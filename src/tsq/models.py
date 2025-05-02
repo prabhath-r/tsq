@@ -207,3 +207,130 @@ class Question:
     @property
     def misconception_ids(self) -> set[str]:
         return {o.misconception_id for o in self.options if o.misconception_id}
+
+
+@dataclass(slots=True)
+class SkillState:
+    learner_id: str
+    concept_id: str
+    mean: float
+    variance: float
+    stability_hours: float
+    exposures: int = 0
+    last_seen_at: datetime | None = None
+    next_review_at: datetime | None = None
+    evidence_mass: float = 0.0
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.mean):
+            raise ValueError("Skill-state mean must be finite.")
+        if not isfinite(self.variance) or self.variance <= 0.0:
+            raise ValueError("Skill-state variance must be finite and positive.")
+        if not isfinite(self.stability_hours) or self.stability_hours <= 0.0:
+            raise ValueError("Skill-state stability must be finite and positive.")
+        if (
+            not isinstance(self.exposures, int)
+            or isinstance(self.exposures, bool)
+            or self.exposures < 0
+        ):
+            raise ValueError("Skill-state exposures must be a non-negative integer.")
+        if not isfinite(self.evidence_mass) or self.evidence_mass < 0.0:
+            raise ValueError("Skill-state evidence mass must be finite and non-negative.")
+
+    @property
+    def expected_competence(self) -> float:
+        """Approximate posterior mean on the logistic competence scale."""
+        logistic_normal_scale = sqrt(1.0 + pi * self.variance / 8.0)
+        return sigmoid(self.mean / logistic_normal_scale)
+
+    def probability_above(self, threshold: float) -> float:
+        """Posterior probability that latent competence exceeds a threshold."""
+        boundary = logit(threshold)
+        z = (boundary - self.mean) / sqrt(2.0 * self.variance)
+        return min(1.0, max(0.0, 0.5 * erfc(z)))
+
+    @property
+    def mastery_probability(self) -> float:
+        """Calibrated certification belief, including posterior uncertainty."""
+        return self.probability_above(MASTERY_THRESHOLD)
+
+
+@dataclass(slots=True)
+class MisconceptionBelief:
+    learner_id: str
+    misconception_id: str
+    log_odds: float
+    evidence_count: int = 0
+    last_seen_at: datetime | None = None
+
+    @property
+    def probability(self) -> float:
+        return sigmoid(self.log_odds)
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateScore:
+    question_id: str
+    total: float
+    predicted_correct: float
+    information_gain: float
+    learning_fit: float
+    concept_need: float
+    misconception_value: float
+    prerequisite_value: float
+    review_value: float
+    novelty: float
+    kind_fit: float
+
+    def terms(self) -> dict[str, float]:
+        return {
+            "total": self.total,
+            "predicted_correct": self.predicted_correct,
+            "information_gain": self.information_gain,
+            "learning_fit": self.learning_fit,
+            "concept_need": self.concept_need,
+            "misconception_value": self.misconception_value,
+            "prerequisite_value": self.prerequisite_value,
+            "review_value": self.review_value,
+            "novelty": self.novelty,
+            "kind_fit": self.kind_fit,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class Presentation:
+    decision_id: str
+    session_id: str
+    question: Question
+    option_order: tuple[str, ...]
+    phase: SessionPhase
+    score: CandidateScore
+    propensity: float
+    rationale: str
+
+    @property
+    def ordered_options(self) -> tuple[Option, ...]:
+        by_id = {option.id: option for option in self.question.options}
+        return tuple(by_id[option_id] for option_id in self.option_order)
+
+
+@dataclass(frozen=True, slots=True)
+class SubmissionResult:
+    interaction_id: str
+    correct: bool
+    selected_option: Option | None
+    correct_option: Option
+    next_phase: SessionPhase
+    focus_concept_id: str | None
+    focus_misconception_id: str | None
+    state_changes: tuple[dict[str, Any], ...]
+    idempotent_replay: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class QualityIssue:
+    code: str
+    severity: str
+    message: str
+    question_id: str | None = None
+    path: str | None = None
