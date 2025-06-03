@@ -1,0 +1,750 @@
+# SPDX-License-Identifier: MPL-2.0
+
+from __future__ import annotations
+
+import json
+from collections import Counter
+from math import isfinite
+from pathlib import Path
+from typing import Any
+
+from .errors import ValidationError
+from .graph import KnowledgeGraph
+from .models import (
+    Concept,
+    ConceptEdge,
+    ConceptRole,
+    ConceptWeight,
+    Misconception,
+    Option,
+    Question,
+    QuestionKind,
+    QuestionStatus,
+    QualityIssue,
+    RelationType,
+    Source,
+)
+from .quality import audit_corpus
+
+
+def _relation(value: str) -> RelationType:
+    aliases = {"requires": "requires", "prerequisite": "prerequisite", "contrasts": "contrasts_with"}
+    return RelationType(aliases.get(value, value))
+
+
+_LIST_FIELDS = ("concepts", "edges", "misconceptions", "sources", "questions")
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON numeric constant {value!r}")
+
+
+def _object_without_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r}")
+        result[key] = value
+    return result
+
+
+def _is_number(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def validate_bundle(bundle: object) -> list[QualityIssue]:
+    """Validate raw JSON types and scalar domains without coercing input values.
+
+    The parser runs this complete pass before constructing domain objects. This is
+    intentionally separate from semantic/reference checks so a producer receives
+    every inexpensive schema defect in one response.
+    """
+
+    issues: list[QualityIssue] = []
+
+    def add(code: str, message: str, path: str, question_id: str | None = None) -> None:
+        issues.append(QualityIssue(code, "error", message, question_id, path))
+
+    if not isinstance(bundle, dict):
+        add("bundle_type", "Corpus root must be a JSON object.", "$")
+        return issues
+
+    schema_version = bundle.get("schema_version")
+    if "schema_version" not in bundle:
+        add("missing_field", "Required field 'schema_version' is missing.", "schema_version")
+    elif not isinstance(schema_version, int) or isinstance(schema_version, bool):
+        add("schema_version_type", "schema_version must be the integer 1.", "schema_version")
+    elif schema_version != 1:
+        add("schema_version", "Only corpus schema_version 1 is supported.", "schema_version")
+    if "title" not in bundle:
+        add("missing_field", "Required field 'title' is missing.", "title")
+    elif not isinstance(bundle["title"], str):
+        add("field_type", "title must be a string.", "title")
+    elif not bundle["title"].strip():
+        add("blank_field", "title cannot be blank.", "title")
+
+    for field in _LIST_FIELDS:
+        if field not in bundle:
+            add("missing_field", f"Required field '{field}' is missing.", field)
+        elif not isinstance(bundle[field], list):
+            add("field_type", f"Field '{field}' must be a list.", field)
+
+    def rows(field: str):
+        value = bundle.get(field)
+        return value if isinstance(value, list) else []
+
+    def row_object(value: object, path: str) -> dict[str, Any] | None:
+        if not isinstance(value, dict):
+            add("row_type", "List entry must be an object.", path)
+            return None
+        return value
+
+    def string_field(
+        row: dict[str, Any],
+        name: str,
+        path: str,
+        *,
+        question_id: str | None = None,
+        required: bool = True,
+        nullable: bool = False,
+    ) -> str | None:
+        field_path = f"{path}.{name}"
+        if name not in row:
+            if required:
+                add("missing_field", f"Required field '{name}' is missing.", field_path, question_id)
+            return None
+        value = row[name]
+        if value is None and nullable:
+            return None
+        if not isinstance(value, str):
+            add("field_type", f"Field '{name}' must be a string.", field_path, question_id)
+            return None
+        if not value.strip():
+            add("blank_field", f"Field '{name}' cannot be blank.", field_path, question_id)
+        return value
+
+    def list_field(
+        row: dict[str, Any], name: str, path: str, *, question_id: str | None = None
+    ) -> list[Any]:
+        field_path = f"{path}.{name}"
+        if name not in row:
+            add("missing_field", f"Required field '{name}' is missing.", field_path, question_id)
+            return []
+        value = row[name]
+        if not isinstance(value, list):
+            add("field_type", f"Field '{name}' must be a list.", field_path, question_id)
+            return []
+        return value
+
+    def number_field(
+        row: dict[str, Any],
+        name: str,
+        path: str,
+        *,
+        question_id: str | None = None,
+        required: bool = True,
+        default: float | None = None,
+        minimum: float | None = None,
+        maximum: float | None = None,
+        exclusive_minimum: bool = False,
+        exclusive_maximum: bool = False,
+    ) -> float | None:
+        field_path = f"{path}.{name}"
+        if name not in row:
+            if required:
+                add("missing_field", f"Required field '{name}' is missing.", field_path, question_id)
+                return None
+            return default
+        value = row[name]
+        if not _is_number(value):
+            add("field_type", f"Field '{name}' must be a number.", field_path, question_id)
+            return None
+        try:
+            numeric = float(value)
+        except (OverflowError, ValueError):
+            add("non_finite", f"Field '{name}' must be finite.", field_path, question_id)
+            return None
+        if not isfinite(numeric):
+            add("non_finite", f"Field '{name}' must be finite.", field_path, question_id)
+            return None
+        below = minimum is not None and (
+            numeric <= minimum if exclusive_minimum else numeric < minimum
+        )
+        above = maximum is not None and (
+            numeric >= maximum if exclusive_maximum else numeric > maximum
+        )
+        if below or above:
+            if minimum is None:
+                comparator = "less than" if exclusive_maximum else "at most"
+                constraint = f"{comparator} {maximum}"
+            elif maximum is None:
+                comparator = "greater than" if exclusive_minimum else "at least"
+                constraint = f"{comparator} {minimum}"
+            else:
+                left = "(" if exclusive_minimum else "["
+                right = ")" if exclusive_maximum else "]"
+                constraint = f"in {left}{minimum}, {maximum}{right}"
+            add(
+                "out_of_range",
+                f"Field '{name}' must be {constraint}.",
+                field_path,
+                question_id,
+            )
+        return numeric
+
+    for index, value in enumerate(rows("concepts")):
+        path = f"concepts[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "id", path)
+        string_field(row, "name", path)
+        string_field(row, "description", path)
+        string_field(row, "domain", path, required=False)
+        number_field(
+            row,
+            "prior_mastery",
+            path,
+            required=False,
+            default=0.20,
+            minimum=0.0,
+            maximum=1.0,
+            exclusive_minimum=True,
+            exclusive_maximum=True,
+        )
+
+    for index, value in enumerate(rows("edges")):
+        path = f"edges[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "source", path)
+        string_field(row, "target", path)
+        relation = string_field(row, "relation", path)
+        if relation is not None:
+            try:
+                _relation(relation)
+            except ValueError:
+                add("invalid_enum", f"Unknown concept relation '{relation}'.", f"{path}.relation")
+        number_field(
+            row,
+            "weight",
+            path,
+            required=False,
+            default=1.0,
+            minimum=0.0,
+            exclusive_minimum=True,
+        )
+
+    for index, value in enumerate(rows("misconceptions")):
+        path = f"misconceptions[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "id", path)
+        string_field(row, "concept_id", path)
+        string_field(row, "name", path)
+        string_field(row, "description", path)
+
+    for index, value in enumerate(rows("sources")):
+        path = f"sources[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "id", path)
+        string_field(row, "title", path)
+        string_field(row, "uri", path, required=False, nullable=True)
+        string_field(row, "license", path, required=False, nullable=True)
+
+    for question_index, value in enumerate(rows("questions")):
+        path = f"questions[{question_index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        raw_id = row.get("id")
+        question_id = raw_id if isinstance(raw_id, str) and raw_id.strip() else None
+        string_field(row, "id", path, question_id=question_id)
+        string_field(row, "family_id", path, question_id=question_id)
+        string_field(row, "stem", path, question_id=question_id)
+        status = string_field(row, "status", path, question_id=question_id)
+        if status is not None:
+            try:
+                QuestionStatus(status)
+            except ValueError:
+                add("invalid_enum", f"Unknown question status '{status}'.", f"{path}.status", question_id)
+        kind = string_field(row, "kind", path, question_id=question_id)
+        if kind is not None:
+            try:
+                QuestionKind(kind)
+            except ValueError:
+                add("invalid_enum", f"Unknown question kind '{kind}'.", f"{path}.kind", question_id)
+        version = row.get("version", 1)
+        if not isinstance(version, int) or isinstance(version, bool):
+            add("field_type", "Field 'version' must be an integer.", f"{path}.version", question_id)
+        elif version < 1:
+            add("out_of_range", "Field 'version' must be at least 1.", f"{path}.version", question_id)
+        number_field(
+            row, "difficulty", path, question_id=question_id, minimum=-4.0, maximum=4.0
+        )
+        number_field(
+            row,
+            "discrimination",
+            path,
+            question_id=question_id,
+            minimum=0.25,
+            maximum=3.0,
+        )
+        guess_rate = number_field(
+            row,
+            "guess_rate",
+            path,
+            question_id=question_id,
+            required=False,
+            default=0.25,
+            minimum=0.0,
+            maximum=0.35,
+        )
+        number_field(
+            row,
+            "slip_rate",
+            path,
+            question_id=question_id,
+            required=False,
+            default=0.05,
+            minimum=0.0,
+            maximum=0.25,
+        )
+
+        mappings = list_field(row, "concepts", path, question_id=question_id)
+        for mapping_index, mapping_value in enumerate(mappings):
+            mapping_path = f"{path}.concepts[{mapping_index}]"
+            mapping = row_object(mapping_value, mapping_path)
+            if mapping is None:
+                continue
+            string_field(mapping, "concept_id", mapping_path, question_id=question_id)
+            number_field(
+                mapping,
+                "weight",
+                mapping_path,
+                question_id=question_id,
+                minimum=0.0,
+                exclusive_minimum=True,
+            )
+            role = mapping.get("role", ConceptRole.SECONDARY.value)
+            if not isinstance(role, str):
+                add(
+                    "field_type",
+                    "Field 'role' must be a string.",
+                    f"{mapping_path}.role",
+                    question_id,
+                )
+            else:
+                try:
+                    ConceptRole(role)
+                except ValueError:
+                    allowed = ", ".join(role.value for role in ConceptRole)
+                    add(
+                        "invalid_concept_role",
+                        f"Unknown concept role '{role}'; allowed roles are {allowed}.",
+                        f"{mapping_path}.role",
+                        question_id,
+                    )
+
+        options = list_field(row, "options", path, question_id=question_id)
+        if guess_rate is not None and options:
+            chance_rate = 1.0 / len(options)
+            if guess_rate + 1e-9 < chance_rate:
+                add(
+                    "guess_below_forced_choice_chance",
+                    f"Field 'guess_rate' ({guess_rate:.3f}) is below the forced-choice "
+                    f"chance floor ({chance_rate:.3f}) for {len(options)} options; use a "
+                    "nominal option model for systematic below-chance misconceptions.",
+                    f"{path}.guess_rate",
+                    question_id,
+                )
+        for option_index, option_value in enumerate(options):
+            option_path = f"{path}.options[{option_index}]"
+            option = row_object(option_value, option_path)
+            if option is None:
+                continue
+            string_field(option, "id", option_path, question_id=question_id)
+            string_field(option, "text", option_path, question_id=question_id)
+            string_field(option, "rationale", option_path, question_id=question_id)
+            string_field(
+                option,
+                "misconception_id",
+                option_path,
+                question_id=question_id,
+                required=False,
+                nullable=True,
+            )
+            if "correct" not in option:
+                add(
+                    "missing_field",
+                    "Required field 'correct' is missing.",
+                    f"{option_path}.correct",
+                    question_id,
+                )
+            elif not isinstance(option["correct"], bool):
+                add(
+                    "field_type",
+                    "Field 'correct' must be a boolean.",
+                    f"{option_path}.correct",
+                    question_id,
+                )
+
+        source_ids = list_field(row, "source_ids", path, question_id=question_id)
+        for source_index, source_id in enumerate(source_ids):
+            if not isinstance(source_id, str) or not source_id.strip():
+                add(
+                    "field_type",
+                    "Every source_ids entry must be a non-blank string.",
+                    f"{path}.source_ids[{source_index}]",
+                    question_id,
+                )
+        provenance = row.get("provenance", {})
+        if not isinstance(provenance, dict):
+            add("field_type", "Field 'provenance' must be an object.", f"{path}.provenance", question_id)
+        tags = row.get("tags", [])
+        if not isinstance(tags, list):
+            add("field_type", "Field 'tags' must be a list.", f"{path}.tags", question_id)
+        else:
+            for tag_index, tag in enumerate(tags):
+                if not isinstance(tag, str) or not tag.strip():
+                    add(
+                        "field_type",
+                        "Every tag must be a non-blank string.",
+                        f"{path}.tags[{tag_index}]",
+                        question_id,
+                    )
+        string_field(
+            row,
+            "revision_of",
+            path,
+            question_id=question_id,
+            required=False,
+            nullable=True,
+        )
+    return issues
+
+
+def _raise_issues(prefix: str, issues: list[QualityIssue]) -> None:
+    errors = [issue for issue in issues if issue.severity == "error"]
+    if not errors:
+        return
+    rendered = "; ".join(
+        f"{issue.path or issue.question_id or 'corpus'}: {issue.message}" for issue in errors[:20]
+    )
+    suffix = f" (+{len(errors) - 20} more)" if len(errors) > 20 else ""
+    raise ValidationError(f"{prefix} failed {len(errors)} checks: {rendered}{suffix}", issues=errors)
+
+
+def load_bundle(path: str | Path, *, validate: bool = True) -> dict[str, Any]:
+    source_path = Path(path)
+    try:
+        bundle = json.loads(
+            source_path.read_text(encoding="utf-8"),
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_object_without_duplicate_keys,
+        )
+    except (OSError, ValueError) as exc:
+        raise ValidationError(f"Could not read corpus bundle {source_path}: {exc}") from exc
+    if validate:
+        _raise_issues("Corpus structure", validate_bundle(bundle))
+    return bundle
+
+
+def parse_bundle(bundle: dict[str, Any]) -> tuple[
+    list[Concept], list[ConceptEdge], list[Misconception], list[Source], list[Question]
+]:
+    _raise_issues("Corpus structure", validate_bundle(bundle))
+    try:
+        concepts = [
+            Concept(
+                id=row["id"],
+                name=row["name"],
+                description=row["description"],
+                domain=row.get("domain", "ai"),
+                prior_mastery=float(row.get("prior_mastery", 0.20)),
+            )
+            for row in bundle["concepts"]
+        ]
+        edges = [
+            ConceptEdge(
+                source_id=row["source"],
+                target_id=row["target"],
+                relation=_relation(row["relation"]),
+                weight=float(row.get("weight", 1.0)),
+            )
+            for row in bundle["edges"]
+        ]
+        misconceptions = [
+            Misconception(
+                id=row["id"],
+                concept_id=row["concept_id"],
+                name=row["name"],
+                description=row["description"],
+            )
+            for row in bundle["misconceptions"]
+        ]
+        sources = [
+            Source(
+                id=row["id"],
+                title=row["title"],
+                uri=row.get("uri"),
+                license=row.get("license"),
+                metadata={k: v for k, v in row.items() if k not in {"id", "title", "uri", "license"}},
+            )
+            for row in bundle["sources"]
+        ]
+        questions = []
+        for row in bundle["questions"]:
+            questions.append(
+                Question(
+                    id=row["id"],
+                    version=int(row.get("version", 1)),
+                    family_id=row["family_id"],
+                    status=QuestionStatus(row["status"]),
+                    stem=row["stem"],
+                    kind=QuestionKind(row["kind"]),
+                    difficulty=float(row["difficulty"]),
+                    discrimination=float(row["discrimination"]),
+                    guess_rate=float(row.get("guess_rate", 0.25)),
+                    slip_rate=float(row.get("slip_rate", 0.05)),
+                    concepts=tuple(
+                        ConceptWeight(
+                            concept_id=mapping["concept_id"],
+                            weight=float(mapping["weight"]),
+                            role=ConceptRole(mapping.get("role", ConceptRole.SECONDARY.value)),
+                        )
+                        for mapping in row["concepts"]
+                    ),
+                    options=tuple(
+                        Option(
+                            id=option["id"],
+                            text=option["text"],
+                            correct=bool(option["correct"]),
+                            misconception_id=option.get("misconception_id"),
+                            rationale=option["rationale"],
+                        )
+                        for option in row["options"]
+                    ),
+                    source_ids=tuple(row["source_ids"]),
+                    provenance=dict(row.get("provenance", {})),
+                    tags=tuple(row.get("tags", [])),
+                    revision_of=row.get("revision_of"),
+                )
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValidationError(f"Invalid corpus object: {exc}") from exc
+
+    issues: list[QualityIssue] = []
+
+    def add(
+        code: str,
+        message: str,
+        *,
+        path: str | None = None,
+        question_id: str | None = None,
+        severity: str = "error",
+    ) -> None:
+        issues.append(QualityIssue(code, severity, message, question_id, path))
+
+    concept_ids = {concept.id for concept in concepts}
+    misconception_ids = {misconception.id for misconception in misconceptions}
+    source_ids = {source.id for source in sources}
+    question_ids = {question.id for question in questions}
+    misconception_id_counts = Counter(misconception.id for misconception in misconceptions)
+    question_id_counts = Counter(question.id for question in questions)
+    misconception_owners = {
+        misconception.id: misconception.concept_id
+        for misconception in misconceptions
+        if misconception_id_counts[misconception.id] == 1
+    }
+    for field, values in (
+        ("concepts", [concept.id for concept in concepts]),
+        ("misconceptions", [misconception.id for misconception in misconceptions]),
+        ("sources", [source.id for source in sources]),
+        ("questions", [question.id for question in questions]),
+    ):
+        duplicates = sorted(value for value, count in Counter(values).items() if count > 1)
+        if duplicates:
+            add(
+                "duplicate_id",
+                f"{field} IDs must be unique; duplicates: {', '.join(duplicates)}.",
+                path=field,
+            )
+
+    edge_keys = [
+        (edge.source_id, edge.target_id, edge.relation.value) for edge in edges
+    ]
+    duplicate_edges = sorted(key for key, count in Counter(edge_keys).items() if count > 1)
+    if duplicate_edges:
+        add(
+            "duplicate_edge",
+            f"Concept edges must be unique; duplicates: {duplicate_edges}.",
+            path="edges",
+        )
+
+    for index, edge in enumerate(edges):
+        unknown = sorted({edge.source_id, edge.target_id} - concept_ids)
+        if unknown:
+            add(
+                "unknown_concept_reference",
+                f"Edge references unknown concepts: {', '.join(unknown)}.",
+                path=f"edges[{index}]",
+            )
+    for misconception in misconceptions:
+        if misconception.concept_id not in concept_ids:
+            add(
+                "unknown_concept_reference",
+                f"Misconception {misconception.id} references unknown concept "
+                f"{misconception.concept_id}.",
+                path="misconceptions",
+            )
+    for question in questions:
+        mapped_concept_ids = {mapping.concept_id for mapping in question.concepts}
+        distractor_misconception_ids = {
+            option.misconception_id
+            for option in question.options
+            if not option.correct and option.misconception_id
+        }
+        for mapping in question.concepts:
+            if mapping.concept_id not in concept_ids:
+                add(
+                    "unknown_concept_reference",
+                    f"Question references unknown concept {mapping.concept_id}.",
+                    path="questions[].concepts",
+                    question_id=question.id,
+                )
+        for misconception_id in question.misconception_ids:
+            if misconception_id not in misconception_ids:
+                add(
+                    "unknown_misconception_reference",
+                    f"Question references unknown misconception {misconception_id}.",
+                    path="questions[].options",
+                    question_id=question.id,
+                )
+                continue
+            owner_concept_id = misconception_owners.get(misconception_id)
+            if (
+                misconception_id in distractor_misconception_ids
+                and owner_concept_id in concept_ids
+                and owner_concept_id not in mapped_concept_ids
+            ):
+                add(
+                    "unmapped_misconception_owner",
+                    f"Distractor misconception {misconception_id} belongs to concept "
+                    f"{owner_concept_id}, which is absent from the question's concept mappings.",
+                    path="questions[].options",
+                    question_id=question.id,
+                )
+        unknown_sources = set(question.source_ids) - source_ids
+        if unknown_sources:
+            add(
+                "unknown_source_reference",
+                f"Question references unknown sources {sorted(unknown_sources)}.",
+                path="questions[].source_ids",
+                question_id=question.id,
+            )
+        duplicate_sources = sorted(
+            source_id
+            for source_id, count in Counter(question.source_ids).items()
+            if count > 1
+        )
+        if duplicate_sources:
+            add(
+                "duplicate_source_reference",
+                f"Question repeats source IDs {duplicate_sources}.",
+                path="questions[].source_ids",
+                question_id=question.id,
+            )
+        if question.revision_of and question.revision_of not in question_ids:
+            add(
+                "unknown_revision_reference",
+                f"Question revision_of references unknown question {question.revision_of}.",
+                path="questions[].revision_of",
+                question_id=question.id,
+            )
+
+    questions_by_id = {
+        question.id: question
+        for question in questions
+        if question_id_counts[question.id] == 1
+    }
+    for question in questions_by_id.values():
+        parent_id = question.revision_of
+        if not parent_id or parent_id not in questions_by_id:
+            continue
+        if parent_id == question.id:
+            add(
+                "revision_self_reference",
+                "Question revision_of cannot reference the question itself.",
+                path="questions[].revision_of",
+                question_id=question.id,
+            )
+            continue
+        parent = questions_by_id[parent_id]
+        if question.version <= parent.version:
+            add(
+                "revision_version_order",
+                f"Revision version {question.version} must be greater than parent "
+                f"{parent.id} version {parent.version}.",
+                path="questions[].version",
+                question_id=question.id,
+            )
+        if question.family_id != parent.family_id:
+            add(
+                "revision_family_mismatch",
+                f"Revision must preserve parent {parent.id} family_id "
+                f"{parent.family_id}; received {question.family_id}.",
+                path="questions[].family_id",
+                question_id=question.id,
+            )
+
+    completed_revision_nodes: set[str] = set()
+    for start_id in questions_by_id:
+        if start_id in completed_revision_nodes:
+            continue
+        trail: list[str] = []
+        position: dict[str, int] = {}
+        current_id = start_id
+        while current_id in questions_by_id and current_id not in completed_revision_nodes:
+            if current_id in position:
+                cycle = trail[position[current_id] :]
+                if len(cycle) > 1:
+                    add(
+                        "revision_cycle",
+                        "revision_of chain contains a cycle: "
+                        + " -> ".join([*cycle, cycle[0]]),
+                        path="questions[].revision_of",
+                        question_id=cycle[0],
+                    )
+                break
+            position[current_id] = len(trail)
+            trail.append(current_id)
+            parent_id = questions_by_id[current_id].revision_of
+            if not parent_id or parent_id == current_id:
+                break
+            current_id = parent_id
+        completed_revision_nodes.update(trail)
+
+    if not any(issue.code == "unknown_concept_reference" for issue in issues):
+        try:
+            KnowledgeGraph(concepts, edges)
+        except ValidationError as exc:
+            add("graph_integrity", str(exc), path="edges")
+    issues.extend(
+        audit_corpus(
+            questions,
+            expected_primary_concept_ids={
+                mapping.concept_id for question in questions for mapping in question.concepts
+            },
+        )
+    )
+    _raise_issues("Corpus", issues)
+    return concepts, edges, misconceptions, sources, questions
+
+
+def read_and_parse(path: str | Path):
+    return parse_bundle(load_bundle(path))
