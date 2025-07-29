@@ -5,3 +5,10 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+dist/
+build/
+*.db
+*.db-shm
+*.db-wal
+.DS_Store
+
