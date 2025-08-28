@@ -1928,3 +1928,1003 @@ class Database:
                 f"quality checks: {rendered}",
                 issues=quality_errors,
             )
+
+    def append_event(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        stream_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        metadata: dict[str, Any] | None = None,
+        learner_id: str | None = None,
+        session_id: str | None = None,
+        idempotency_key: str | None = None,
+        correlation_id: str | None = None,
+        causation_id: str | None = None,
+        occurred_at: datetime | None = None,
+    ) -> sqlite3.Row:
+        if idempotency_key:
+            prior = connection.execute(
+                "SELECT * FROM events WHERE idempotency_key = ?", (idempotency_key,)
+            ).fetchone()
+            if prior:
+                if prior["event_type"] != event_type or json.loads(prior["payload_json"]) != payload:
+                    raise ConflictError("Idempotency key was already used for a different command.")
+                return prior
+        head = connection.execute(
+            "SELECT stream_version, payload_hash FROM stream_heads WHERE stream_id = ?",
+            (stream_id,),
+        ).fetchone()
+        tail = connection.execute(
+            "SELECT stream_version, payload_hash FROM events WHERE stream_id = ? ORDER BY stream_version DESC LIMIT 1",
+            (stream_id,),
+        ).fetchone()
+        if (head is None) != (tail is None) or (
+            head is not None
+            and tail is not None
+            and (
+                head["stream_version"] != tail["stream_version"]
+                or head["payload_hash"] != tail["payload_hash"]
+            )
+        ):
+            raise ConflictError(
+                f"Stream {stream_id} head does not match its event tail; run integrity repair."
+            )
+        stream_version = (head["stream_version"] + 1) if head else 1
+        previous_hash = head["payload_hash"] if head else None
+        event_id = new_id("evt")
+        now = datetime.now(timezone.utc)
+        occurred_timestamp = to_timestamp(occurred_at or now)
+        recorded_timestamp = to_timestamp(now)
+        resolved_correlation_id = correlation_id or event_id
+        try:
+            payload_json = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
+            metadata_json = json.dumps(
+                metadata or {}, sort_keys=True, separators=(",", ":"), allow_nan=False
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(f"Event payload and metadata must be finite JSON: {exc}") from exc
+        envelope = {
+            "event_id": event_id,
+            "stream_id": stream_id,
+            "stream_version": stream_version,
+            "event_type": event_type,
+            "schema_version": 1,
+            "occurred_at": occurred_timestamp,
+            "recorded_at": recorded_timestamp,
+            "learner_id": learner_id,
+            "session_id": session_id,
+            "correlation_id": resolved_correlation_id,
+            "causation_id": causation_id,
+            "idempotency_key": idempotency_key,
+            "payload": payload,
+            "metadata": metadata or {},
+            "previous_hash": previous_hash,
+        }
+        payload_hash = _content_hash(envelope)
+        connection.execute(
+            """INSERT INTO events(
+                   event_id, stream_id, stream_version, event_type, schema_version,
+                   occurred_at, recorded_at, learner_id, session_id, correlation_id,
+                   causation_id, idempotency_key, payload_json, metadata_json,
+                   previous_hash, payload_hash
+               ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_id,
+                stream_id,
+                stream_version,
+                event_type,
+                occurred_timestamp,
+                recorded_timestamp,
+                learner_id,
+                session_id,
+                resolved_correlation_id,
+                causation_id,
+                idempotency_key,
+                payload_json,
+                metadata_json,
+                previous_hash,
+                payload_hash,
+            ),
+        )
+        connection.execute(
+            """INSERT INTO stream_heads(stream_id, stream_version, payload_hash, updated_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(stream_id) DO UPDATE SET
+                   stream_version=excluded.stream_version,
+                   payload_hash=excluded.payload_hash,
+                   updated_at=excluded.updated_at""",
+            (stream_id, stream_version, payload_hash, recorded_timestamp),
+        )
+        return connection.execute("SELECT * FROM events WHERE event_id = ?", (event_id,)).fetchone()
+
+    def revoke_question(
+        self,
+        question_id: str,
+        reason: str,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Globally quarantine a question across every pinned corpus release."""
+        if not isinstance(question_id, str) or not question_id.strip():
+            raise ValidationError("question_id must be a non-blank string.")
+        if (
+            not isinstance(reason, str)
+            or not reason.strip()
+            or len(reason.strip()) > 500
+        ):
+            raise ValidationError(
+                "reason must be a non-blank string of at most 500 characters."
+            )
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key) > 200
+        ):
+            raise ValidationError(
+                "idempotency_key must be a non-blank string of at most 200 characters."
+            )
+        normalized_reason = reason.strip()
+        with self.transaction() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM questions WHERE id = ?", (question_id,)
+            ).fetchone():
+                raise NotFoundError(f"Unknown question: {question_id}")
+            payload = {"question_id": question_id, "reason": normalized_reason}
+            if idempotency_key:
+                prior_event = connection.execute(
+                    "SELECT * FROM events WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if prior_event:
+                    if (
+                        prior_event["event_type"] != "QuestionEmergencyRevoked"
+                        or json.loads(prior_event["payload_json"]) != payload
+                    ):
+                        raise ConflictError(
+                            "Idempotency key was reused for a different revocation."
+                        )
+                    prior = connection.execute(
+                        "SELECT * FROM question_revocations WHERE question_id = ?",
+                        (question_id,),
+                    ).fetchone()
+                    if not prior or prior["event_id"] != prior_event["event_id"]:
+                        raise ConflictError(
+                            "Revocation event has no matching safety projection."
+                        )
+                    return {**dict(prior), "idempotent": True}
+            existing = connection.execute(
+                "SELECT * FROM question_revocations WHERE question_id = ?",
+                (question_id,),
+            ).fetchone()
+            if existing:
+                if existing["reason"] != normalized_reason:
+                    raise ConflictError(
+                        f"Question {question_id} is already revoked for a different reason."
+                    )
+                return {**dict(existing), "idempotent": True}
+            revoked_at = datetime.now(timezone.utc)
+            active = connection.execute(
+                "SELECT value FROM meta WHERE key = 'active_corpus_release'"
+            ).fetchone()
+            event = self.append_event(
+                connection,
+                stream_id="corpus:safety",
+                event_type="QuestionEmergencyRevoked",
+                payload=payload,
+                metadata={
+                    "schema_version": SCHEMA_VERSION,
+                    "active_corpus_release_id": active["value"] if active else None,
+                },
+                idempotency_key=idempotency_key,
+                occurred_at=revoked_at,
+            )
+            connection.execute(
+                """INSERT INTO question_revocations(
+                       question_id, reason, revoked_at, event_id
+                   ) VALUES (?, ?, ?, ?)""",
+                (
+                    question_id,
+                    normalized_reason,
+                    revoked_at.isoformat(),
+                    event["event_id"],
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM question_revocations WHERE question_id = ?",
+                (question_id,),
+            ).fetchone()
+            return {**dict(row), "idempotent": False}
+
+    def ensure_learner(self, learner_id: str, display_name: str | None = None) -> dict[str, Any]:
+        if not isinstance(learner_id, str) or not learner_id.strip() or len(learner_id) > 128:
+            raise ValidationError("learner_id must be a non-blank string of at most 128 characters.")
+        if display_name is not None and (
+            not isinstance(display_name, str)
+            or not display_name.strip()
+            or len(display_name) > 200
+        ):
+            raise ValidationError(
+                "display_name must be a non-blank string of at most 200 characters."
+            )
+        now = datetime.now(timezone.utc).isoformat()
+        with self.transaction() as connection:
+            row = connection.execute("SELECT * FROM learners WHERE id = ?", (learner_id,)).fetchone()
+            if not row:
+                connection.execute(
+                    "INSERT INTO learners(id, display_name, created_at) VALUES (?, ?, ?)",
+                    (learner_id, display_name or learner_id, now),
+                )
+                self.append_event(
+                    connection,
+                    stream_id=f"learner:{learner_id}",
+                    event_type="LearnerCreated",
+                    payload={"learner_id": learner_id, "display_name": display_name or learner_id},
+                    learner_id=learner_id,
+                )
+                row = connection.execute("SELECT * FROM learners WHERE id = ?", (learner_id,)).fetchone()
+            elif display_name is not None and row["display_name"] != display_name:
+                raise ConflictError(
+                    f"Learner {learner_id} already exists with a different display name."
+                )
+        return dict(row)
+
+    def get_concepts(self) -> list[Concept]:
+        with self.read() as connection:
+            rows = connection.execute("SELECT * FROM concepts ORDER BY domain, name").fetchall()
+        return [Concept(row["id"], row["name"], row["description"], row["domain"], row["prior_mastery"]) for row in rows]
+
+    def get_graph(self, release_id: str | None = None) -> KnowledgeGraph:
+        """Load the current graph or the immutable edge snapshot for a release."""
+        with self.read() as connection:
+            resolved_release = release_id
+            if resolved_release is None:
+                active = connection.execute(
+                    "SELECT value FROM meta WHERE key = 'active_corpus_release'"
+                ).fetchone()
+                resolved_release = active["value"] if active else None
+            if resolved_release is None:
+                concept_rows = connection.execute(
+                    "SELECT * FROM concepts ORDER BY domain, name"
+                ).fetchall()
+                edge_rows = connection.execute("SELECT * FROM concept_edges").fetchall()
+            else:
+                release = connection.execute(
+                    "SELECT 1 FROM corpus_releases WHERE id = ?", (resolved_release,)
+                ).fetchone()
+                if not release:
+                    raise NotFoundError(f"Unknown corpus release: {resolved_release}")
+                concept_rows = connection.execute(
+                    """SELECT concept.* FROM concepts concept
+                       JOIN release_concepts membership
+                         ON membership.concept_id = concept.id
+                       WHERE membership.release_id = ?
+                       ORDER BY concept.domain, concept.name""",
+                    (resolved_release,),
+                ).fetchall()
+                edge_rows = connection.execute(
+                    "SELECT * FROM release_edges WHERE release_id = ?",
+                    (resolved_release,),
+                ).fetchall()
+        concepts = [
+            Concept(
+                row["id"],
+                row["name"],
+                row["description"],
+                row["domain"],
+                row["prior_mastery"],
+            )
+            for row in concept_rows
+        ]
+        edges = [
+            ConceptEdge(row["source_id"], row["target_id"], RelationType(row["relation"]), row["weight"])
+            for row in edge_rows
+        ]
+        return KnowledgeGraph(concepts, edges)
+
+    def get_misconceptions(
+        self,
+        ids: set[str] | None = None,
+        *,
+        release_id: str | None = None,
+    ) -> list[Misconception]:
+        if ids is not None and not ids:
+            return []
+        with self.read() as connection:
+            parameters: list[Any] = []
+            joins: list[str] = []
+            where: list[str] = []
+            if release_id is not None:
+                joins.append(
+                    " JOIN release_misconceptions membership"
+                    " ON membership.misconception_id = misconception.id"
+                )
+                where.append("membership.release_id = ?")
+                parameters.append(release_id)
+            if ids is not None:
+                connection.execute(
+                    "CREATE TEMP TABLE requested_misconceptions(id TEXT PRIMARY KEY)"
+                )
+                connection.executemany(
+                    "INSERT INTO requested_misconceptions(id) VALUES (?)",
+                    ((misconception_id,) for misconception_id in sorted(ids)),
+                )
+                joins.append(
+                    " JOIN requested_misconceptions requested"
+                    " ON requested.id = misconception.id"
+                )
+            clause = " WHERE " + " AND ".join(where) if where else ""
+            rows = connection.execute(
+                f"SELECT misconception.* FROM misconceptions misconception"
+                f"{''.join(joins)}{clause}",
+                tuple(parameters),
+            ).fetchall()
+        return [Misconception(row["id"], row["concept_id"], row["name"], row["description"]) for row in rows]
+
+    def _question_from_row(self, connection: sqlite3.Connection, row: sqlite3.Row) -> Question:
+        concept_rows = connection.execute(
+            """SELECT * FROM question_concepts
+               WHERE question_id = ? ORDER BY rowid""",
+            (row["id"],),
+        ).fetchall()
+        option_rows = connection.execute(
+            "SELECT * FROM options WHERE question_id = ? ORDER BY rowid", (row["id"],)
+        ).fetchall()
+        source_rows = connection.execute(
+            """SELECT source_id FROM question_sources
+               WHERE question_id = ? ORDER BY rowid""",
+            (row["id"],),
+        ).fetchall()
+        return Question(
+            id=row["id"],
+            version=row["version"],
+            family_id=row["family_id"],
+            status=QuestionStatus(row["status"]),
+            stem=row["stem"],
+            kind=QuestionKind(row["kind"]),
+            difficulty=row["difficulty"],
+            discrimination=row["discrimination"],
+            guess_rate=row["guess_rate"],
+            slip_rate=row["slip_rate"],
+            concepts=tuple(
+                ConceptWeight(r["concept_id"], r["weight"], r["role"]) for r in concept_rows
+            ),
+            options=tuple(
+                Option(
+                    id=r["option_id"],
+                    text=r["text"],
+                    correct=bool(r["is_correct"]),
+                    rationale=r["rationale"],
+                    misconception_id=r["misconception_id"],
+                )
+                for r in option_rows
+            ),
+            source_ids=tuple(r["source_id"] for r in source_rows),
+            provenance=json.loads(row["provenance_json"]),
+            tags=tuple(json.loads(row["tags_json"])),
+            revision_of=row["revision_of"],
+        )
+
+    def get_question(self, question_id: str, connection: sqlite3.Connection | None = None) -> Question:
+        owns_connection = connection is None
+        conn = connection or self.connect()
+        try:
+            row = conn.execute("SELECT * FROM questions WHERE id = ?", (question_id,)).fetchone()
+            if not row:
+                raise NotFoundError(f"Unknown question: {question_id}")
+            return self._question_from_row(conn, row)
+        finally:
+            if owns_connection:
+                conn.close()
+
+    def get_active_release_id(
+        self, connection: sqlite3.Connection | None = None
+    ) -> str:
+        owns_connection = connection is None
+        conn = connection or self.connect()
+        try:
+            row = conn.execute(
+                """SELECT meta.value FROM meta
+                   JOIN corpus_releases release ON release.id = meta.value
+                   WHERE meta.key = 'active_corpus_release'
+                     AND release.sealed_at IS NOT NULL"""
+            ).fetchone()
+            if not row:
+                raise NotFoundError(
+                    "No sealed active corpus release. Import a corpus first."
+                )
+            return row["value"]
+        finally:
+            if owns_connection:
+                conn.close()
+
+    def questions_for_scope(
+        self,
+        concept_ids: set[str],
+        *,
+        learner_id: str | None = None,
+        focus_concept_id: str | None = None,
+        focus_misconception_id: str | None = None,
+        release_id: str | None = None,
+        target_difficulty: float = 0.0,
+        limit: int = 600,
+    ) -> list[Question]:
+        """Retrieve a bounded, indexed candidate pool instead of scanning the bank.
+
+        The temporary scope table avoids SQLite's parameter limit for large concept
+        closures. Retrieval favors a live remediation focus, low personal exposure,
+        and proximity to the learner's current latent ability. Family-level exposure
+        pushes every sibling of a previously presented item behind unseen families.
+        When the fast bounded result itself contains siblings, a family-ranked query
+        takes the first variant from every available family before second variants,
+        so a prolific family cannot hide independent repair or verification paths.
+        The adaptive policy performs richer scoring only over this bounded pool.
+        """
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not (1 <= limit <= 600)
+        ):
+            raise ValidationError("Candidate retrieval limit must be between 1 and 600.")
+        if not concept_ids:
+            return []
+        with self.read() as connection:
+            release_id = release_id or self.get_active_release_id(connection)
+            connection.execute("CREATE TEMP TABLE requested_scope(id TEXT PRIMARY KEY)")
+            connection.executemany(
+                "INSERT INTO requested_scope(id) VALUES (?)",
+                ((concept_id,) for concept_id in sorted(concept_ids)),
+            )
+            parameters = (
+                focus_concept_id,
+                focus_misconception_id,
+                target_difficulty,
+                release_id,
+                learner_id or "",
+                QuestionStatus.APPROVED.value,
+                QuestionStatus.CALIBRATED.value,
+                max(1, limit),
+            )
+            id_rows = connection.execute(
+                CANDIDATE_POOL_SQL, parameters
+            ).fetchall()
+            if len({row["family_id"] for row in id_rows}) != len(id_rows):
+                id_rows = connection.execute(
+                    FAMILY_DIVERSE_CANDIDATE_POOL_SQL, parameters
+                ).fetchall()
+            question_ids = [row["id"] for row in id_rows]
+            return self._questions_by_ids(
+                connection, question_ids, release_id=release_id
+            )
+
+    def _questions_by_ids(
+        self,
+        connection: sqlite3.Connection,
+        question_ids: Sequence[str],
+        *,
+        release_id: str | None = None,
+    ) -> list[Question]:
+        if not question_ids:
+            return []
+        placeholders = ",".join("?" for _ in question_ids)
+        if release_id is None:
+            question_rows = connection.execute(
+                f"SELECT q.*, q.status AS resolved_status "
+                f"FROM questions q WHERE q.id IN ({placeholders})",
+                tuple(question_ids),
+            ).fetchall()
+        else:
+            question_rows = connection.execute(
+                f"""SELECT q.*, rq.status AS resolved_status
+                    FROM questions q
+                    JOIN release_questions rq
+                      ON rq.question_id = q.id AND rq.release_id = ?
+                    WHERE q.id IN ({placeholders})""",
+                (release_id, *question_ids),
+            ).fetchall()
+        concept_rows = connection.execute(
+            f"""SELECT * FROM question_concepts
+                WHERE question_id IN ({placeholders})
+                ORDER BY question_id, rowid""",
+            tuple(question_ids),
+        ).fetchall()
+        option_rows = connection.execute(
+            f"""SELECT * FROM options WHERE question_id IN ({placeholders})
+                ORDER BY question_id, rowid""",
+            tuple(question_ids),
+        ).fetchall()
+        source_rows = connection.execute(
+            f"""SELECT * FROM question_sources
+                WHERE question_id IN ({placeholders})
+                ORDER BY question_id, rowid""",
+            tuple(question_ids),
+        ).fetchall()
+        concepts_by_question: dict[str, list[ConceptWeight]] = {}
+        options_by_question: dict[str, list[Option]] = {}
+        sources_by_question: dict[str, list[str]] = {}
+        for row in concept_rows:
+            concepts_by_question.setdefault(row["question_id"], []).append(
+                ConceptWeight(row["concept_id"], row["weight"], row["role"])
+            )
+        for row in option_rows:
+            options_by_question.setdefault(row["question_id"], []).append(
+                Option(
+                    id=row["option_id"],
+                    text=row["text"],
+                    correct=bool(row["is_correct"]),
+                    rationale=row["rationale"],
+                    misconception_id=row["misconception_id"],
+                )
+            )
+        for row in source_rows:
+            sources_by_question.setdefault(row["question_id"], []).append(row["source_id"])
+        by_id = {
+            row["id"]: Question(
+                id=row["id"],
+                version=row["version"],
+                family_id=row["family_id"],
+                status=QuestionStatus(row["resolved_status"]),
+                stem=row["stem"],
+                kind=QuestionKind(row["kind"]),
+                difficulty=row["difficulty"],
+                discrimination=row["discrimination"],
+                guess_rate=row["guess_rate"],
+                slip_rate=row["slip_rate"],
+                concepts=tuple(
+                    concepts_by_question.get(row["id"], [])
+                ),
+                options=tuple(options_by_question.get(row["id"], [])),
+                source_ids=tuple(sources_by_question.get(row["id"], [])),
+                provenance=json.loads(row["provenance_json"]),
+                tags=tuple(json.loads(row["tags_json"])),
+                revision_of=row["revision_of"],
+            )
+            for row in question_rows
+        }
+        return [by_id[question_id] for question_id in question_ids if question_id in by_id]
+
+    def get_skill_states(self, learner_id: str) -> dict[str, SkillState]:
+        with self.read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM skill_states WHERE learner_id = ?", (learner_id,)
+            ).fetchall()
+        return {
+            row["concept_id"]: SkillState(
+                learner_id=row["learner_id"],
+                concept_id=row["concept_id"],
+                mean=row["mean"],
+                variance=row["variance"],
+                stability_hours=row["stability_hours"],
+                exposures=row["exposures"],
+                last_seen_at=from_timestamp(row["last_seen_at"]),
+                next_review_at=from_timestamp(row["next_review_at"]),
+                evidence_mass=row["evidence_mass"],
+            )
+            for row in rows
+        }
+
+    def get_misconception_beliefs(self, learner_id: str) -> dict[str, MisconceptionBelief]:
+        with self.read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM misconception_beliefs WHERE learner_id = ?", (learner_id,)
+            ).fetchall()
+        return {
+            row["misconception_id"]: MisconceptionBelief(
+                learner_id=row["learner_id"],
+                misconception_id=row["misconception_id"],
+                log_odds=row["log_odds"],
+                evidence_count=row["evidence_count"],
+                last_seen_at=from_timestamp(row["last_seen_at"]),
+            )
+            for row in rows
+        }
+
+    def learner_projection_hash(
+        self, learner_id: str, connection: sqlite3.Connection | None = None
+    ) -> str:
+        """Hash every mutable learner-model projection in canonical order."""
+        owns_connection = connection is None
+        conn = connection or self.connect()
+        try:
+            learner = conn.execute(
+                "SELECT id, revision FROM learners WHERE id = ?", (learner_id,)
+            ).fetchone()
+            if not learner:
+                raise NotFoundError(f"Unknown learner: {learner_id}")
+            skill_states = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT learner_id, concept_id, mean, variance,
+                              stability_hours, exposures, last_seen_at,
+                              next_review_at, evidence_mass, as_of_event_id,
+                              model_version
+                       FROM skill_states WHERE learner_id = ?
+                       ORDER BY concept_id""",
+                    (learner_id,),
+                )
+            ]
+            misconception_beliefs = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT learner_id, misconception_id, log_odds,
+                              evidence_count, last_seen_at, as_of_event_id,
+                              model_version
+                       FROM misconception_beliefs WHERE learner_id = ?
+                       ORDER BY misconception_id""",
+                    (learner_id,),
+                )
+            ]
+            skill_families = [
+                dict(row)
+                for row in conn.execute(
+                    """SELECT learner_id, concept_id, family_id, kind,
+                              first_unguided_correct_at,
+                              last_unguided_correct_at,
+                              delayed_unguided_correct_at
+                       FROM learner_skill_families WHERE learner_id = ?
+                       ORDER BY concept_id, family_id""",
+                    (learner_id,),
+                )
+            ]
+            return _content_hash(
+                {
+                    "learner_id": learner["id"],
+                    "learner_revision": learner["revision"],
+                    "skill_states": skill_states,
+                    "misconception_beliefs": misconception_beliefs,
+                    "skill_families": skill_families,
+                }
+            )
+        finally:
+            if owns_connection:
+                conn.close()
+
+    def get_exposure_summary(
+        self,
+        learner_id: str,
+        *,
+        question_ids: set[str] | None = None,
+        family_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        with self.read() as connection:
+            if question_ids is None:
+                question_rows = connection.execute(
+                    """SELECT question_id, COUNT(*) AS n FROM decisions
+                       WHERE learner_id = ? GROUP BY question_id""",
+                    (learner_id,),
+                ).fetchall()
+            elif question_ids:
+                placeholders = ",".join("?" for _ in question_ids)
+                question_rows = connection.execute(
+                    f"""SELECT question_id, COUNT(*) AS n FROM decisions
+                        WHERE learner_id = ? AND question_id IN ({placeholders})
+                        GROUP BY question_id""",
+                    (learner_id, *sorted(question_ids)),
+                ).fetchall()
+            else:
+                question_rows = []
+            if family_ids is None:
+                family_rows = connection.execute(
+                    """SELECT question.family_id, COUNT(*) AS n,
+                              MAX(decision.created_at) AS last_at
+                       FROM decisions decision
+                       JOIN questions question ON question.id = decision.question_id
+                       WHERE decision.learner_id = ? GROUP BY question.family_id""",
+                    (learner_id,),
+                ).fetchall()
+            elif family_ids:
+                placeholders = ",".join("?" for _ in family_ids)
+                family_rows = connection.execute(
+                    f"""SELECT question.family_id, COUNT(*) AS n,
+                               MAX(decision.created_at) AS last_at
+                        FROM decisions decision
+                        JOIN questions question ON question.id = decision.question_id
+                        WHERE decision.learner_id = ?
+                          AND question.family_id IN ({placeholders})
+                        GROUP BY question.family_id""",
+                    (learner_id, *sorted(family_ids)),
+                ).fetchall()
+            else:
+                family_rows = []
+        return {
+            "questions": {row["question_id"]: row["n"] for row in question_rows},
+            "families": {row["family_id"]: {"count": row["n"], "last_at": row["last_at"]} for row in family_rows},
+        }
+
+    def session_exposure_summary(self, session_id: str) -> dict[str, set[str]]:
+        with self.read() as connection:
+            rows = connection.execute(
+                """SELECT decision.question_id, question.family_id
+                   FROM decisions decision
+                   JOIN questions question ON question.id = decision.question_id
+                   WHERE decision.session_id = ?""",
+                (session_id,),
+            ).fetchall()
+        return {
+            "questions": {row["question_id"] for row in rows},
+            "families": {row["family_id"] for row in rows},
+        }
+
+    def independent_evidence_summary(self, learner_id: str, concept_id: str) -> dict[str, int]:
+        return self.independent_evidence_summaries(learner_id, {concept_id})[concept_id]
+
+    def independent_evidence_summaries(
+        self, learner_id: str, concept_ids: set[str]
+    ) -> dict[str, dict[str, int]]:
+        summaries = {
+            concept_id: {"families": 0, "delayed": 0, "operation_kinds": 0}
+            for concept_id in concept_ids
+        }
+        if not concept_ids:
+            return summaries
+        with self.read() as connection:
+            connection.execute("CREATE TEMP TABLE evidence_scope(id TEXT PRIMARY KEY)")
+            connection.executemany(
+                "INSERT INTO evidence_scope(id) VALUES (?)",
+                ((concept_id,) for concept_id in sorted(concept_ids)),
+            )
+            rows = connection.execute(
+                """SELECT evidence.concept_id, COUNT(*) AS families,
+                          COUNT(DISTINCT CASE WHEN evidence.kind != 'unknown'
+                                              THEN evidence.kind END) AS operation_kinds,
+                          SUM(CASE WHEN evidence.delayed_unguided_correct_at IS NOT NULL
+                                   THEN 1 ELSE 0 END) AS delayed
+                   FROM learner_skill_families evidence
+                   JOIN evidence_scope scope ON scope.id = evidence.concept_id
+                   WHERE evidence.learner_id = ? GROUP BY evidence.concept_id""",
+                (learner_id,),
+            ).fetchall()
+        for row in rows:
+            summaries[row["concept_id"]] = {
+                "families": int(row["families"] or 0),
+                "delayed": int(row["delayed"] or 0),
+                "operation_kinds": int(row["operation_kinds"] or 0),
+            }
+        return summaries
+
+    def create_session(
+        self,
+        learner_id: str,
+        root_concept_id: str,
+        *,
+        mode: str = "learn",
+        seed: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        if not isinstance(learner_id, str) or not learner_id.strip():
+            raise ValidationError("learner_id must be a non-blank string.")
+        if not isinstance(root_concept_id, str) or not root_concept_id.strip():
+            raise ValidationError("root_concept_id must be a non-blank string.")
+        if mode not in {"learn", "diagnose", "review"}:
+            raise ValidationError("Mode must be learn, diagnose, or review.")
+        if seed is not None and (
+            not isinstance(seed, int)
+            or isinstance(seed, bool)
+            or not (-(2**63) <= seed < 2**63)
+        ):
+            raise ValidationError("seed must be a signed 64-bit integer.")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key) > 200
+        ):
+            raise ValidationError(
+                "idempotency_key must be a non-blank string of at most 200 characters."
+            )
+        phase = {
+            "diagnose": SessionPhase.DIAGNOSE,
+            "review": SessionPhase.REVIEW,
+        }.get(mode, SessionPhase.LEARN)
+        session_id = new_id("ses")
+        now = datetime.now(timezone.utc).isoformat()
+        resolved_seed = seed if seed is not None else secrets.randbelow(2**31)
+        with self.transaction() as connection:
+            if idempotency_key:
+                prior = connection.execute(
+                    "SELECT * FROM events WHERE idempotency_key = ?", (idempotency_key,)
+                ).fetchone()
+                if prior:
+                    if prior["event_type"] != "SessionStarted":
+                        raise ConflictError("Idempotency key belongs to a different command.")
+                    payload = json.loads(prior["payload_json"])
+                    if (
+                        payload.get("root_concept_id") != root_concept_id
+                        or payload.get("mode") != mode
+                        or payload.get("requested_seed") != seed
+                        or prior["learner_id"] != learner_id
+                    ):
+                        raise ConflictError("Idempotency key was reused with different session inputs.")
+                    return self.get_session(payload["session_id"], connection)
+            if not connection.execute("SELECT 1 FROM learners WHERE id = ?", (learner_id,)).fetchone():
+                raise NotFoundError(f"Unknown learner: {learner_id}")
+            release_id = self.get_active_release_id(connection)
+            if not connection.execute(
+                """SELECT 1 FROM release_concepts
+                   WHERE release_id = ? AND concept_id = ?""",
+                (release_id, root_concept_id),
+            ).fetchone():
+                raise NotFoundError(
+                    f"Concept {root_concept_id} is not in active release {release_id}."
+                )
+            self.append_event(
+                connection,
+                stream_id=f"learner:{learner_id}",
+                event_type="SessionStarted",
+                payload={
+                    "session_id": session_id,
+                    "root_concept_id": root_concept_id,
+                    "mode": mode,
+                    "initial_phase": phase.value,
+                    "requested_seed": seed,
+                    "rng_seed": resolved_seed,
+                    "corpus_release_id": release_id,
+                },
+                metadata={"corpus_release_id": release_id},
+                learner_id=learner_id,
+                session_id=session_id,
+                idempotency_key=idempotency_key,
+            )
+            connection.execute(
+                """INSERT INTO sessions(
+                       id, learner_id, root_concept_id, corpus_release_id,
+                       mode, phase, rng_seed, created_at, updated_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    session_id,
+                    learner_id,
+                    root_concept_id,
+                    release_id,
+                    mode,
+                    phase.value,
+                    resolved_seed,
+                    now,
+                    now,
+                ),
+            )
+            return self.get_session(session_id, connection)
+
+    def end_session(
+        self,
+        session_id: str,
+        *,
+        status: str = "completed",
+        reason: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        if status not in {"completed", "abandoned"}:
+            raise ValidationError("Session status must be completed or abandoned.")
+        if reason is not None and (
+            not isinstance(reason, str) or not reason.strip() or len(reason) > 500
+        ):
+            raise ValidationError(
+                "Session end reason must be a non-blank string of at most 500 characters."
+            )
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key) > 200
+        ):
+            raise ValidationError(
+                "idempotency_key must be a non-blank string of at most 200 characters."
+            )
+        with self.transaction() as connection:
+            session = self.get_session(session_id, connection)
+            payload = {
+                "session_id": session_id,
+                "status": status,
+                "reason": reason,
+            }
+            if idempotency_key:
+                prior = connection.execute(
+                    "SELECT * FROM events WHERE idempotency_key = ?", (idempotency_key,)
+                ).fetchone()
+                if prior:
+                    if (
+                        prior["event_type"] != "SessionEnded"
+                        or prior["session_id"] != session_id
+                        or json.loads(prior["payload_json"]) != payload
+                    ):
+                        raise ConflictError(
+                            "Idempotency key was reused with different session-end inputs."
+                        )
+                    return session
+            if session["status"] == status:
+                return session
+            if session["status"] != "active":
+                raise ConflictError(
+                    f"Session is already {session['status']} and cannot become {status}."
+                )
+            now = datetime.now(timezone.utc)
+            event = self.append_event(
+                connection,
+                stream_id=f"learner:{session['learner_id']}",
+                event_type="SessionEnded",
+                payload=payload,
+                metadata={"corpus_release_id": session["corpus_release_id"]},
+                learner_id=session["learner_id"],
+                session_id=session_id,
+                idempotency_key=idempotency_key,
+                occurred_at=now,
+            )
+            updated = connection.execute(
+                """UPDATE sessions SET status = ?, revision = revision + 1, updated_at = ?
+                   WHERE id = ? AND status = 'active' AND revision = ?""",
+                (status, to_timestamp(now), session_id, session["revision"]),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError("Session changed while it was being ended.")
+            return self.get_session(session_id, connection)
+
+    def get_session(
+        self, session_id: str, connection: sqlite3.Connection | None = None
+    ) -> dict[str, Any]:
+        owns_connection = connection is None
+        conn = connection or self.connect()
+        try:
+            row = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+            if not row:
+                raise NotFoundError(f"Unknown session: {session_id}")
+            result = dict(row)
+            result["recent_families"] = json.loads(result.pop("recent_families_json"))
+            result["remediation_path"] = json.loads(
+                result.pop("remediation_path_json")
+            )
+            return result
+        finally:
+            if owns_connection:
+                conn.close()
+
+    def pending_presentation(self, session_id: str) -> Presentation | None:
+        with self.read() as connection:
+            row = connection.execute(
+                """SELECT * FROM decisions WHERE session_id = ?
+                   AND consumed_at IS NULL AND invalidated_at IS NULL
+                   AND NOT EXISTS (
+                       SELECT 1 FROM question_revocations revoked
+                       WHERE revoked.question_id = decisions.question_id
+                   )
+                   ORDER BY created_at DESC LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+            if not row:
+                return None
+            questions = self._questions_by_ids(
+                connection,
+                [row["question_id"]],
+                release_id=row["corpus_release_id"],
+            )
+            if not questions:
+                raise NotFoundError(
+                    f"Decision {row['id']} references a question outside its corpus release."
+                )
+            question = questions[0]
+            terms = json.loads(row["selected_score_json"])
+            score = CandidateScore(question_id=question.id, **terms)
+            return Presentation(
+                decision_id=row["id"],
+                session_id=session_id,
+                question=question,
+                option_order=tuple(json.loads(row["option_order_json"])),
+                phase=SessionPhase(row["phase"]),
+                score=score,
+                propensity=row["propensity"],
+                rationale=row["rationale"],
+            )
+
+    def recent_decisions(self, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with self.read() as connection:
+            rows = connection.execute(
+                "SELECT * FROM decisions WHERE session_id = ? ORDER BY created_at DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["selected_score"] = json.loads(item.pop("selected_score_json"))
+            item["top_candidates"] = json.loads(item.pop("top_candidates_json"))
+            item["option_order"] = json.loads(item.pop("option_order_json"))
+            result.append(item)
+        return result
