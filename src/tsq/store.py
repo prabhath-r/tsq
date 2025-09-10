@@ -2928,3 +2928,1096 @@ class Database:
             item["option_order"] = json.loads(item.pop("option_order_json"))
             result.append(item)
         return result
+
+    def verify_integrity(self, stream_id: str | None = None) -> dict[str, Any]:
+        """Verify storage, hash-chain, stream-head, and projection invariants."""
+        errors: list[str] = []
+        payload_cache: dict[str, dict[str, Any] | None] = {}
+        metadata_cache: dict[str, dict[str, Any] | None] = {}
+
+        def reject_non_finite_json_constant(value: str) -> None:
+            raise ValueError(f"non-finite JSON constant {value}")
+
+        def event_object(
+            event: sqlite3.Row, column: str, cache: dict[str, dict[str, Any] | None]
+        ) -> dict[str, Any] | None:
+            event_id = event["event_id"]
+            if event_id in cache:
+                return cache[event_id]
+            label = "payload" if column == "payload_json" else "metadata"
+            try:
+                value = json.loads(
+                    event[column], parse_constant=reject_non_finite_json_constant
+                )
+            except (TypeError, ValueError) as exc:
+                errors.append(f"event {event_id}: invalid {label} JSON ({exc})")
+                cache[event_id] = None
+                return None
+            if not isinstance(value, dict):
+                errors.append(f"event {event_id}: {label} JSON is not an object")
+                cache[event_id] = None
+                return None
+            cache[event_id] = value
+            return value
+
+        def json_value(
+            raw: str | None,
+            label: str,
+            expected_type: type,
+        ) -> Any | None:
+            if raw is None:
+                return None
+            try:
+                value = json.loads(raw)
+            except (TypeError, json.JSONDecodeError) as exc:
+                errors.append(f"{label}: invalid JSON ({exc})")
+                return None
+            if not isinstance(value, expected_type):
+                errors.append(f"{label}: expected {expected_type.__name__} JSON")
+                return None
+            return value
+
+        def compare_payload(
+            actual: dict[str, Any], expected: dict[str, Any], label: str
+        ) -> None:
+            for field, expected_value in expected.items():
+                if field not in actual:
+                    errors.append(f"{label}: missing {field}")
+                elif actual[field] != expected_value:
+                    errors.append(f"{label}: {field} mismatch")
+
+        with self.read() as connection:
+            quick_check = [row[0] for row in connection.execute("PRAGMA quick_check")]
+            if quick_check != ["ok"]:
+                errors.extend(f"SQLite quick_check: {message}" for message in quick_check)
+
+            foreign_key_failures = [
+                dict(row) for row in connection.execute("PRAGMA foreign_key_check")
+            ]
+            if foreign_key_failures:
+                errors.append(f"{len(foreign_key_failures)} foreign-key violations")
+
+            # A release is only immutable if both its membership rows and the
+            # versioned registry content addressed by those rows are intact.
+            # Recompute hashes from canonical domain objects rather than trusting
+            # the stored hash columns that an attacker could change alongside data.
+            for row in connection.execute("SELECT * FROM concepts ORDER BY id"):
+                try:
+                    concept = Concept(
+                        row["id"],
+                        row["name"],
+                        row["description"],
+                        row["domain"],
+                        row["prior_mastery"],
+                    )
+                    expected_hash = concept_content_hash(concept)
+                except (TypeError, ValueError) as exc:
+                    errors.append(f"concept {row['id']}: invalid registry row ({exc})")
+                    continue
+                if row["content_hash"] != expected_hash:
+                    errors.append(f"concept {row['id']}: content hash mismatch")
+
+            for row in connection.execute("SELECT * FROM misconceptions ORDER BY id"):
+                try:
+                    misconception = Misconception(
+                        row["id"],
+                        row["concept_id"],
+                        row["name"],
+                        row["description"],
+                    )
+                    expected_hash = misconception_content_hash(misconception)
+                except (TypeError, ValueError) as exc:
+                    errors.append(
+                        f"misconception {row['id']}: invalid registry row ({exc})"
+                    )
+                    continue
+                if row["content_hash"] != expected_hash:
+                    errors.append(f"misconception {row['id']}: content hash mismatch")
+
+            for row in connection.execute("SELECT * FROM sources ORDER BY id"):
+                try:
+                    metadata = json.loads(row["metadata_json"])
+                    if not isinstance(metadata, dict):
+                        raise ValueError("metadata_json must contain an object")
+                    source = Source(
+                        row["id"],
+                        row["title"],
+                        row["uri"],
+                        row["license"],
+                        metadata,
+                    )
+                    expected_hash = source_content_hash(source)
+                except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                    errors.append(f"source {row['id']}: invalid registry row ({exc})")
+                    continue
+                if row["content_hash"] != expected_hash:
+                    errors.append(f"source {row['id']}: content hash mismatch")
+
+            question_batch_size = 400
+            question_registry_cursor = connection.execute(
+                "SELECT * FROM questions ORDER BY id"
+            )
+            while batch_rows := question_registry_cursor.fetchmany(
+                question_batch_size
+            ):
+                batch_ids = [row["id"] for row in batch_rows]
+                try:
+                    hydrated = self._questions_by_ids(connection, batch_ids)
+                    hydrated_by_id = {question.id: question for question in hydrated}
+                except (
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                    json.JSONDecodeError,
+                    ValidationError,
+                ):
+                    # Preserve useful per-item diagnostics on a corrupted batch;
+                    # the healthy 100k path remains four queries per 400 items.
+                    hydrated_by_id = {}
+                    for row in batch_rows:
+                        try:
+                            hydrated_by_id[row["id"]] = self._question_from_row(
+                                connection, row
+                            )
+                        except (
+                            TypeError,
+                            ValueError,
+                            KeyError,
+                            json.JSONDecodeError,
+                            ValidationError,
+                        ) as exc:
+                            errors.append(
+                                f"question {row['id']}: invalid registry row ({exc})"
+                            )
+                for row in batch_rows:
+                    question = hydrated_by_id.get(row["id"])
+                    if question is None:
+                        if not any(
+                            error.startswith(
+                                f"question {row['id']}: invalid registry row"
+                            )
+                            for error in errors
+                        ):
+                            errors.append(
+                                f"question {row['id']}: missing registry components"
+                            )
+                        continue
+                    expected_hash = question_content_hash(question)
+                    if row["content_hash"] != expected_hash:
+                        errors.append(
+                            f"question {row['id']}: content hash mismatch"
+                        )
+
+            release_rows = connection.execute(
+                "SELECT * FROM corpus_releases ORDER BY id"
+            ).fetchall()
+            for release in release_rows:
+                release_id = release["id"]
+                prefix = f"release {release_id}"
+                if release["sealed_at"] is None:
+                    errors.append(f"{prefix}: release is not sealed")
+                concept_rows = connection.execute(
+                    """SELECT membership.concept_id, concept.content_hash
+                       FROM release_concepts membership
+                       JOIN concepts concept ON concept.id = membership.concept_id
+                       WHERE membership.release_id = ?
+                       ORDER BY membership.concept_id""",
+                    (release_id,),
+                ).fetchall()
+                concept_ids_in_release = {row["concept_id"] for row in concept_rows}
+                edge_rows = connection.execute(
+                    """SELECT source_id, target_id, relation, weight
+                       FROM release_edges WHERE release_id = ?
+                       ORDER BY source_id, target_id, relation""",
+                    (release_id,),
+                ).fetchall()
+                misconception_rows = connection.execute(
+                    """SELECT membership.misconception_id, misconception.content_hash,
+                              misconception.concept_id
+                       FROM release_misconceptions membership
+                       JOIN misconceptions misconception
+                         ON misconception.id = membership.misconception_id
+                       WHERE membership.release_id = ?
+                       ORDER BY membership.misconception_id""",
+                    (release_id,),
+                ).fetchall()
+                misconception_ids_in_release = {
+                    row["misconception_id"] for row in misconception_rows
+                }
+                source_rows = connection.execute(
+                    """SELECT membership.source_id, source.content_hash
+                       FROM release_sources membership
+                       JOIN sources source ON source.id = membership.source_id
+                       WHERE membership.release_id = ?
+                       ORDER BY membership.source_id""",
+                    (release_id,),
+                ).fetchall()
+                source_ids_in_release = {row["source_id"] for row in source_rows}
+                question_rows = connection.execute(
+                    """SELECT membership.question_id, question.content_hash,
+                              membership.status, membership.evidence_weight
+                       FROM release_questions membership
+                       JOIN questions question ON question.id = membership.question_id
+                       WHERE membership.release_id = ?
+                       ORDER BY membership.question_id""",
+                    (release_id,),
+                ).fetchall()
+                for edge in edge_rows:
+                    absent = {
+                        edge["source_id"], edge["target_id"]
+                    } - concept_ids_in_release
+                    if absent:
+                        errors.append(
+                            f"{prefix}: edge references concepts outside the release: "
+                            f"{', '.join(sorted(absent))}"
+                        )
+                for misconception in misconception_rows:
+                    if misconception["concept_id"] not in concept_ids_in_release:
+                        errors.append(
+                            f"{prefix}: misconception {misconception['misconception_id']} "
+                            "belongs to a concept outside the release"
+                        )
+
+                for question in question_rows:
+                    try:
+                        status = QuestionStatus(question["status"])
+                    except ValueError:
+                        errors.append(
+                            f"{prefix}: question {question['question_id']} has invalid status"
+                        )
+                    else:
+                        if question["evidence_weight"] != status.evidence_weight:
+                            errors.append(
+                                f"{prefix}: question {question['question_id']} has "
+                                "an evidence weight inconsistent with its status"
+                            )
+
+                outside_concepts = connection.execute(
+                    """SELECT DISTINCT qc.question_id, qc.concept_id
+                       FROM release_questions rq
+                       JOIN question_concepts qc
+                         ON qc.question_id = rq.question_id
+                       WHERE rq.release_id = ?
+                         AND NOT EXISTS (
+                             SELECT 1 FROM release_concepts membership
+                             WHERE membership.release_id = ?
+                               AND membership.concept_id = qc.concept_id
+                         )
+                       ORDER BY qc.question_id, qc.concept_id""",
+                    (release_id, release_id),
+                ).fetchall()
+                outside_misconceptions = connection.execute(
+                    """SELECT DISTINCT option.question_id,
+                                      option.misconception_id
+                       FROM release_questions rq
+                       JOIN options option ON option.question_id = rq.question_id
+                       WHERE rq.release_id = ?
+                         AND option.misconception_id IS NOT NULL
+                         AND NOT EXISTS (
+                             SELECT 1 FROM release_misconceptions membership
+                             WHERE membership.release_id = ?
+                               AND membership.misconception_id =
+                                   option.misconception_id
+                         )
+                       ORDER BY option.question_id, option.misconception_id""",
+                    (release_id, release_id),
+                ).fetchall()
+                outside_sources = connection.execute(
+                    """SELECT DISTINCT source.question_id, source.source_id
+                       FROM release_questions rq
+                       JOIN question_sources source
+                         ON source.question_id = rq.question_id
+                       WHERE rq.release_id = ?
+                         AND NOT EXISTS (
+                             SELECT 1 FROM release_sources membership
+                             WHERE membership.release_id = ?
+                               AND membership.source_id = source.source_id
+                         )
+                       ORDER BY source.question_id, source.source_id""",
+                    (release_id, release_id),
+                ).fetchall()
+                for row in outside_concepts:
+                    errors.append(
+                        f"{prefix}: question {row['question_id']} maps concept "
+                        f"{row['concept_id']} outside the release"
+                    )
+                for row in outside_misconceptions:
+                    errors.append(
+                        f"{prefix}: question {row['question_id']} uses misconception "
+                        f"{row['misconception_id']} outside the release"
+                    )
+                for row in outside_sources:
+                    errors.append(
+                        f"{prefix}: question {row['question_id']} cites source "
+                        f"{row['source_id']} outside the release"
+                    )
+
+                release_payload = {
+                    "concepts": [
+                        (row["concept_id"], row["content_hash"])
+                        for row in concept_rows
+                    ],
+                    "edges": [tuple(row) for row in edge_rows],
+                    "misconceptions": [
+                        (row["misconception_id"], row["content_hash"])
+                        for row in misconception_rows
+                    ],
+                    "sources": [
+                        (row["source_id"], row["content_hash"])
+                        for row in source_rows
+                    ],
+                    "questions": [
+                        (row["question_id"], row["content_hash"], row["status"])
+                        for row in question_rows
+                    ],
+                }
+                expected_bundle_hash = _content_hash(release_payload)
+                if release["bundle_hash"] != expected_bundle_hash:
+                    errors.append(f"{prefix}: bundle hash mismatch")
+
+            active_release = connection.execute(
+                "SELECT value FROM meta WHERE key = 'active_corpus_release'"
+            ).fetchone()
+            if active_release:
+                active = connection.execute(
+                    "SELECT sealed_at FROM corpus_releases WHERE id = ?",
+                    (active_release["value"],),
+                ).fetchone()
+                if active is None:
+                    errors.append("active corpus release does not exist")
+                elif active["sealed_at"] is None:
+                    errors.append("active corpus release is not sealed")
+
+            if stream_id:
+                events = connection.execute(
+                    "SELECT * FROM events WHERE stream_id = ? ORDER BY stream_id, stream_version",
+                    (stream_id,),
+                ).fetchall()
+            else:
+                events = connection.execute(
+                    "SELECT * FROM events ORDER BY stream_id, stream_version"
+                ).fetchall()
+            expected_version: dict[str, int] = {}
+            expected_previous: dict[str, str | None] = {}
+            stream_tails: dict[str, sqlite3.Row] = {}
+            for event in events:
+                stream = event["stream_id"]
+                version = expected_version.get(stream, 1)
+                previous_hash = expected_previous.get(stream)
+                if event["stream_version"] != version:
+                    errors.append(
+                        f"{stream}: expected version {version}, found {event['stream_version']}"
+                    )
+                if event["previous_hash"] != previous_hash:
+                    errors.append(f"{stream}@{event['stream_version']}: previous hash mismatch")
+                payload = event_object(event, "payload_json", payload_cache)
+                metadata = event_object(event, "metadata_json", metadata_cache)
+                if payload is not None and metadata is not None:
+                    envelope = {
+                        "event_id": event["event_id"],
+                        "stream_id": event["stream_id"],
+                        "stream_version": event["stream_version"],
+                        "event_type": event["event_type"],
+                        "schema_version": event["schema_version"],
+                        "occurred_at": event["occurred_at"],
+                        "recorded_at": event["recorded_at"],
+                        "learner_id": event["learner_id"],
+                        "session_id": event["session_id"],
+                        "correlation_id": event["correlation_id"],
+                        "causation_id": event["causation_id"],
+                        "idempotency_key": event["idempotency_key"],
+                        "payload": payload,
+                        "metadata": metadata,
+                        "previous_hash": event["previous_hash"],
+                    }
+                    actual_hash = _content_hash(envelope)
+                    if actual_hash != event["payload_hash"]:
+                        errors.append(
+                            f"{stream}@{event['stream_version']}: payload hash mismatch"
+                        )
+                expected_version[stream] = event["stream_version"] + 1
+                expected_previous[stream] = event["payload_hash"]
+                stream_tails[stream] = event
+
+            if stream_id:
+                head_rows = connection.execute(
+                    "SELECT * FROM stream_heads WHERE stream_id = ?", (stream_id,)
+                ).fetchall()
+            else:
+                head_rows = connection.execute("SELECT * FROM stream_heads").fetchall()
+            heads = {row["stream_id"]: row for row in head_rows}
+            for stream, tail in stream_tails.items():
+                head = heads.get(stream)
+                if head is None:
+                    errors.append(f"{stream}: missing stream head")
+                    continue
+                if head["stream_version"] != tail["stream_version"]:
+                    errors.append(
+                        f"{stream}: stream head version mismatch "
+                        f"({head['stream_version']} != {tail['stream_version']})"
+                    )
+                if head["payload_hash"] != tail["payload_hash"]:
+                    errors.append(f"{stream}: stream head hash mismatch")
+            for stream in heads.keys() - stream_tails.keys():
+                errors.append(f"{stream}: stream head has no matching event tail")
+
+            revocation_events: dict[str, list[sqlite3.Row]] = {}
+            for event in connection.execute(
+                """SELECT rowid AS storage_order, * FROM events
+                   WHERE event_type = 'QuestionEmergencyRevoked'
+                   ORDER BY recorded_at, storage_order"""
+            ).fetchall():
+                payload = event_object(event, "payload_json", payload_cache)
+                event_object(event, "metadata_json", metadata_cache)
+                if payload is None:
+                    continue
+                question_id = payload.get("question_id")
+                if not isinstance(question_id, str) or not question_id:
+                    errors.append(
+                        f"event {event['event_id']}: missing revoked question_id"
+                    )
+                    continue
+                revocation_events.setdefault(question_id, []).append(event)
+
+            # Domain timestamps on decisions and attempts describe when the
+            # interaction occurred and are intentionally supplied by callers
+            # (for deterministic simulation and offline ingestion).  They
+            # therefore cannot establish whether an operation was accepted
+            # before or after a safety revocation.  Use the immutable semantic
+            # event's system-recorded timestamp instead, with SQLite insertion
+            # order only as a tie-breaker for equal clock readings.
+            decision_questions = {
+                row["id"]: row["question_id"]
+                for row in connection.execute(
+                    "SELECT id, question_id FROM decisions"
+                )
+            }
+            attempt_questions = {
+                row["event_id"]: row["question_id"]
+                for row in connection.execute(
+                    "SELECT event_id, question_id FROM attempts"
+                )
+            }
+            recorded_selections: dict[str, list[sqlite3.Row]] = {}
+            recorded_attempts: dict[str, list[sqlite3.Row]] = {}
+            for event in connection.execute(
+                """SELECT rowid AS storage_order, * FROM events
+                   WHERE event_type IN ('QuestionSelected', 'ResponseSubmitted')
+                   ORDER BY recorded_at, storage_order"""
+            ).fetchall():
+                payload = event_object(event, "payload_json", payload_cache)
+                if payload is None:
+                    continue
+                question_id = payload.get("question_id")
+                if not isinstance(question_id, str) or not question_id:
+                    continue
+                if event["event_type"] == "QuestionSelected":
+                    decision_id = payload.get("decision_id")
+                    if decision_questions.get(decision_id) == question_id:
+                        recorded_selections.setdefault(question_id, []).append(event)
+                elif attempt_questions.get(event["event_id"]) == question_id:
+                    recorded_attempts.setdefault(question_id, []).append(event)
+
+            def recorded_after(candidate: sqlite3.Row, anchor: sqlite3.Row) -> bool:
+                return (
+                    candidate["recorded_at"],
+                    candidate["storage_order"],
+                ) > (anchor["recorded_at"], anchor["storage_order"])
+
+            revocation_rows = connection.execute(
+                "SELECT * FROM question_revocations ORDER BY question_id"
+            ).fetchall()
+            revoked_question_ids = {row["question_id"] for row in revocation_rows}
+            for revocation in revocation_rows:
+                question_id = revocation["question_id"]
+                prefix = f"question revocation {question_id}"
+                matching = revocation_events.get(question_id, [])
+                if len(matching) != 1:
+                    errors.append(
+                        f"{prefix}: expected one safety event, found {len(matching)}"
+                    )
+                    continue
+                event = matching[0]
+                payload = event_object(event, "payload_json", payload_cache)
+                if event["event_id"] != revocation["event_id"]:
+                    errors.append(f"{prefix}: event ID mismatch")
+                if event["occurred_at"] != revocation["revoked_at"]:
+                    errors.append(f"{prefix}: revocation time mismatch")
+                if payload is not None:
+                    compare_payload(
+                        payload,
+                        {
+                            "question_id": question_id,
+                            "reason": revocation["reason"],
+                        },
+                        prefix,
+                    )
+                late_decisions = sum(
+                    recorded_after(candidate, event)
+                    for candidate in recorded_selections.get(question_id, [])
+                )
+                late_attempts = sum(
+                    recorded_after(candidate, event)
+                    for candidate in recorded_attempts.get(question_id, [])
+                )
+                if late_decisions:
+                    errors.append(
+                        f"{prefix}: {late_decisions} decisions were selected after revocation"
+                    )
+                if late_attempts:
+                    errors.append(
+                        f"{prefix}: {late_attempts} attempts were accepted after revocation"
+                    )
+            for question_id, matching in revocation_events.items():
+                if question_id not in revoked_question_ids:
+                    for event in matching:
+                        errors.append(
+                            f"event {event['event_id']}: safety event has no revocation projection"
+                        )
+
+            # The latest projection event commits to all mutable learner-model
+            # tables.  This catches out-of-band edits that a valid event chain
+            # alone cannot reveal.
+            projection_learner_ids = {
+                row["learner_id"]
+                for row in connection.execute(
+                    """SELECT learner_id FROM skill_states
+                       UNION SELECT learner_id FROM misconception_beliefs
+                       UNION SELECT learner_id FROM learner_skill_families"""
+                )
+            }
+            learners_with_projection_events = {
+                row["learner_id"]
+                for row in connection.execute(
+                    """SELECT DISTINCT learner_id FROM events
+                       WHERE event_type = 'LearnerProjectionAdvanced'
+                         AND learner_id IS NOT NULL"""
+                )
+            }
+            for learner_id in sorted(
+                projection_learner_ids - learners_with_projection_events
+            ):
+                errors.append(
+                    f"learner {learner_id}: mutable projection rows exist without "
+                    "a LearnerProjectionAdvanced event"
+                )
+            latest_projection_events: dict[str, sqlite3.Row] = {}
+            for event in events:
+                if event["event_type"] == "LearnerProjectionAdvanced" and event[
+                    "learner_id"
+                ]:
+                    latest_projection_events[event["learner_id"]] = event
+            for learner_id, projection_event in latest_projection_events.items():
+                payload = event_object(
+                    projection_event, "payload_json", payload_cache
+                )
+                if payload is None or "projection_hash" not in payload:
+                    # Pre-v5 events did not carry a projection commitment.
+                    continue
+                committed_hash = payload.get("projection_hash")
+                if not isinstance(committed_hash, str):
+                    errors.append(
+                        f"learner {learner_id}: projection hash is not a string"
+                    )
+                    continue
+                try:
+                    actual_projection_hash = self.learner_projection_hash(
+                        learner_id, connection
+                    )
+                except (NotFoundError, TypeError, ValueError) as exc:
+                    errors.append(
+                        f"learner {learner_id}: projection cannot be hashed ({exc})"
+                    )
+                    continue
+                if actual_projection_hash != committed_hash:
+                    errors.append(f"learner {learner_id}: projection hash mismatch")
+
+            semantic_events = connection.execute(
+                """SELECT * FROM events
+                   WHERE event_type IN ('QuestionSelected', 'ResponseSubmitted')
+                   ORDER BY recorded_at, event_id"""
+            ).fetchall()
+            question_selected: dict[str, list[sqlite3.Row]] = {}
+            response_events_by_id: dict[str, sqlite3.Row] = {}
+            response_events_by_decision: dict[str, list[sqlite3.Row]] = {}
+            for event in semantic_events:
+                payload = event_object(event, "payload_json", payload_cache)
+                event_object(event, "metadata_json", metadata_cache)
+                if event["event_type"] == "ResponseSubmitted":
+                    response_events_by_id[event["event_id"]] = event
+                if payload is None:
+                    continue
+                decision_id = payload.get("decision_id")
+                if not isinstance(decision_id, str) or not decision_id:
+                    errors.append(f"event {event['event_id']}: missing decision_id")
+                    continue
+                if event["event_type"] == "QuestionSelected":
+                    question_selected.setdefault(decision_id, []).append(event)
+                else:
+                    response_events_by_decision.setdefault(decision_id, []).append(event)
+
+            invalidation_events_by_decision: dict[str, list[sqlite3.Row]] = {}
+            for event in connection.execute(
+                """SELECT * FROM events WHERE event_type = 'DecisionInvalidated'
+                   ORDER BY recorded_at, event_id"""
+            ).fetchall():
+                payload = event_object(event, "payload_json", payload_cache)
+                event_object(event, "metadata_json", metadata_cache)
+                if payload is None:
+                    continue
+                decision_id = payload.get("decision_id")
+                if not isinstance(decision_id, str) or not decision_id:
+                    errors.append(
+                        f"event {event['event_id']}: missing decision_id"
+                    )
+                    continue
+                invalidation_events_by_decision.setdefault(decision_id, []).append(
+                    event
+                )
+
+            decision_rows = connection.execute(
+                """SELECT d.*,
+                          s.learner_id AS session_learner_id,
+                          s.corpus_release_id AS session_release_id,
+                          q.version AS current_question_version,
+                          q.content_hash AS current_question_content_hash,
+                          q.family_id AS current_family_id,
+                          rq.status AS release_question_status,
+                          rq.evidence_weight AS release_evidence_weight
+                   FROM decisions d
+                   LEFT JOIN sessions s ON s.id = d.session_id
+                   LEFT JOIN questions q ON q.id = d.question_id
+                   LEFT JOIN release_questions rq
+                     ON rq.release_id = d.corpus_release_id
+                    AND rq.question_id = d.question_id
+                   ORDER BY d.created_at, d.id"""
+            ).fetchall()
+            decisions = {row["id"]: row for row in decision_rows}
+
+            option_rows = connection.execute(
+                """SELECT DISTINCT o.question_id, o.option_id, o.text,
+                          o.is_correct, o.rationale, o.misconception_id
+                   FROM options o
+                   JOIN decisions d ON d.question_id = o.question_id"""
+            ).fetchall()
+            option_ids: dict[str, set[str]] = {}
+            answer_keys: dict[tuple[str, str], bool] = {}
+            option_snapshots: dict[tuple[str, str], dict[str, Any]] = {}
+            correct_option_snapshots: dict[str, list[dict[str, Any]]] = {}
+            for option in option_rows:
+                option_ids.setdefault(option["question_id"], set()).add(option["option_id"])
+                answer_keys[(option["question_id"], option["option_id"])] = bool(
+                    option["is_correct"]
+                )
+                option_snapshots[(option["question_id"], option["option_id"])] = {
+                    "id": option["option_id"],
+                    "text": option["text"],
+                    "correct": bool(option["is_correct"]),
+                    "rationale": option["rationale"],
+                    "misconception_id": option["misconception_id"],
+                }
+                if option["is_correct"]:
+                    correct_option_snapshots.setdefault(
+                        option["question_id"], []
+                    ).append(
+                        option_snapshots[(option["question_id"], option["option_id"])]
+                    )
+            concept_ids = {
+                row["id"] for row in connection.execute("SELECT id FROM concepts")
+            }
+            misconception_ids = {
+                row["id"] for row in connection.execute("SELECT id FROM misconceptions")
+            }
+            for question_id in option_ids:
+                correct_count = len(correct_option_snapshots.get(question_id, []))
+                if correct_count != 1:
+                    errors.append(
+                        f"question {question_id}: expected one correct option, found "
+                        f"{correct_count}"
+                    )
+
+            decision_orders: dict[str, list[Any] | None] = {}
+            for decision in decision_rows:
+                decision_id = decision["id"]
+                prefix = f"decision {decision_id}"
+                if decision["session_learner_id"] is None:
+                    errors.append(f"{prefix}: missing session")
+                elif decision["learner_id"] != decision["session_learner_id"]:
+                    errors.append(f"{prefix}: learner/session mismatch")
+                if decision["session_release_id"] is None:
+                    errors.append(f"{prefix}: session has no corpus release")
+                elif decision["corpus_release_id"] != decision["session_release_id"]:
+                    errors.append(f"{prefix}: corpus release/session mismatch")
+                if decision["current_question_version"] is None:
+                    errors.append(f"{prefix}: missing question")
+                else:
+                    if decision["question_version"] != decision["current_question_version"]:
+                        errors.append(f"{prefix}: question version mismatch")
+                    if (
+                        decision["question_content_hash"]
+                        != decision["current_question_content_hash"]
+                    ):
+                        errors.append(f"{prefix}: question content hash mismatch")
+                if decision["release_question_status"] is None:
+                    errors.append(f"{prefix}: question absent from pinned release")
+                else:
+                    if decision["question_status"] != decision["release_question_status"]:
+                        errors.append(f"{prefix}: pinned question status mismatch")
+                    if decision["evidence_weight"] != decision["release_evidence_weight"]:
+                        errors.append(f"{prefix}: pinned evidence weight mismatch")
+
+                order = json_value(
+                    decision["option_order_json"], f"{prefix} option order", list
+                )
+                decision_orders[decision_id] = order
+                if order is not None:
+                    expected_options = option_ids.get(decision["question_id"], set())
+                    if not all(isinstance(option_id, str) for option_id in order):
+                        errors.append(f"{prefix}: option order contains a non-string ID")
+                    else:
+                        ordered_options = set(order)
+                        if len(order) != len(ordered_options):
+                            errors.append(f"{prefix}: option order contains duplicates")
+                        if ordered_options != expected_options:
+                            errors.append(
+                                f"{prefix}: option order does not match question options"
+                            )
+
+                selection_events = question_selected.get(decision_id, [])
+                if len(selection_events) != 1:
+                    errors.append(
+                        f"{prefix}: expected one QuestionSelected event, found "
+                        f"{len(selection_events)}"
+                    )
+                else:
+                    selection = selection_events[0]
+                    selection_payload = event_object(
+                        selection, "payload_json", payload_cache
+                    )
+                    selected_score = json_value(
+                        decision["selected_score_json"],
+                        f"{prefix} selected score",
+                        dict,
+                    )
+                    if selection["learner_id"] != decision["learner_id"]:
+                        errors.append(f"{prefix}: selection event learner mismatch")
+                    if selection["session_id"] != decision["session_id"]:
+                        errors.append(f"{prefix}: selection event session mismatch")
+                    if (
+                        selection_payload is not None
+                        and order is not None
+                        and selected_score is not None
+                    ):
+                        compare_payload(
+                            selection_payload,
+                            {
+                                "decision_id": decision_id,
+                                "question_id": decision["question_id"],
+                                "phase": decision["phase"],
+                                "candidate_count": decision["candidate_count"],
+                                "candidate_digest": decision["candidate_digest"],
+                                "propensity": decision["propensity"],
+                                "score": selected_score,
+                                "option_order": order,
+                                "question_version": decision["question_version"],
+                                "question_content_hash": decision["question_content_hash"],
+                                "question_status": decision["question_status"],
+                                "evidence_weight": decision["evidence_weight"],
+                                "corpus_release_id": decision["corpus_release_id"],
+                                "session_revision": decision["session_revision"],
+                                "learner_revision": decision["learner_revision"],
+                                "focus_concept_id": decision["focus_concept_id"],
+                                "focus_misconception_id": decision[
+                                    "focus_misconception_id"
+                                ],
+                                "pedagogical_role": decision["pedagogical_role"],
+                                "focus_valid": bool(decision["focus_valid"]),
+                            },
+                            f"{prefix} selection event",
+                        )
+
+            for decision_id, selection_events in question_selected.items():
+                if decision_id not in decisions:
+                    for event in selection_events:
+                        errors.append(
+                            f"event {event['event_id']}: QuestionSelected has no decision"
+                        )
+
+            attempt_rows = connection.execute(
+                """SELECT a.*, q.version AS current_question_version,
+                          q.family_id AS current_family_id
+                   FROM attempts a
+                   LEFT JOIN questions q ON q.id = a.question_id
+                   ORDER BY a.answered_at, a.id"""
+            ).fetchall()
+            attempts_by_decision: dict[str, list[sqlite3.Row]] = {}
+            attempts_by_event: dict[str, sqlite3.Row] = {}
+            for attempt in attempt_rows:
+                attempt_id = attempt["id"]
+                prefix = f"attempt {attempt_id}"
+                attempts_by_decision.setdefault(attempt["decision_id"], []).append(attempt)
+                attempts_by_event[attempt["event_id"]] = attempt
+                decision = decisions.get(attempt["decision_id"])
+                if decision is None:
+                    errors.append(f"{prefix}: missing decision")
+                    continue
+
+                field_pairs = (
+                    ("session_id", "session_id"),
+                    ("learner_id", "learner_id"),
+                    ("question_id", "question_id"),
+                    ("question_version", "question_version"),
+                )
+                for attempt_field, decision_field in field_pairs:
+                    if attempt[attempt_field] != decision[decision_field]:
+                        errors.append(
+                            f"{prefix}: {attempt_field} does not match decision"
+                        )
+                if attempt["question_version"] != attempt["current_question_version"]:
+                    errors.append(f"{prefix}: current question version mismatch")
+                if attempt["family_id"] != attempt["current_family_id"]:
+                    errors.append(f"{prefix}: question family mismatch")
+
+                presented_order = json_value(
+                    attempt["presented_order_json"], f"{prefix} presented order", list
+                )
+                if presented_order != decision_orders.get(attempt["decision_id"]):
+                    errors.append(f"{prefix}: presented order does not match decision")
+                selected_option_id = attempt["selected_option_id"]
+                if selected_option_id is not None and (
+                    presented_order is None or selected_option_id not in presented_order
+                ):
+                    errors.append(f"{prefix}: selected option was not presented")
+                expected_correct = (
+                    answer_keys.get((attempt["question_id"], selected_option_id), False)
+                    if selected_option_id is not None
+                    else False
+                )
+                if bool(attempt["is_correct"]) != expected_correct:
+                    errors.append(f"{prefix}: correctness does not match answer key")
+
+                command_payload = {
+                    "decision_id": attempt["decision_id"],
+                    "question_id": attempt["question_id"],
+                    "question_version": attempt["question_version"],
+                    "selected_option_id": selected_option_id,
+                    "is_correct": bool(attempt["is_correct"]),
+                    "confidence": attempt["confidence"],
+                    "response_ms": attempt["response_ms"],
+                    "hint_count": attempt["hint_count"],
+                    "feedback_shown": bool(attempt["feedback_shown"]),
+                    "presented_order": presented_order,
+                }
+                if presented_order is not None and attempt["command_hash"] != _content_hash(
+                    command_payload
+                ):
+                    errors.append(f"{prefix}: command hash mismatch")
+
+                if attempt["outcome_json"] is not None:
+                    outcome = json_value(
+                        attempt["outcome_json"], f"{prefix} outcome", dict
+                    )
+                    if outcome is not None:
+                        correct_options = correct_option_snapshots.get(
+                            attempt["question_id"], []
+                        )
+                        expected_selected = (
+                            option_snapshots.get(
+                                (attempt["question_id"], selected_option_id)
+                            )
+                            if selected_option_id is not None
+                            else None
+                        )
+                        expected_correct_option = (
+                            correct_options[0] if len(correct_options) == 1 else None
+                        )
+                        compare_payload(
+                            outcome,
+                            {
+                                "interaction_id": attempt_id,
+                                "correct": bool(attempt["is_correct"]),
+                                "selected_option": expected_selected,
+                                "correct_option": expected_correct_option,
+                            },
+                            f"{prefix} outcome",
+                        )
+                        next_phase = outcome.get("next_phase")
+                        try:
+                            SessionPhase(next_phase)
+                        except (TypeError, ValueError):
+                            errors.append(f"{prefix} outcome: invalid next_phase")
+                        for field, known_ids in (
+                            ("focus_concept_id", concept_ids),
+                            ("focus_misconception_id", misconception_ids),
+                        ):
+                            if field not in outcome:
+                                errors.append(f"{prefix} outcome: missing {field}")
+                                continue
+                            value = outcome.get(field)
+                            if value is not None and value not in known_ids:
+                                errors.append(f"{prefix} outcome: invalid {field}")
+                        state_changes = outcome.get("state_changes")
+                        if not isinstance(state_changes, list) or not all(
+                            isinstance(change, dict) for change in state_changes
+                        ):
+                            errors.append(
+                                f"{prefix} outcome: state_changes must be a list of objects"
+                            )
+
+                response = response_events_by_id.get(attempt["event_id"])
+                if response is None:
+                    errors.append(f"{prefix}: missing ResponseSubmitted event")
+                    continue
+                response_payload = event_object(response, "payload_json", payload_cache)
+                response_metadata = event_object(response, "metadata_json", metadata_cache)
+                if response["learner_id"] != attempt["learner_id"]:
+                    errors.append(f"{prefix}: response event learner mismatch")
+                if response["session_id"] != attempt["session_id"]:
+                    errors.append(f"{prefix}: response event session mismatch")
+                if response["causation_id"] != attempt["decision_id"]:
+                    errors.append(f"{prefix}: response event causation mismatch")
+                if response["occurred_at"] != attempt["answered_at"]:
+                    errors.append(f"{prefix}: response event time mismatch")
+                if response_payload is not None and presented_order is not None:
+                    compare_payload(
+                        response_payload,
+                        command_payload,
+                        f"{prefix} response event",
+                    )
+                if response_metadata is not None:
+                    compare_payload(
+                        response_metadata,
+                        {
+                            "policy_version": decision["policy_version"],
+                            "corpus_release_id": decision["corpus_release_id"],
+                            "question_content_hash": decision["question_content_hash"],
+                            "question_status": decision["question_status"],
+                            "evidence_weight": decision["evidence_weight"],
+                            "selection_learner_revision": decision["learner_revision"],
+                        },
+                        f"{prefix} response metadata",
+                    )
+
+            for decision in decision_rows:
+                projected = attempts_by_decision.get(decision["id"], [])
+                if len(projected) > 1:
+                    errors.append(
+                        f"decision {decision['id']}: multiple attempt projections"
+                    )
+                if projected:
+                    if decision["consumed_at"] is None:
+                        errors.append(
+                            f"decision {decision['id']}: attempt exists but decision is pending"
+                        )
+                    elif decision["consumed_at"] != projected[0]["answered_at"]:
+                        errors.append(
+                            f"decision {decision['id']}: consumed time mismatch"
+                        )
+                elif decision["consumed_at"] is not None:
+                    errors.append(
+                        f"decision {decision['id']}: consumed without an attempt"
+                    )
+
+                invalidations = invalidation_events_by_decision.get(
+                    decision["id"], []
+                )
+                if decision["invalidated_at"] is not None:
+                    if decision["consumed_at"] is not None or projected:
+                        errors.append(
+                            f"decision {decision['id']}: invalidated decision was consumed"
+                        )
+                    if not decision["invalidation_reason"]:
+                        errors.append(
+                            f"decision {decision['id']}: missing invalidation reason"
+                        )
+                    if len(invalidations) != 1:
+                        errors.append(
+                            f"decision {decision['id']}: expected one invalidation event, "
+                            f"found {len(invalidations)}"
+                        )
+                    else:
+                        invalidation = invalidations[0]
+                        payload = event_object(
+                            invalidation, "payload_json", payload_cache
+                        )
+                        if invalidation["learner_id"] != decision["learner_id"]:
+                            errors.append(
+                                f"decision {decision['id']}: invalidation learner mismatch"
+                            )
+                        if invalidation["session_id"] != decision["session_id"]:
+                            errors.append(
+                                f"decision {decision['id']}: invalidation session mismatch"
+                            )
+                        if invalidation["causation_id"] != decision["id"]:
+                            errors.append(
+                                f"decision {decision['id']}: invalidation causation mismatch"
+                            )
+                        if invalidation["occurred_at"] != decision["invalidated_at"]:
+                            errors.append(
+                                f"decision {decision['id']}: invalidation time mismatch"
+                            )
+                        if payload is not None:
+                            compare_payload(
+                                payload,
+                                {
+                                    "decision_id": decision["id"],
+                                    "reason": decision["invalidation_reason"],
+                                    "selection_learner_revision": decision[
+                                        "learner_revision"
+                                    ],
+                                },
+                                f"decision {decision['id']} invalidation event",
+                            )
+                            current_revision = payload.get(
+                                "current_learner_revision"
+                            )
+                            valid_revision = (
+                                isinstance(current_revision, int)
+                                and not isinstance(current_revision, bool)
+                                and (
+                                    current_revision > decision["learner_revision"]
+                                    if decision["invalidation_reason"]
+                                    == "learner_projection_advanced"
+                                    else current_revision
+                                    >= decision["learner_revision"]
+                                )
+                            )
+                            if not valid_revision:
+                                errors.append(
+                                    f"decision {decision['id']}: invalidation revision did not advance"
+                                )
+                elif invalidations:
+                    errors.append(
+                        f"decision {decision['id']}: invalidation event without invalidated state"
+                    )
+                elif decision["invalidation_reason"] is not None:
+                    errors.append(
+                        f"decision {decision['id']}: reason without invalidation time"
+                    )
+
+                response_count = len(response_events_by_decision.get(decision["id"], []))
+                if response_count != len(projected):
+                    errors.append(
+                        f"decision {decision['id']}: {response_count} response events for "
+                        f"{len(projected)} attempts"
+                    )
+
+            for event_id, event in response_events_by_id.items():
+                if event_id not in attempts_by_event:
+                    errors.append(
+                        f"event {event_id}: ResponseSubmitted has no attempt projection"
+                    )
+            for decision_id, invalidations in invalidation_events_by_decision.items():
+                if decision_id not in decisions:
+                    for event in invalidations:
+                        errors.append(
+                            f"event {event['event_id']}: DecisionInvalidated has no decision"
+                        )
+        return {
+            "ok": not errors,
+            "event_count": len(events),
+            "stream_count": len(expected_version),
+            "errors": errors,
+            "foreign_key_failures": foreign_key_failures,
+            "quick_check": quick_check,
+        }
