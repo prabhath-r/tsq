@@ -408,3 +408,256 @@ def command_verify(args: argparse.Namespace) -> None:
             print(f"  - {error}")
     if not report["ok"]:
         raise TSQError("Integrity verification found errors.")
+
+
+def command_study(args: argparse.Namespace) -> None:
+    database = _database(args)
+    engine = AdaptiveEngine(database)
+    engine.create_learner(args.learner, args.name)
+    session = engine.start_session(args.learner, args.topic, mode=args.mode, seed=args.seed)
+    print(f"Session {session['id']} · {args.topic} · {args.mode}")
+    print("Use 1-4 to answer, ? for 'I do not know', or q to stop.\n")
+
+    completed = 0
+    while completed < args.limit:
+        presentation = engine.next_question(session["id"])
+        print(f"[{presentation.phase.value.upper()}] {presentation.question.kind.value.replace('_', ' ')}")
+        print(presentation.question.stem)
+        ordered = presentation.ordered_options
+        for index, option in enumerate(ordered, start=1):
+            print(f"  {index}. {option.text}")
+        if args.explain_policy:
+            print(f"  policy: {presentation.rationale}")
+        started = time.perf_counter()
+        while True:
+            try:
+                raw = input("answer> ").strip().lower()
+            except EOFError:
+                engine.end_session(
+                    session["id"], completed=False, reason="input_closed"
+                )
+                print("\nSession stopped; all completed evidence is saved.")
+                return
+            except KeyboardInterrupt:
+                engine.end_session(
+                    session["id"], completed=False, reason="interrupted"
+                )
+                raise
+            if raw == "q":
+                engine.end_session(
+                    session["id"], completed=False, reason="user_quit"
+                )
+                print("Session stopped; all completed evidence is saved.")
+                return
+            if raw == "?":
+                selected_id = None
+                break
+            if raw.isdigit() and 1 <= int(raw) <= len(ordered):
+                selected_id = ordered[int(raw) - 1].id
+                break
+            print("Enter 1-4, ?, or q.")
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        confidence = None
+        if args.ask_confidence:
+            while True:
+                try:
+                    raw_confidence = input(
+                        "confidence 0-100 (blank to skip)> "
+                    ).strip()
+                except EOFError:
+                    engine.end_session(
+                        session["id"], completed=False, reason="input_closed"
+                    )
+                    print("\nSession stopped; all completed evidence is saved.")
+                    return
+                except KeyboardInterrupt:
+                    engine.end_session(
+                        session["id"], completed=False, reason="interrupted"
+                    )
+                    raise
+                if not raw_confidence:
+                    break
+                try:
+                    number = float(raw_confidence)
+                except ValueError:
+                    print("Enter a number from 0 to 100.")
+                    continue
+                if 0 <= number <= 100:
+                    confidence = number / 100.0
+                    break
+                print("Enter a number from 0 to 100.")
+        result = engine.submit_answer(
+            presentation.decision_id,
+            selected_id,
+            confidence=confidence,
+            response_ms=elapsed_ms,
+            idempotency_key=new_id("cli"),
+        )
+        print("\n✓ Correct" if result.correct else "\n✗ Not correct")
+        if result.selected_option and not result.correct:
+            print(f"Why that choice fails: {result.selected_option.rationale}")
+        print(f"Best answer: {result.correct_option.text}")
+        print(f"Why: {result.correct_option.rationale}")
+        if result.focus_misconception_id:
+            print(f"Next probe targets hypothesis: {result.focus_misconception_id}")
+        print()
+        completed += 1
+
+    engine.end_session(session["id"], completed=True, reason="question_limit_reached")
+    print(f"Completed {completed} questions.\n")
+    command_profile(
+        argparse.Namespace(db=args.db, learner=args.learner, topic=args.topic, json=False)
+    )
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="tsq",
+        description="Explainable, knowledge-graph adaptive learning engine",
+    )
+    parser.add_argument("--db", type=Path, default=_default_database(), help="SQLite database path")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    init = subparsers.add_parser("init", help="Initialize a database and import a corpus")
+    init.add_argument(
+        "--corpus",
+        type=Path,
+        default=None,
+        help=f"Corpus JSON path (default: bundled {BUNDLED_CORPUS_NAME})",
+    )
+    init.add_argument("--json", action="store_true")
+    init.set_defaults(func=command_init)
+
+    importer = subparsers.add_parser("import", help="Validate and import a versioned corpus bundle")
+    importer.add_argument("path", type=Path)
+    importer.add_argument("--json", action="store_true")
+    importer.set_defaults(func=command_import)
+
+    revoke = subparsers.add_parser(
+        "revoke",
+        help="Emergency-quarantine a question across all pinned releases",
+    )
+    revoke.add_argument("question")
+    revoke.add_argument("--reason", required=True)
+    revoke.add_argument("--idempotency-key")
+    revoke.add_argument("--json", action="store_true")
+    revoke.set_defaults(func=command_revoke)
+
+    audit = subparsers.add_parser("audit", help="Run deterministic corpus-quality gates")
+    audit.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=None,
+        help=f"Corpus JSON path (default: bundled {BUNDLED_CORPUS_NAME})",
+    )
+    audit.add_argument("--json", action="store_true")
+    audit.add_argument("--strict", action="store_true", help="Treat warnings as a failing audit")
+    audit.set_defaults(func=command_audit)
+
+    topics = subparsers.add_parser("topics", help="List concepts and direct item coverage")
+    topics.add_argument("--json", action="store_true")
+    topics.set_defaults(func=command_topics)
+
+    graph = subparsers.add_parser("graph", help="Inspect a topic's learning scope")
+    graph.add_argument("topic")
+    graph.add_argument("--json", action="store_true")
+    graph.set_defaults(func=command_graph)
+
+    learner = subparsers.add_parser("learner", help="Manage learners")
+    learner_sub = learner.add_subparsers(dest="learner_command", required=True)
+    learner_add = learner_sub.add_parser("add")
+    learner_add.add_argument("learner_id")
+    learner_add.add_argument("--name")
+    learner_add.add_argument("--json", action="store_true")
+    learner_add.set_defaults(func=command_learner_add)
+
+    session = subparsers.add_parser("session", help="Create an adaptive session")
+    session_sub = session.add_subparsers(dest="session_command", required=True)
+    session_start = session_sub.add_parser("start")
+    session_start.add_argument("--learner", required=True)
+    session_start.add_argument("--name")
+    session_start.add_argument("--topic", required=True)
+    session_start.add_argument("--mode", choices=["learn", "diagnose", "review"], default="learn")
+    session_start.add_argument("--seed", type=int)
+    session_start.add_argument("--idempotency-key")
+    session_start.add_argument("--json", action="store_true")
+    session_start.set_defaults(func=command_session_start)
+
+    session_end = session_sub.add_parser("end")
+    session_end.add_argument("session")
+    session_end.add_argument(
+        "--status", choices=["completed", "abandoned"], default="completed"
+    )
+    session_end.add_argument("--reason")
+    session_end.add_argument("--idempotency-key")
+    session_end.add_argument("--json", action="store_true")
+    session_end.set_defaults(func=command_session_end)
+
+    next_parser = subparsers.add_parser("next", help="Select or retrieve the pending question")
+    next_parser.add_argument("session")
+    next_parser.add_argument("--explain", action="store_true")
+    next_parser.add_argument("--json", action="store_true")
+    next_parser.set_defaults(func=command_next)
+
+    answer = subparsers.add_parser("answer", help="Submit one immutable response event")
+    answer.add_argument("decision")
+    answer.add_argument("option", help="Stable option ID, or ? for I do not know")
+    answer.add_argument("--confidence", type=float)
+    answer.add_argument("--response-ms", type=int)
+    answer.add_argument("--hints", type=int, default=0)
+    answer.add_argument("--idempotency-key")
+    answer.add_argument("--json", action="store_true")
+    answer.set_defaults(func=command_answer)
+
+    study = subparsers.add_parser("study", help="Run an interactive adaptive CLI session")
+    study.add_argument("--learner", required=True)
+    study.add_argument("--name")
+    study.add_argument("--topic", required=True)
+    study.add_argument("--mode", choices=["learn", "diagnose", "review"], default="learn")
+    study.add_argument("--limit", type=int, default=10)
+    study.add_argument("--seed", type=int)
+    study.add_argument("--ask-confidence", action="store_true")
+    study.add_argument("--explain-policy", action="store_true")
+    study.set_defaults(func=command_study)
+
+    profile = subparsers.add_parser("profile", help="Show the probabilistic learner projection")
+    profile.add_argument("--learner", required=True)
+    profile.add_argument("--topic")
+    profile.add_argument("--json", action="store_true")
+    profile.set_defaults(func=command_profile)
+
+    trace = subparsers.add_parser("trace", help="Explain every adaptive decision in a session")
+    trace.add_argument("session")
+    trace.add_argument("--json", action="store_true")
+    trace.set_defaults(func=command_trace)
+
+    coverage = subparsers.add_parser(
+        "coverage", help="Plan corpus growth from explicit concept/kind coverage debt"
+    )
+    coverage.add_argument("--limit", type=int, default=25)
+    coverage.add_argument("--enqueue", action="store_true")
+    coverage.add_argument("--json", action="store_true")
+    coverage.set_defaults(func=command_coverage)
+
+    verify = subparsers.add_parser("verify", help="Verify event hash chains and database integrity")
+    verify.add_argument("--stream")
+    verify.add_argument("--json", action="store_true")
+    verify.set_defaults(func=command_verify)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        result = args.func(args)
+        return int(result or 0)
+    except (TSQError, KeyboardInterrupt) as exc:
+        message = str(exc) if str(exc) else "Interrupted."
+        print(f"error: {message}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
