@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
-from .authoring import CoveragePlanner
+from .authoring import AuthoringJobs, CoveragePlanner, deterministic_test_pipeline
 from .engine import AdaptiveEngine
 from .errors import TSQError, ValidationError
 from .quality import audit_corpus
@@ -392,6 +392,122 @@ def command_coverage(args: argparse.Namespace) -> None:
         print(f"Enqueued {len(job_ids)} quarantined authoring jobs.")
 
 
+def command_jobs_list(args: argparse.Namespace) -> None:
+    jobs = AuthoringJobs(_database(args)).list(status=args.status, limit=args.limit)
+    if args.json:
+        _emit(jobs, as_json=True)
+        return
+    if not jobs:
+        print("No generation jobs matched.")
+        return
+    for job in jobs:
+        blueprint = job["blueprint"]
+        print(
+            f"{job['id']} [{job['status']}] {blueprint['concept_id']} / "
+            f"{blueprint['kind']}  attempts={job['run_count']}"
+        )
+
+
+def command_jobs_show(args: argparse.Namespace) -> None:
+    job = AuthoringJobs(_database(args)).show(args.job)
+    if args.json:
+        _emit(job, as_json=True)
+        return
+    blueprint = job["blueprint"]
+    print(f"Job {job['id']} [{job['status']}]")
+    print(
+        f"  target: {blueprint['concept_id']} / {blueprint['kind']} "
+        f"at difficulty {blueprint['target_difficulty']:+.2f}"
+    )
+    print(f"  sources: {', '.join(blueprint['source_ids'])}")
+    print(f"  attempts: {job['run_count']}")
+    for run in job["runs"]:
+        finished = run["completed_at"] or "in progress"
+        print(
+            f"    {run['attempt']}: {run['status']} via "
+            f"{run['provider']}/{run['model']} ({finished})"
+        )
+    if job["raw_output"] is not None:
+        print(
+            f"  artifact: {job['raw_output'].get('id', '<unknown>')} "
+            f"[{job['raw_output'].get('status', '<missing>')}]"
+        )
+        print("  activation: none (reviewed artifacts remain quarantined)")
+    if job["validation"] is not None:
+        issue_count = len(job["validation"].get("deterministic_issues", ()))
+        review_count = len(job["validation"].get("reviews", ()))
+        print(f"  validation: {issue_count} issues; {review_count} independent reviews")
+
+
+def _read_source_context(path: Path) -> str:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise ValidationError(f"Could not read source context {path}: {exc}") from exc
+    if len(raw) > 2 * 1024 * 1024:
+        raise ValidationError("Source context exceeds the 2 MiB operational limit.")
+    try:
+        value = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationError(f"Source context {path} is not valid UTF-8.") from exc
+    if not value.strip():
+        raise ValidationError("Source context must contain approved source material.")
+    return value
+
+
+def command_jobs_run(args: argparse.Namespace) -> None:
+    database = _database(args)
+    if args.provider != "deterministic-test":
+        raise ValidationError(f"Unsupported authoring provider: {args.provider!r}.")
+    result = deterministic_test_pipeline(database).run_job(
+        args.job, _read_source_context(args.source_context)
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(
+        f"Job {result['job_id']} attempt {result['attempt']} finished "
+        f"{result['status']}."
+    )
+    print(
+        f"Artifact {result['item'].get('id', '<unknown>')} remains quarantined; "
+        "no live question or corpus release was changed."
+    )
+
+
+def command_jobs_retry(args: argparse.Namespace) -> None:
+    job = AuthoringJobs(_database(args)).retry(
+        args.job, recover_running=args.recover_running
+    )
+    if args.json:
+        _emit(job, as_json=True)
+        return
+    print(
+        f"Job {job['id']} is planned for explicit retry; "
+        f"{job['run_count']} immutable prior attempt(s) retained."
+    )
+
+
+def command_reviews_show(args: argparse.Namespace) -> None:
+    result = AuthoringJobs(_database(args)).reviews(args.job)
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    if not result["review_attempts"]:
+        print(f"Generation job {args.job} has no completed independent reviews.")
+        return
+    print(f"Independent reviews for generation job {args.job}")
+    for attempt in result["review_attempts"]:
+        for review in attempt["reviews"]:
+            reviewer = review.get("reviewer", {})
+            output = review.get("output", {})
+            print(
+                f"  attempt {attempt['attempt']}: "
+                f"{reviewer.get('reviewer_name', '<unknown>')} -> "
+                f"{output.get('verdict', '<invalid>')}"
+            )
+
+
 def command_verify(args: argparse.Namespace) -> None:
     database = _database(args, require_corpus=False)
     report = database.verify_integrity(args.stream)
@@ -639,6 +755,64 @@ def build_parser() -> argparse.ArgumentParser:
     coverage.add_argument("--enqueue", action="store_true")
     coverage.add_argument("--json", action="store_true")
     coverage.set_defaults(func=command_coverage)
+
+    jobs = subparsers.add_parser(
+        "jobs", help="Operate quarantined offline generation jobs"
+    )
+    jobs_sub = jobs.add_subparsers(dest="jobs_command", required=True)
+
+    jobs_list = jobs_sub.add_parser("list", help="List generation jobs")
+    jobs_list.add_argument(
+        "--status", choices=sorted(AuthoringJobs.STATUSES), help="Filter by job status"
+    )
+    jobs_list.add_argument("--limit", type=int, default=50)
+    jobs_list.add_argument("--json", action="store_true")
+    jobs_list.set_defaults(func=command_jobs_list)
+
+    jobs_show = jobs_sub.add_parser("show", help="Inspect one job and all attempts")
+    jobs_show.add_argument("job")
+    jobs_show.add_argument("--json", action="store_true")
+    jobs_show.set_defaults(func=command_jobs_show)
+
+    jobs_run = jobs_sub.add_parser(
+        "run", help="Run a planned job with an explicit offline provider"
+    )
+    jobs_run.add_argument("job")
+    jobs_run.add_argument(
+        "--provider",
+        required=True,
+        choices=["deterministic-test"],
+        help="Provider adapter (only the explicit test fixture is bundled)",
+    )
+    jobs_run.add_argument(
+        "--source-context",
+        type=Path,
+        required=True,
+        help="UTF-8 file containing approved source context (content is not persisted)",
+    )
+    jobs_run.add_argument("--json", action="store_true")
+    jobs_run.set_defaults(func=command_jobs_run)
+
+    jobs_retry = jobs_sub.add_parser(
+        "retry", help="Return a rejected or failed job to planned state"
+    )
+    jobs_retry.add_argument("job")
+    jobs_retry.add_argument(
+        "--recover-running",
+        action="store_true",
+        help="Fail a stranded running attempt before retrying it",
+    )
+    jobs_retry.add_argument("--json", action="store_true")
+    jobs_retry.set_defaults(func=command_jobs_retry)
+
+    reviews = subparsers.add_parser(
+        "reviews", help="Inspect independent generation review attestations"
+    )
+    reviews_sub = reviews.add_subparsers(dest="reviews_command", required=True)
+    reviews_show = reviews_sub.add_parser("show", help="Show reviews for one job")
+    reviews_show.add_argument("job")
+    reviews_show.add_argument("--json", action="store_true")
+    reviews_show.set_defaults(func=command_reviews_show)
 
     verify = subparsers.add_parser("verify", help="Verify event hash chains and database integrity")
     verify.add_argument("--stream")
