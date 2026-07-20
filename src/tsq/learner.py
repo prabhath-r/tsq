@@ -219,6 +219,7 @@ class LearnerModel:
         event_id: str,
         now: datetime,
         response_ms: int | None = None,
+        prior_family_attempts_override: int | None = None,
     ) -> tuple[dict[str, SkillState], list[dict[str, object]]]:
         concept_rows = connection.execute(
             "SELECT * FROM concepts WHERE id IN ({})".format(
@@ -267,11 +268,21 @@ class LearnerModel:
             * (1.0 - logistic)
         )
         score_theta = (y - p) * dp_dtheta / max(1e-6, p * (1.0 - p))
-        prior_family_attempts = connection.execute(
-            """SELECT COUNT(*) AS n FROM attempts
-               WHERE learner_id = ? AND family_id = ? AND event_id <> ?""",
-            (learner_id, question.family_id, event_id),
-        ).fetchone()["n"]
+        if prior_family_attempts_override is None:
+            prior_family_attempts = connection.execute(
+                """SELECT COUNT(*) AS n FROM attempts
+                   WHERE learner_id = ? AND family_id = ? AND event_id <> ?""",
+                (learner_id, question.family_id, event_id),
+            ).fetchone()["n"]
+        else:
+            if (
+                type(prior_family_attempts_override) is not int
+                or prior_family_attempts_override < 0
+            ):
+                raise ValueError(
+                    "Prior family-attempt override must be a non-negative integer."
+                )
+            prior_family_attempts = prior_family_attempts_override
         dependence_discount = self.family_dependence_discount(prior_family_attempts)
         confidence_discount = (
             1.0
