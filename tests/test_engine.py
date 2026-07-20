@@ -564,6 +564,10 @@ class EngineTestCase(unittest.TestCase):
         )
 
     def test_live_corpus_gap_creates_one_durable_authoring_demand(self) -> None:
+        self.database.revoke_question(
+            "q_leakage_global_feature_selection_001",
+            "Gap regression: remove the sole live transfer family.",
+        )
         session = self.engine.start_session(
             "learner-1", "c_data_leakage", mode="learn", seed=113
         )

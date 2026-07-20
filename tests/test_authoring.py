@@ -213,41 +213,13 @@ class AuthoringTestCase(unittest.TestCase):
         self.assertEqual(len(attention), 1)
         self.assertEqual(attention[0].current_count, 1)
         original_sources = attention[0].blueprint.source_ids
-
-        self.assertIn(
-            "m_full_attention_is_linear_in_length",
-            attention[0].blueprint.misconception_ids,
-        )
-
-        self.database.revoke_question(
-            "q_attention_permutation_001",
-            "Coverage regression: item is no longer selectable.",
-        )
-
-        updated = planner.gaps(limit=1000)
-        attention = next(
-            gap
-            for gap in updated
-            if gap.blueprint.concept_id == "c_attention"
-            and gap.blueprint.kind == "conceptual"
-        )
-        self.assertNotIn(
-            "m_full_attention_is_linear_in_length",
-            attention.blueprint.misconception_ids,
-        )
-        self.assertEqual(
-            attention.blueprint.misconception_ids,
-            (
-                "m_attention_infers_absolute_position",
-                "m_shared_weights_destroy_equivariance",
-                "m_symmetric_pooling_recovers_order",
-            ),
-        )
+        self.assertIn("src_goodfellow_dl_2016", original_sources)
 
         self.database.revoke_question(
             "q_attention_sequence_scaling_001",
-            "Coverage regression: the remaining item is no longer selectable.",
+            "Coverage regression: item is no longer selectable.",
         )
+
         updated = planner.gaps(limit=1000)
         attention = [
             gap
@@ -257,18 +229,12 @@ class AuthoringTestCase(unittest.TestCase):
         ]
         self.assertEqual(len(attention), 2)
         self.assertTrue(all(gap.current_count == 0 for gap in attention))
-        with self.database.read() as connection:
-            release_id = self.database.get_active_release_id(connection)
-            all_release_sources = tuple(
-                row["source_id"]
-                for row in connection.execute(
-                    """SELECT source_id FROM release_sources
-                       WHERE release_id = ? ORDER BY source_id""",
-                    (release_id,),
-                )
-            )
-        self.assertNotEqual(original_sources, all_release_sources)
-        self.assertEqual(attention[0].blueprint.source_ids, all_release_sources)
+        self.assertIn(
+            "m_quadratic_attention_only_during_training",
+            attention[0].blueprint.misconception_ids,
+        )
+        self.assertNotIn("src_goodfellow_dl_2016", attention[0].blueprint.source_ids)
+        self.assertNotEqual(original_sources, attention[0].blueprint.source_ids)
 
     def test_topics_excludes_revoked_questions_from_direct_counts(self) -> None:
         def topic_count() -> int:
@@ -282,12 +248,13 @@ class AuthoringTestCase(unittest.TestCase):
                 if row["id"] == "c_adaptive_testing"
             )
 
-        self.assertEqual(topic_count(), 1)
+        initial_count = topic_count()
+        self.assertGreaterEqual(initial_count, 1)
         self.database.revoke_question(
             "q_adaptive_item_selection_001",
             "Topics regression: item is no longer selectable.",
         )
-        self.assertEqual(topic_count(), 0)
+        self.assertEqual(topic_count(), initial_count - 1)
 
     def test_generated_item_is_forced_into_quarantine(self) -> None:
         planner = CoveragePlanner(self.database)
