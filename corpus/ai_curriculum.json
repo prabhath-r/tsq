@@ -1352,6 +1352,244 @@
       "description": "Treats discounted return as a function of the reward multiset while ignoring when each reward arrives.",
       "concept_id": "c_reinforcement_learning",
       "remediation": "Swap two rewards at different delays and recompute their gamma exponents."
+    },
+    {
+      "id": "m_supervised_means_classification",
+      "name": "Supervised learning means classification",
+      "description": "Restricts supervised learning to discrete class labels and excludes regression with observed numeric targets.",
+      "concept_id": "c_supervised_learning",
+      "remediation": "Identify the observed target and loss in both a classification task and a regression task."
+    },
+    {
+      "id": "m_supervised_labels_guarantee_generalization",
+      "name": "Labeled training data guarantee generalization",
+      "description": "Treats access to labels and low training loss as sufficient evidence of performance on future deployment examples.",
+      "concept_id": "c_supervised_learning",
+      "remediation": "Separate the supervised training signal from held-out evidence under the intended deployment process."
+    },
+    {
+      "id": "m_supervision_identifies_deployment_goal",
+      "name": "Any observed target defines the deployment goal",
+      "description": "Assumes a conveniently recorded label is automatically the outcome that the deployed decision should optimize.",
+      "concept_id": "c_supervised_learning",
+      "remediation": "State the deployment decision and verify that the training target and loss represent its desired outcome."
+    },
+    {
+      "id": "m_unsupervised_has_no_objective",
+      "name": "Unsupervised learning has no objective",
+      "description": "Confuses absence of task labels with absence of an explicit reconstruction, density, contrastive, or clustering objective.",
+      "concept_id": "c_unsupervised_learning",
+      "remediation": "Write the criterion optimized by an unlabeled-data method and distinguish it from an external task label."
+    },
+    {
+      "id": "m_clusters_are_observed_truth",
+      "name": "Clusters are observed ground truth",
+      "description": "Treats groups returned by an unsupervised algorithm as uniquely correct labels rather than consequences of a chosen objective and representation.",
+      "concept_id": "c_unsupervised_learning",
+      "remediation": "Compare clusterings produced by two defensible similarity choices and evaluate them against the intended use."
+    },
+    {
+      "id": "m_reconstruction_guarantees_task_value",
+      "name": "Reconstruction guarantees downstream usefulness",
+      "description": "Assumes preserving input detail under an unsupervised objective necessarily preserves the information needed by a later task.",
+      "concept_id": "c_unsupervised_learning",
+      "remediation": "Evaluate the learned representation on held-out downstream outcomes rather than inferring utility from reconstruction alone."
+    },
+    {
+      "id": "m_training_fit_is_generalization",
+      "name": "Training fit is generalization",
+      "description": "Uses performance on fitted examples as direct evidence of performance on new draws from the deployment process.",
+      "concept_id": "c_generalization",
+      "remediation": "Estimate performance on untouched examples sampled with the same units and chronology as deployment."
+    },
+    {
+      "id": "m_sample_size_repairs_distribution_mismatch",
+      "name": "More source data repair distribution mismatch",
+      "description": "Assumes an arbitrarily large sample from the wrong population identifies performance in a different deployment distribution.",
+      "concept_id": "c_generalization",
+      "remediation": "Distinguish sampling uncertainty within a distribution from bias caused by a mismatch between source and target distributions."
+    },
+    {
+      "id": "m_average_performance_guarantees_subgroups",
+      "name": "Average performance guarantees subgroup performance",
+      "description": "Infers reliable behavior for every deployment subgroup from a satisfactory aggregate test metric.",
+      "concept_id": "c_generalization",
+      "remediation": "Report uncertainty and performance for decision-relevant subgroups in addition to the deployment-weighted aggregate."
+    },
+    {
+      "id": "m_depth_without_nonlinearity_adds_expressivity",
+      "name": "Depth alone creates nonlinear expressivity",
+      "description": "Assumes stacking affine layers without nonlinear activations yields functions beyond a single affine transformation.",
+      "concept_id": "c_neural_networks",
+      "remediation": "Compose two affine maps algebraically and identify the activation that prevents their collapse."
+    },
+    {
+      "id": "m_universal_approximation_guarantees_training",
+      "name": "Universal approximation guarantees successful training",
+      "description": "Treats an existence result for representable functions as a guarantee that finite data and an optimizer will find a useful solution.",
+      "concept_id": "c_neural_networks",
+      "remediation": "Separate representational capacity from optimization, sample efficiency, and out-of-sample validation."
+    },
+    {
+      "id": "m_hidden_units_have_fixed_human_meanings",
+      "name": "Hidden units have fixed human meanings",
+      "description": "Assumes each learned coordinate has an intrinsic, uniquely identifiable semantic interpretation across equivalent parameterizations.",
+      "concept_id": "c_neural_networks",
+      "remediation": "Apply a permutation of hidden units and the inverse permutation to the next layer while observing unchanged predictions."
+    },
+    {
+      "id": "m_lossless_representation_is_always_best",
+      "name": "The most lossless representation is always best",
+      "description": "Ranks representations only by retained input detail even when nuisance variation harms the downstream task.",
+      "concept_id": "c_representation_learning",
+      "remediation": "Compare representations using held-out task utility and robustness to known nuisance changes."
+    },
+    {
+      "id": "m_representation_dimension_determines_utility",
+      "name": "Representation dimension determines utility",
+      "description": "Infers downstream usefulness solely from the number of coordinates rather than the information and invariances they encode.",
+      "concept_id": "c_representation_learning",
+      "remediation": "Hold dimension fixed while changing the learned objective, then compare downstream separability and robustness."
+    },
+    {
+      "id": "m_pretraining_objective_guarantees_transfer",
+      "name": "Pretraining guarantees transfer",
+      "description": "Assumes success on a source pretraining objective necessarily improves every target task and domain.",
+      "concept_id": "c_representation_learning",
+      "remediation": "Measure target-task performance under a deployment-aligned split and compare frozen, fine-tuned, and baseline representations."
+    },
+    {
+      "id": "m_transformers_are_inherently_bidirectional",
+      "name": "Transformers are inherently bidirectional",
+      "description": "Treats the architecture name as fixing information flow even though attention masks determine which token positions are visible.",
+      "concept_id": "c_transformers",
+      "remediation": "Draw the allowed attention edges for causal, bidirectional, and encoder-decoder masks."
+    },
+    {
+      "id": "m_feedforward_layers_mix_token_positions",
+      "name": "Position-wise feed-forward layers mix tokens",
+      "description": "Attributes cross-token communication to the feed-forward sublayer even though its weights are applied independently at each position.",
+      "concept_id": "c_transformers",
+      "remediation": "Track the sequence and feature axes through attention and the position-wise feed-forward network."
+    },
+    {
+      "id": "m_residuals_make_sublayer_order_irrelevant",
+      "name": "Residual paths make sublayer order irrelevant",
+      "description": "Assumes skip connections make attention, normalization, and feed-forward ordering interchangeable.",
+      "concept_id": "c_transformers",
+      "remediation": "Write the computations for two sublayer orders and identify the different inputs seen by each nonlinear transformation."
+    },
+    {
+      "id": "m_roc_and_pr_share_prevalence_invariance",
+      "name": "ROC and precision-recall share prevalence invariance",
+      "description": "Assumes precision-recall values are unchanged by class prevalence just because ROC rates condition within each class.",
+      "concept_id": "c_ranking_metrics",
+      "remediation": "Hold sensitivity and false-positive rate fixed while recomputing precision under two prevalences."
+    },
+    {
+      "id": "m_accuracy_is_sufficient_under_imbalance",
+      "name": "Accuracy is sufficient under class imbalance",
+      "description": "Treats a high aggregate accuracy as informative even when a majority-class rule ignores the rare outcome of interest.",
+      "concept_id": "c_class_imbalance",
+      "remediation": "Inspect the confusion matrix and decision costs rather than relying on the aggregate correct fraction."
+    },
+    {
+      "id": "m_resampling_preserves_probability_calibration",
+      "name": "Class resampling preserves population probabilities",
+      "description": "Reads probabilities learned after changing class proportions as calibrated deployment probabilities without correction or representative validation.",
+      "concept_id": "c_class_imbalance",
+      "remediation": "Account for the sampling-induced odds shift or recalibrate on a representative held-out sample."
+    },
+    {
+      "id": "m_information_gain_is_realized_surprise",
+      "name": "Information gain is the surprise of one outcome",
+      "description": "Confuses the expected reduction in uncertainty before observing a result with the surprise of the particular result obtained.",
+      "concept_id": "c_information_gain",
+      "remediation": "Average posterior entropy over all possible outcomes before subtracting it from prior entropy."
+    },
+    {
+      "id": "m_correlated_evidence_adds_full_information",
+      "name": "Correlated evidence adds full independent information",
+      "description": "Counts repeated or shared-family observations as independent reductions in uncertainty despite their common error source.",
+      "concept_id": "c_information_gain",
+      "remediation": "Condition the second observation on the first and measure only its remaining mutual information."
+    },
+    {
+      "id": "m_outcome_entropy_guarantees_information",
+      "name": "High outcome entropy guarantees useful information",
+      "description": "Assumes an unpredictable measurement is informative about the target even when it is statistically independent noise.",
+      "concept_id": "c_information_gain",
+      "remediation": "Compare marginal outcome entropy with conditional entropy given the target hypothesis."
+    },
+    {
+      "id": "m_duplicates_across_splits_are_independent",
+      "name": "Duplicates across splits are independent evidence",
+      "description": "Treats near-duplicate records in training and evaluation partitions as separate evidence despite shared content or entity identity.",
+      "concept_id": "c_data_leakage",
+      "remediation": "Deduplicate or group related records before splitting and evaluate on genuinely unseen units."
+    },
+    {
+      "id": "m_resampling_variation_is_only_metric_noise",
+      "name": "Resampling variation is only metric noise",
+      "description": "Dismisses large changes in fitted predictions across plausible training samples as irrelevant evaluation noise rather than estimator variance.",
+      "concept_id": "c_bias_variance",
+      "remediation": "Compare fitted functions or predictions across resampled training sets, not only uncertainty in a reported average."
+    },
+    {
+      "id": "m_stronger_regularization_always_improves_generalization",
+      "name": "Stronger regularization always improves generalization",
+      "description": "Assumes increasing a penalty monotonically improves held-out performance and cannot introduce harmful bias or underfitting.",
+      "concept_id": "c_regularization",
+      "remediation": "Tune regularization on untouched validation data and inspect both training and validation error across strengths."
+    },
+    {
+      "id": "m_global_calibration_implies_subgroup_calibration",
+      "name": "Global calibration implies subgroup calibration",
+      "description": "Infers calibrated probabilities in every relevant subgroup from calibration after pooling groups with different error patterns.",
+      "concept_id": "c_calibration",
+      "remediation": "Check reliability within prespecified decision-relevant groups and report uncertainty from limited samples."
+    },
+    {
+      "id": "m_ranking_metric_determines_optimal_threshold",
+      "name": "A ranking metric determines the action threshold",
+      "description": "Assumes ROC AUC or another ordering summary identifies the probability cutoff that maximizes deployment utility.",
+      "concept_id": "c_decision_thresholds",
+      "remediation": "Combine calibrated probabilities with explicit costs, benefits, and capacity constraints to choose an action rule."
+    },
+    {
+      "id": "m_threshold_survives_context_change",
+      "name": "A threshold survives cost and prevalence changes",
+      "description": "Reuses a previously optimized cutoff after deployment probabilities or action consequences change without re-evaluation.",
+      "concept_id": "c_decision_thresholds",
+      "remediation": "Recompute expected utility under the new probability calibration, costs, and operating constraints."
+    },
+    {
+      "id": "m_higher_likelihood_guarantees_better_decisions",
+      "name": "Higher generative likelihood guarantees better decisions",
+      "description": "Assumes a model with higher overall data likelihood must perform better on every conditional prediction or utility-weighted action.",
+      "concept_id": "c_generative_models",
+      "remediation": "Evaluate the conditional quantity and decision utility directly in addition to the joint-model likelihood."
+    },
+    {
+      "id": "m_stable_feature_marginal_means_no_shift",
+      "name": "A stable feature marginal rules out shift",
+      "description": "Concludes that deployment is unchanged from a stable p(x) even when the conditional outcome mechanism p(y|x) has changed.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "Audit the joint factorization and test conditional outcome behavior rather than checking feature marginals alone."
+    },
+    {
+      "id": "m_conditional_change_is_label_shift",
+      "name": "Any conditional change is label shift",
+      "description": "Calls a change in p(y|x) label shift even though label shift assumes stable class-conditional features and a changed class prior.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "State which factor in p(x,y) is assumed stable before naming the shift."
+    },
+    {
+      "id": "m_covariate_shift_changes_label_mechanism",
+      "name": "Covariate shift changes the label mechanism",
+      "description": "Defines covariate shift as a change in p(y|x) rather than a change in p(x) with a stable conditional outcome relationship.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "Contrast p_source(x) with p_target(x) while holding p(y|x) fixed in the covariate-shift factorization."
     }
   ],
   "sources": [
@@ -5700,6 +5938,1376 @@
       "source_ids": ["src_bishop_prml_2006", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
       "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
       "tags": ["probability", "bayes_rule", "likelihood_ratio", "odds"]
+    },
+    {
+      "id": "q_supervised_numeric_target_001",
+      "version": 1,
+      "family_id": "f_supervised_numeric_targets",
+      "status": "approved",
+      "stem": "A utility company fits a function from weather and household features to observed next-day electricity use, minimizing squared error on labeled examples. Which characterization is most accurate?",
+      "kind": "conceptual",
+      "difficulty": -0.8,
+      "discrimination": 1.25,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_supervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "It is supervised regression because each training input is paired with an observed numeric target used by the loss.", "correct": true, "misconception_id": null, "rationale": "Supervision comes from paired targets and a target-dependent loss; the target need not be a discrete class."},
+        {"id": "b", "text": "It is unsupervised learning because electricity use is continuous rather than one of several named classes.", "correct": false, "misconception_id": "m_supervised_means_classification", "rationale": "Regression with observed numeric outcomes is a standard supervised-learning setting."},
+        {"id": "c", "text": "It establishes deployment performance once squared error is small on the labeled examples used for fitting.", "correct": false, "misconception_id": "m_supervised_labels_guarantee_generalization", "rationale": "Training fit is not independent evidence about future households or weather conditions."},
+        {"id": "d", "text": "It optimizes the correct business decision because recorded electricity use is available as a training target.", "correct": false, "misconception_id": "m_supervision_identifies_deployment_goal", "rationale": "A recorded target does not by itself encode the costs or objective of the eventual business decision."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["supervised_learning", "regression", "targets", "loss"]
+    },
+    {
+      "id": "q_supervised_shuffled_labels_001",
+      "version": 1,
+      "family_id": "f_supervised_label_permutation",
+      "status": "approved",
+      "stem": "A high-capacity classifier is trained after the class labels are randomly permuted across examples. It reaches nearly zero training loss but chance accuracy on an untouched set with the real labels. What does this experiment show?",
+      "kind": "counterfactual",
+      "difficulty": 0.1,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_supervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The labeled fitting process has learned a transferable rule because its supervised training loss is nearly zero.", "correct": false, "misconception_id": "m_supervised_labels_guarantee_generalization", "rationale": "Memorizing randomized pairings can minimize training loss while conveying no relationship that transfers to real labels."},
+        {"id": "b", "text": "The procedure remains supervised fitting, but its target pairing contains no useful signal for generalization to the real task.", "correct": true, "misconception_id": null, "rationale": "The loss still uses paired labels, while the permutation destroys the input-target relationship needed for held-out prediction."},
+        {"id": "c", "text": "The procedure becomes unsupervised because a class name counts as supervision when its semantic assignment is correct.", "correct": false, "misconception_id": "m_supervised_means_classification", "rationale": "Supervision describes how targets enter the loss; semantic validity and generalization are separate questions."},
+        {"id": "d", "text": "The procedure is aligned with deployment because any observed class column defines a valid supervised objective.", "correct": false, "misconception_id": "m_supervision_identifies_deployment_goal", "rationale": "A target column can be corrupted or misaligned with the decision even though it is used in supervised training."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["supervised_learning", "label_permutation", "memorization", "generalization"]
+    },
+    {
+      "id": "q_supervised_proxy_target_001",
+      "version": 1,
+      "family_id": "f_supervised_proxy_objectives",
+      "status": "approved",
+      "stem": "A fraud team trains a binary classifier to predict whether the previous rules engine sent a transaction to manual review. The desired deployment outcome is prevented financial loss. Which conclusion best separates supervision from objective choice?",
+      "kind": "application",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_supervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The binary target makes the task well aligned because supervised classification directly represents financial loss.", "correct": false, "misconception_id": "m_supervised_means_classification", "rationale": "Being a classification target says nothing about whether it measures the downstream consequence of interest."},
+        {"id": "b", "text": "Enough reviewed labels make held-out loss unnecessary because labeled examples already demonstrate future usefulness.", "correct": false, "misconception_id": "m_supervised_labels_guarantee_generalization", "rationale": "Labels provide a fitting signal, not independent deployment evidence, especially when produced by an earlier policy."},
+        {"id": "c", "text": "The training is supervised, but review status is a policy-dependent proxy whose relation to prevented loss needs separate validation.", "correct": true, "misconception_id": null, "rationale": "The observed target supplies supervision while alignment requires evidence that optimizing it improves the intended deployment outcome."},
+        {"id": "d", "text": "The recorded review decision defines the deployment goal because an available target should determine the operational objective.", "correct": false, "misconception_id": "m_supervision_identifies_deployment_goal", "rationale": "Convenient observability does not make a historical policy decision the desired causal or utility target."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["supervised_learning", "proxy_target", "policy_labels", "alignment"]
+    },
+    {
+      "id": "q_unsupervised_cluster_objective_001",
+      "version": 1,
+      "family_id": "f_unsupervised_cluster_objectives",
+      "status": "approved",
+      "stem": "Two analysts cluster the same unlabeled customer records. One uses standardized Euclidean distance and the other uses a density-based method; they obtain different partitions. What is the strongest interpretation?",
+      "kind": "comparison",
+      "difficulty": -0.15,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_unsupervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Neither result is a learning output because unlabeled methods lack an objective that can define a fitted solution.", "correct": false, "misconception_id": "m_unsupervised_has_no_objective", "rationale": "Each method optimizes or operationalizes a criterion even though no task labels enter that criterion."},
+        {"id": "b", "text": "One partition is the hidden true labeling, so disagreement means one optimizer failed to recover the observed groups.", "correct": false, "misconception_id": "m_clusters_are_observed_truth", "rationale": "The groups are not observed labels; they depend on representation, similarity, density, and other modeling choices."},
+        {"id": "c", "text": "The partition retaining more input detail is preferable for any later decision that uses the customer records.", "correct": false, "misconception_id": "m_reconstruction_guarantees_task_value", "rationale": "Retained detail may concern nuisance variation and does not establish usefulness for an unspecified downstream task."},
+        {"id": "d", "text": "Both are unsupervised fits under different structural criteria, and usefulness should be evaluated for the intended downstream purpose.", "correct": true, "misconception_id": null, "rationale": "Unsupervised results are conditional on an objective and representation; external validity comes from their intended use."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["unsupervised_learning", "clustering", "objective", "validation"]
+    },
+    {
+      "id": "q_unsupervised_reconstruction_001",
+      "version": 1,
+      "family_id": "f_unsupervised_reconstruction_tradeoff",
+      "status": "approved",
+      "stem": "An autoencoder trained without task labels reconstructs camera backgrounds extremely well but suppresses a small defect that determines whether a manufactured part should be rejected. Which evaluation is most appropriate?",
+      "kind": "debugging",
+      "difficulty": 0.4,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_unsupervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Treat reconstruction as the unlabeled training objective, then test whether the representation preserves defect information on held-out parts.", "correct": true, "misconception_id": null, "rationale": "The training criterion is well defined, but downstream utility requires a separate evaluation tied to the defect decision."},
+        {"id": "b", "text": "Discard the result as undefined because learning without defect labels has no measurable objective to optimize.", "correct": false, "misconception_id": "m_unsupervised_has_no_objective", "rationale": "Reconstruction error is a measurable objective even when it is not aligned with the later defect task."},
+        {"id": "c", "text": "Accept the representation because low reconstruction error establishes that downstream defect information has been retained.", "correct": false, "misconception_id": "m_reconstruction_guarantees_task_value", "rationale": "Average reconstruction can favor dominant background detail while dropping a small task-relevant feature."},
+        {"id": "d", "text": "Interpret latent groups as the correct defect classes because structure discovered from the inputs provides target labels.", "correct": false, "misconception_id": "m_clusters_are_observed_truth", "rationale": "Unsupervised structure is not automatically equivalent to the externally defined defect outcome."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["unsupervised_learning", "autoencoder", "reconstruction", "downstream_validation"]
+    },
+    {
+      "id": "q_unsupervised_model_selection_001",
+      "version": 1,
+      "family_id": "f_unsupervised_external_validation",
+      "status": "approved",
+      "stem": "A team has two unlabeled-data representations of support tickets. The representations have equal dimension; one has lower reconstruction loss, while the other may better support routing to specialists. How should the team choose?",
+      "kind": "transfer",
+      "difficulty": 0.65,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_unsupervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Choose neither because an unlabeled representation has no fitted criterion that can be compared across models.", "correct": false, "misconception_id": "m_unsupervised_has_no_objective", "rationale": "Both methods can have explicit unlabeled objectives; the issue is whether those objectives align with routing."},
+        {"id": "b", "text": "Evaluate routing utility on a deployment-aligned labeled sample while retaining reconstruction as evidence about its own objective.", "correct": true, "misconception_id": null, "rationale": "A downstream evaluation tests the intended use without pretending that reconstruction and routing are the same criterion."},
+        {"id": "c", "text": "Choose the lower reconstruction loss because preservation of more ticket detail establishes better routing performance.", "correct": false, "misconception_id": "m_reconstruction_guarantees_task_value", "rationale": "A representation can reconstruct frequent wording while obscuring the distinctions that drive specialist assignment."},
+        {"id": "d", "text": "Choose the representation with clearer clusters because discovered groups constitute the true specialist categories.", "correct": false, "misconception_id": "m_clusters_are_observed_truth", "rationale": "Cluster shape reflects the chosen geometry and is not an observed routing ground truth."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["unsupervised_learning", "representation", "model_selection", "transfer"]
+    },
+    {
+      "id": "q_generalization_future_cohort_001",
+      "version": 1,
+      "family_id": "f_generalization_future_cohorts",
+      "status": "approved",
+      "stem": "A demand model is retrained monthly and used on the following month. Randomly splitting rows from all months yields low error, but a sequence of train-on-past, test-on-next-month evaluations is substantially worse. Which estimate is more relevant?",
+      "kind": "application",
+      "difficulty": 0.15,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_generalization", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The random split, because low error on examples drawn from the fitted table is the direct definition of generalization.", "correct": false, "misconception_id": "m_training_fit_is_generalization", "rationale": "A row-random split across time does not reproduce the information boundary or future cohort used in deployment."},
+        {"id": "b", "text": "The random split, provided the table is made large enough to eliminate uncertainty caused by changing months.", "correct": false, "misconception_id": "m_sample_size_repairs_distribution_mismatch", "rationale": "More mixed-time rows reduce sampling noise but do not make that evaluation match future-month deployment."},
+        {"id": "c", "text": "The forward evaluations, because their training boundary and target cohort reproduce the intended month-ahead use more closely.", "correct": true, "misconception_id": null, "rationale": "Generalization evidence should sample the units, chronology, and available information of the deployment process."},
+        {"id": "d", "text": "Either estimate, because a favorable overall error implies comparable performance within each future customer segment.", "correct": false, "misconception_id": "m_average_performance_guarantees_subgroups", "rationale": "An aggregate metric neither fixes temporal mismatch nor establishes behavior for particular segments."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["generalization", "temporal_validation", "deployment", "cohort"]
+    },
+    {
+      "id": "q_generalization_source_population_001",
+      "version": 1,
+      "family_id": "f_generalization_population_transport",
+      "status": "approved",
+      "stem": "A speech recognizer has been evaluated on ten million clean studio recordings from one language region. It will be deployed on noisy mobile recordings from another region, for which no evaluation sample exists. What follows from the large source test?",
+      "kind": "counterfactual",
+      "difficulty": 0.35,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_generalization", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The source training fit directly establishes low deployment error because both datasets contain recorded speech.", "correct": false, "misconception_id": "m_training_fit_is_generalization", "rationale": "Shared modality does not make fitted or source-distribution performance an estimate for the target process."},
+        {"id": "b", "text": "The aggregate source score establishes reliable performance for each accent and noise subgroup in the target region.", "correct": false, "misconception_id": "m_average_performance_guarantees_subgroups", "rationale": "The source aggregate contains neither target subgroup weights nor subgroup-specific performance evidence."},
+        {"id": "c", "text": "The source sample is sufficiently large that the region and recording mismatch no longer affects external validity.", "correct": false, "misconception_id": "m_sample_size_repairs_distribution_mismatch", "rationale": "A precise estimate for the source distribution can remain biased for a different deployment distribution."},
+        {"id": "d", "text": "The source error is precise for its sampled conditions, but target generalization remains unmeasured until representative deployment evidence is obtained.", "correct": true, "misconception_id": null, "rationale": "Sample size addresses uncertainty about the source mean, not transport to new acoustics and populations."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["generalization", "external_validity", "population_shift", "sample_size"]
+    },
+    {
+      "id": "q_generalization_subgroup_failure_001",
+      "version": 1,
+      "family_id": "f_generalization_subgroup_resolution",
+      "status": "approved",
+      "stem": "A vision model reaches 94% accuracy on a deployment-weighted test set. Accuracy is 97% in daylight and 61% at night, where errors carry higher safety cost. Which report best supports a generalization claim?",
+      "kind": "debugging",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_generalization", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Report the aggregate and night-specific estimates with uncertainty, sampling design, and consequences for the intended operating policy.", "correct": true, "misconception_id": null, "rationale": "Aggregate and decision-relevant conditional performance answer different deployment questions and both matter here."},
+        {"id": "b", "text": "Report training accuracy because fit on the examples used to learn the detector is the most direct generalization evidence.", "correct": false, "misconception_id": "m_training_fit_is_generalization", "rationale": "Training performance is optimistically coupled to fitting and does not replace untouched deployment-aligned evidence."},
+        {"id": "c", "text": "Collect more daylight examples because a larger overall sample will repair the mismatch in costly nighttime behavior.", "correct": false, "misconception_id": "m_sample_size_repairs_distribution_mismatch", "rationale": "More observations from the well-performing condition do not estimate or improve the underrepresented nighttime condition."},
+        {"id": "d", "text": "Report 94% alone because satisfactory deployment-weighted accuracy establishes adequate performance for the nighttime subgroup.", "correct": false, "misconception_id": "m_average_performance_guarantees_subgroups", "rationale": "The aggregate masks a large, decision-relevant conditional failure with different safety consequences."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["generalization", "subgroups", "aggregate_metric", "safety"]
+    },
+    {
+      "id": "q_neural_affine_composition_001",
+      "version": 1,
+      "family_id": "f_neural_affine_collapse",
+      "status": "approved",
+      "stem": "A feed-forward network computes h = W1 x + b1 and y = W2 h + b2, with no activation or other nonlinear operation between the two layers. Relative to a single affine layer, what function class does this network represent?",
+      "kind": "calculation",
+      "difficulty": -0.2,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_neural_networks", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "A strictly richer nonlinear class, because two learned layers create depth even without an activation.", "correct": false, "misconception_id": "m_depth_without_nonlinearity_adds_expressivity", "rationale": "Depth alone does not prevent affine maps from composing into another affine map."},
+        {"id": "b", "text": "The same affine class, since y = (W2 W1)x + (W2 b1 + b2) can be represented by one layer.", "correct": true, "misconception_id": null, "rationale": "Substitution collapses the composition to one matrix and one bias; nonlinear activations change that conclusion."},
+        {"id": "c", "text": "A class with guaranteed learnability, because a sufficiently wide hidden layer ensures the optimizer finds its best parameters.", "correct": false, "misconception_id": "m_universal_approximation_guarantees_training", "rationale": "Width and representability do not supply an optimization guarantee, and the stated network remains affine."},
+        {"id": "d", "text": "A uniquely interpretable class, because each coordinate of h identifies one stable human-readable feature.", "correct": false, "misconception_id": "m_hidden_units_have_fixed_human_meanings", "rationale": "Hidden coordinates can be reparameterized without changing the represented input-output function."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["neural_networks", "affine_layers", "nonlinearity", "composition"]
+    },
+    {
+      "id": "q_neural_capacity_evidence_001",
+      "version": 1,
+      "family_id": "f_neural_capacity_optimization",
+      "status": "approved",
+      "stem": "A theorem says a sufficiently wide network can approximate any continuous function on a compact domain to arbitrary accuracy. A team cites it as proof that its training run will learn the correct deployment function. What is missing?",
+      "kind": "conceptual",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_neural_networks", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "An argument that extra depth itself makes the learned mapping nonlinear even if the configured activations are removed.", "correct": false, "misconception_id": "m_depth_without_nonlinearity_adds_expressivity", "rationale": "This changes the architecture question but does not bridge an approximation existence theorem to learning."},
+        {"id": "b", "text": "A mapping from each hidden coordinate to a fixed semantic concept shared by all equivalent parameter settings.", "correct": false, "misconception_id": "m_hidden_units_have_fixed_human_meanings", "rationale": "Unit-level semantic uniqueness is not required for prediction and is not supplied by approximation capacity."},
+        {"id": "c", "text": "Evidence about optimization, finite-sample identification, regularization, and held-out performance under the deployment distribution.", "correct": true, "misconception_id": null, "rationale": "Representability is an existence statement; learning also depends on data, search, inductive bias, and external validation."},
+        {"id": "d", "text": "A larger hidden layer, because universal approximation means added width directly proves that gradient training reaches a useful solution.", "correct": false, "misconception_id": "m_universal_approximation_guarantees_training", "rationale": "Increasing capacity does not turn an existence result into convergence or generalization evidence."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["neural_networks", "universal_approximation", "optimization", "generalization"]
+    },
+    {
+      "id": "q_neural_hidden_permutation_001",
+      "version": 1,
+      "family_id": "f_neural_hidden_symmetry",
+      "status": "approved",
+      "stem": "In a one-hidden-layer network, the hidden units are permuted and the corresponding input columns of the next layer are permuted inversely. Activations and all numeric weights otherwise stay the same. What happens?",
+      "kind": "counterfactual",
+      "difficulty": 0.45,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_neural_networks", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The network becomes affine because reordering hidden coordinates removes the nonlinear effect of its activations.", "correct": false, "misconception_id": "m_depth_without_nonlinearity_adds_expressivity", "rationale": "A coordinate permutation does not remove or linearize the activation function."},
+        {"id": "b", "text": "The network gains a convergence advantage because the permutation selects an equivalent minimum with better training properties.", "correct": false, "misconception_id": "m_universal_approximation_guarantees_training", "rationale": "Equivalence of parameterizations does not establish how an optimizer reaches either one."},
+        {"id": "c", "text": "Predictions change because each hidden unit has a fixed semantic identity tied to its original coordinate.", "correct": false, "misconception_id": "m_hidden_units_have_fixed_human_meanings", "rationale": "The compensating permutation demonstrates that unit indices are not uniquely identified by the input-output function."},
+        {"id": "d", "text": "Predictions remain unchanged because the inverse permutation restores the same weighted combination at the next layer.", "correct": true, "misconception_id": null, "rationale": "The hidden vector is reindexed and then reindexed back in the downstream linear map, leaving the function invariant."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["neural_networks", "hidden_units", "permutation_symmetry", "interpretability"]
+    },
+    {
+      "id": "q_representation_nuisance_invariance_001",
+      "version": 1,
+      "family_id": "f_representation_nuisance_invariance",
+      "status": "approved",
+      "stem": "For recognizing manufactured parts, representation A preserves exact lighting and background pixels, while representation B discards those variations but separates part geometry. On held-out factory lines, B yields better recognition. Which conclusion is strongest?",
+      "kind": "application",
+      "difficulty": 0.05,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_representation_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "B is more useful for this task because its invariances suppress nuisance detail while preserving geometry that transfers across lines.", "correct": true, "misconception_id": null, "rationale": "Representation quality is relative to task-relevant information and deployment variation, not raw detail retention alone."},
+        {"id": "b", "text": "A is more useful because the representation retaining the most input information is preferable for downstream prediction.", "correct": false, "misconception_id": "m_lossless_representation_is_always_best", "rationale": "Preserving nuisance information can make a downstream predictor less robust even when reconstruction is excellent."},
+        {"id": "c", "text": "The comparison is settled by whichever representation has more coordinates, independent of what those coordinates encode.", "correct": false, "misconception_id": "m_representation_dimension_determines_utility", "rationale": "Dimension alone does not say whether the coordinates expose geometry or background artifacts."},
+        {"id": "d", "text": "A pretraining objective selecting either representation establishes its benefit on new lines without a held-out recognition test.", "correct": false, "misconception_id": "m_pretraining_objective_guarantees_transfer", "rationale": "Source-objective performance does not substitute for evaluation on the intended target task and domain."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["representation_learning", "invariance", "nuisance", "transfer"]
+    },
+    {
+      "id": "q_representation_equal_dimension_001",
+      "version": 1,
+      "family_id": "f_representation_equal_dimension",
+      "status": "approved",
+      "stem": "Two encoders each map an image to 128 numbers. A linear probe separates disease status well from encoder X but remains near chance for encoder Y on a patient-grouped test set. What does this comparison establish?",
+      "kind": "diagnostic",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_representation_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Y is preferable if it reconstructs more pixel detail, because retained information dominates the downstream probe result.", "correct": false, "misconception_id": "m_lossless_representation_is_always_best", "rationale": "Reconstruction may preserve irrelevant variation while failing to expose disease information to the chosen downstream model."},
+        {"id": "b", "text": "At equal dimension, X makes disease-relevant structure more usable by this probe under the tested patient-level deployment split.", "correct": true, "misconception_id": null, "rationale": "The controlled dimension and held-out probe provide task-specific evidence about accessibility of relevant information."},
+        {"id": "c", "text": "The encoders are equivalent because equal vector length fixes the amount and organization of useful information.", "correct": false, "misconception_id": "m_representation_dimension_determines_utility", "rationale": "Equal coordinate count permits very different information, geometry, and invariances."},
+        {"id": "d", "text": "Whichever encoder used pretraining should be preferred because source-objective learning establishes transfer to disease status.", "correct": false, "misconception_id": "m_pretraining_objective_guarantees_transfer", "rationale": "Pretraining is a hypothesis about transfer; the deployment-aligned probe supplies the relevant comparative evidence."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["representation_learning", "linear_probe", "dimension", "held_out"]
+    },
+    {
+      "id": "q_representation_negative_transfer_001",
+      "version": 1,
+      "family_id": "f_representation_negative_transfer",
+      "status": "approved",
+      "stem": "An encoder pretrained to identify camera models transfers poorly to classifying plant disease because it emphasizes sensor artifacts. A smaller encoder trained for leaf morphology performs better on farms using unseen cameras. What lesson is best supported?",
+      "kind": "transfer",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_representation_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The larger encoder remains preferable because preserving sensor-specific detail makes a representation more complete for later tasks.", "correct": false, "misconception_id": "m_lossless_representation_is_always_best", "rationale": "Retaining source-specific nuisance detail can damage robustness to the target camera change."},
+        {"id": "b", "text": "The larger encoder remains preferable because more coordinates determine greater utility independent of learned invariances.", "correct": false, "misconception_id": "m_representation_dimension_determines_utility", "rationale": "Capacity or dimensionality does not ensure that target-relevant factors are encoded accessibly."},
+        {"id": "c", "text": "Transfer depends on alignment between learned factors and the target variation, so pretraining success needs target-domain validation.", "correct": true, "misconception_id": null, "rationale": "The result is negative transfer: a source-useful representation emphasizes variation that is spurious for the target."},
+        {"id": "d", "text": "Camera-model pretraining establishes target usefulness because a successful source objective carries over to downstream tasks.", "correct": false, "misconception_id": "m_pretraining_objective_guarantees_transfer", "rationale": "The scenario directly shows that source success can encode the wrong invariances for a new task."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["representation_learning", "negative_transfer", "pretraining", "invariance"]
+    },
+    {
+      "id": "q_transformer_mask_direction_001",
+      "version": 1,
+      "family_id": "f_transformer_attention_masks",
+      "status": "approved",
+      "stem": "The same Transformer block is used once with unrestricted self-attention and once with a causal mask that blocks positions to the right. What architectural property changes most directly?",
+      "kind": "comparison",
+      "difficulty": -0.05,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_transformers", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The causal version gains bidirectional context because Transformer layers impose two-way information flow by design.", "correct": false, "misconception_id": "m_transformers_are_inherently_bidirectional", "rationale": "The causal mask removes rightward attention edges, so information flow is not inherently bidirectional."},
+        {"id": "b", "text": "The position-wise feed-forward network begins mixing neighboring tokens because masking shifts communication out of attention.", "correct": false, "misconception_id": "m_feedforward_layers_mix_token_positions", "rationale": "The feed-forward sublayer remains independently applied at each token position."},
+        {"id": "c", "text": "Residual paths erase the difference because skipped representations make the attention mask operationally irrelevant.", "correct": false, "misconception_id": "m_residuals_make_sublayer_order_irrelevant", "rationale": "A residual adds the input to a mask-dependent attention output; it does not restore blocked future information."},
+        {"id": "d", "text": "The allowed token-to-token information paths change, enabling full-context encoding in one case and autoregressive conditioning in the other.", "correct": true, "misconception_id": null, "rationale": "Attention masks define which positions can contribute to each representation while leaving the core block parameters reusable."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["transformers", "attention_mask", "causal", "bidirectional"]
+    },
+    {
+      "id": "q_transformer_token_mixing_001",
+      "version": 1,
+      "family_id": "f_transformer_axis_mixing",
+      "status": "approved",
+      "stem": "In a standard Transformer layer, attention output is temporarily replaced with zeros while the position-wise feed-forward sublayer and residual paths remain. Which operation can still combine information from different token positions in that layer?",
+      "kind": "counterfactual",
+      "difficulty": 0.35,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_transformers", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "No remaining operation; each token is transformed separately from its own residual representation in this layer.", "correct": true, "misconception_id": null, "rationale": "Cross-token mixing is supplied by attention, while the feed-forward network acts separately along the feature axis at each position."},
+        {"id": "b", "text": "The feed-forward sublayer, because its two learned matrices multiply across the sequence axis and exchange token content.", "correct": false, "misconception_id": "m_feedforward_layers_mix_token_positions", "rationale": "Those matrices are shared across positions but applied independently to each position's feature vector."},
+        {"id": "c", "text": "The residual path, because adding a token representation incorporates representations from neighboring sequence locations.", "correct": false, "misconception_id": "m_residuals_make_sublayer_order_irrelevant", "rationale": "A residual addition combines two representations at the same position; it does not itself connect positions."},
+        {"id": "d", "text": "Bidirectional Transformer structure, because token communication persists without attention or another sequence-mixing operation.", "correct": false, "misconception_id": "m_transformers_are_inherently_bidirectional", "rationale": "The architecture label does not create information paths after the sequence-mixing operation is removed."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["transformers", "feed_forward", "token_mixing", "residual"]
+    },
+    {
+      "id": "q_transformer_sublayer_order_001",
+      "version": 1,
+      "family_id": "f_transformer_sublayer_composition",
+      "status": "approved",
+      "stem": "A developer swaps the attention and position-wise feed-forward sublayers in a trained Transformer block without changing their parameters. Residual connections are retained. Why should identical outputs not be expected?",
+      "kind": "debugging",
+      "difficulty": 0.7,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_transformers", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The swap forces attention to become unidirectional because later sublayers determine whether a Transformer is bidirectional.", "correct": false, "misconception_id": "m_transformers_are_inherently_bidirectional", "rationale": "Directionality is controlled by permitted attention edges, not merely by whether attention appears before the feed-forward map."},
+        {"id": "b", "text": "The nonlinear sublayers receive different inputs and generally do not commute, so residual additions do not make their order equivalent.", "correct": true, "misconception_id": null, "rationale": "Composing nonlinear attention and feed-forward transformations in opposite orders changes the intermediate representation each sees."},
+        {"id": "c", "text": "The swap makes the feed-forward matrices mix token positions, changing which sequence elements exchange their feature vectors.", "correct": false, "misconception_id": "m_feedforward_layers_mix_token_positions", "rationale": "Position-wise feed-forward maps do not acquire cross-token mixing when moved earlier in the block."},
+        {"id": "d", "text": "The outputs should match because residual paths make the ordering of attention and feed-forward transformations irrelevant.", "correct": false, "misconception_id": "m_residuals_make_sublayer_order_irrelevant", "rationale": "Residual connections preserve an identity path but do not make the added nonlinear transformations commutative."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["transformers", "sublayer_order", "residual", "composition"]
+    },
+    {
+      "id": "q_ranking_prevalence_metrics_001",
+      "version": 1,
+      "family_id": "f_ranking_prevalence_response",
+      "status": "approved",
+      "stem": "A scoring model keeps the same class-conditional score distributions when moved to a population with much lower positive prevalence. Which metric behavior is expected before any retraining?",
+      "kind": "counterfactual",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_ranking_metrics", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Its ROC AUC establishes calibrated probabilities in the lower-prevalence population because ranking fixes probability magnitude.", "correct": false, "misconception_id": "m_auc_implies_calibration", "rationale": "ROC AUC concerns pairwise ordering and does not determine posterior probability calibration."},
+        {"id": "b", "text": "Its F1 score continues to encode the deployment error costs because the harmonic mean adapts to the new prevalence.", "correct": false, "misconception_id": "m_f1_encodes_operating_costs", "rationale": "F1 contains no explicit utilities and will depend on the chosen threshold and resulting precision and recall."},
+        {"id": "c", "text": "ROC AUC can remain stable while precision-recall values fall because precision depends on the changed positive base rate.", "correct": true, "misconception_id": null, "rationale": "Stable class-conditional scores preserve ROC rates, while fewer positives reduce positive predictive value at the same operating point."},
+        {"id": "d", "text": "ROC and precision-recall curves remain stable together because both ranking summaries are invariant to prevalence changes.", "correct": false, "misconception_id": "m_roc_and_pr_share_prevalence_invariance", "rationale": "Precision includes prevalence through the balance of true and false positives, unlike class-conditional ROC coordinates."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["ranking_metrics", "roc_auc", "precision_recall", "prevalence"]
+    },
+    {
+      "id": "q_ranking_auc_threshold_001",
+      "version": 1,
+      "family_id": "f_ranking_operating_points",
+      "status": "approved",
+      "stem": "Two models have the same ROC AUC. At the hospital's feasible false-positive capacity, model X has substantially higher sensitivity than model Y. The action costs are asymmetric. Which conclusion is justified?",
+      "kind": "application",
+      "difficulty": 0.3,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_ranking_metrics", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Equal AUC means their reported probabilities are equally calibrated at the hospital's operating threshold.", "correct": false, "misconception_id": "m_auc_implies_calibration", "rationale": "Models with equal ranking summaries can have very different probability calibration."},
+        {"id": "b", "text": "Equal AUC means their F1 values encode the same false-positive capacity and asymmetric clinical costs.", "correct": false, "misconception_id": "m_f1_encodes_operating_costs", "rationale": "Neither AUC equality nor F1 embeds the stated resource constraint and utility without an explicit decision analysis."},
+        {"id": "c", "text": "Equal AUC makes prevalence irrelevant to precision and therefore removes the need to inspect local operating behavior.", "correct": false, "misconception_id": "m_roc_and_pr_share_prevalence_invariance", "rationale": "Precision and utility at a threshold still depend on prevalence and the local confusion rates."},
+        {"id": "d", "text": "The global AUC tie does not settle deployment choice; compare feasible operating points, calibration, and expected utility under the stated constraints.", "correct": true, "misconception_id": null, "rationale": "A global ordering summary can conceal material differences in the region where actions are actually taken."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["ranking_metrics", "roc_auc", "operating_point", "utility"]
+    },
+    {
+      "id": "q_ranking_monotone_transform_001",
+      "version": 1,
+      "family_id": "f_ranking_monotone_scores",
+      "status": "approved",
+      "stem": "Every score from a binary classifier is replaced by a strictly increasing transformation. The ordering of all examples is unchanged, but the transformed numbers are no longer calibrated probabilities. What remains the same?",
+      "kind": "conceptual",
+      "difficulty": 0.1,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_ranking_metrics", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "ROC AUC remains the same because it depends on pairwise ordering, while numeric probability calibration can change.", "correct": true, "misconception_id": null, "rationale": "A strictly increasing map preserves every positive-negative score comparison but can distort the probability scale."},
+        {"id": "b", "text": "Probability calibration remains the same because a high ranking score determines the correct event frequency.", "correct": false, "misconception_id": "m_auc_implies_calibration", "rationale": "Ordering does not fix the numerical relationship between a score and observed frequency."},
+        {"id": "c", "text": "F1 remains the same at the original numeric cutoff because F1 directly encodes the unchanged deployment costs.", "correct": false, "misconception_id": "m_f1_encodes_operating_costs", "rationale": "The set above a fixed numeric cutoff can change after transformation, and F1 does not encode costs."},
+        {"id": "d", "text": "Precision-recall behavior is independent of prevalence because its invariance matches the preserved ROC ordering.", "correct": false, "misconception_id": "m_roc_and_pr_share_prevalence_invariance", "rationale": "At corresponding ranks a monotone map preserves the curve on the same sample, but precision still depends on prevalence."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["ranking_metrics", "monotone_transform", "auc", "calibration"]
+    },
+    {
+      "id": "q_imbalance_majority_accuracy_001",
+      "version": 1,
+      "family_id": "f_imbalance_majority_baseline",
+      "status": "approved",
+      "stem": "In a screening population, 1% of cases are positive. A classifier predicts negative for every case and reports 99% accuracy. What is the most useful assessment?",
+      "kind": "diagnostic",
+      "difficulty": -0.45,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_class_imbalance", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The classifier is well calibrated because 99% accuracy implies its negative predictions have correct probability values.", "correct": false, "misconception_id": "m_resampling_preserves_probability_calibration", "rationale": "A hard-label accuracy says nothing about the probability values or their reliability."},
+        {"id": "b", "text": "Accuracy is dominated by prevalence; inspect sensitivity, false positives, predictive values, and decision costs against relevant baselines.", "correct": true, "misconception_id": null, "rationale": "The majority rule misses every positive, so the high aggregate fraction does not establish screening utility."},
+        {"id": "c", "text": "The 99% figure is sufficient because aggregate accuracy remains informative when one class is much more common.", "correct": false, "misconception_id": "m_accuracy_is_sufficient_under_imbalance", "rationale": "A majority-class rule can achieve high accuracy while failing completely on the rare outcome."},
+        {"id": "d", "text": "The action threshold should be set to 1% because the class prevalence directly identifies the optimal cutoff.", "correct": false, "misconception_id": "m_threshold_should_equal_prevalence", "rationale": "The optimal action threshold depends on calibrated risk and consequences, not prevalence alone."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["class_imbalance", "accuracy", "majority_baseline", "screening"]
+    },
+    {
+      "id": "q_imbalance_case_control_sampling_001",
+      "version": 1,
+      "family_id": "f_imbalance_sampling_odds",
+      "status": "approved",
+      "stem": "A rare-event training set is constructed by retaining every positive case but only one tenth of negative cases. A probabilistic classifier is fit without sampling weights. How should its raw probabilities be treated at deployment with the original prevalence?",
+      "kind": "application",
+      "difficulty": 0.6,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_class_imbalance", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Treat them as calibrated because changing class sampling affects optimization speed but not the represented event odds.", "correct": false, "misconception_id": "m_resampling_preserves_probability_calibration", "rationale": "Unequal retention changes the sampled class odds and therefore the raw probability scale absent correction."},
+        {"id": "b", "text": "Set the decision cutoff equal to the original prevalence, which directly reverses the altered training class ratio.", "correct": false, "misconception_id": "m_threshold_should_equal_prevalence", "rationale": "A threshold does not generally repair probability semantics, and prevalence alone does not encode action costs."},
+        {"id": "c", "text": "Correct for the known sampling odds or recalibrate on representative held-out data before interpreting the outputs as deployment probabilities.", "correct": true, "misconception_id": null, "rationale": "Case-control sampling can support ranking or slope estimation while requiring an intercept or calibration correction for population risk."},
+        {"id": "d", "text": "Use training accuracy to validate them because a high correct fraction summarizes rare-class performance adequately.", "correct": false, "misconception_id": "m_accuracy_is_sufficient_under_imbalance", "rationale": "Training accuracy neither tests probability calibration nor resolves majority-class dominance."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["class_imbalance", "case_control", "resampling", "calibration"]
+    },
+    {
+      "id": "q_imbalance_capacity_threshold_001",
+      "version": 1,
+      "family_id": "f_imbalance_capacity_policy",
+      "status": "approved",
+      "stem": "A fraud queue can investigate 500 of 100,000 daily transactions. Fraud prevalence varies by season, and investigation benefits and costs are known. Which policy best handles the imbalance?",
+      "kind": "transfer",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_class_imbalance", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Optimize aggregate accuracy because the correct fraction summarizes the rare fraud cases and common legitimate cases adequately.", "correct": false, "misconception_id": "m_accuracy_is_sufficient_under_imbalance", "rationale": "Accuracy can favor ignoring fraud and does not represent queue capacity or asymmetric consequences."},
+        {"id": "b", "text": "Use resampled-training probabilities directly because balancing classes preserves their interpretation under seasonal deployment prevalence.", "correct": false, "misconception_id": "m_resampling_preserves_probability_calibration", "rationale": "Changed sampling or prevalence can shift probability calibration and should be corrected or monitored."},
+        {"id": "c", "text": "Set the probability threshold to the observed fraud prevalence because base rate alone determines the investigation rule.", "correct": false, "misconception_id": "m_threshold_should_equal_prevalence", "rationale": "Prevalence affects risk but does not by itself encode costs or the fixed review capacity."},
+        {"id": "d", "text": "Calibrate and monitor risks on representative data, then rank expected utility and choose the feasible top actions under queue capacity.", "correct": true, "misconception_id": null, "rationale": "This combines population risk, asymmetric value, and the operational limit instead of relying on a prevalence shortcut."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["class_imbalance", "capacity", "expected_utility", "ranking"]
+    },
+    {
+      "id": "q_information_gain_diagnostic_noise_001",
+      "version": 1,
+      "family_id": "f_information_gain_relevance",
+      "status": "approved",
+      "stem": "A hidden hypothesis H is equally likely to be red or blue. Test A reports H without error. Test B returns an independent fair coin unrelated to H. Before observing either result, which test has more expected information about H?",
+      "kind": "calculation",
+      "difficulty": -0.25,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_information_gain", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Test A: it reduces one bit of prior entropy to zero, while the independent fair result from B reduces none.", "correct": true, "misconception_id": null, "rationale": "Information about H depends on uncertainty reduction conditional on the result, not unpredictability of the result alone."},
+        {"id": "b", "text": "Test B: its fair outcome has maximum entropy, so an unpredictable measurement carries the most information about H.", "correct": false, "misconception_id": "m_outcome_entropy_guarantees_information", "rationale": "B has high marginal entropy but remains independent of H, making its mutual information with H zero."},
+        {"id": "c", "text": "They tie until one outcome is seen, because information gain is defined as the surprise of the realized result.", "correct": false, "misconception_id": "m_information_gain_is_realized_surprise", "rationale": "Expected information is computed before observation by averaging posterior uncertainty across possible results."},
+        {"id": "d", "text": "They add two bits together, because each binary observation contributes a full independent unit of information.", "correct": false, "misconception_id": "m_correlated_evidence_adds_full_information", "rationale": "A binary outcome contributes information about H only through statistical dependence with H."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["information_gain", "entropy", "mutual_information", "diagnostic"]
+    },
+    {
+      "id": "q_information_gain_binary_test_001",
+      "version": 1,
+      "family_id": "f_information_gain_expected_entropy",
+      "status": "approved",
+      "stem": "Two hypotheses have prior probabilities 0.5 and 0.5. A symmetric binary test reports the correct hypothesis with probability 0.75. Its two outcomes are equally likely. Approximately how much expected information does the test provide in bits?",
+      "kind": "calculation",
+      "difficulty": 0.75,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [{"concept_id": "c_information_gain", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "About 0.415 bits, because the surprise of the less likely posterior hypothesis is the information gained.", "correct": false, "misconception_id": "m_information_gain_is_realized_surprise", "rationale": "Expected gain averages posterior entropy; it is not the self-information of one posterior branch."},
+        {"id": "b", "text": "About 0.189 bits, because the gain is 1 minus the binary entropy of probabilities 0.75 and 0.25.", "correct": true, "misconception_id": null, "rationale": "Each outcome yields posterior probabilities 0.75 and 0.25, whose entropy is about 0.811 bits."},
+        {"id": "c", "text": "Exactly 1 bit, because an equally likely binary test result has one bit of outcome entropy.", "correct": false, "misconception_id": "m_outcome_entropy_guarantees_information", "rationale": "Outcome entropy includes test noise; conditional uncertainty about the hypothesis remains after either result."},
+        {"id": "d", "text": "Exactly 0.75 bits, because each test contributes its accuracy as a full independent amount of evidence.", "correct": false, "misconception_id": "m_correlated_evidence_adds_full_information", "rationale": "Accuracy is neither measured in bits nor additive without accounting for conditional dependence and uncertainty."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["information_gain", "binary_entropy", "expected_entropy", "calculation"]
+    },
+    {
+      "id": "q_information_gain_duplicate_sensor_001",
+      "version": 1,
+      "family_id": "f_information_gain_conditional_dependence",
+      "status": "approved",
+      "stem": "A second dashboard field is an exact cached copy of a diagnostic sensor already observed. The first reading changed the posterior over a fault. How much additional information about the fault does the copied field provide conditional on the first reading?",
+      "kind": "application",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_information_gain", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "It provides the surprise value of the copied result again because realized information is counted per displayed observation.", "correct": false, "misconception_id": "m_information_gain_is_realized_surprise", "rationale": "Once the first field is known, the exact copy has no uncertainty and cannot change the posterior."},
+        {"id": "b", "text": "It provides high information because a sensor field with variable outcomes has high marginal entropy across incidents.", "correct": false, "misconception_id": "m_outcome_entropy_guarantees_information", "rationale": "Marginal variability does not imply conditional information after the source reading is already observed."},
+        {"id": "c", "text": "It provides zero additional information because its value is determined by the first reading and leaves the posterior unchanged.", "correct": true, "misconception_id": null, "rationale": "Conditional mutual information is zero for a deterministic duplicate of evidence already in the conditioning set."},
+        {"id": "d", "text": "It provides the same full gain as the first reading because separately displayed measurements count as independent evidence.", "correct": false, "misconception_id": "m_correlated_evidence_adds_full_information", "rationale": "Presentation as a second field does not make a shared underlying observation independent."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["information_gain", "conditional_information", "duplicate_evidence", "dependence"]
+    },
+    {
+      "id": "q_adaptive_difficulty_information_001",
+      "version": 1,
+      "family_id": "f_adaptive_information_curve",
+      "status": "approved",
+      "stem": "An adaptive test estimates a learner near ability 0. It can choose among equally discriminating items with difficulties -3, 0, and 3. Guess and slip parameters are equal. Which item is the strongest diagnostic choice before applying content constraints?",
+      "kind": "calculation",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_adaptive_testing", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The difficulty-3 item, because the hardest available response provides the largest information gain for any learner.", "correct": false, "misconception_id": "m_maximum_difficulty_means_maximum_information", "rationale": "An item far above current ability produces a nearly predictable failure and little local discrimination."},
+        {"id": "b", "text": "Whichever item targets a concept with mastery probability closest to one half, without considering its response curve.", "correct": false, "misconception_id": "m_mastery_uncertainty_is_the_only_selection_goal", "rationale": "State uncertainty matters, but the observation model determines whether a candidate can reduce that uncertainty."},
+        {"id": "c", "text": "The highest-scoring item from one familiar family, even if repeated exposure and coverage constraints exclude it.", "correct": false, "misconception_id": "m_greedy_information_needs_no_constraints", "rationale": "A local score does not override exposure, family independence, or content requirements."},
+        {"id": "d", "text": "The difficulty-0 item, because its response is least predetermined near the current ability and therefore most discriminating locally.", "correct": true, "misconception_id": null, "rationale": "With equal slopes and asymptotes, information is greatest near the region where response probability changes most with ability."}
+      ],
+      "source_ids": ["src_van_der_linden_adaptive_2010", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["adaptive_testing", "item_information", "difficulty", "ability"]
+    },
+    {
+      "id": "q_adaptive_family_constraint_001",
+      "version": 1,
+      "family_id": "f_adaptive_constrained_selection",
+      "status": "approved",
+      "stem": "A tutor's top information score belongs to a fourth paraphrase from a family the learner has already answered three times. A slightly lower-scoring item uses a fresh solution path and preserves later repair coverage. Which selection is better supported?",
+      "kind": "application",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_adaptive_testing", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Choose the fresh-family item because dependence, exposure, and future repair capacity are hard constraints on useful evidence.", "correct": true, "misconception_id": null, "rationale": "A constrained policy values independent evidence and preserves viable pedagogy rather than maximizing one myopic score."},
+        {"id": "b", "text": "Choose the paraphrase because the largest point estimate of information should override family dependence and coverage.", "correct": false, "misconception_id": "m_greedy_information_needs_no_constraints", "rationale": "The score overstates useful evidence when repeated observations share a solution path and consume options needed later."},
+        {"id": "c", "text": "Choose the most difficult of the two because harder responses dominate selection quality after several exposures.", "correct": false, "misconception_id": "m_maximum_difficulty_means_maximum_information", "rationale": "Difficulty contributes through its match to the learner and item curve, not as a monotone quality ranking."},
+        {"id": "d", "text": "Choose by mastery probability alone because uncertainty near one half settles the next-question decision without item context.", "correct": false, "misconception_id": "m_mastery_uncertainty_is_the_only_selection_goal", "rationale": "Candidate response behavior, independence, prerequisites, and instructional route remain material."}
+      ],
+      "source_ids": ["src_van_der_linden_adaptive_2010", "src_corbett_anderson_1995", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["adaptive_testing", "constraints", "family_independence", "coverage"]
+    },
+    {
+      "id": "q_attention_value_routing_001",
+      "version": 1,
+      "family_id": "f_attention_content_routing",
+      "status": "approved",
+      "stem": "In one attention head, a query assigns weights 0.8 and 0.2 to two source positions whose value vectors are v1 and v2. Ignoring output projection, what does the head return for that query?",
+      "kind": "calculation",
+      "difficulty": -0.35,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_attention", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The value from the absolute query position, because content attention recovers sequence coordinates without positional input.", "correct": false, "misconception_id": "m_attention_infers_absolute_position", "rationale": "The stated computation routes source values by compatibility weights and supplies no absolute position by itself."},
+        {"id": "b", "text": "The weighted mixture 0.8 v1 + 0.2 v2, so query-key compatibility controls how source values are aggregated.", "correct": true, "misconception_id": null, "rationale": "After softmax, attention weights form the coefficients of the value-vector combination for that query."},
+        {"id": "c", "text": "A row-specific projection of v1, because shared query and key matrices bind learned parameters to token indices.", "correct": false, "misconception_id": "m_shared_weights_destroy_equivariance", "rationale": "Shared projections act on token content uniformly; the weights arise from content compatibility."},
+        {"id": "d", "text": "A linear-time summary independent of source count, because full attention avoids pairwise query-key interactions.", "correct": false, "misconception_id": "m_full_attention_is_linear_in_length", "rationale": "This two-source mixture is simple, but forming all query-key scores in full attention is pairwise in sequence length."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["attention", "values", "weighted_sum", "content_routing"]
+    },
+    {
+      "id": "q_backprop_detached_branch_001",
+      "version": 1,
+      "family_id": "f_backprop_detached_branch",
+      "status": "approved",
+      "stem": "A shared activation h = f_theta(x) feeds two losses: L1(g_phi(h)) and L2(k_psi(stop_gradient(h))). The total loss is L1 + L2. Which gradient routing is correct?",
+      "kind": "debugging",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_backpropagation", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "L2 stops updates to psi because detaching its input blocks gradients for operations downstream of h.", "correct": false, "misconception_id": "m_stop_gradient_blocks_downstream", "rationale": "Psi still affects L2 after the detach and receives gradients through its own downstream computation."},
+        {"id": "b", "text": "Both losses update theta because h appears in both forward computations and forward use determines gradient flow.", "correct": false, "misconception_id": "m_forward_use_guarantees_gradient_flow", "rationale": "The explicit stop-gradient removes the derivative path from L2 back into theta."},
+        {"id": "c", "text": "L1 updates theta and phi; L2 updates psi but contributes no gradient to theta through its detached input.", "correct": true, "misconception_id": null, "rationale": "Detach preserves the forward value for k while replacing the backward derivative from that branch to h with zero."},
+        {"id": "d", "text": "L2 changes the forward activation passed to k while preserving its derivative path back into theta.", "correct": false, "misconception_id": "m_stop_gradient_changes_values_not_derivatives", "rationale": "Stop-gradient has the opposite semantics: same forward value, blocked derivative at the boundary."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["backpropagation", "stop_gradient", "branching_graph", "gradient_flow"]
+    },
+    {
+      "id": "q_backprop_target_network_001",
+      "version": 1,
+      "family_id": "f_backprop_detached_targets",
+      "status": "approved",
+      "stem": "A loss is ||p_theta(x) - stop_gradient(t_phi(x))|| squared. During this update, theta and phi are distinct parameter sets and phi is used nowhere else. What parameter update follows from automatic differentiation?",
+      "kind": "transfer",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_backpropagation", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Phi is updated but theta is not, because stop-gradient blocks parameters downstream from the target value.", "correct": false, "misconception_id": "m_stop_gradient_blocks_downstream", "rationale": "Theta lies on the live prediction path; phi lies behind the detached target boundary."},
+        {"id": "b", "text": "Both theta and phi are updated because both parameter sets influence values used in the forward loss.", "correct": false, "misconception_id": "m_forward_use_guarantees_gradient_flow", "rationale": "Forward influence does not overcome the explicit derivative stop around t_phi."},
+        {"id": "c", "text": "Phi is updated through an unchanged derivative while its target values are replaced during the forward pass.", "correct": false, "misconception_id": "m_stop_gradient_changes_values_not_derivatives", "rationale": "The target value is preserved in the forward pass and the gradient into phi is removed."},
+        {"id": "d", "text": "Theta receives the prediction-error gradient, while phi receives no gradient from this loss during the stated update.", "correct": true, "misconception_id": null, "rationale": "The live branch differentiates through p_theta; the detached target acts as a constant for this backward pass."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["backpropagation", "target_network", "detach", "automatic_differentiation"]
+    },
+    {
+      "id": "q_bellman_shaping_cycle_001",
+      "version": 1,
+      "family_id": "f_bellman_shaping_cycles",
+      "status": "approved",
+      "stem": "An agent receives +1 each time it moves closer to a goal and no corresponding penalty when it moves away. It learns to oscillate between two states rather than finish. What is the best diagnosis?",
+      "kind": "debugging",
+      "difficulty": 0.15,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_bellman_reasoning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The locally positive progress reward changed return comparisons by making a repeatable cycle profitable, so policy preservation was not established.", "correct": true, "misconception_id": null, "rationale": "Dense rewards alter the Bellman return unless their structure, such as valid potential shaping, preserves policy ordering."},
+        {"id": "b", "text": "Positive progress rewards preserve the goal policy because movements toward the goal remain locally desirable.", "correct": false, "misconception_id": "m_positive_progress_reward_preserves_policy", "rationale": "Local desirability does not prevent accumulated reward from favoring cycles or longer paths."},
+        {"id": "c", "text": "The shaping is safe if the terminal state's reward remains ranked above the reward of each intermediate state.", "correct": false, "misconception_id": "m_same_terminal_order_means_safe_shaping", "rationale": "Discounted return depends on the full path, including repeatable intermediate rewards and duration."},
+        {"id": "d", "text": "The missing element is an undiscounted potential difference Phi(s') - Phi(s), independent of the MDP discount.", "correct": false, "misconception_id": "m_discount_can_be_omitted_from_shaping", "rationale": "For a discounted MDP, the policy-invariant potential term uses gamma Phi(s') - Phi(s)."}
+      ],
+      "source_ids": ["src_sutton_barto_rl_2018", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["bellman_reasoning", "reward_shaping", "cycles", "policy_invariance"]
+    },
+    {
+      "id": "q_bellman_potential_numeric_001",
+      "version": 1,
+      "family_id": "f_bellman_potential_calculation",
+      "status": "approved",
+      "stem": "A discounted MDP has gamma = 0.9. A transition goes from a state with potential Phi(s) = 2 to one with Phi(s') = 5. Under potential-based shaping, what reward term is added for this transition?",
+      "kind": "calculation",
+      "difficulty": -0.1,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_bellman_reasoning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "+3.0, because the undiscounted increase in potential is the policy-invariant shaping term.", "correct": false, "misconception_id": "m_discount_can_be_omitted_from_shaping", "rationale": "The next-state potential is discounted in a discounted MDP, giving 0.9 times 5 minus 2."},
+        {"id": "b", "text": "+2.5, because the term is gamma Phi(s') - Phi(s) = 0.9 times 5 minus 2.", "correct": true, "misconception_id": null, "rationale": "This discounted potential difference telescopes across a trajectory in the policy-invariance result."},
+        {"id": "c", "text": "+5.0, because a positive destination potential can be used directly without changing the preferred policy.", "correct": false, "misconception_id": "m_positive_progress_reward_preserves_policy", "rationale": "Using destination potential alone can accumulate differently across paths and cycles."},
+        {"id": "d", "text": "+7.0, because preserving terminal-state ranking is enough even when intermediate potentials are summed.", "correct": false, "misconception_id": "m_same_terminal_order_means_safe_shaping", "rationale": "Terminal ordering does not justify adding potentials; the specific discounted difference provides the guarantee."}
+      ],
+      "source_ids": ["src_sutton_barto_rl_2018", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["bellman_reasoning", "potential_shaping", "discount", "calculation"]
+    },
+    {
+      "id": "q_bias_variance_bootstrap_001",
+      "version": 1,
+      "family_id": "f_bias_variance_training_resamples",
+      "status": "approved",
+      "stem": "One fixed validation case receives predicted probabilities ranging from 0.08 to 0.91 across models trained on bootstrap resamples of the same development population. Each model has low error on its own training sample. What does the spread diagnose?",
+      "kind": "calculation",
+      "difficulty": 0.3,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_bias_variance", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Low training error rules out variance because each fitted model represents its resampled data accurately.", "correct": false, "misconception_id": "m_training_error_diagnoses_variance", "rationale": "Variance concerns sensitivity to the sampled training set, which this prediction spread directly reveals."},
+        {"id": "b", "text": "Increasing model capacity should reduce the spread because a more flexible fit smooths across bootstrap samples.", "correct": false, "misconception_id": "m_more_capacity_reduces_variance", "rationale": "Additional flexibility often permits greater sample-specific changes rather than stabilizing them."},
+        {"id": "c", "text": "The estimator has high sampling variance at this case; training fit alone does not show stable behavior across plausible datasets.", "correct": true, "misconception_id": null, "rationale": "Holding the evaluation input fixed while varying the training sample isolates sensitivity of the fitted predictor."},
+        {"id": "d", "text": "The spread is merely metric noise from resampling and says nothing about changes in the learned prediction function.", "correct": false, "misconception_id": "m_resampling_variation_is_only_metric_noise", "rationale": "The measured object is the fitted probability itself, so its variation reflects estimator instability."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["bias_variance", "bootstrap", "prediction_stability", "sampling"]
+    },
+    {
+      "id": "q_bias_variance_capacity_curve_001",
+      "version": 1,
+      "family_id": "f_bias_variance_capacity_curve",
+      "status": "approved",
+      "stem": "As tree depth increases, average training error falls, mean validation error first falls and then rises, and fitted predictions become less stable across resampled training sets. Which explanation best fits the evidence?",
+      "kind": "counterfactual",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_bias_variance", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Falling training error shows variance is falling throughout the depth range.", "correct": false, "misconception_id": "m_training_error_diagnoses_variance", "rationale": "Training fit does not measure sensitivity to which observations happened to be sampled."},
+        {"id": "b", "text": "Greater depth reduces variance by letting the model average away differences between resampled datasets.", "correct": false, "misconception_id": "m_more_capacity_reduces_variance", "rationale": "The observed instability moves in the opposite direction as depth increases."},
+        {"id": "c", "text": "The changing validation curve is evaluation noise, while variation among fitted predictors can be ignored.", "correct": false, "misconception_id": "m_resampling_variation_is_only_metric_noise", "rationale": "Consistent instability across resamples is evidence about the estimator, not merely one metric draw."},
+        {"id": "d", "text": "Initial depth reduces approximation bias, but later depth adds sample sensitivity whose variance raises validation error.", "correct": true, "misconception_id": null, "rationale": "The joint pattern of fit, held-out error, and resample instability matches a bias-variance tradeoff."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["bias_variance", "capacity", "validation_curve", "trees"]
+    },
+    {
+      "id": "q_calibration_hidden_subgroups_001",
+      "version": 1,
+      "family_id": "f_calibration_subgroup_cancellation",
+      "status": "approved",
+      "stem": "Among all cases assigned risk 0.30, the event rate is 0.30. Within group A it is 0.15 and within group B it is 0.45, with balanced group counts. What conclusion is justified?",
+      "kind": "diagnostic",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_calibration", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The score is calibrated after pooling at 0.30 but miscalibrated within both groups, whose errors cancel in aggregate.", "correct": true, "misconception_id": null, "rationale": "Marginal reliability can coexist with opposing conditional errors, which matter when decisions differ by group."},
+        {"id": "b", "text": "The pooled calibration result establishes calibration within each group because their combined event rate matches the score.", "correct": false, "misconception_id": "m_global_calibration_implies_subgroup_calibration", "rationale": "Opposite subgroup deviations can average to zero without either subgroup being calibrated."},
+        {"id": "c", "text": "The subgroup errors establish poor ranking because calibration differences determine whether positives receive higher scores.", "correct": false, "misconception_id": "m_calibration_determines_ranking", "rationale": "The scenario concerns frequency agreement at one score, not pairwise ordering across cases."},
+        {"id": "d", "text": "Repairing the subgroup probabilities requires changing the ordering because recalibration necessarily changes rank.", "correct": false, "misconception_id": "m_recalibration_requires_new_ranking", "rationale": "A calibration map or group-aware model can alter probability magnitudes without a general requirement to reverse order."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["calibration", "subgroups", "aggregation", "reliability"]
+    },
+    {
+      "id": "q_calibration_monotone_map_001",
+      "version": 1,
+      "family_id": "f_calibration_monotone_repair",
+      "status": "approved",
+      "stem": "A held-out calibration set supports a strictly increasing recalibration map for a model's scores. The map improves reliability and preserves the ordering of every pair. What changes?",
+      "kind": "transfer",
+      "difficulty": 0.3,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_calibration", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Ranking improves by necessity because a better reliability curve forces more positive-negative pairs into the right order.", "correct": false, "misconception_id": "m_calibration_determines_ranking", "rationale": "The stated strictly increasing map preserves every ordering comparison, so rank metrics remain unchanged."},
+        {"id": "b", "text": "Probability magnitudes and threshold locations can change while rank-based discrimination remains unchanged on the evaluated cases.", "correct": true, "misconception_id": null, "rationale": "Monotone recalibration changes the score scale without changing pairwise order."},
+        {"id": "c", "text": "Calibration improvement requires changed ranking because probability correction depends on score reordering.", "correct": false, "misconception_id": "m_recalibration_requires_new_ranking", "rationale": "Monotone calibration methods are a direct counterexample: they adjust magnitudes while preserving ranks."},
+        {"id": "d", "text": "The pooled improvement establishes reliability in each deployment subgroup without separate conditional checks.", "correct": false, "misconception_id": "m_global_calibration_implies_subgroup_calibration", "rationale": "Global calibration can conceal group-specific errors even after a pooled mapping."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["calibration", "monotone_map", "ranking", "recalibration"]
+    },
+    {
+      "id": "q_causal_collider_adjustment_001",
+      "version": 1,
+      "family_id": "f_causal_collider_adjustment",
+      "status": "approved",
+      "stem": "Treatment and disease severity both increase the chance of hospital admission, but treatment does not affect severity. An analysis is restricted to admitted patients and adjusts for admission. What risk does this create?",
+      "kind": "debugging",
+      "difficulty": 0.8,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [{"concept_id": "c_causal_inference", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "A flexible outcome predictor turns the admitted-sample association into the intervention effect without further assumptions.", "correct": false, "misconception_id": "m_prediction_implies_intervention_effect", "rationale": "Predictive fit within a selected sample does not identify the effect of setting treatment."},
+        {"id": "b", "text": "Adding admission and many related covariates removes confounding because richer adjustment improves causal identification.", "correct": false, "misconception_id": "m_covariate_adjustment_always_removes_confounding", "rationale": "Admission is a common effect, so conditioning on it can open a noncausal path rather than close one."},
+        {"id": "c", "text": "Conditioning on the common effect admission can induce an association between treatment and severity, producing collider bias.", "correct": true, "misconception_id": null, "rationale": "Selection on a variable caused by both treatment and severity creates dependence between its causes."},
+        {"id": "d", "text": "A larger admitted cohort resolves the problem because more observations identify the causal structure behind selection.", "correct": false, "misconception_id": "m_more_observations_identify_causality", "rationale": "More selected observations reduce sampling error but do not remove collider-induced bias."}
+      ],
+      "source_ids": ["src_pearl_causality_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["causal_inference", "collider", "selection_bias", "adjustment"]
+    },
+    {
+      "id": "q_causal_randomized_offer_001",
+      "version": 1,
+      "family_id": "f_causal_randomized_encouragement",
+      "status": "approved",
+      "stem": "Eligible users are randomly assigned an offer for a training program. Some offered users decline, and some control users find similar training elsewhere. Which quantity is identified most directly by comparing outcomes by assigned offer?",
+      "kind": "counterfactual",
+      "difficulty": 0.65,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [{"concept_id": "c_causal_inference", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The effect of program participation, because assignment predicts participation and predictive association equals intervention effect.", "correct": false, "misconception_id": "m_prediction_implies_intervention_effect", "rationale": "Noncompliance separates the intervention of assignment from the intervention of actual participation."},
+        {"id": "b", "text": "The participation effect after adjusting for a large set of observed user features, independent of compliance assumptions.", "correct": false, "misconception_id": "m_covariate_adjustment_always_removes_confounding", "rationale": "Observed adjustment does not by itself identify the treatment-received effect under noncompliance."},
+        {"id": "c", "text": "The participation effect once the sample is large, because random assignment and sample size remove the distinction between offer and uptake.", "correct": false, "misconception_id": "m_more_observations_identify_causality", "rationale": "Precision does not collapse two different interventions; offer assignment and participation remain distinct."},
+        {"id": "d", "text": "The intention-to-treat effect of being assigned the offer, with participation effects requiring additional assumptions and analysis.", "correct": true, "misconception_id": null, "rationale": "Randomization identifies the causal contrast for assignment even when actual participation crosses assignment groups."}
+      ],
+      "source_ids": ["src_pearl_causality_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["causal_inference", "randomization", "noncompliance", "intention_to_treat"]
+    },
+    {
+      "id": "q_leakage_duplicate_documents_001",
+      "version": 1,
+      "family_id": "f_leakage_near_duplicate_units",
+      "status": "approved",
+      "stem": "A document classifier uses a random row split. Many reports are copied from a common template, and near-identical versions of the same report appear in both train and test partitions. Test accuracy is unusually high. What is the strongest correction?",
+      "kind": "diagnostic",
+      "difficulty": 0.2,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_data_leakage", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Group near-duplicate reports before splitting and evaluate on report families that were not represented in training.", "correct": true, "misconception_id": null, "rationale": "The split unit should prevent shared content from turning the test into recognition of training-linked documents."},
+        {"id": "b", "text": "Keep the split because leakage requires the explicit target column to appear among the input features.", "correct": false, "misconception_id": "m_leakage_is_only_target_column", "rationale": "Leakage includes shared or unavailable information that makes held-out rows non-independent of fitting."},
+        {"id": "c", "text": "Keep the duplicates because separate rows provide independent evidence even when their text derives from the same report.", "correct": false, "misconception_id": "m_duplicates_across_splits_are_independent", "rationale": "Near copies share content and can let the model recognize a report rather than generalize to new report families."},
+        {"id": "d", "text": "Fit the text representation on all reports before splitting because label-free preprocessing does not leak evaluation information.", "correct": false, "misconception_id": "m_preprocessing_on_all_data_is_harmless", "rationale": "Learned vocabulary or representation choices can use held-out distribution information and should be fit inside training partitions."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["data_leakage", "duplicates", "group_split", "documents"]
+    },
+    {
+      "id": "q_leakage_global_feature_selection_001",
+      "version": 1,
+      "family_id": "f_leakage_nested_preprocessing",
+      "status": "approved",
+      "stem": "Before cross-validation, an analyst uses the full labeled dataset to select the 100 features most correlated with the target. The selected features are then evaluated by cross-validation. Why is the estimate optimistic?",
+      "kind": "transfer",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_data_leakage", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Feature selection is safe because leakage refers to copying the target column rather than using target correlations.", "correct": false, "misconception_id": "m_leakage_is_only_target_column", "rationale": "Target-guided feature choice uses information from held-out fold labels even without including the label as a feature."},
+        {"id": "b", "text": "Each validation fold influenced the feature set; selection should be repeated inside each training fold before scoring its held-out fold.", "correct": true, "misconception_id": null, "rationale": "Nesting the supervised preprocessing step restores the information boundary between fitting and validation."},
+        {"id": "c", "text": "The procedure is safe because feature selection is preprocessing, and preprocessing on all rows does not affect evaluation.", "correct": false, "misconception_id": "m_preprocessing_on_all_data_is_harmless", "rationale": "This preprocessing directly uses all target labels and adapts the representation to validation folds."},
+        {"id": "d", "text": "The procedure is safe because rows remain distinct, so shared selected features count as independent evidence across folds.", "correct": false, "misconception_id": "m_duplicates_across_splits_are_independent", "rationale": "Row uniqueness does not repair a transformation that was chosen using each held-out label."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["data_leakage", "feature_selection", "cross_validation", "nesting"]
+    },
+    {
+      "id": "q_partition_patient_groups_001",
+      "version": 1,
+      "family_id": "f_partition_grouped_patients",
+      "status": "approved",
+      "stem": "A dataset contains several visits per patient, and deployment will predict outcomes for patients absent from training. Which cross-validation unit best matches that use?",
+      "kind": "debugging",
+      "difficulty": -0.25,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_data_partitioning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Random visits with many folds, because more folds repair dependence between visits from the same patient.", "correct": false, "misconception_id": "m_cross_validation_repairs_bad_split_units", "rationale": "Fold count does not stop one patient's visits from appearing in both fitting and evaluation."},
+        {"id": "b", "text": "Random visits followed by repeated test inspection, because the test set can guide the grouping choice.", "correct": false, "misconception_id": "m_test_set_is_a_validation_set", "rationale": "Using final test feedback to choose the split contaminates the final estimate and leaves patient overlap."},
+        {"id": "c", "text": "Whole patients assigned to folds, so all visits from a patient stay on one side of each evaluation boundary.", "correct": true, "misconception_id": null, "rationale": "Patient-grouped splitting matches the independent unit expected at deployment and prevents identity-linked leakage."},
+        {"id": "d", "text": "The single split with the highest score, because variability across patient partitions is irrelevant to deployment evidence.", "correct": false, "misconception_id": "m_single_split_is_stable_evidence", "rationale": "Selecting a favorable partition hides uncertainty and can bias the reported estimate."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["data_partitioning", "grouped_split", "patients", "cross_validation"]
+    },
+    {
+      "id": "q_partition_nested_selection_001",
+      "version": 1,
+      "family_id": "f_partition_nested_model_selection",
+      "status": "approved",
+      "stem": "A team compares 200 preprocessing and model configurations by cross-validation and wants an honest estimate of the performance of the selected workflow. Which design best separates selection from final evaluation?",
+      "kind": "transfer",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_data_partitioning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Increase the number of folds in the same selection loop, because more folds repair reuse of validation feedback.", "correct": false, "misconception_id": "m_cross_validation_repairs_bad_split_units", "rationale": "More folds do not create an untouched evaluation when their results still guide selection."},
+        {"id": "b", "text": "Choose with the final test set and report its best score, because a test set can also serve as validation data.", "correct": false, "misconception_id": "m_test_set_is_a_validation_set", "rationale": "Adaptive use of the final set makes its selected score optimistic rather than a final estimate."},
+        {"id": "c", "text": "Try more configurations against the same held-out scores, because a broader search makes the maximum more reliable.", "correct": false, "misconception_id": "m_more_trials_reduce_selection_bias", "rationale": "Selecting the maximum over more noisy estimates generally increases adaptive selection bias."},
+        {"id": "d", "text": "Run selection inside inner training folds and estimate the full selection procedure on untouched outer folds or a final holdout.", "correct": true, "misconception_id": null, "rationale": "Nested evaluation reproduces the entire adaptive workflow while keeping each outer assessment independent of its selection."}
+      ],
+      "source_ids": ["src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["data_partitioning", "nested_cross_validation", "model_selection", "holdout"]
+    },
+    {
+      "id": "q_threshold_expected_loss_001",
+      "version": 1,
+      "family_id": "f_threshold_expected_loss",
+      "status": "approved",
+      "stem": "A calibrated probability p estimates an adverse event. Acting prevents the event at cost 1, while not acting costs 9 if the event occurs and 0 otherwise. Acting has no remaining event loss. At what p does acting have lower expected cost?",
+      "kind": "calculation",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {"concept_id": "c_decision_thresholds", "weight": 0.85, "role": "primary"},
+        {"concept_id": "c_class_imbalance", "weight": 0.15, "role": "supporting"}
+      ],
+      "options": [
+        {"id": "a", "text": "When p exceeds 1/9, because acting costs 1 and not acting has expected cost 9p.", "correct": true, "misconception_id": null, "rationale": "Comparing the two action-specific expected losses yields 1 < 9p, hence p > 1/9."},
+        {"id": "b", "text": "When p exceeds 0.5, because one half is the standard probability cutoff for a binary action.", "correct": false, "misconception_id": "m_default_half_threshold_is_optimal", "rationale": "The asymmetric cost makes acting worthwhile well below one half."},
+        {"id": "c", "text": "When p exceeds the event prevalence, because the population base rate identifies the decision cutoff.", "correct": false, "misconception_id": "m_threshold_should_equal_prevalence", "rationale": "Prevalence helps form calibrated individual risks but does not replace the comparison of action consequences."},
+        {"id": "d", "text": "At the cutoff selected by the model's ROC AUC, because a ranking metric determines the utility-maximizing action point.", "correct": false, "misconception_id": "m_ranking_metric_determines_optimal_threshold", "rationale": "AUC summarizes ordering across thresholds and contains neither the action costs nor a chosen operating point."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["decision_thresholds", "expected_loss", "cost_sensitive", "calibrated_probability"]
+    },
+    {
+      "id": "q_threshold_context_change_001",
+      "version": 1,
+      "family_id": "f_threshold_context_change",
+      "status": "approved",
+      "stem": "A risk threshold was optimized when intervention capacity was 1,000 cases per week. Capacity falls to 300, event prevalence rises, and intervention benefit is revised. What should happen before reusing the old cutoff?",
+      "kind": "transfer",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {"concept_id": "c_decision_thresholds", "weight": 0.85, "role": "primary"},
+        {"concept_id": "c_class_imbalance", "weight": 0.15, "role": "supporting"}
+      ],
+      "options": [
+        {"id": "a", "text": "Keep 0.5 as the action boundary because conventional binary classification cutoffs remain optimal after operational changes.", "correct": false, "misconception_id": "m_default_half_threshold_is_optimal", "rationale": "The decision problem now has different capacity, risk distribution, and benefit, none represented by a conventional cutoff."},
+        {"id": "b", "text": "Recheck calibration, recompute expected utility under the new benefits and capacity, and select a feasible operating policy.", "correct": true, "misconception_id": null, "rationale": "Thresholds are policy choices conditional on current probabilities, consequences, and constraints."},
+        {"id": "c", "text": "Set the cutoff to the new prevalence because changing the base rate directly determines the revised action threshold.", "correct": false, "misconception_id": "m_threshold_should_equal_prevalence", "rationale": "The base rate influences risk calibration but does not encode intervention benefit or capacity."},
+        {"id": "d", "text": "Keep the old cutoff because a threshold optimized once transfers across changes in prevalence, benefit, and capacity.", "correct": false, "misconception_id": "m_threshold_survives_context_change", "rationale": "All three changes can alter which actions maximize deployment utility."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["decision_thresholds", "capacity", "prevalence", "utility"]
+    },
+    {
+      "id": "q_shift_prior_reweighting_001",
+      "version": 1,
+      "family_id": "f_shift_prior_reweighting",
+      "status": "approved",
+      "stem": "Between training and deployment, the positive class prior falls from 0.50 to 0.10 while audited feature distributions within each class remain stable. What follows for the deployment distribution?",
+      "kind": "diagnostic",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_distribution_shift", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "There is no shift because stable class-conditional feature distributions make the joint deployment distribution stable.", "correct": false, "misconception_id": "m_stable_class_conditionals_mean_no_shift", "rationale": "Changing class mixture changes p(y), p(x), and generally posterior probabilities despite stable p(x|y)."},
+        {"id": "b", "text": "This is covariate shift because any resulting change in the feature marginal defines the changed factor.", "correct": false, "misconception_id": "m_prior_change_is_covariate_shift", "rationale": "The assumed primitive change is p(y), while p(x|y) remains stable; that is label shift."},
+        {"id": "c", "text": "This is label shift; class-prior reweighting can update posteriors if the stability and estimation assumptions are credible.", "correct": true, "misconception_id": null, "rationale": "The factorization changes the mixing weights over stable class-conditional feature distributions."},
+        {"id": "d", "text": "This is concept shift because the lower positive prior means the conditional label mechanism has changed.", "correct": false, "misconception_id": "m_prior_change_is_concept_shift", "rationale": "A prior change alone does not assert a changed p(y|x) mechanism, though posteriors can change through Bayes' rule."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["distribution_shift", "label_shift", "prior", "reweighting"]
+    },
+    {
+      "id": "q_shift_changed_mechanism_001",
+      "version": 1,
+      "family_id": "f_shift_conditional_mechanism",
+      "status": "approved",
+      "stem": "A credit policy changes the legal definition of default. The applicant-feature distribution remains nearly unchanged, but identical feature profiles now receive different outcome labels under the new definition. Which shift is most directly described?",
+      "kind": "transfer",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_distribution_shift", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "No material shift, because stability of the feature marginal establishes stability of the deployment problem.", "correct": false, "misconception_id": "m_stable_feature_marginal_means_no_shift", "rationale": "The meaning and conditional distribution of the target changed even though p(x) did not."},
+        {"id": "b", "text": "Label shift, because a changed conditional label definition is equivalent to changing class prevalence with stable p(x|y).", "correct": false, "misconception_id": "m_conditional_change_is_label_shift", "rationale": "Label shift assumes stable class-conditional features; the scenario directly states a changed outcome mechanism for fixed x."},
+        {"id": "c", "text": "Covariate shift, because that term denotes a changed p(y|x) relationship at stable feature frequency.", "correct": false, "misconception_id": "m_covariate_shift_changes_label_mechanism", "rationale": "Covariate shift instead uses a changed p(x) with a stable conditional outcome relationship."},
+        {"id": "d", "text": "Concept shift, because p(y|x) changed for the same feature profiles and the prior labeling rule no longer applies.", "correct": true, "misconception_id": null, "rationale": "A revised target definition changes the conditional mapping the predictor is meant to estimate."}
+      ],
+      "source_ids": ["src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["distribution_shift", "concept_shift", "label_definition", "deployment"]
+    },
+    {
+      "id": "q_generative_likelihood_decision_001",
+      "version": 1,
+      "family_id": "f_generative_likelihood_utility",
+      "status": "approved",
+      "stem": "Model G assigns higher held-out joint log likelihood to images and labels than model H, but H has lower cost-weighted classification loss on the deployment population. Which comparison is sound?",
+      "kind": "application",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_generative_models", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "G fits the evaluated joint distribution better; H performs better under the stated deployment decision loss.", "correct": true, "misconception_id": null, "rationale": "Joint density fit and utility-weighted conditional decisions are distinct objectives that can rank models differently."},
+        {"id": "b", "text": "G is preferable for the decision because higher generative likelihood implies lower loss for each downstream action.", "correct": false, "misconception_id": "m_higher_likelihood_guarantees_better_decisions", "rationale": "Overall likelihood can improve through aspects of x that do not improve the cost-weighted label decision."},
+        {"id": "c", "text": "G is assumption free because modeling the joint distribution removes commitments required by conditional model H.", "correct": false, "misconception_id": "m_joint_modeling_is_assumption_free", "rationale": "A joint model commits to additional structure for the feature distribution and can be misspecified there."},
+        {"id": "d", "text": "G counts as generative when it uses a neural decoder that synthesizes realistic image samples.", "correct": false, "misconception_id": "m_generative_requires_neural_synthesis", "rationale": "Generative modeling concerns a joint or data-generating distribution, not a required neural media interface."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["generative_models", "joint_likelihood", "decision_utility", "evaluation"]
+    },
+    {
+      "id": "q_generative_tabular_sampling_001",
+      "version": 1,
+      "family_id": "f_generative_tabular_factorization",
+      "status": "approved",
+      "stem": "A Bayesian network over weather, demand, and outages specifies a normalized joint distribution and can sample complete synthetic records by ancestral sampling. It contains no neural network. How should it be classified?",
+      "kind": "transfer",
+      "difficulty": -0.15,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_generative_models", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Discriminative, because a model without a neural synthesis decoder does not meet the definition of generative modeling.", "correct": false, "misconception_id": "m_generative_requires_neural_synthesis", "rationale": "A normalized joint distribution with a sampling process is generative regardless of neural architecture."},
+        {"id": "b", "text": "Generative, because it models a data-generating joint distribution and supports sampling of complete variable configurations.", "correct": true, "misconception_id": null, "rationale": "The joint factorization defines how records are distributed, which is the relevant generative property."},
+        {"id": "c", "text": "Assumption free, because specifying the full joint distribution avoids structural commitments about dependencies among variables.", "correct": false, "misconception_id": "m_joint_modeling_is_assumption_free", "rationale": "The graph and local conditional distributions encode substantive independence and parametric assumptions."},
+        {"id": "d", "text": "Superior for outage decisions, because joint sampling and likelihood imply better utility than a conditional predictor.", "correct": false, "misconception_id": "m_higher_likelihood_guarantees_better_decisions", "rationale": "Decision performance depends on the relevant conditional estimates, losses, calibration, and model fit."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["generative_models", "bayesian_network", "joint_distribution", "sampling"]
+    },
+    {
+      "id": "q_gradient_diagonal_preconditioner_001",
+      "version": 1,
+      "family_id": "f_gradient_preconditioned_coordinates",
+      "status": "approved",
+      "stem": "For loss L = 100 x squared + y squared, ordinary gradient descent uses one learning rate and zigzags in x while progressing slowly in y. Which change most directly improves the coordinate conditioning?",
+      "kind": "calculation",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_gradient_optimization", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Use a much smaller shared learning rate, which makes progress efficient by removing the curvature ratio.", "correct": false, "misconception_id": "m_small_learning_rate_fixes_conditioning", "rationale": "A smaller step can stabilize x but leaves the 100-to-1 curvature ratio and slow y progress."},
+        {"id": "b", "text": "Run more iterations with the same coordinates, which improves the Hessian condition number over optimization time.", "correct": false, "misconception_id": "m_iterations_change_condition_number", "rationale": "The Hessian of this fixed quadratic and its condition number do not change merely because iterations pass."},
+        {"id": "c", "text": "Rescale or precondition the coordinates so gradient steps account for their different curvature scales.", "correct": true, "misconception_id": null, "rationale": "A suitable coordinate scaling makes the level sets more isotropic and permits balanced progress."},
+        {"id": "d", "text": "Add momentum and infer that curvature sensitivity has been removed, independent of its tuning.", "correct": false, "misconception_id": "m_momentum_guarantees_perfect_conditioning", "rationale": "Momentum may accelerate a tuned problem but does not make the objective perfectly conditioned."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_bishop_prml_2006", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["gradient_optimization", "preconditioning", "quadratic", "conditioning"]
+    },
+    {
+      "id": "q_gradient_stability_speed_001",
+      "version": 1,
+      "family_id": "f_gradient_stability_efficiency",
+      "status": "approved",
+      "stem": "A learning rate is reduced until gradient descent no longer diverges on an ill-conditioned objective, but loss then decreases extremely slowly. Which statement best distinguishes stability from efficiency?",
+      "kind": "transfer",
+      "difficulty": 0.25,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_gradient_optimization", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The small step has repaired conditioning because a stable trajectory implies similar progress along all curvature directions.", "correct": false, "misconception_id": "m_small_learning_rate_fixes_conditioning", "rationale": "Stability in the steep direction can coexist with very slow movement in shallow directions."},
+        {"id": "b", "text": "Continuing the same iterations will improve the objective's condition number and eventually balance the coordinate speeds.", "correct": false, "misconception_id": "m_iterations_change_condition_number", "rationale": "The local curvature ratio is a property of the objective and parameterization, not elapsed iteration count."},
+        {"id": "c", "text": "Adding momentum makes efficiency independent of curvature, so tuning and scaling no longer matter.", "correct": false, "misconception_id": "m_momentum_guarantees_perfect_conditioning", "rationale": "Momentum remains sensitive to hyperparameters and the curvature spectrum even when it improves convergence."},
+        {"id": "d", "text": "The step is stable but inefficient; scaling, preconditioning, or a suitable adaptive method can address directional imbalance.", "correct": true, "misconception_id": null, "rationale": "Avoiding divergence is a weaker property than making useful progress across both steep and shallow directions."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["gradient_optimization", "learning_rate", "stability", "efficiency"]
+    },
+    {
+      "id": "q_tracing_slip_sequence_001",
+      "version": 1,
+      "family_id": "f_tracing_slip_sequence",
+      "status": "approved",
+      "stem": "A learner has several strong, independent successes on one skill and then misses one moderately discriminating item. The observation model permits slips. What posterior response is most defensible?",
+      "kind": "diagnostic",
+      "difficulty": -0.05,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_knowledge_tracing", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Decrease mastery probability by an amount determined by the prior and response likelihood, while retaining uncertainty about a slip.", "correct": true, "misconception_id": null, "rationale": "Bayesian evidence shifts rather than resets belief, and prior independent successes remain relevant."},
+        {"id": "b", "text": "Set the skill to unmastered because one wrong response proves the required knowledge is absent.", "correct": false, "misconception_id": "m_wrong_response_proves_all_skills_missing", "rationale": "A nonzero slip probability makes the response compatible with a knowledgeable learner."},
+        {"id": "c", "text": "Assign failure to the highest-weight skill as the unique cause, independent of competing error explanations.", "correct": false, "misconception_id": "m_highest_weight_skill_is_unique_failure_cause", "rationale": "Content weights do not provide deterministic causal attribution for a noisy response."},
+        {"id": "d", "text": "Ignore the response because evidence with possible slips is ambiguous and therefore unusable for state estimation.", "correct": false, "misconception_id": "m_ambiguous_multiskill_evidence_is_useless", "rationale": "Noisy evidence can still update a posterior by a smaller, likelihood-weighted amount."}
+      ],
+      "source_ids": ["src_corbett_anderson_1995", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["knowledge_tracing", "slip", "posterior", "sequence"]
+    },
+    {
+      "id": "q_tracing_multiskill_ambiguity_001",
+      "version": 1,
+      "family_id": "f_tracing_multiskill_transfer",
+      "status": "approved",
+      "stem": "A debugging item requires both tensor-shape reasoning and backpropagation. A learner chooses a distractor consistent with a shape error, but the item is not perfectly diagnostic. How should a knowledge tracer use the response?",
+      "kind": "transfer",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_knowledge_tracing", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Mark both skills absent because an incorrect multi-skill response disproves all prerequisites used by the item.", "correct": false, "misconception_id": "m_wrong_response_proves_all_skills_missing", "rationale": "The response has multiple possible causes and a noisy observation model, so deterministic failure labels overstate evidence."},
+        {"id": "b", "text": "Increase the shape-error hypothesis and modestly update linked skill beliefs according to the option and observation likelihoods.", "correct": true, "misconception_id": null, "rationale": "The named distractor is informative but not conclusive; a probabilistic joint update preserves competing explanations."},
+        {"id": "c", "text": "Assign the miss to whichever skill has the largest item weight and leave other hypotheses unchanged.", "correct": false, "misconception_id": "m_highest_weight_skill_is_unique_failure_cause", "rationale": "A loading describes item relevance, not exclusive causal responsibility for one response."},
+        {"id": "d", "text": "Discard the attempt because evidence involving more than one skill provides no useful learner-state update.", "correct": false, "misconception_id": "m_ambiguous_multiskill_evidence_is_useless", "rationale": "Ambiguity reduces attribution strength but does not make the option-specific observation uninformative."}
+      ],
+      "source_ids": ["src_corbett_anderson_1995", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["knowledge_tracing", "multiskill", "misconception", "uncertainty"]
+    },
+    {
+      "id": "q_ope_weight_degeneracy_001",
+      "version": 1,
+      "family_id": "f_ope_weight_degeneracy",
+      "status": "approved",
+      "stem": "An importance-sampling off-policy estimate uses 100,000 logged trajectories, but nearly all total weight is carried by 12 trajectories because target and behavior policies differ sharply. What is the central concern?",
+      "kind": "calculation",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [{"concept_id": "c_off_policy_evaluation", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The logged returns transfer directly to the target policy because the raw trajectory count is large.", "correct": false, "misconception_id": "m_logged_returns_transfer_across_policies", "rationale": "Policy mismatch changes which trajectories matter, and the effective weighted sample is much smaller than the row count."},
+        {"id": "b", "text": "Any zero-support target actions can be corrected by assigning them very large importance weights.", "correct": false, "misconception_id": "m_importance_sampling_works_without_support", "rationale": "An action absent under the behavior policy has no observed outcome to reweight."},
+        {"id": "c", "text": "The estimate may have extreme variance and tiny effective sample size, so weight diagnostics and policy overlap are essential.", "correct": true, "misconception_id": null, "rationale": "Concentration of weight means the nominal sample size badly overstates independent information about the target policy."},
+        {"id": "d", "text": "A learned dynamics model removes the overlap concern and turns unsupported target behavior into identified evidence.", "correct": false, "misconception_id": "m_learned_model_eliminates_coverage_need", "rationale": "Model extrapolation may trade variance for assumption-dependent bias; it does not create observed support."}
+      ],
+      "source_ids": ["src_sutton_barto_rl_2018", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["off_policy_evaluation", "importance_sampling", "effective_sample_size", "overlap"]
+    },
+    {
+      "id": "q_ope_model_extrapolation_001",
+      "version": 1,
+      "family_id": "f_ope_model_extrapolation",
+      "status": "approved",
+      "stem": "A learned simulator predicts outcomes for actions rarely chosen by the logging policy. A target policy relies heavily on those actions, and no external validation covers that region. How should its model-based value estimate be described?",
+      "kind": "transfer",
+      "difficulty": 0.65,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [{"concept_id": "c_off_policy_evaluation", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "As the logged policy's observed return, because recorded rewards transfer directly to the target action sequence.", "correct": false, "misconception_id": "m_logged_returns_transfer_across_policies", "rationale": "The target changes actions and state visitation, so its return is not the behavior policy's return."},
+        {"id": "b", "text": "As an unbiased importance-sampling estimate, because rare or absent target actions can be repaired by weighting.", "correct": false, "misconception_id": "m_importance_sampling_works_without_support", "rationale": "Importance sampling needs behavior support for target actions and cannot validate model predictions where observations are absent."},
+        {"id": "c", "text": "As identified from data, because a fitted simulator removes the need for action coverage in the logged trajectories.", "correct": false, "misconception_id": "m_learned_model_eliminates_coverage_need", "rationale": "The simulator supplies extrapolating assumptions whose errors may compound in unsupported regions."},
+        {"id": "d", "text": "As assumption-sensitive extrapolation that needs overlap diagnostics, model checks, and preferably new coverage before strong claims.", "correct": true, "misconception_id": null, "rationale": "A model can reduce variance and extend estimates, but unvalidated support gaps remain an identification risk."}
+      ],
+      "source_ids": ["src_sutton_barto_rl_2018", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["off_policy_evaluation", "model_based", "extrapolation", "support"]
+    },
+    {
+      "id": "q_regularization_validation_curve_001",
+      "version": 1,
+      "family_id": "f_regularization_validation_curve",
+      "status": "approved",
+      "stem": "As an L2 penalty increases, training error rises steadily while validation error first falls and then rises. What is the best interpretation of the rising right side of the validation curve?",
+      "kind": "application",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_regularization", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The penalty has become scale invariant, so feature units no longer affect which coefficients are shrunk.", "correct": false, "misconception_id": "m_l2_is_scale_invariant", "rationale": "The curve says nothing about scale invariance; coordinate units still affect an L2 penalty."},
+        {"id": "b", "text": "Regularization is now too strong for this setting, adding enough bias or underfitting to harm held-out performance.", "correct": true, "misconception_id": null, "rationale": "Regularization can reduce variance initially and then damage fit when its constraint overwhelms useful signal."},
+        {"id": "c", "text": "A larger penalty should continue improving generalization because stronger regularization has a monotone benefit.", "correct": false, "misconception_id": "m_stronger_regularization_always_improves_generalization", "rationale": "The observed validation rise is direct evidence against monotone improvement."},
+        {"id": "d", "text": "One revised global lambda can preserve the same solution after any single-feature rescaling while leaving other penalties unchanged.", "correct": false, "misconception_id": "m_one_global_lambda_repairs_one_feature_rescale", "rationale": "A global multiplier cannot selectively undo a coordinate-specific change in penalty geometry."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["regularization", "validation_curve", "underfitting", "l2"]
+    },
+    {
+      "id": "q_regularization_coordinate_rescale_001",
+      "version": 1,
+      "family_id": "f_regularization_coordinate_penalty",
+      "status": "approved",
+      "stem": "A linear predictor uses two physical measurements with an L2 penalty. The first measurement is rescaled by a factor of 100 and its coefficient is divided by 100 so predictions initially match. With the old penalty strength, what changes during refitting?",
+      "kind": "transfer",
+      "difficulty": 0.6,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_regularization", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Nothing changes because L2 regularization is invariant to invertible rescaling of an individual feature coordinate.", "correct": false, "misconception_id": "m_l2_is_scale_invariant", "rationale": "The equivalent coefficient has a different squared magnitude, changing its relative penalty."},
+        {"id": "b", "text": "Increasing the shared lambda restores the prior solution because one global multiplier repairs a single-coordinate rescale.", "correct": false, "misconception_id": "m_one_global_lambda_repairs_one_feature_rescale", "rationale": "Changing one global lambda also changes the penalty on the unscaled coordinate and cannot generally preserve both tradeoffs."},
+        {"id": "c", "text": "The data-fit predictions can start equal, but the penalty geometry changes, so refitting can prefer a different physical predictor.", "correct": true, "misconception_id": null, "rationale": "Coordinate-wise coefficient norms depend on units unless features or penalties are adjusted consistently."},
+        {"id": "d", "text": "The rescale improves held-out performance because a stronger effective penalty on one coordinate benefits generalization.", "correct": false, "misconception_id": "m_stronger_regularization_always_improves_generalization", "rationale": "A changed penalty may help or harm; held-out evidence is needed and the effect is not monotone."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_hastie_esl_2009", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["regularization", "feature_units", "penalty_geometry", "transfer"]
+    },
+    {
+      "id": "q_probability_expected_shortfall_001",
+      "version": 1,
+      "family_id": "f_probability_expected_shortfall",
+      "status": "approved",
+      "stem": "Daily demand X is 0 units or 10 units with equal probability. A supplier prepays for 5 units and pays an emergency charge proportional to max(X - 5, 0). What is the expected emergency quantity?",
+      "kind": "application",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_probability_reasoning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "2.5 units, because the emergency quantity is 0 or 5 with equal probability and those costs are averaged.", "correct": true, "misconception_id": null, "rationale": "Applying the nonlinear shortfall function to each outcome gives an expectation of one half times 0 plus one half times 5."},
+        {"id": "b", "text": "5 units, because the expected demand is the outcome most likely to occur and should be used as the emergency quantity.", "correct": false, "misconception_id": "m_expected_value_is_most_likely_outcome", "rationale": "Demand 5 has probability zero in this distribution, and emergency quantity is not equal to mean demand."},
+        {"id": "c", "text": "0 units, because max(E[X] - 5, 0) equals zero and expectation commutes with the shortfall function.", "correct": false, "misconception_id": "m_expectation_commutes_with_nonlinear_functions", "rationale": "The positive-part function is nonlinear, so applying it after averaging loses the costly high-demand outcome."},
+        {"id": "d", "text": "10 units, because demand variance by itself determines the expectation of this nonlinear emergency quantity.", "correct": false, "misconception_id": "m_variance_determines_every_nonlinear_expectation", "rationale": "The expectation depends on the distribution relative to the threshold; variance alone does not produce this value."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["probability_reasoning", "expectation", "nonlinear_loss", "decision"]
+    },
+    {
+      "id": "q_probability_conditional_tests_001",
+      "version": 1,
+      "family_id": "f_probability_conditional_test_dependence",
+      "status": "approved",
+      "stem": "Two screening tests use different biological signals. Given disease status, their errors are independent. Both tests are more likely to be positive for diseased people than for nondiseased people. Before disease status is observed, how are the test results related?",
+      "kind": "transfer",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_probability_reasoning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "They are marginally independent because conditional independence persists after disease status is averaged out.", "correct": false, "misconception_id": "m_conditional_independence_implies_marginal_independence", "rationale": "Mixing diseased and nondiseased groups can induce dependence between tests that factor within each group."},
+        {"id": "b", "text": "They are marginally independent because a shared disease cause does not create association between its effects.", "correct": false, "misconception_id": "m_shared_cause_does_not_induce_dependence", "rationale": "Disease changes both positive rates, so unobserved disease status makes positive results co-occur more often."},
+        {"id": "c", "text": "They have identical marginal behavior because conditional independence requires equal sensitivity and false-positive rates.", "correct": false, "misconception_id": "m_conditional_independence_means_identical_tests", "rationale": "Independence specifies factorization within disease strata, not equality of each test's parameters."},
+        {"id": "d", "text": "They are generally marginally dependent because mixing over their shared disease cause associates the two results.", "correct": true, "misconception_id": null, "rationale": "Disease is a common cause; conditional factorization need not survive marginalization over a variable that changes both tests."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["probability_reasoning", "conditional_independence", "common_cause", "screening"]
+    },
+    {
+      "id": "q_supervised_loss_uses_target_001",
+      "version": 1,
+      "family_id": "f_supervised_target_in_objective",
+      "status": "approved",
+      "stem": "A dataset contains input vectors and observed next-week demand. Four training descriptions use the same table. Which description identifies the supervised-learning signal precisely?",
+      "kind": "debugging",
+      "difficulty": -0.2,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [{"concept_id": "c_supervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Cluster the input vectors and name the groups high and low demand, since named categories make the fit supervised.", "correct": false, "misconception_id": "m_supervised_means_classification", "rationale": "Names assigned after clustering are not observed targets used to compute the fitting loss."},
+        {"id": "b", "text": "Compare each prediction with its paired observed demand in the loss, so target errors drive the parameter updates.", "correct": true, "misconception_id": null, "rationale": "The defining supervision is the example-level target entering the objective used for learning."},
+        {"id": "c", "text": "Minimize reconstruction error on inputs and infer deployment validity because the demand column exists in the table.", "correct": false, "misconception_id": "m_supervision_identifies_deployment_goal", "rationale": "A target that is present but unused in the objective does not supervise the reconstruction updates or establish alignment."},
+        {"id": "d", "text": "Minimize demand error on fitted rows and infer future accuracy because a labeled training loss is low.", "correct": false, "misconception_id": "m_supervised_labels_guarantee_generalization", "rationale": "This is supervised fitting, but training loss does not provide independent evidence for future performance."}
+      ],
+      "source_ids": ["src_bishop_prml_2006", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["supervised_learning", "target", "loss", "debugging"]
+    },
+    {
+      "id": "q_supervised_self_supervision_001",
+      "version": 1,
+      "family_id": "f_supervised_derived_targets",
+      "status": "approved",
+      "stem": "An encoder learns by rotating each unlabeled image by a sampled angle and predicting that known angle. It is later evaluated for defect recognition. Which description best distinguishes the training signal from downstream evidence?",
+      "kind": "transfer",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [{"concept_id": "c_supervised_learning", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "The angle prediction is unsupervised because a continuous target does not count as a supervision signal.", "correct": false, "misconception_id": "m_supervised_means_classification", "rationale": "A numeric target can supervise a loss; here it is generated from the input rather than externally annotated."},
+        {"id": "b", "text": "Accurate angle prediction establishes defect generalization because success on target-driven pretraining transfers to later labels.", "correct": false, "misconception_id": "m_supervised_labels_guarantee_generalization", "rationale": "Performance on the derived target is not independent evidence about defect recognition."},
+        {"id": "c", "text": "It is self-supervised target-driven fitting; whether its representation helps defects requires deployment-aligned downstream evaluation.", "correct": true, "misconception_id": null, "rationale": "The transformation supplies known targets without manual labels, while target-task usefulness remains an empirical question."},
+        {"id": "d", "text": "The generated angle becomes the deployment objective because an observed training target determines what the system should optimize.", "correct": false, "misconception_id": "m_supervision_identifies_deployment_goal", "rationale": "A convenient pretext target supplies a learning signal but does not define the later defect decision."}
+      ],
+      "source_ids": ["src_goodfellow_dl_2016", "src_expert_synthesis_2026"],
+      "provenance": {"method": "expert_authored_original_scenario", "created_on": "2026-07-20", "review_status": "structurally_validated_content_seed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["supervised_learning", "self_supervision", "derived_target", "transfer"]
     }
   ]
 }
