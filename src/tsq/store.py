@@ -34,7 +34,7 @@ from .models import (
 from .quality import audit_corpus
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Candidate retrieval deliberately has a separate, compact SQL kernel.  Keeping
 # it module-level lets the large-bank benchmark inspect the exact production
@@ -559,6 +559,38 @@ CREATE TABLE IF NOT EXISTS generation_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_generation_jobs_status ON generation_jobs(status, created_at);
 
+CREATE TABLE IF NOT EXISTS generation_job_runs (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL REFERENCES generation_jobs(id),
+    attempt INTEGER NOT NULL CHECK(attempt > 0),
+    status TEXT NOT NULL CHECK(status IN ('running', 'reviewed', 'rejected', 'failed')),
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    source_context_sha256 TEXT NOT NULL CHECK(length(source_context_sha256) = 64),
+    raw_output_json TEXT,
+    validation_json TEXT,
+    error_json TEXT,
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    UNIQUE(job_id, attempt),
+    CHECK(
+        (status = 'running' AND raw_output_json IS NULL
+         AND validation_json IS NULL AND error_json IS NULL
+         AND completed_at IS NULL)
+        OR
+        (status IN ('reviewed', 'rejected') AND raw_output_json IS NOT NULL
+         AND validation_json IS NOT NULL AND error_json IS NULL
+         AND completed_at IS NOT NULL)
+        OR
+        (status = 'failed' AND error_json IS NOT NULL
+         AND completed_at IS NOT NULL)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_generation_job_runs_job_attempt
+ON generation_job_runs(job_id, attempt);
+
 CREATE TABLE IF NOT EXISTS item_reviews (
     id TEXT PRIMARY KEY,
     question_id TEXT NOT NULL REFERENCES questions(id),
@@ -714,6 +746,7 @@ class Database:
                 # after every migration succeeds.
                 self._drop_corpus_registry_triggers(connection)
                 self._drop_release_snapshot_triggers(connection)
+                self._drop_v6_authoring_triggers(connection)
             connection.execute("PRAGMA journal_mode = WAL")
             connection.executescript(DDL)
             if current_version < 2:
@@ -734,11 +767,15 @@ class Database:
                     starting_version=starting_version,
                 )
                 current_version = 5
+            if current_version < 6:
+                self._migrate_v5_to_v6(connection)
+                current_version = 6
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
             )
             self._install_v5_indexes(connection)
+            self._install_v6_authoring_triggers(connection)
             self._install_v4_attempt_triggers(connection)
             self._install_release_snapshot_triggers(connection)
             self._install_corpus_registry_triggers(connection)
@@ -1418,6 +1455,171 @@ class Database:
         connection.execute("DROP INDEX IF EXISTS idx_one_pending_decision")
 
     @staticmethod
+    def _migrate_v5_to_v6(connection: sqlite3.Connection) -> None:
+        """Backfill immutable execution history for legacy authoring jobs.
+
+        Schema v5 retained only the latest mutable job summary.  A terminal
+        summary can be preserved as attempt one, but an interrupted ``running``
+        row cannot be proven complete and is therefore migrated to ``failed``.
+        Planned jobs have no execution history to backfill.
+        """
+
+        def strict_object(raw: str | None) -> dict[str, Any] | None:
+            if raw is None:
+                return None
+
+            def reject_constant(value: str) -> None:
+                raise ValueError(f"non-finite JSON constant {value}")
+
+            try:
+                value = json.loads(raw, parse_constant=reject_constant)
+            except (TypeError, ValueError):
+                return None
+            return value if type(value) is dict else None
+
+        def canonical(value: dict[str, Any]) -> str:
+            return json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+                allow_nan=False,
+            )
+
+        for row in connection.execute(
+            "SELECT * FROM generation_jobs ORDER BY created_at, id"
+        ).fetchall():
+            if connection.execute(
+                "SELECT 1 FROM generation_job_runs WHERE job_id = ? LIMIT 1",
+                (row["id"],),
+            ).fetchone():
+                continue
+            if row["status"] == "planned" and all(
+                row[field] is None
+                for field in ("provider", "model", "raw_output_json", "validation_json")
+            ):
+                continue
+
+            provider = (
+                row["provider"].strip()
+                if type(row["provider"]) is str and row["provider"].strip()
+                else "legacy-unknown-provider"
+            )
+            model = (
+                row["model"].strip()
+                if type(row["model"]) is str and row["model"].strip()
+                else "legacy-unknown-model"
+            )
+            prompt_version = (
+                row["prompt_version"].strip()
+                if type(row["prompt_version"]) is str and row["prompt_version"].strip()
+                else "legacy-unknown-prompt"
+            )
+            validation = strict_object(row["validation_json"])
+            raw_output = strict_object(row["raw_output_json"])
+            declared_context_hash = (
+                validation.get("source_context_sha256")
+                if validation is not None
+                else None
+            )
+            if not (
+                type(declared_context_hash) is str
+                and len(declared_context_hash) == 64
+                and all(character in "0123456789abcdef" for character in declared_context_hash)
+            ):
+                declared_context_hash = hashlib.sha256(
+                    f"legacy source context unavailable:{row['id']}".encode("utf-8")
+                ).hexdigest()
+
+            legacy_status = row["status"]
+            terminal_status = legacy_status
+            error_record: dict[str, Any] | None = None
+            if legacy_status not in {"reviewed", "rejected", "failed"}:
+                terminal_status = "failed"
+                error_record = {
+                    "error_type": "LegacyGenerationJobState",
+                    "error": (
+                        f"Legacy job state {legacy_status!r} was not a complete, "
+                        "verifiable execution and requires an explicit retry."
+                    ),
+                }
+            elif legacy_status in {"reviewed", "rejected"} and (
+                raw_output is None or validation is None
+            ):
+                terminal_status = "failed"
+                error_record = {
+                    "error_type": "LegacyGenerationJobState",
+                    "error": (
+                        "Legacy terminal authoring output was missing or invalid; "
+                        "the job requires an explicit retry."
+                    ),
+                }
+            elif legacy_status == "failed":
+                error_record = {
+                    "error_type": "LegacyGenerationJobFailure",
+                    "error": (
+                        str(validation.get("error"))
+                        if validation is not None and validation.get("error") is not None
+                        else "Legacy authoring attempt failed before schema v6."
+                    ),
+                }
+
+            completed_at = row["updated_at"] or row["created_at"]
+            run_id = "run_legacy_" + hashlib.sha256(
+                row["id"].encode("utf-8")
+            ).hexdigest()[:24]
+            if terminal_status == "failed":
+                assert error_record is not None
+                validation_json = canonical(error_record)
+                connection.execute(
+                    """UPDATE generation_jobs
+                       SET status='failed', provider=?, model=?, prompt_version=?,
+                           raw_output_json=NULL, validation_json=?, updated_at=?
+                       WHERE id=?""",
+                    (
+                        provider,
+                        model,
+                        prompt_version,
+                        validation_json,
+                        completed_at,
+                        row["id"],
+                    ),
+                )
+                raw_json = None
+                run_validation_json = None
+                error_json = validation_json
+            else:
+                raw_json = row["raw_output_json"]
+                run_validation_json = row["validation_json"]
+                error_json = None
+                connection.execute(
+                    """UPDATE generation_jobs SET provider=?, model=?, prompt_version=?
+                       WHERE id=?""",
+                    (provider, model, prompt_version, row["id"]),
+                )
+            connection.execute(
+                """INSERT INTO generation_job_runs(
+                       id, job_id, attempt, status, provider, model, prompt_version,
+                       source_context_sha256, raw_output_json, validation_json,
+                       error_json, started_at, completed_at
+                   ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    row["id"],
+                    terminal_status,
+                    provider,
+                    model,
+                    prompt_version,
+                    declared_context_hash,
+                    raw_json,
+                    run_validation_json,
+                    error_json,
+                    row["created_at"],
+                    completed_at,
+                ),
+            )
+
+    @staticmethod
     def _install_v5_indexes(connection: sqlite3.Connection) -> None:
         connection.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pending_decision
@@ -1427,6 +1629,128 @@ class Database:
         connection.execute(
             """CREATE INDEX IF NOT EXISTS idx_decisions_learner_question
                ON decisions(learner_id, question_id, created_at)"""
+        )
+
+    @staticmethod
+    def _install_v6_authoring_triggers(connection: sqlite3.Connection) -> None:
+        """Constrain job state transitions and make completed runs immutable."""
+
+        connection.executescript(
+            """
+            DROP TRIGGER IF EXISTS generation_jobs_validate_insert;
+            DROP TRIGGER IF EXISTS generation_jobs_validate_update;
+            DROP TRIGGER IF EXISTS generation_jobs_no_delete;
+            DROP TRIGGER IF EXISTS generation_job_runs_validate_insert;
+            DROP TRIGGER IF EXISTS generation_job_runs_validate_update;
+            DROP TRIGGER IF EXISTS generation_job_runs_no_delete;
+
+            CREATE TRIGGER generation_jobs_validate_insert
+            BEFORE INSERT ON generation_jobs BEGIN
+                SELECT CASE WHEN NEW.status != 'planned'
+                    THEN RAISE(ABORT, 'new generation jobs must be planned') END;
+                SELECT CASE WHEN NEW.provider IS NOT NULL OR NEW.model IS NOT NULL
+                                  OR NEW.raw_output_json IS NOT NULL
+                                  OR NEW.validation_json IS NOT NULL
+                    THEN RAISE(ABORT, 'planned generation job has execution data') END;
+            END;
+
+            CREATE TRIGGER generation_jobs_validate_update
+            BEFORE UPDATE ON generation_jobs BEGIN
+                SELECT CASE WHEN NEW.id IS NOT OLD.id
+                                  OR NEW.blueprint_json IS NOT OLD.blueprint_json
+                                  OR NEW.prompt_version IS NOT OLD.prompt_version
+                                  OR NEW.created_at IS NOT OLD.created_at
+                    THEN RAISE(ABORT, 'generation job identity is immutable') END;
+                SELECT CASE WHEN NOT (
+                    (OLD.status = 'planned' AND NEW.status = 'running')
+                    OR (OLD.status = 'running'
+                        AND NEW.status IN ('reviewed', 'rejected', 'failed'))
+                    OR (OLD.status IN ('rejected', 'failed')
+                        AND NEW.status = 'planned')
+                ) THEN RAISE(ABORT, 'invalid generation job transition') END;
+                SELECT CASE WHEN NEW.status = 'planned' AND (
+                                  NEW.provider IS NOT NULL OR NEW.model IS NOT NULL
+                                  OR NEW.raw_output_json IS NOT NULL
+                                  OR NEW.validation_json IS NOT NULL)
+                    THEN RAISE(ABORT, 'planned generation job has execution data') END;
+                SELECT CASE WHEN NEW.status = 'running' AND (
+                                  NEW.provider IS NULL OR trim(NEW.provider) = ''
+                                  OR NEW.model IS NULL OR trim(NEW.model) = ''
+                                  OR NEW.raw_output_json IS NOT NULL
+                                  OR NEW.validation_json IS NOT NULL)
+                    THEN RAISE(ABORT, 'running generation job has invalid execution data') END;
+                SELECT CASE WHEN NEW.status IN ('reviewed', 'rejected') AND (
+                                  NEW.provider IS NULL OR trim(NEW.provider) = ''
+                                  OR NEW.model IS NULL OR trim(NEW.model) = ''
+                                  OR NEW.raw_output_json IS NULL
+                                  OR NEW.validation_json IS NULL)
+                    THEN RAISE(ABORT, 'terminal generation job lacks reviewed output') END;
+                SELECT CASE WHEN NEW.status = 'failed' AND (
+                                  NEW.provider IS NULL OR trim(NEW.provider) = ''
+                                  OR NEW.model IS NULL OR trim(NEW.model) = ''
+                                  OR NEW.validation_json IS NULL)
+                    THEN RAISE(ABORT, 'failed generation job lacks error data') END;
+            END;
+
+            CREATE TRIGGER generation_jobs_no_delete
+            BEFORE DELETE ON generation_jobs BEGIN
+                SELECT RAISE(ABORT, 'generation jobs are immutable records');
+            END;
+
+            CREATE TRIGGER generation_job_runs_validate_insert
+            BEFORE INSERT ON generation_job_runs BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM generation_jobs job
+                    WHERE job.id = NEW.job_id
+                      AND job.status = 'running'
+                      AND job.provider = NEW.provider
+                      AND job.model = NEW.model
+                      AND job.prompt_version = NEW.prompt_version
+                ) THEN RAISE(ABORT, 'generation run does not match running job') END;
+                SELECT CASE WHEN NEW.attempt != COALESCE((
+                    SELECT MAX(run.attempt) + 1 FROM generation_job_runs run
+                    WHERE run.job_id = NEW.job_id
+                ), 1) THEN RAISE(ABORT, 'generation run attempt is not sequential') END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM generation_job_runs run
+                    WHERE run.job_id = NEW.job_id AND run.status = 'running'
+                ) THEN RAISE(ABORT, 'generation job already has a running attempt') END;
+            END;
+
+            CREATE TRIGGER generation_job_runs_validate_update
+            BEFORE UPDATE ON generation_job_runs BEGIN
+                SELECT CASE WHEN OLD.status != 'running'
+                                  OR NEW.status NOT IN ('reviewed', 'rejected', 'failed')
+                    THEN RAISE(ABORT, 'completed generation runs are immutable') END;
+                SELECT CASE WHEN NEW.id IS NOT OLD.id
+                                  OR NEW.job_id IS NOT OLD.job_id
+                                  OR NEW.attempt IS NOT OLD.attempt
+                                  OR NEW.provider IS NOT OLD.provider
+                                  OR NEW.model IS NOT OLD.model
+                                  OR NEW.prompt_version IS NOT OLD.prompt_version
+                                  OR NEW.source_context_sha256 IS NOT OLD.source_context_sha256
+                                  OR NEW.started_at IS NOT OLD.started_at
+                    THEN RAISE(ABORT, 'generation run identity is immutable') END;
+            END;
+
+            CREATE TRIGGER generation_job_runs_no_delete
+            BEFORE DELETE ON generation_job_runs BEGIN
+                SELECT RAISE(ABORT, 'generation runs are immutable');
+            END;
+            """
+        )
+
+    @staticmethod
+    def _drop_v6_authoring_triggers(connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            DROP TRIGGER IF EXISTS generation_jobs_validate_insert;
+            DROP TRIGGER IF EXISTS generation_jobs_validate_update;
+            DROP TRIGGER IF EXISTS generation_jobs_no_delete;
+            DROP TRIGGER IF EXISTS generation_job_runs_validate_insert;
+            DROP TRIGGER IF EXISTS generation_job_runs_validate_update;
+            DROP TRIGGER IF EXISTS generation_job_runs_no_delete;
+            """
         )
 
     @contextmanager
@@ -2968,8 +3292,8 @@ class Database:
             if raw is None:
                 return None
             try:
-                value = json.loads(raw)
-            except (TypeError, json.JSONDecodeError) as exc:
+                value = json.loads(raw, parse_constant=reject_non_finite_json_constant)
+            except (TypeError, ValueError) as exc:
                 errors.append(f"{label}: invalid JSON ({exc})")
                 return None
             if not isinstance(value, expected_type):
@@ -2996,6 +3320,215 @@ class Database:
             ]
             if foreign_key_failures:
                 errors.append(f"{len(foreign_key_failures)} foreign-key violations")
+
+            # Offline generation is intentionally outside the live question
+            # registry, but its operational history still needs ledger-like
+            # guarantees. Validate every mutable job summary against its
+            # immutable attempts and their self-contained attestations.
+            job_rows = connection.execute(
+                "SELECT * FROM generation_jobs ORDER BY created_at, id"
+            ).fetchall()
+            run_rows = connection.execute(
+                "SELECT * FROM generation_job_runs ORDER BY job_id, attempt"
+            ).fetchall()
+            runs_by_job: dict[str, list[sqlite3.Row]] = {}
+            for run in run_rows:
+                runs_by_job.setdefault(run["job_id"], []).append(run)
+                prefix = f"generation run {run['id']}"
+                if run["status"] not in {"running", "reviewed", "rejected", "failed"}:
+                    errors.append(f"{prefix}: invalid status {run['status']!r}")
+                if not run["provider"] or not run["model"] or not run["prompt_version"]:
+                    errors.append(f"{prefix}: incomplete provider provenance")
+                context_hash = run["source_context_sha256"]
+                if not (
+                    type(context_hash) is str
+                    and len(context_hash) == 64
+                    and all(character in "0123456789abcdef" for character in context_hash)
+                ):
+                    errors.append(f"{prefix}: invalid source-context hash")
+                raw_output = (
+                    json_value(run["raw_output_json"], f"{prefix} raw output", dict)
+                    if run["raw_output_json"] is not None
+                    else None
+                )
+                validation = (
+                    json_value(run["validation_json"], f"{prefix} validation", dict)
+                    if run["validation_json"] is not None
+                    else None
+                )
+                error_record = (
+                    json_value(run["error_json"], f"{prefix} error", dict)
+                    if run["error_json"] is not None
+                    else None
+                )
+                if run["status"] == "running":
+                    if any(
+                        value is not None
+                        for value in (raw_output, validation, error_record, run["completed_at"])
+                    ):
+                        errors.append(f"{prefix}: running attempt has terminal output")
+                    continue
+                if run["completed_at"] is None:
+                    errors.append(f"{prefix}: terminal attempt has no completion time")
+                if run["status"] in {"reviewed", "rejected"}:
+                    if raw_output is None or validation is None or error_record is not None:
+                        errors.append(f"{prefix}: reviewed attempt has invalid output shape")
+                        continue
+                    if raw_output.get("status") != "quarantined":
+                        errors.append(f"{prefix}: generated artifact is not quarantined")
+                    if validation.get("source_context_sha256") != context_hash:
+                        errors.append(f"{prefix}: source-context attestation mismatch")
+
+                    def attestation_hash(value: Any) -> str | None:
+                        try:
+                            encoded = json.dumps(
+                                value,
+                                sort_keys=True,
+                                separators=(",", ":"),
+                                ensure_ascii=False,
+                                allow_nan=False,
+                            ).encode("utf-8")
+                        except (TypeError, ValueError):
+                            return None
+                        return hashlib.sha256(encoded).hexdigest()
+
+                    generator_provenance = validation.get("generator_provenance")
+                    if type(generator_provenance) is not dict or validation.get(
+                        "generator_provenance_sha256"
+                    ) != attestation_hash(generator_provenance):
+                        errors.append(f"{prefix}: generator provenance hash mismatch")
+                    reviews = validation.get("reviews")
+                    if type(reviews) is not list:
+                        errors.append(f"{prefix}: validation has no review array")
+                    else:
+                        if validation.get("reviews_sha256") != attestation_hash(reviews):
+                            errors.append(f"{prefix}: review-set hash mismatch")
+                        reviewer_names: set[str] = set()
+                        reviewer_models: set[tuple[str, str]] = set()
+                        all_accept = bool(reviews)
+                        for index, review in enumerate(reviews):
+                            review_prefix = f"{prefix} review {index + 1}"
+                            if type(review) is not dict:
+                                errors.append(f"{review_prefix}: record is not an object")
+                                all_accept = False
+                                continue
+                            provenance = review.get("reviewer")
+                            output = review.get("output")
+                            if type(provenance) is not dict or review.get(
+                                "reviewer_provenance_sha256"
+                            ) != attestation_hash(provenance):
+                                errors.append(
+                                    f"{review_prefix}: reviewer provenance hash mismatch"
+                                )
+                            if type(output) is not dict or review.get(
+                                "reviewer_output_sha256"
+                            ) != attestation_hash(output):
+                                errors.append(f"{review_prefix}: output hash mismatch")
+                            reviewer_name = (
+                                provenance.get("reviewer_name")
+                                if type(provenance) is dict
+                                else None
+                            )
+                            normalized_name = (
+                                " ".join(reviewer_name.split()).casefold()
+                                if type(reviewer_name) is str
+                                else ""
+                            )
+                            if not normalized_name or normalized_name in reviewer_names:
+                                errors.append(
+                                    f"{review_prefix}: missing or duplicate reviewer identity"
+                                )
+                            reviewer_names.add(normalized_name)
+                            if type(provenance) is dict:
+                                provider = provenance.get("provider_name")
+                                model = provenance.get("model_name")
+                                if type(provider) is str and type(model) is str:
+                                    model_identity = (
+                                        " ".join(provider.split()).casefold(),
+                                        " ".join(model.split()).casefold(),
+                                    )
+                                    if model_identity in reviewer_models:
+                                        errors.append(
+                                            f"{review_prefix}: duplicate reviewer model identity"
+                                        )
+                                    reviewer_models.add(model_identity)
+                                    if model_identity == (
+                                        " ".join(run["provider"].split()).casefold(),
+                                        " ".join(run["model"].split()).casefold(),
+                                    ):
+                                        errors.append(
+                                            f"{review_prefix}: reviewer shares generator model"
+                                        )
+                            if not (
+                                review.get("valid") is True
+                                and type(output) is dict
+                                and output.get("verdict") == "accept"
+                            ):
+                                all_accept = False
+                        deterministic_issues = validation.get("deterministic_issues")
+                        deterministic_errors = (
+                            [
+                                issue
+                                for issue in deterministic_issues
+                                if type(issue) is dict and issue.get("severity") == "error"
+                            ]
+                            if type(deterministic_issues) is list
+                            else ["malformed"]
+                        )
+                        should_be_reviewed = all_accept and not deterministic_errors
+                        if (run["status"] == "reviewed") != should_be_reviewed:
+                            errors.append(f"{prefix}: terminal verdict mismatch")
+                elif error_record is None:
+                    errors.append(f"{prefix}: failed attempt has no error record")
+
+            valid_job_statuses = {"planned", "running", "reviewed", "rejected", "failed"}
+            for job in job_rows:
+                prefix = f"generation job {job['id']}"
+                status = job["status"]
+                if status not in valid_job_statuses:
+                    errors.append(f"{prefix}: invalid status {status!r}")
+                blueprint = json_value(job["blueprint_json"], f"{prefix} blueprint", dict)
+                if blueprint is not None and not blueprint:
+                    errors.append(f"{prefix}: blueprint is empty")
+                runs = runs_by_job.get(job["id"], [])
+                attempts = [run["attempt"] for run in runs]
+                if attempts != list(range(1, len(runs) + 1)):
+                    errors.append(f"{prefix}: run attempts are not contiguous from one")
+                running_runs = [run for run in runs if run["status"] == "running"]
+                latest = runs[-1] if runs else None
+                if status == "planned":
+                    if running_runs:
+                        errors.append(f"{prefix}: planned job has a running attempt")
+                    if any(
+                        job[field] is not None
+                        for field in (
+                            "provider",
+                            "model",
+                            "raw_output_json",
+                            "validation_json",
+                        )
+                    ):
+                        errors.append(f"{prefix}: planned job retains execution summary")
+                elif latest is None:
+                    errors.append(f"{prefix}: non-planned job has no run history")
+                else:
+                    if latest["status"] != status:
+                        errors.append(f"{prefix}: summary status differs from latest run")
+                    if job["provider"] != latest["provider"] or job["model"] != latest["model"]:
+                        errors.append(f"{prefix}: provider summary differs from latest run")
+                    if status == "running" and (
+                        len(running_runs) != 1 or running_runs[0]["id"] != latest["id"]
+                    ):
+                        errors.append(f"{prefix}: running summary has no unique latest owner")
+                    if status != "running" and running_runs:
+                        errors.append(f"{prefix}: terminal summary retains a running attempt")
+                    if status in {"reviewed", "rejected"} and (
+                        job["raw_output_json"] != latest["raw_output_json"]
+                        or job["validation_json"] != latest["validation_json"]
+                    ):
+                        errors.append(f"{prefix}: artifact summary differs from latest run")
+                    if status == "failed" and job["validation_json"] != latest["error_json"]:
+                        errors.append(f"{prefix}: failure summary differs from latest run")
 
             # A release is only immutable if both its membership rows and the
             # versioned registry content addressed by those rows are intact.

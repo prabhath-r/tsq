@@ -6,15 +6,20 @@ import copy
 import hashlib
 import io
 import json
+import sqlite3
 import tempfile
+import threading
+import time
 import unittest
 from argparse import Namespace
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from tsq.authoring import CoveragePlanner, OfflineAuthoringPipeline
-from tsq.cli import command_topics
+from tsq.authoring import AuthoringJobs, CoveragePlanner, OfflineAuthoringPipeline
+from tsq.cli import command_topics, main
 from tsq.corpus import read_and_parse
+from tsq.errors import ConflictError
 from tsq.store import Database
 
 
@@ -83,6 +88,23 @@ class FakeGenerator:
 class BrokenGenerator(FakeGenerator):
     def generate(self, blueprint, source_context):
         return {"id": "broken-generated-item", "status": "approved", "stem": "Too thin"}
+
+
+class FailingGenerator(FakeGenerator):
+    def generate(self, blueprint, source_context):
+        raise RuntimeError("deterministic provider failure")
+
+
+class CountingGenerator(FakeGenerator):
+    def __init__(self):
+        self.calls = 0
+        self.lock = threading.Lock()
+
+    def generate(self, blueprint, source_context):
+        with self.lock:
+            self.calls += 1
+        time.sleep(0.03)
+        return super().generate(blueprint, source_context)
 
 
 class CoercionAttackGenerator(FakeGenerator):
@@ -455,6 +477,218 @@ class AuthoringTestCase(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["status"], "rejected")
         json.loads(row["validation_json"])
+
+    def test_generation_runs_are_claimed_once_and_recorded_immutably(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        generator = CountingGenerator()
+        pipeline = OfflineAuthoringPipeline(
+            self.database, generator, (AcceptingReviewer(),)
+        )
+
+        def execute():
+            try:
+                pipeline.run_job(job_id, "approved source excerpt")
+                return "reviewed"
+            except ConflictError:
+                return "conflict"
+
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            outcomes = list(executor.map(lambda _: execute(), range(8)))
+
+        self.assertEqual(outcomes.count("reviewed"), 1)
+        self.assertEqual(outcomes.count("conflict"), 7)
+        self.assertEqual(generator.calls, 1)
+        job = AuthoringJobs(self.database).show(job_id)
+        self.assertEqual(job["status"], "reviewed")
+        self.assertEqual(job["run_count"], 1)
+        self.assertEqual(job["runs"][0]["attempt"], 1)
+        self.assertEqual(job["runs"][0]["status"], "reviewed")
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.database.transaction() as connection:
+                connection.execute(
+                    "UPDATE generation_job_runs SET status='rejected' WHERE job_id=?",
+                    (job_id,),
+                )
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.database.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM generation_job_runs WHERE job_id=?", (job_id,)
+                )
+
+    def test_rejected_job_retry_preserves_prior_attempt(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        first = OfflineAuthoringPipeline(
+            self.database, BrokenGenerator(), (AcceptingReviewer(),)
+        ).run_job(job_id, "approved source excerpt")
+        self.assertEqual(first["status"], "rejected")
+        before = AuthoringJobs(self.database).show(job_id)
+        first_raw = before["runs"][0]["raw_output"]
+
+        planned = AuthoringJobs(self.database).retry(job_id)
+        self.assertEqual(planned["status"], "planned")
+        self.assertIsNone(planned["raw_output"])
+        second = OfflineAuthoringPipeline(
+            self.database, FakeGenerator(), (AcceptingReviewer(),)
+        ).run_job(job_id, "approved source excerpt")
+        self.assertEqual(second["status"], "reviewed")
+
+        after = AuthoringJobs(self.database).show(job_id)
+        self.assertEqual([run["attempt"] for run in after["runs"]], [1, 2])
+        self.assertEqual(
+            [run["status"] for run in after["runs"]], ["rejected", "reviewed"]
+        )
+        self.assertEqual(after["runs"][0]["raw_output"], first_raw)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_failed_job_requires_explicit_retry(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        with self.assertRaisesRegex(RuntimeError, "deterministic provider failure"):
+            OfflineAuthoringPipeline(
+                self.database, FailingGenerator(), (AcceptingReviewer(),)
+            ).run_job(job_id, "approved source excerpt")
+        failed = AuthoringJobs(self.database).show(job_id)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["runs"][0]["status"], "failed")
+        self.assertIn("RuntimeError", failed["runs"][0]["error"]["error_type"])
+        with self.assertRaises(ConflictError):
+            OfflineAuthoringPipeline(
+                self.database, FakeGenerator(), (AcceptingReviewer(),)
+            ).run_job(job_id, "approved source excerpt")
+        retried = AuthoringJobs(self.database).retry(job_id)
+        self.assertEqual(retried["status"], "planned")
+        self.assertEqual(retried["run_count"], 1)
+
+    def test_cli_can_list_show_run_retry_and_inspect_reviews(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        source_context = Path(self.tempdir.name) / "approved-source.txt"
+        source_context.write_text(
+            "Approved deterministic test context for offline authoring operations.",
+            encoding="utf-8",
+        )
+        with self.database.read() as connection:
+            before_questions = connection.execute(
+                "SELECT COUNT(*) AS n FROM questions"
+            ).fetchone()["n"]
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "jobs",
+                    "run",
+                    job_id,
+                    "--provider",
+                    "deterministic-test",
+                    "--source-context",
+                    str(source_context),
+                    "--json",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        run_result = json.loads(output.getvalue())
+        self.assertEqual(run_result["status"], "reviewed")
+        self.assertEqual(run_result["item"]["status"], "quarantined")
+
+        for arguments, expected_type in (
+            (["jobs", "list", "--status", "reviewed", "--json"], list),
+            (["jobs", "show", job_id, "--json"], dict),
+            (["reviews", "show", job_id, "--json"], dict),
+        ):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
+                    ["--db", str(self.database.path), *arguments]
+                )
+            self.assertEqual(exit_code, 0)
+            self.assertIsInstance(json.loads(output.getvalue()), expected_type)
+
+        with self.database.read() as connection:
+            after_questions = connection.execute(
+                "SELECT COUNT(*) AS n FROM questions"
+            ).fetchone()["n"]
+            generated_question = connection.execute(
+                "SELECT 1 FROM questions WHERE id = ?",
+                (run_result["item"]["id"],),
+            ).fetchone()
+        self.assertEqual(after_questions, before_questions)
+        self.assertIsNone(generated_question)
+
+        rejected_gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        rejected_job = CoveragePlanner(self.database).enqueue([rejected_gap])[0]
+        if rejected_job == job_id:
+            # A reviewed job is closed, so the planner must allocate a new one.
+            self.fail("Coverage planner reused a closed generation job")
+        OfflineAuthoringPipeline(
+            self.database, BrokenGenerator(), (AcceptingReviewer(),)
+        ).run_job(rejected_job, "approved source excerpt")
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "jobs",
+                    "retry",
+                    rejected_job,
+                    "--json",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(output.getvalue())["status"], "planned")
+
+    def test_v5_running_job_migrates_fail_closed_with_history(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        with self.database.transaction() as connection:
+            self.database._drop_v6_authoring_triggers(connection)
+            connection.execute(
+                """UPDATE generation_jobs
+                   SET status='running', provider='legacy-provider', model='legacy-model'
+                   WHERE id=?""",
+                (job_id,),
+            )
+            connection.execute(
+                "UPDATE meta SET value='5' WHERE key='schema_version'"
+            )
+
+        self.database.initialize()
+
+        migrated = AuthoringJobs(self.database).show(job_id)
+        self.assertEqual(migrated["status"], "failed")
+        self.assertEqual(migrated["run_count"], 1)
+        self.assertEqual(migrated["runs"][0]["status"], "failed")
+        self.assertIn("explicit retry", migrated["runs"][0]["error"]["error"])
+        self.assertTrue(self.database.verify_integrity()["ok"])
 
 
 if __name__ == "__main__":

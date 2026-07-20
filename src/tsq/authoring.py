@@ -18,6 +18,7 @@ from .models import (
     QuestionKind,
     QuestionStatus,
 )
+from .errors import ConflictError, NotFoundError, ValidationError
 from .quality import validate_question
 from .store import Database, new_id
 
@@ -174,6 +175,100 @@ class GenerationBlueprint:
         "The stem requires reasoning; no answer-position or wording clue is usable.",
         "Every option has a local rationale and every factual claim is source-grounded.",
     )
+
+
+def _decode_json(
+    raw: str | None,
+    *,
+    label: str,
+    expected_type: type[Any],
+    nullable: bool = False,
+) -> Any:
+    """Decode persisted authoring JSON without accepting NaN or scalar coercion."""
+
+    if raw is None:
+        if nullable:
+            return None
+        raise ValidationError(f"{label} is missing.")
+
+    def reject_constant(value: str) -> None:
+        raise ValueError(f"non-finite JSON constant {value}")
+
+    try:
+        value = json.loads(raw, parse_constant=reject_constant)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{label} contains invalid JSON: {exc}") from exc
+    if type(value) is not expected_type:
+        raise ValidationError(
+            f"{label} must contain a JSON {expected_type.__name__}, "
+            f"not {type(value).__name__}."
+        )
+    return value
+
+
+def _parse_blueprint(raw: str, *, label: str = "Generation blueprint") -> GenerationBlueprint:
+    payload = _decode_json(raw, label=label, expected_type=dict)
+    required = {
+        "concept_id",
+        "concept_name",
+        "kind",
+        "target_difficulty",
+        "misconception_ids",
+        "source_ids",
+        "family_constraint",
+    }
+    allowed = required | {"quality_contract"}
+    missing = required - set(payload)
+    unknown = set(payload) - allowed
+    if missing:
+        raise ValidationError(f"{label} is missing fields: {', '.join(sorted(missing))}.")
+    if unknown:
+        raise ValidationError(f"{label} has unknown fields: {', '.join(sorted(unknown))}.")
+    for field in ("concept_id", "concept_name", "kind", "family_constraint"):
+        if type(payload[field]) is not str or not payload[field].strip():
+            raise ValidationError(f"{label} field {field!r} must be a non-empty string.")
+    if payload["kind"] not in {kind.value for kind in QuestionKind}:
+        raise ValidationError(f"{label} has unsupported question kind {payload['kind']!r}.")
+    difficulty = payload["target_difficulty"]
+    if type(difficulty) not in {int, float} or not isfinite(difficulty):
+        raise ValidationError(f"{label} target_difficulty must be a finite JSON number.")
+    if not -3.0 <= float(difficulty) <= 3.0:
+        raise ValidationError(f"{label} target_difficulty must be between -3 and 3.")
+
+    arrays: dict[str, tuple[str, ...]] = {}
+    for field in ("misconception_ids", "source_ids"):
+        value = payload[field]
+        if type(value) is not list or any(
+            type(entry) is not str or not entry.strip() for entry in value
+        ):
+            raise ValidationError(f"{label} field {field!r} must be an array of strings.")
+        if len(value) != len(set(value)):
+            raise ValidationError(f"{label} field {field!r} contains duplicate IDs.")
+        arrays[field] = tuple(value)
+    if not arrays["source_ids"]:
+        raise ValidationError(f"{label} must cite at least one approved source ID.")
+
+    quality_contract = payload.get("quality_contract")
+    if quality_contract is not None and (
+        type(quality_contract) is not list
+        or not quality_contract
+        or any(type(entry) is not str or not entry.strip() for entry in quality_contract)
+    ):
+        raise ValidationError(
+            f"{label} field 'quality_contract' must be a non-empty array of strings."
+        )
+    kwargs: dict[str, Any] = {
+        "concept_id": payload["concept_id"],
+        "concept_name": payload["concept_name"],
+        "kind": payload["kind"],
+        "target_difficulty": float(difficulty),
+        "misconception_ids": arrays["misconception_ids"],
+        "source_ids": arrays["source_ids"],
+        "family_constraint": payload["family_constraint"],
+    }
+    if quality_contract is not None:
+        kwargs["quality_contract"] = tuple(quality_contract)
+    return GenerationBlueprint(**kwargs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +451,350 @@ class CoveragePlanner:
                 job_ids.append(job_id)
                 existing[blueprint_json] = job_id
         return job_ids
+
+
+class AuthoringJobs:
+    """Read and transition quarantined authoring work without activating items."""
+
+    STATUSES = frozenset({"planned", "running", "reviewed", "rejected", "failed"})
+
+    def __init__(self, database: Database):
+        self.database = database
+
+    @staticmethod
+    def _run_record(row: Any) -> dict[str, Any]:
+        record = dict(row)
+        record["raw_output"] = _decode_json(
+            record.pop("raw_output_json"),
+            label=f"Generation run {record['id']} raw output",
+            expected_type=dict,
+            nullable=True,
+        )
+        record["validation"] = _decode_json(
+            record.pop("validation_json"),
+            label=f"Generation run {record['id']} validation",
+            expected_type=dict,
+            nullable=True,
+        )
+        record["error"] = _decode_json(
+            record.pop("error_json"),
+            label=f"Generation run {record['id']} error",
+            expected_type=dict,
+            nullable=True,
+        )
+        return record
+
+    @staticmethod
+    def _job_record(row: Any, *, include_artifact: bool) -> dict[str, Any]:
+        record = dict(row)
+        record["blueprint"] = asdict(
+            _parse_blueprint(
+                record.pop("blueprint_json"),
+                label=f"Generation job {record['id']} blueprint",
+            )
+        )
+        raw_json = record.pop("raw_output_json")
+        validation_json = record.pop("validation_json")
+        if include_artifact:
+            record["raw_output"] = _decode_json(
+                raw_json,
+                label=f"Generation job {record['id']} raw output",
+                expected_type=dict,
+                nullable=True,
+            )
+            record["validation"] = _decode_json(
+                validation_json,
+                label=f"Generation job {record['id']} validation",
+                expected_type=dict,
+                nullable=True,
+            )
+        else:
+            record["has_artifact"] = raw_json is not None
+            record["has_validation"] = validation_json is not None
+        return record
+
+    def list(self, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        if status is not None and status not in self.STATUSES:
+            raise ValidationError(f"Unknown generation job status: {status!r}.")
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValidationError("Generation job list limit must be an integer from 1 to 500.")
+        where = "WHERE job.status = ?" if status is not None else ""
+        parameters: tuple[Any, ...] = (status, limit) if status is not None else (limit,)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                f"""SELECT job.*, COUNT(run.id) AS run_count
+                    FROM generation_jobs job
+                    LEFT JOIN generation_job_runs run ON run.job_id = job.id
+                    {where}
+                    GROUP BY job.id
+                    ORDER BY job.created_at DESC, job.id DESC
+                    LIMIT ?""",
+                parameters,
+            ).fetchall()
+        return [self._job_record(row, include_artifact=False) for row in rows]
+
+    def show(self, job_id: str) -> dict[str, Any]:
+        if type(job_id) is not str or not job_id.strip():
+            raise ValidationError("Generation job ID must be a non-empty string.")
+        with self.database.read() as connection:
+            row = connection.execute(
+                """SELECT job.*, COUNT(run.id) AS run_count
+                   FROM generation_jobs job
+                   LEFT JOIN generation_job_runs run ON run.job_id = job.id
+                   WHERE job.id = ? GROUP BY job.id""",
+                (job_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(f"Unknown generation job: {job_id}")
+            run_rows = connection.execute(
+                """SELECT * FROM generation_job_runs
+                   WHERE job_id = ? ORDER BY attempt""",
+                (job_id,),
+            ).fetchall()
+        record = self._job_record(row, include_artifact=True)
+        record["runs"] = [self._run_record(run) for run in run_rows]
+        return record
+
+    def reviews(self, job_id: str) -> dict[str, Any]:
+        job = self.show(job_id)
+        review_attempts: list[dict[str, Any]] = []
+        for run in job["runs"]:
+            validation = run["validation"]
+            if validation is None:
+                continue
+            reviews = validation.get("reviews")
+            if type(reviews) is not list:
+                raise ValidationError(
+                    f"Generation run {run['id']} validation has no JSON review array."
+                )
+            if any(type(review) is not dict for review in reviews):
+                raise ValidationError(
+                    f"Generation run {run['id']} contains a malformed review record."
+                )
+            review_attempts.append(
+                {
+                    "attempt": run["attempt"],
+                    "run_id": run["id"],
+                    "status": run["status"],
+                    "reviews": reviews,
+                }
+            )
+        return {
+            "job_id": job_id,
+            "job_status": job["status"],
+            "review_attempts": review_attempts,
+        }
+
+    def retry(self, job_id: str, *, recover_running: bool = False) -> dict[str, Any]:
+        if type(recover_running) is not bool:
+            raise TypeError("recover_running must be a boolean.")
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            job = connection.execute(
+                "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
+            if job is None:
+                raise NotFoundError(f"Unknown generation job: {job_id}")
+            status = job["status"]
+            if status == "running":
+                if not recover_running:
+                    raise ConflictError(
+                        f"Generation job {job_id} is running; use explicit running "
+                        "recovery only after confirming no worker still owns it."
+                    )
+                running_runs = connection.execute(
+                    """SELECT * FROM generation_job_runs
+                       WHERE job_id = ? AND status = 'running' ORDER BY attempt""",
+                    (job_id,),
+                ).fetchall()
+                if len(running_runs) != 1:
+                    raise ValidationError(
+                        f"Generation job {job_id} does not have exactly one running attempt."
+                    )
+                error = {
+                    "error_type": "InterruptedGenerationRun",
+                    "error": "Running attempt was explicitly recovered by an operator.",
+                }
+                error_json = _canonical_json(error)
+                connection.execute(
+                    """UPDATE generation_job_runs
+                       SET status='failed', error_json=?, completed_at=? WHERE id=?""",
+                    (error_json, now, running_runs[0]["id"]),
+                )
+                connection.execute(
+                    """UPDATE generation_jobs
+                       SET status='failed', validation_json=?, updated_at=? WHERE id=?""",
+                    (error_json, now, job_id),
+                )
+                status = "failed"
+            if status not in {"failed", "rejected"}:
+                raise ConflictError(
+                    f"Generation job {job_id} is {status}; only failed or rejected "
+                    "jobs can be retried."
+                )
+            latest = connection.execute(
+                """SELECT status FROM generation_job_runs
+                   WHERE job_id = ? ORDER BY attempt DESC LIMIT 1""",
+                (job_id,),
+            ).fetchone()
+            if latest is None or latest["status"] != status:
+                raise ValidationError(
+                    f"Generation job {job_id} summary does not match immutable run history."
+                )
+            updated = connection.execute(
+                """UPDATE generation_jobs
+                   SET status='planned', provider=NULL, model=NULL,
+                       raw_output_json=NULL, validation_json=NULL, updated_at=?
+                   WHERE id=? AND status=?""",
+                (now, job_id, status),
+            )
+            if updated.rowcount != 1:
+                raise ConflictError(f"Generation job {job_id} changed while retrying.")
+        return self.show(job_id)
+
+
+class DeterministicTestGenerator:
+    """Explicit test-only provider for exercising authoring operations offline."""
+
+    provider_name = "deterministic-test-generator"
+    model_name = "blueprint-fixture-v1"
+
+    def __init__(self, misconceptions: dict[str, tuple[str, str]]):
+        self._misconceptions = copy.deepcopy(misconceptions)
+
+    def generate(
+        self, blueprint: GenerationBlueprint, source_context: str
+    ) -> dict[str, Any]:
+        material = {
+            "blueprint": asdict(blueprint),
+            "source_context_sha256": _sha256_text(source_context),
+        }
+        digest = _sha256_json(material)
+        misconception_ids = blueprint.misconception_ids
+        if not misconception_ids:
+            # This deliberately yields an invalid artifact rather than inventing
+            # an unnamed distractor. Deterministic validation will reject it.
+            misconception_ids = ("missing_named_misconception",)
+        distractor_ids = tuple(
+            misconception_ids[index % len(misconception_ids)] for index in range(3)
+        )
+        distractor_options: list[dict[str, Any]] = []
+        option_ids = ("a", "c", "d")
+        for index, (option_id, misconception_id) in enumerate(
+            zip(option_ids, distractor_ids, strict=True), start=1
+        ):
+            name, description = self._misconceptions.get(
+                misconception_id,
+                (misconception_id, "No registered misconception description is available."),
+            )
+            distractor_options.append(
+                {
+                    "id": option_id,
+                    "text": (
+                        f"Adopt misconception {index}, {name}: {description}"
+                    ),
+                    "correct": False,
+                    "misconception_id": misconception_id,
+                    "rationale": (
+                        f"This option directly states the named misconception {name}; "
+                        "it is retained only as a quarantined fixture distractor."
+                    ),
+                }
+            )
+        return {
+            "id": f"q_generated_fixture_{digest[:20]}",
+            "version": 1,
+            "family_id": f"f_generated_fixture_{digest[20:40]}",
+            "status": "quarantined",
+            "stem": (
+                f"A practitioner is evaluating a claim about {blueprint.concept_name}. "
+                "Which response best separates supported reasoning from a named "
+                "misconception under the supplied source context?"
+            ),
+            "kind": blueprint.kind,
+            "difficulty": blueprint.target_difficulty,
+            "discrimination": 1.0,
+            "guess_rate": 0.25,
+            "slip_rate": 0.05,
+            "concepts": [
+                {
+                    "concept_id": blueprint.concept_id,
+                    "weight": 1.0,
+                    "role": "primary",
+                }
+            ],
+            "source_ids": list(blueprint.source_ids),
+            "options": [
+                distractor_options[0],
+                {
+                    "id": "b",
+                    "text": (
+                        "State the governing assumptions, compare the claim with the "
+                        "approved source evidence, and preserve unresolved uncertainty."
+                    ),
+                    "correct": True,
+                    "misconception_id": None,
+                    "rationale": (
+                        "This response tests assumptions against evidence without "
+                        "turning an unsupported shortcut into a conclusion."
+                    ),
+                },
+                distractor_options[1],
+                distractor_options[2],
+            ],
+            "provenance": {"deterministic_test_fixture": True},
+            "tags": ["generated-fixture", "test-provider"],
+            "revision_of": None,
+        }
+
+
+class DeterministicTestReviewer:
+    """Separate deterministic shape reviewer for the test provider."""
+
+    reviewer_name = "deterministic-independent-fixture-reviewer"
+    provider_name = "deterministic-test-reviewer"
+    model_name = "blind-shape-review-v1"
+
+    def review(self, item: dict[str, Any], source_context: str) -> dict[str, Any]:
+        options = item.get("options")
+        option_ids = (
+            [option.get("id") for option in options if type(option) is dict]
+            if type(options) is list
+            else []
+        )
+        checks = {
+            "nonempty_source_context": bool(source_context.strip()),
+            "reasoning_stem": type(item.get("stem")) is str and len(item["stem"]) >= 40,
+            "four_distinct_options": (
+                len(option_ids) == 4 and len(set(option_ids)) == 4
+            ),
+            "source_ids_present": (
+                type(item.get("source_ids")) is list and bool(item["source_ids"])
+            ),
+        }
+        return {
+            "verdict": "accept" if all(checks.values()) else "reject",
+            "independent": True,
+            "checks": checks,
+            "source_context_sha256": _sha256_text(source_context),
+        }
+
+
+def deterministic_test_pipeline(database: Database) -> "OfflineAuthoringPipeline":
+    """Build the only bundled provider pair; it is explicit and test-only."""
+
+    with database.read() as connection:
+        misconceptions = {
+            row["id"]: (row["name"], row["description"])
+            for row in connection.execute(
+                "SELECT id, name, description FROM misconceptions ORDER BY id"
+            )
+        }
+    return OfflineAuthoringPipeline(
+        database,
+        DeterministicTestGenerator(misconceptions),
+        (DeterministicTestReviewer(),),
+    )
 
 
 class OfflineAuthoringPipeline:
@@ -706,20 +1145,68 @@ class OfflineAuthoringPipeline:
         return issues
 
     def run_job(self, job_id: str, source_context: str) -> dict[str, Any]:
+        if type(job_id) is not str or not job_id.strip():
+            raise ValidationError("Generation job ID must be a non-empty string.")
         if type(source_context) is not str:
             raise TypeError("source_context must be a string; implicit coercion is forbidden.")
+        if not source_context.strip():
+            raise ValidationError("Source context must contain approved source material.")
+        source_context_sha256 = _sha256_text(source_context)
+        started_at = datetime.now(timezone.utc).isoformat()
         with self.database.transaction() as connection:
             row = connection.execute(
                 "SELECT * FROM generation_jobs WHERE id = ?", (job_id,)
             ).fetchone()
             if not row:
-                raise ValueError(f"Unknown generation job: {job_id}")
-            if row["status"] not in {"planned", "failed"}:
-                raise ValueError(f"Generation job {job_id} is already {row['status']}.")
-            blueprint = GenerationBlueprint(**json.loads(row["blueprint_json"]))
+                raise NotFoundError(f"Unknown generation job: {job_id}")
+            if row["status"] != "planned":
+                raise ConflictError(
+                    f"Generation job {job_id} is {row['status']}; retry it explicitly "
+                    "before another execution."
+                )
+            if row["prompt_version"] != PROMPT_VERSION:
+                raise ConflictError(
+                    f"Generation job {job_id} uses unsupported prompt version "
+                    f"{row['prompt_version']!r}."
+                )
+            blueprint = _parse_blueprint(
+                row["blueprint_json"], label=f"Generation job {job_id} blueprint"
+            )
+            next_attempt = connection.execute(
+                """SELECT COALESCE(MAX(attempt), 0) + 1 AS attempt
+                   FROM generation_job_runs WHERE job_id = ?""",
+                (job_id,),
+            ).fetchone()["attempt"]
+            run_id = new_id("run")
+            claimed = connection.execute(
+                """UPDATE generation_jobs
+                   SET status='running', provider=?, model=?, raw_output_json=NULL,
+                       validation_json=NULL, updated_at=?
+                   WHERE id=? AND status='planned'""",
+                (
+                    self.generator_provider_name,
+                    self.generator_model_name,
+                    started_at,
+                    job_id,
+                ),
+            )
+            if claimed.rowcount != 1:
+                raise ConflictError(f"Generation job {job_id} was claimed by another worker.")
             connection.execute(
-                "UPDATE generation_jobs SET status='running', provider=?, model=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                (self.generator_provider_name, self.generator_model_name, job_id),
+                """INSERT INTO generation_job_runs(
+                       id, job_id, attempt, status, provider, model, prompt_version,
+                       source_context_sha256, started_at
+                   ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, ?)""",
+                (
+                    run_id,
+                    job_id,
+                    next_attempt,
+                    self.generator_provider_name,
+                    self.generator_model_name,
+                    row["prompt_version"],
+                    source_context_sha256,
+                    started_at,
+                ),
             )
         try:
             raw_output = self.generator.generate(blueprint, source_context)
@@ -746,12 +1233,13 @@ class OfflineAuthoringPipeline:
             declared_provenance = item.get("provenance")
             if type(declared_provenance) is not dict:
                 declared_provenance = {}
-            source_context_sha256 = _sha256_text(source_context)
             generator_provenance = {
                 "provider_name": self.generator_provider_name,
                 "model_name": self.generator_model_name,
-                "prompt_version": PROMPT_VERSION,
+                "prompt_version": row["prompt_version"],
                 "generation_job_id": job_id,
+                "generation_run_id": run_id,
+                "attempt": next_attempt,
             }
             generator_provenance_sha256 = _sha256_json(generator_provenance)
             item["provenance"] = copy.deepcopy(declared_provenance)
@@ -760,8 +1248,10 @@ class OfflineAuthoringPipeline:
                     "generated": True,
                     "provider": self.generator_provider_name,
                     "model": self.generator_model_name,
-                    "prompt_version": PROMPT_VERSION,
+                    "prompt_version": row["prompt_version"],
                     "generation_job_id": job_id,
+                    "generation_run_id": run_id,
+                    "generation_attempt": next_attempt,
                     "source_context_sha256": source_context_sha256,
                     "generator_output_sha256": generator_output_sha256,
                     "generator_provenance_sha256": generator_provenance_sha256,
@@ -791,6 +1281,9 @@ class OfflineAuthoringPipeline:
             accepted = accepted_by_critics and not deterministic_errors
             reviews_sha256 = _sha256_json(reviews)
             result = {
+                "job_id": job_id,
+                "run_id": run_id,
+                "attempt": next_attempt,
                 "item": item,
                 "deterministic_issues": deterministic_issues,
                 "reviews": reviews,
@@ -803,6 +1296,7 @@ class OfflineAuthoringPipeline:
                 "accepted_for_reviewed_quarantine": accepted,
             }
             status = "reviewed" if accepted else "rejected"
+            result["status"] = status
             validation_record = {
                 "deterministic_issues": deterministic_issues,
                 "source_context_sha256": source_context_sha256,
@@ -813,22 +1307,75 @@ class OfflineAuthoringPipeline:
                 "reviews_sha256": reviews_sha256,
             }
             with self.database.transaction() as connection:
-                connection.execute(
-                    """UPDATE generation_jobs SET status=?, raw_output_json=?,
-                           validation_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                completed_at = datetime.now(timezone.utc).isoformat()
+                finalized_run = connection.execute(
+                    """UPDATE generation_job_runs
+                       SET status=?, raw_output_json=?, validation_json=?, completed_at=?
+                       WHERE id=? AND job_id=? AND status='running'""",
                     (
                         status,
                         json.dumps(item, sort_keys=True, allow_nan=False),
                         json.dumps(validation_record, sort_keys=True, allow_nan=False),
+                        completed_at,
+                        run_id,
                         job_id,
                     ),
                 )
+                if finalized_run.rowcount != 1:
+                    raise ConflictError(
+                        f"Generation run {run_id} changed before finalization."
+                    )
+                finalized_job = connection.execute(
+                    """UPDATE generation_jobs SET status=?, raw_output_json=?,
+                           validation_json=?, updated_at=?
+                       WHERE id=? AND status='running'""",
+                    (
+                        status,
+                        json.dumps(item, sort_keys=True, allow_nan=False),
+                        json.dumps(validation_record, sort_keys=True, allow_nan=False),
+                        completed_at,
+                        job_id,
+                    ),
+                )
+                if finalized_job.rowcount != 1:
+                    raise ConflictError(
+                        f"Generation job {job_id} changed before finalization."
+                    )
             return result
-        except Exception as exc:
-            with self.database.transaction() as connection:
-                connection.execute(
-                    """UPDATE generation_jobs SET status='failed', validation_json=?,
-                           updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                    (json.dumps({"error": str(exc)}), job_id),
+        except BaseException as exc:
+            completed_at = datetime.now(timezone.utc).isoformat()
+            error_record = {
+                "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
+                "error": str(exc)[:4000],
+            }
+            error_json = _canonical_json(error_record)
+            try:
+                with self.database.transaction() as connection:
+                    run = connection.execute(
+                        "SELECT status FROM generation_job_runs WHERE id = ? AND job_id = ?",
+                        (run_id, job_id),
+                    ).fetchone()
+                    if run is not None and run["status"] == "running":
+                        connection.execute(
+                            """UPDATE generation_job_runs
+                               SET status='failed', error_json=?, completed_at=?
+                               WHERE id=? AND status='running'""",
+                            (error_json, completed_at, run_id),
+                        )
+                        failed_job = connection.execute(
+                            """UPDATE generation_jobs
+                               SET status='failed', raw_output_json=NULL,
+                                   validation_json=?, updated_at=?
+                               WHERE id=? AND status='running'""",
+                            (error_json, completed_at, job_id),
+                        )
+                        if failed_job.rowcount != 1:
+                            raise ConflictError(
+                                f"Generation job {job_id} changed while recording failure."
+                            )
+            except Exception as persistence_error:
+                exc.add_note(
+                    "TSQ could not persist the generation-run failure: "
+                    f"{persistence_error}"
                 )
             raise

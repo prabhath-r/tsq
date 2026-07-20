@@ -142,7 +142,7 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 5)
+        self.assertEqual(SCHEMA_VERSION, 6)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_v1_database_is_migrated_and_question_hashes_are_backfilled(self) -> None:
