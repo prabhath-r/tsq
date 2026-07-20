@@ -1,0 +1,105 @@
+{
+  "checkpoints": [
+    {
+      "family_id": "f_distance_units_geometry",
+      "projection_event_id": "evt_golden_006",
+      "projection_hash": "f816720cbed75bf2dacaa0aed4006e5af493aec8bb970e644be1f0323b696fb5",
+      "question_id": "q_scaling_distance_metric_001",
+      "response_event_id": "evt_golden_005",
+      "revision": 1,
+      "state_changes": [
+        {
+          "concept_id": "c_feature_scaling",
+          "effective_evidence_weight": 0.65,
+          "evidence_delta": 0.49381,
+          "feedback_transition": 0.01153,
+          "posterior_expected_competence": 0.33943,
+          "posterior_mastery": 0.13895,
+          "posterior_variance": 1.91115,
+          "prior_expected_competence": 0.26696,
+          "prior_mastery": 0.09063,
+          "prior_variance": 2.25,
+          "retrieval_certified": true,
+          "stability_hours": 62.4
+        }
+      ]
+    },
+    {
+      "family_id": "f_training_fitted_transform",
+      "projection_event_id": "evt_golden_009",
+      "projection_hash": "76d56a1b35b67383994556276f12889f967901af5e8856b65b03c63177cdcecc",
+      "question_id": "q_scaling_training_transform_001",
+      "response_event_id": "evt_golden_008",
+      "revision": 2,
+      "state_changes": [
+        {
+          "concept_id": "c_feature_scaling",
+          "effective_evidence_weight": 0.0975,
+          "evidence_delta": -0.09266,
+          "feedback_transition": 0.04022,
+          "posterior_expected_competence": 0.32798,
+          "posterior_mastery": 0.12634,
+          "posterior_variance": 1.86842,
+          "prior_expected_competence": 0.33772,
+          "prior_mastery": 0.1378,
+          "prior_variance": 1.92104,
+          "retrieval_certified": false,
+          "stability_hours": 48.67
+        }
+      ]
+    },
+    {
+      "family_id": "f_monotone_tree_threshold_equivalence",
+      "projection_event_id": "evt_golden_013",
+      "projection_hash": "54b8dd352925398205cb563e963dd787bf11aadb2f75fcfc099a564e31571877",
+      "question_id": "q_scaling_tree_threshold_equivalence_001",
+      "response_event_id": "evt_golden_012",
+      "revision": 3,
+      "state_changes": [
+        {
+          "concept_id": "c_feature_scaling",
+          "effective_evidence_weight": 0.065,
+          "evidence_delta": -0.05472,
+          "feedback_transition": 0.01467,
+          "posterior_expected_competence": 0.29987,
+          "posterior_mastery": 0.10666,
+          "posterior_variance": 1.97482,
+          "prior_expected_competence": 0.30701,
+          "prior_mastery": 0.11441,
+          "prior_variance": 2.0164,
+          "retrieval_certified": false,
+          "stability_hours": 37.96
+        }
+      ]
+    },
+    {
+      "family_id": "f_penalty_units_reparameterization",
+      "projection_event_id": "evt_golden_017",
+      "projection_hash": "fcdb6ea7cf692eb6d64a1bd1abc1add023dff5b8afeba20ba6b694569695c96c",
+      "question_id": "q_scaling_penalty_reparameterization_001",
+      "response_event_id": "evt_golden_016",
+      "revision": 4,
+      "state_changes": [
+        {
+          "concept_id": "c_feature_scaling",
+          "effective_evidence_weight": 0.65,
+          "evidence_delta": 0.33617,
+          "feedback_transition": 0.0115,
+          "posterior_expected_competence": 0.34329,
+          "posterior_mastery": 0.1497,
+          "posterior_variance": 2.06775,
+          "prior_expected_competence": 0.28896,
+          "prior_mastery": 0.10396,
+          "prior_variance": 2.13448,
+          "retrieval_certified": true,
+          "stability_hours": 55.35
+        }
+      ]
+    }
+  ],
+  "final_projection_hash": "fcdb6ea7cf692eb6d64a1bd1abc1add023dff5b8afeba20ba6b694569695c96c",
+  "format_version": 1,
+  "learner_id": "replay-golden",
+  "learner_model_version": "irt-gaussian-retention-v3",
+  "response_count": 4
+}

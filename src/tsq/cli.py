@@ -18,6 +18,7 @@ from .authoring import AuthoringJobs, CoveragePlanner, deterministic_test_pipeli
 from .engine import AdaptiveEngine
 from .errors import TSQError, ValidationError
 from .quality import audit_corpus
+from .replay import ProjectionReplay, replay_or_error
 from .store import Database, new_id
 
 
@@ -508,6 +509,34 @@ def command_reviews_show(args: argparse.Namespace) -> None:
             )
 
 
+def command_replay(args: argparse.Namespace) -> None:
+    replayer = ProjectionReplay(Database(args.db))
+    if args.check:
+        result = replay_or_error(lambda: replayer.check(args.learner))
+    else:
+        result = replay_or_error(
+            lambda: replayer.rebuild_copy(args.learner, args.rebuild_copy)
+        )
+    if args.json:
+        _emit(result, as_json=True)
+    elif result["ok"]:
+        print(
+            f"Projection replay verified {result['response_count']} response "
+            f"checkpoint(s) for {result['learner_id']}."
+        )
+        if result["mode"] == "rebuild-copy":
+            print(
+                f"Rebuilt copy written to {result['rebuilt_database']}; "
+                "the source database was not modified."
+            )
+    else:
+        print("Projection replay failed:")
+        for error in result["errors"]:
+            print(f"  - {error}")
+    if not result["ok"]:
+        raise TSQError("Projection replay found inconsistencies.")
+
+
 def command_verify(args: argparse.Namespace) -> None:
     database = _database(args, require_corpus=False)
     report = database.verify_integrity(args.stream)
@@ -813,6 +842,24 @@ def build_parser() -> argparse.ArgumentParser:
     reviews_show.add_argument("job")
     reviews_show.add_argument("--json", action="store_true")
     reviews_show.set_defaults(func=command_reviews_show)
+
+    replay = subparsers.add_parser(
+        "replay", help="Reconstruct and verify a learner projection on a database copy"
+    )
+    replay.add_argument("--learner", required=True)
+    replay_mode = replay.add_mutually_exclusive_group(required=True)
+    replay_mode.add_argument(
+        "--check",
+        action="store_true",
+        help="Replay on a temporary copy and compare every committed checkpoint",
+    )
+    replay_mode.add_argument(
+        "--rebuild-copy",
+        type=Path,
+        help="Write a verified rebuilt copy without modifying the source database",
+    )
+    replay.add_argument("--json", action="store_true")
+    replay.set_defaults(func=command_replay)
 
     verify = subparsers.add_parser("verify", help="Verify event hash chains and database integrity")
     verify.add_argument("--stream")
