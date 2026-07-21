@@ -7,8 +7,8 @@ __pycache__/
 .venv/
 dist/
 build/
+/docs/
 *.db
 *.db-shm
 *.db-wal
 .DS_Store
-
