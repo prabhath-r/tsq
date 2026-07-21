@@ -86,11 +86,12 @@ class SimulationClock:
 
 @dataclass(frozen=True, slots=True)
 class SyntheticAnswer:
-    selected_option_id: str
+    selected_option_id: str | None
     correct: bool
     ground_truth_probability: float
     confidence: float
     response_ms: int
+    hint_count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +115,10 @@ class SyntheticLearner:
     guess_probability: float = 0.02
     seed: int = 0
     base_response_ms: int = 4_000
+    abstain_probability: float = 0.0
+    confidence_override: float | None = None
+    forced_correctness: bool | None = None
+    hint_count: int = 0
 
     def __post_init__(self) -> None:
         if not self.name.strip():
@@ -121,6 +126,7 @@ class SyntheticLearner:
         _validate_probability("default_ability", self.default_ability)
         _validate_probability("slip_probability", self.slip_probability)
         _validate_probability("guess_probability", self.guess_probability)
+        _validate_probability("abstain_probability", self.abstain_probability)
         for concept_id, value in self.concept_abilities.items():
             if not isinstance(concept_id, str) or not concept_id:
                 raise ValidationError("Synthetic ability keys must be concept IDs.")
@@ -139,6 +145,12 @@ class SyntheticLearner:
             or self.base_response_ms <= 0
         ):
             raise ValidationError("base_response_ms must be a positive integer.")
+        if self.confidence_override is not None:
+            _validate_probability("confidence_override", self.confidence_override)
+        if self.forced_correctness is not None and type(self.forced_correctness) is not bool:
+            raise ValidationError("forced_correctness must be true, false, or null.")
+        if type(self.hint_count) is not int or self.hint_count < 0:
+            raise ValidationError("hint_count must be a non-negative integer.")
 
         # Detach the profile from caller-owned mutable dictionaries.  Sorted
         # insertion order also makes diagnostic serialization stable.
@@ -206,8 +218,17 @@ class SyntheticLearner:
             f"{self.seed}|{simulation_seed}|{trial_index}|{question.id}|"
             f"{encounter}"
         )
-        correct = _stable_uniform(f"{key}|outcome") < probability
-        if correct:
+        abstained = _stable_uniform(f"{key}|abstain") < self.abstain_probability
+        sampled_correct = _stable_uniform(f"{key}|outcome") < probability
+        correct = (
+            self.forced_correctness
+            if self.forced_correctness is not None
+            else sampled_correct
+        )
+        correct = bool(correct and not abstained)
+        if abstained:
+            selected = None
+        elif correct:
             selected = question.correct_option
         else:
             selected = self._incorrect_option(question, f"{key}|distractor")
@@ -215,19 +236,24 @@ class SyntheticLearner:
         # Confidence is intentionally not a proxy for observed correctness.  A
         # low-ability learner may be confidently wrong, which exercises the
         # engine's confidence-sensitive evidence path.
-        confidence = min(0.99, max(0.01, max(probability, 1.0 - probability)))
+        confidence = (
+            self.confidence_override
+            if self.confidence_override is not None
+            else min(0.99, max(0.01, max(probability, 1.0 - probability)))
+        )
         latency_jitter = 0.75 + 0.5 * _stable_uniform(f"{key}|latency")
         difficulty_factor = 1.0 + 0.12 * abs(question.difficulty)
         response_ms = max(
-            250,
+            1,
             int(round(self.base_response_ms * latency_jitter * difficulty_factor)),
         )
         return SyntheticAnswer(
-            selected_option_id=selected.id,
+            selected_option_id=selected.id if selected is not None else None,
             correct=correct,
             ground_truth_probability=probability,
             confidence=confidence,
             response_ms=response_ms,
+            hint_count=self.hint_count,
         )
 
     def _incorrect_option(self, question: Question, key: str) -> Option:
@@ -282,7 +308,7 @@ class SimulationStep:
     predicted_correct: float
     ground_truth_probability: float
     actual_correct: bool
-    selected_option_id: str
+    selected_option_id: str | None
     focus_concept_before: str | None
     focus_concept_after: str | None
     focus_misconception_before: str | None
@@ -290,6 +316,8 @@ class SimulationStep:
     exact_repeat: bool
     family_repeat: bool
     response_ms: int
+    confidence: float
+    hint_count: int
     selected_at: datetime
     answered_at: datetime
 
@@ -409,6 +437,8 @@ class SimulationReport:
                     ),
                     "actual_correct": step.actual_correct,
                     "selected_option_id": step.selected_option_id,
+                    "confidence": round(step.confidence, 12),
+                    "hint_count": step.hint_count,
                     "focus_before": [
                         step.focus_concept_before,
                         step.focus_misconception_before,
@@ -485,6 +515,23 @@ class SimulationReport:
             "family_repeats": self.family_repeat_count,
             "remediation_exact_repeats": self.remediation_exact_repeat_count,
             "remediation_family_repeats": self.remediation_family_repeat_count,
+            "answer_patterns": {
+                "correct": self.correct,
+                "incorrect": self.attempted - self.correct,
+                "abstained": sum(
+                    step.selected_option_id is None for step in self.steps
+                ),
+                "low_confidence": sum(
+                    step.confidence < 0.50 for step in self.steps
+                ),
+                "fast_under_250ms": sum(
+                    step.response_ms < 250 for step in self.steps
+                ),
+                "slow_at_least_500ms": sum(
+                    step.response_ms >= 500 for step in self.steps
+                ),
+                "hinted": sum(step.hint_count > 0 for step in self.steps),
+            },
             "phase_counts": dict(self.phase_counts),
             "phase_transitions": dict(self.phase_transitions),
             "calibration": {
@@ -705,7 +752,7 @@ class BehavioralSimulator:
                 answer.selected_option_id,
                 confidence=answer.confidence,
                 response_ms=answer.response_ms,
-                hint_count=0,
+                hint_count=answer.hint_count,
                 feedback_shown=True,
                 idempotency_key=(
                     f"simulation-answer:{learner_id}:{policy_seed}:"
@@ -761,6 +808,8 @@ class BehavioralSimulator:
                 exact_repeat=exact_repeat,
                 family_repeat=family_repeat,
                 response_ms=answer.response_ms,
+                confidence=answer.confidence,
+                hint_count=answer.hint_count,
                 selected_at=selected_at,
                 answered_at=answered_at,
             )
@@ -785,11 +834,21 @@ class BehavioralSimulator:
                 and result.next_phase in _MAIN_PHASES
                 and active_episode is not None
             ):
-                outcome = (
-                    "resolved"
-                    if phase_before == SessionPhase.VERIFY and result.correct
-                    else "bounded_failure_exit"
+                credible_retrieval = (
+                    answer.hint_count == 0
+                    and answer.confidence >= 0.50
+                    and answer.response_ms >= 250
                 )
+                if (
+                    phase_before == SessionPhase.VERIFY
+                    and result.correct
+                    and credible_retrieval
+                ):
+                    outcome = "resolved"
+                elif result.correct:
+                    outcome = "bounded_uncertainty_exit"
+                else:
+                    outcome = "bounded_failure_exit"
                 episodes.append(active_episode.finish(end_step=step_index, outcome=outcome))
                 active_episode = None
 
