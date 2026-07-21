@@ -276,6 +276,7 @@ class ProjectionReplayTestCase(unittest.TestCase):
             )
             if len(families) != len(set(families)):
                 break
+        self.assertEqual(len(set(families[:3])), 3, families)
         self.assertLess(len(set(families)), len(families), families)
 
         report = ProjectionReplay(database).check("repeat-family")
