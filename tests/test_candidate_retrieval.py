@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,13 +51,15 @@ class CandidateRetrievalTestCase(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.tempdir.name) / "candidate.db")
         self.database.initialize()
-        self.release_id = self.database.import_corpus(*read_and_parse(CORPUS))[
+        self.release_id = self.database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )[
             "release_id"
         ]
         self.learner_id = "candidate-learner"
         self.engine = AdaptiveEngine(self.database)
         self.engine.create_learner(self.learner_id, "Candidate learner")
-        self.root_concept_id = "c_ai_learning_systems"
+        self.root_concept_id = "c_adaptive_testing"
         self.scope = self.database.get_graph(self.release_id).learning_scope(
             self.root_concept_id
         )
@@ -368,6 +374,35 @@ class CandidateRetrievalTestCase(unittest.TestCase):
             presentation.question.family_id,
             {"family_a", "family_b", "family_c"},
         )
+
+
+class BenchmarkFixtureTestCase(unittest.TestCase):
+    def test_small_benchmark_bank_is_serviceable_by_the_live_policy(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(ROOT / "src")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "benchmarks" / "benchmark_candidate_retrieval.py"),
+                "--questions",
+                "100",
+                "--rounds",
+                "2",
+                "--json",
+            ],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["question_count"], 100)
+        self.assertEqual(len(payload["selected_question_ids"]), 2)
+        self.assertGreater(payload["full_policy_selection"]["median_ms"], 0)
 
 
 if __name__ == "__main__":

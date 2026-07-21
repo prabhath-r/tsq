@@ -109,7 +109,7 @@ def parser() -> argparse.ArgumentParser:
         default=PROJECT_ROOT / "corpus" / "ai_curriculum.json",
     )
     result.add_argument("--database", type=Path)
-    result.add_argument("--root", default="c_ai_learning_systems")
+    result.add_argument("--root", default="t_machine_learning")
     result.add_argument(
         "--profile",
         choices=(
@@ -220,7 +220,9 @@ def run(
     failures = invariant_failures if invariant_failures is not None else []
     database = Database(database_path)
     database.initialize()
-    database.import_corpus(*read_and_parse(arguments.corpus))
+    database.import_corpus(
+        *read_and_parse(arguments.corpus, include_catalog=True)
+    )
     simulator = BehavioralSimulator(AdaptiveEngine(database))
     profile = profile_named(arguments.profile, arguments.seed)
     if arguments.trials == 1:

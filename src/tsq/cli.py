@@ -16,7 +16,7 @@ from typing import Any, Iterator
 from .corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
 from .authoring import AuthoringJobs, CoveragePlanner, deterministic_test_pipeline
 from .engine import AdaptiveEngine
-from .errors import TSQError, ValidationError
+from .errors import ExhaustedError, NotFoundError, TSQError, ValidationError
 from .graph import KnowledgeGraph
 from .quality import audit_corpus
 from .replay import ProjectionReplay, replay_or_error
@@ -80,9 +80,14 @@ def _emit(value: Any, *, as_json: bool = False) -> None:
 def command_init(args: argparse.Namespace) -> None:
     database = _database(args, require_corpus=False)
     with _corpus_path(args.corpus) as (corpus_path, corpus_label):
-        counts = database.import_corpus(*read_and_parse(corpus_path))
+        counts = database.import_corpus(
+            *read_and_parse(corpus_path, include_catalog=True)
+        )
     if args.json:
-        _emit({"database": str(database.path), "corpus": corpus_label, **counts}, as_json=True)
+        _emit(
+            {"database": str(database.path), "corpus": corpus_label, **counts},
+            as_json=True,
+        )
     else:
         print(f"Initialized {database.path}")
         print(
@@ -91,9 +96,100 @@ def command_init(args: argparse.Namespace) -> None:
         )
 
 
+def _ensure_starter_corpus(database: Database) -> bool:
+    """Install the bundled catalog for a new or legacy catalog-less database."""
+    with database.read() as connection:
+        active = connection.execute(
+            "SELECT value FROM meta WHERE key = 'active_corpus_release'"
+        ).fetchone()
+        catalog_count = (
+            connection.execute(
+                """SELECT COUNT(*) AS n FROM release_topics
+                   WHERE release_id = ?""",
+                (active["value"],),
+            ).fetchone()["n"]
+            if active
+            else 0
+        )
+    if active and catalog_count:
+        return False
+    with _corpus_path(None) as (corpus_path, _):
+        database.import_corpus(
+            *read_and_parse(corpus_path, include_catalog=True)
+        )
+    return True
+
+
+def _starter_topic(database: Database, requested: str | None) -> str:
+    if requested:
+        return requested
+    catalog = database.get_catalog()
+    if not catalog["topics"]:
+        concepts = database.get_graph().concepts
+        return sorted(concepts)[0]
+    default_id = (
+        "t_large_language_models"
+        if any(
+            topic["id"] == "t_large_language_models"
+            for topic in catalog["topics"]
+        )
+        else catalog["topics"][0]["id"]
+    )
+    if not sys.stdin.isatty():
+        return default_id
+    choices = sorted(
+        catalog["topics"],
+        key=lambda topic: (
+            topic["id"] != default_id,
+            topic["parent_id"] is not None,
+            topic["sort_order"],
+            topic["name"],
+        ),
+    )
+    print("Choose a curriculum topic:")
+    for index, topic in enumerate(choices, start=1):
+        label = " (recommended)" if topic["id"] == default_id else ""
+        print(
+            f"  {index}. {topic['name']} — "
+            f"{topic['direct_primary_questions']} direct questions{label}"
+        )
+    try:
+        raw = input("topic [1]> ").strip()
+    except EOFError:
+        return default_id
+    if not raw:
+        return choices[0]["id"]
+    if raw.isdigit() and 1 <= int(raw) <= len(choices):
+        return choices[int(raw) - 1]["id"]
+    return raw
+
+
+def command_start(args: argparse.Namespace) -> None:
+    database = _database(args, require_corpus=False)
+    installed = _ensure_starter_corpus(database)
+    topic = _starter_topic(database, args.topic)
+    if installed:
+        print("Installed the bundled reviewed curriculum catalog.")
+    command_study(
+        argparse.Namespace(
+            db=args.db,
+            learner=args.learner,
+            name=args.name,
+            topic=topic,
+            mode=args.mode,
+            limit=args.limit,
+            seed=args.seed,
+            ask_confidence=args.ask_confidence,
+            explain_policy=args.explain_policy,
+        )
+    )
+
+
 def command_import(args: argparse.Namespace) -> None:
     database = _database(args, require_corpus=False)
-    counts = database.import_corpus(*read_and_parse(args.path))
+    counts = database.import_corpus(
+        *read_and_parse(args.path, include_catalog=True)
+    )
     _emit(counts, as_json=args.json)
 
 
@@ -149,8 +245,65 @@ def command_audit(args: argparse.Namespace) -> int:
 
 def command_topics(args: argparse.Namespace) -> None:
     database = _database(args)
+    catalog = database.get_catalog()
+    if catalog["topics"] and not getattr(args, "concepts", False):
+        topic_by_id = {topic["id"]: topic for topic in catalog["topics"]}
+        children: dict[str | None, list[dict[str, Any]]] = {}
+        for topic in catalog["topics"]:
+            children.setdefault(topic["parent_id"], []).append(topic)
+        for siblings in children.values():
+            siblings.sort(key=lambda item: (item["sort_order"], item["name"], item["id"]))
+
+        rows: list[dict[str, Any]] = []
+
+        def append_topic(topic: dict[str, Any], depth: int, path: list[str]) -> tuple[int, int]:
+            child_rows = children.get(topic["id"], [])
+            descendant_questions = topic["direct_primary_questions"]
+            descendant_objectives = len(topic["concepts"])
+            row = {
+                **topic,
+                "depth": depth,
+                "path": [*path, topic["name"]],
+            }
+            rows.append(row)
+            for child in child_rows:
+                child_questions, child_objectives = append_topic(
+                    child, depth + 1, row["path"]
+                )
+                descendant_questions += child_questions
+                descendant_objectives += child_objectives
+            row["scope_primary_questions"] = descendant_questions
+            row["scope_objectives"] = descendant_objectives
+            return descendant_questions, descendant_objectives
+
+        for domain in catalog["domains"]:
+            for topic in children.get(None, []):
+                if topic["domain_id"] == domain["id"]:
+                    append_topic(topic, 0, [domain["name"]])
+        payload = {
+            "release_id": catalog["release_id"],
+            "domains": catalog["domains"],
+            "topics": rows,
+        }
+        if args.json:
+            _emit(payload, as_json=True)
+            return
+        for domain in catalog["domains"]:
+            print(domain["name"])
+            for row in rows:
+                if row["domain_id"] != domain["id"]:
+                    continue
+                indent = "  " * (row["depth"] + 1)
+                print(
+                    f"{indent}{row['name']} ({row['id']}) — "
+                    f"{row['scope_primary_questions']} questions, "
+                    f"{row['scope_objectives']} objectives"
+                )
+        return
+
     concepts = sorted(
-        database.get_graph().concepts.values(), key=lambda concept: (concept.domain, concept.name)
+        database.get_graph().concepts.values(),
+        key=lambda concept: (concept.domain, concept.name),
     )
     with database.read() as connection:
         release_id = database.get_active_release_id(connection)
@@ -191,7 +344,20 @@ def command_topics(args: argparse.Namespace) -> None:
 def command_graph(args: argparse.Namespace) -> None:
     database = _database(args)
     graph = database.get_graph()
-    scope = graph.learning_scope(args.topic)
+    try:
+        topic = database.resolve_topic(args.topic)
+    except NotFoundError:
+        topic = None
+    if topic is not None:
+        root = topic["id"]
+        root_name = topic["name"]
+        target_type = "topic"
+        scope = database.topic_scope(root, topic["release_id"])
+    else:
+        root = args.topic
+        root_name = graph.concepts[root].name if root in graph.concepts else root
+        target_type = "concept"
+        scope = graph.learning_scope(root)
     edges = [
         {
             "source": edge.source_id,
@@ -203,7 +369,9 @@ def command_graph(args: argparse.Namespace) -> None:
         if edge.source_id in scope and edge.target_id in scope
     ]
     result = {
-        "root": args.topic,
+        "root": root,
+        "root_name": root_name,
+        "target_type": target_type,
         "concepts": [
             {"id": concept_id, "name": graph.concepts[concept_id].name}
             for concept_id in sorted(scope)
@@ -213,7 +381,7 @@ def command_graph(args: argparse.Namespace) -> None:
     if args.json:
         _emit(result, as_json=True)
     else:
-        print(f"Learning scope for {args.topic}: {len(scope)} concepts")
+        print(f"Learning scope for {root_name} ({root}): {len(scope)} objectives")
         for edge in edges:
             print(f"  {edge['source']} --{edge['relation']}--> {edge['target']}")
 
@@ -242,11 +410,74 @@ def command_session_end(args: argparse.Namespace) -> None:
     database = _database(args)
     session = AdaptiveEngine(database).end_session(
         args.session,
-        completed=args.status == "completed",
+        status=args.status,
         reason=args.reason,
         idempotency_key=args.idempotency_key,
     )
     _emit(session, as_json=args.json)
+
+
+def command_session_report(args: argparse.Namespace) -> None:
+    report = AdaptiveEngine(_database(args)).session_report(args.session)
+    if args.json:
+        _emit(report, as_json=True)
+        return
+    topic = report["topic"]
+    target = topic["name"] if topic else report["root_concept_id"]
+    accuracy = (
+        f"{report['accuracy'] * 100:.1f}%" if report["accuracy"] is not None else "n/a"
+    )
+    response = report["response_time"]
+    difficulty = report["difficulty"]
+    print(f"Session {report['session_id']} · {target} · {report['status']}")
+    print(
+        f"  {report['questions_answered']} answered · {report['correct']} correct "
+        f"({accuracy}) · {report['abstained']} unsure"
+    )
+    print(
+        f"  active response time {response['active_seconds']:.1f}s · "
+        f"wall time {response['wall_seconds']:.1f}s"
+    )
+    if difficulty["average"] is not None:
+        print(
+            f"  authored difficulty {difficulty['average']:+.2f} average "
+            f"({difficulty['minimum']:+.2f} to {difficulty['maximum']:+.2f})"
+        )
+    continuity = report["continuity"]
+    if continuity["average_score"] is not None:
+        print(
+            f"  continuity {continuity['average_score']:.2f} average · "
+            f"{report['exploration']['questions']} deliberate exploration probe(s) · "
+            f"{report['remediation_questions']} repair/verification question(s)"
+        )
+    if report["topic_distribution"]:
+        rendered = ", ".join(
+            f"{row['name']} {row['n']}" for row in report["topic_distribution"]
+        )
+        print(f"  topic mix: {rendered}")
+    routing = report["adaptive_routing"]
+    if routing["prerequisite_descents"] or routing["bounded_exits"]:
+        print(
+            f"  adaptive routing: {routing['prerequisite_descents']} prerequisite "
+            f"descent(s) · {routing['prerequisite_resumptions']} resumed parent(s) · "
+            f"{routing['prevented_reopenings']} verified boundary reopening(s) prevented"
+        )
+    if report["diagnostic_findings"]:
+        print("  evidence-backed learning boundaries:")
+        for finding in report["diagnostic_findings"][:5]:
+            projection = finding["current_projection"]
+            reasons = ", ".join(
+                reason.replace("_", " ")
+                for reason in finding["attention_reasons"]
+            )
+            print(
+                f"    {finding['name']}: graph readiness "
+                f"{projection['effective_readiness'] * 100:.1f}% · {reasons}"
+            )
+    print(
+        "  difficulty values are authored priors and remain uncalibrated until "
+        "sufficient response data exists."
+    )
 
 
 def _presentation_dict(presentation) -> dict[str, Any]:
@@ -257,6 +488,7 @@ def _presentation_dict(presentation) -> dict[str, Any]:
         "question_id": presentation.question.id,
         "family_id": presentation.question.family_id,
         "kind": presentation.question.kind.value,
+        "pedagogical_role": presentation.pedagogical_role,
         "stem": presentation.question.stem,
         "options": [
             {"id": option.id, "text": option.text} for option in presentation.ordered_options
@@ -295,6 +527,8 @@ def _submission_dict(result) -> dict[str, Any]:
         "next_phase": result.next_phase.value,
         "focus_concept_id": result.focus_concept_id,
         "focus_misconception_id": result.focus_misconception_id,
+        "transition_reason": result.transition_reason,
+        "boundary_decision": result.boundary_decision,
         "state_changes": list(result.state_changes),
         "idempotent_replay": result.idempotent_replay,
     }
@@ -323,6 +557,7 @@ def command_answer(args: argparse.Namespace) -> None:
         print(f"Next phase: {result.next_phase.value}")
         if result.focus_misconception_id:
             print(f"Current hypothesis: {result.focus_misconception_id}")
+        print(f"Adaptive path: {result.transition_reason}")
 
 
 def command_profile(args: argparse.Namespace) -> None:
@@ -340,10 +575,16 @@ def command_profile(args: argparse.Namespace) -> None:
             f"  P(mastered)={skill['mastery'] * 100:5.1f}%  "
             f"expected={skill['expected_competence'] * 100:5.1f}%  "
             f"latent-σ={skill['uncertainty']:.2f}  "
+            f"graph-ready={skill['effective_readiness'] * 100:5.1f}%  "
             f"{skill['state']:<10}  {skill['name']} "
             f"({skill['independent_families']} independent families, "
             f"{skill['operation_kinds']} operations, {skill['delayed_retrievals']} delayed)"
         )
+        if skill["bottleneck_name"]:
+            print(
+                f"      prerequisite support {skill['prerequisite_support'] * 100:.1f}% · "
+                f"current boundary {skill['bottleneck_name']}"
+            )
     if profile["active_misconceptions"]:
         print("Active misconception hypotheses:")
         for item in profile["active_misconceptions"]:
@@ -561,16 +802,32 @@ def command_verify(args: argparse.Namespace) -> None:
 
 
 def command_study(args: argparse.Namespace) -> None:
+    if args.limit < 1:
+        raise ValidationError("Study limit must be a positive integer.")
     database = _database(args)
     engine = AdaptiveEngine(database)
     engine.create_learner(args.learner, args.name)
     session = engine.start_session(args.learner, args.topic, mode=args.mode, seed=args.seed)
-    print(f"Session {session['id']} · {args.topic} · {args.mode}")
+    topic_name = args.topic
+    if session.get("topic_id"):
+        topic_name = database.resolve_topic(
+            session["topic_id"], session["corpus_release_id"]
+        )["name"]
+    print(f"Session {session['id']} · {topic_name} · {args.mode}")
     print("Use 1-4 to answer, ? for 'I do not know', or q to stop.\n")
 
     completed = 0
     while completed < args.limit:
-        presentation = engine.next_question(session["id"])
+        try:
+            presentation = engine.next_question(session["id"])
+        except ExhaustedError as exc:
+            engine.end_session(
+                session["id"],
+                status="completed",
+                reason="safe_topic_scope_exhausted",
+            )
+            print(f"Session complete: {exc}\n")
+            break
         print(f"[{presentation.phase.value.upper()}] {presentation.question.kind.value.replace('_', ' ')}")
         print(presentation.question.stem)
         ordered = presentation.ordered_options
@@ -584,18 +841,18 @@ def command_study(args: argparse.Namespace) -> None:
                 raw = input("answer> ").strip().lower()
             except EOFError:
                 engine.end_session(
-                    session["id"], completed=False, reason="input_closed"
+                    session["id"], status="abandoned", reason="input_closed"
                 )
                 print("\nSession stopped; all completed evidence is saved.")
                 return
             except KeyboardInterrupt:
                 engine.end_session(
-                    session["id"], completed=False, reason="interrupted"
+                    session["id"], status="abandoned", reason="interrupted"
                 )
                 raise
             if raw == "q":
                 engine.end_session(
-                    session["id"], completed=False, reason="user_quit"
+                    session["id"], status="abandoned", reason="user_quit"
                 )
                 print("Session stopped; all completed evidence is saved.")
                 return
@@ -616,13 +873,13 @@ def command_study(args: argparse.Namespace) -> None:
                     ).strip()
                 except EOFError:
                     engine.end_session(
-                        session["id"], completed=False, reason="input_closed"
+                        session["id"], status="abandoned", reason="input_closed"
                     )
                     print("\nSession stopped; all completed evidence is saved.")
                     return
                 except KeyboardInterrupt:
                     engine.end_session(
-                        session["id"], completed=False, reason="interrupted"
+                        session["id"], status="abandoned", reason="interrupted"
                     )
                     raise
                 if not raw_confidence:
@@ -650,11 +907,33 @@ def command_study(args: argparse.Namespace) -> None:
         print(f"Why: {result.correct_option.rationale}")
         if result.focus_misconception_id:
             print(f"Next probe targets hypothesis: {result.focus_misconception_id}")
+        if result.transition_reason == "descend_to_evidence_boundary":
+            focus_name = (
+                database.get_graph(session["corpus_release_id"])
+                .concepts[result.focus_concept_id]
+                .name
+                if result.focus_concept_id
+                else "a prerequisite"
+            )
+            print(
+                "The next probe steps down to the strongest evidence boundary: "
+                f"{focus_name}."
+            )
         print()
         completed += 1
 
-    engine.end_session(session["id"], completed=True, reason="question_limit_reached")
+    current = database.get_session(session["id"])
+    if current["status"] == "active":
+        engine.end_session(
+            session["id"],
+            status="completed",
+            reason="question_limit_reached",
+        )
     print(f"Completed {completed} questions.\n")
+    command_session_report(
+        argparse.Namespace(db=args.db, session=session["id"], json=False)
+    )
+    print()
     command_profile(
         argparse.Namespace(db=args.db, learner=args.learner, topic=args.topic, json=False)
     )
@@ -667,6 +946,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--db", type=Path, default=_default_database(), help="SQLite database path")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    start = subparsers.add_parser(
+        "start", help="Initialize if needed and begin an interactive study session"
+    )
+    start.add_argument("--learner", default="me")
+    start.add_argument("--name")
+    start.add_argument(
+        "--topic",
+        help="Topic ID or friendly topic name (interactive choice when omitted)",
+    )
+    start.add_argument(
+        "--mode", choices=["learn", "diagnose", "review"], default="learn"
+    )
+    start.add_argument("--limit", type=int, default=5)
+    start.add_argument("--seed", type=int)
+    start.add_argument("--ask-confidence", action="store_true")
+    start.add_argument("--explain-policy", action="store_true")
+    start.set_defaults(func=command_start)
 
     init = subparsers.add_parser("init", help="Initialize a database and import a corpus")
     init.add_argument(
@@ -705,7 +1002,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--strict", action="store_true", help="Treat warnings as a failing audit")
     audit.set_defaults(func=command_audit)
 
-    topics = subparsers.add_parser("topics", help="List concepts and direct item coverage")
+    topics = subparsers.add_parser("topics", help="List the curriculum topic hierarchy")
+    topics.add_argument(
+        "--concepts",
+        action="store_true",
+        help="Show low-level assessable objectives instead of curriculum topics",
+    )
     topics.add_argument("--json", action="store_true")
     topics.set_defaults(func=command_topics)
 
@@ -743,6 +1045,13 @@ def build_parser() -> argparse.ArgumentParser:
     session_end.add_argument("--idempotency-key")
     session_end.add_argument("--json", action="store_true")
     session_end.set_defaults(func=command_session_end)
+
+    session_report = session_sub.add_parser(
+        "report", help="Show timing, difficulty, continuity, and evidence metrics"
+    )
+    session_report.add_argument("session")
+    session_report.add_argument("--json", action="store_true")
+    session_report.set_defaults(func=command_session_report)
 
     next_parser = subparsers.add_parser("next", help="Select or retrieve the pending question")
     next_parser.add_argument("session")

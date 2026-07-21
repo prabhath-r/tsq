@@ -305,6 +305,9 @@ class SimulationStep:
     family_id: str
     primary_concept_id: str
     question_kind: str
+    pedagogical_role: str
+    topic_ids: tuple[str, ...]
+    continuity: float
     predicted_correct: float
     ground_truth_probability: float
     actual_correct: bool
@@ -431,6 +434,9 @@ class SimulationReport:
                     "phase_after": step.phase_after.value,
                     "question_id": step.question_id,
                     "family_id": step.family_id,
+                    "pedagogical_role": step.pedagogical_role,
+                    "topic_ids": step.topic_ids,
+                    "continuity": round(step.continuity, 12),
                     "predicted_correct": round(step.predicted_correct, 12),
                     "ground_truth_probability": round(
                         step.ground_truth_probability, 12
@@ -531,6 +537,17 @@ class SimulationReport:
                     step.response_ms >= 500 for step in self.steps
                 ),
                 "hinted": sum(step.hint_count > 0 for step in self.steps),
+            },
+            "selection_patterns": {
+                "roles": dict(Counter(step.pedagogical_role for step in self.steps)),
+                "cross_topic_questions": sum(
+                    len(step.topic_ids) > 1 for step in self.steps
+                ),
+                "average_continuity": (
+                    sum(step.continuity for step in self.steps) / self.attempted
+                    if self.steps
+                    else None
+                ),
             },
             "phase_counts": dict(self.phase_counts),
             "phase_transitions": dict(self.phase_transitions),
@@ -797,6 +814,14 @@ class BehavioralSimulator:
                 family_id=question.family_id,
                 primary_concept_id=question.primary_concept_id,
                 question_kind=question.kind.value,
+                pedagogical_role=presentation.pedagogical_role,
+                topic_ids=tuple(
+                    item["id"]
+                    for item in self.engine.database.question_topics(
+                        question.id, session["corpus_release_id"]
+                    )
+                ),
+                continuity=presentation.score.continuity,
                 predicted_correct=presentation.score.predicted_correct,
                 ground_truth_probability=answer.ground_truth_probability,
                 actual_correct=answer.correct,
@@ -943,7 +968,13 @@ class BehavioralSimulator:
         self, session: Mapping[str, Any]
     ) -> tuple[int, int, int, int]:
         graph = self.engine.database.get_graph(session["corpus_release_id"])
-        scope = graph.learning_scope(session["root_concept_id"])
+        scope = (
+            self.engine.database.topic_scope(
+                session["topic_id"], session["corpus_release_id"]
+            )
+            if session.get("topic_id")
+            else graph.learning_scope(session["root_concept_id"])
+        )
         with self.engine.database.read() as connection:
             connection.execute(
                 "CREATE TEMP TABLE simulation_scope(id TEXT PRIMARY KEY)"

@@ -211,7 +211,9 @@ class AuthoringTestCase(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.tempdir.name) / "test.db")
         self.database.initialize()
-        self.database.import_corpus(*read_and_parse(CORPUS))
+        self.database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -262,7 +264,9 @@ class AuthoringTestCase(unittest.TestCase):
         def topic_count() -> int:
             output = io.StringIO()
             with redirect_stdout(output):
-                command_topics(Namespace(db=self.database.path, json=True))
+                command_topics(
+                    Namespace(db=self.database.path, json=True, concepts=True)
+                )
             rows = json.loads(output.getvalue())
             return next(
                 row["direct_questions"]

@@ -123,6 +123,71 @@ class SessionPhase(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class Domain:
+    """A learner-facing subject area in one immutable corpus release."""
+
+    id: str
+    name: str
+    description: str
+    sort_order: int = 0
+
+    def __post_init__(self) -> None:
+        for field_name in ("id", "name", "description"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Domain {field_name} must be a non-blank string.")
+        if (
+            not isinstance(self.sort_order, int)
+            or isinstance(self.sort_order, bool)
+            or self.sort_order < 0
+        ):
+            raise ValueError("Domain sort_order must be a non-negative integer.")
+
+
+@dataclass(frozen=True, slots=True)
+class Topic:
+    """A release-pinned curriculum node owning one or more graph concepts.
+
+    Topics are deliberately separate from concepts.  A topic is a navigational
+    curriculum bucket that may contain child topics, while concepts remain the
+    stable units against which learner evidence is recorded.
+    """
+
+    id: str
+    domain_id: str
+    name: str
+    description: str
+    concept_ids: tuple[str, ...] = ()
+    parent_id: str | None = None
+    related_topic_ids: tuple[str, ...] = ()
+    sort_order: int = 0
+
+    def __post_init__(self) -> None:
+        for field_name in ("id", "domain_id", "name", "description"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"Topic {field_name} must be a non-blank string.")
+        if self.parent_id is not None and (
+            not isinstance(self.parent_id, str) or not self.parent_id.strip()
+        ):
+            raise ValueError("Topic parent_id must be null or a non-blank string.")
+        for field_name in ("concept_ids", "related_topic_ids"):
+            values = getattr(self, field_name)
+            if not isinstance(values, tuple) or any(
+                not isinstance(value, str) or not value.strip() for value in values
+            ):
+                raise ValueError(
+                    f"Topic {field_name} must be a tuple of non-blank strings."
+                )
+        if (
+            not isinstance(self.sort_order, int)
+            or isinstance(self.sort_order, bool)
+            or self.sort_order < 0
+        ):
+            raise ValueError("Topic sort_order must be a non-negative integer.")
+
+
+@dataclass(frozen=True, slots=True)
 class Concept:
     id: str
     name: str
@@ -281,6 +346,8 @@ class CandidateScore:
     review_value: float
     novelty: float
     kind_fit: float
+    continuity: float = 0.0
+    boundary_fit: float = 0.0
 
     def terms(self) -> dict[str, float]:
         return {
@@ -294,6 +361,8 @@ class CandidateScore:
             "review_value": self.review_value,
             "novelty": self.novelty,
             "kind_fit": self.kind_fit,
+            "continuity": self.continuity,
+            "boundary_fit": self.boundary_fit,
         }
 
 
@@ -307,6 +376,7 @@ class Presentation:
     score: CandidateScore
     propensity: float
     rationale: str
+    pedagogical_role: str = "main"
 
     @property
     def ordered_options(self) -> tuple[Option, ...]:
@@ -324,6 +394,8 @@ class SubmissionResult:
     focus_concept_id: str | None
     focus_misconception_id: str | None
     state_changes: tuple[dict[str, Any], ...]
+    transition_reason: str = "legacy_transition"
+    boundary_decision: dict[str, Any] | None = None
     idempotent_replay: bool = False
 
 

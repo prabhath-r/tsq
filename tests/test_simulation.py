@@ -21,7 +21,7 @@ START = datetime(2100, 2, 3, 10, 0, tzinfo=timezone.utc)
 def make_simulator(directory: str, filename: str = "simulation.db") -> BehavioralSimulator:
     database = Database(Path(directory) / filename)
     database.initialize()
-    database.import_corpus(*read_and_parse(CORPUS))
+    database.import_corpus(*read_and_parse(CORPUS, include_catalog=True))
     return BehavioralSimulator(AdaptiveEngine(database))
 
 
@@ -179,7 +179,7 @@ class BehavioralSimulationTests(unittest.TestCase):
                 seed=44,
             ),
             learner_id="uncertain-path",
-            root_concept_id="c_ai_learning_systems",
+            root_concept_id="t_machine_learning",
             policy_seed=44,
             max_steps=8,
             start_at=START,
@@ -253,6 +253,82 @@ class BehavioralSimulationTests(unittest.TestCase):
         self.assertLess(fast_mass, slow_mass)
         self.assertEqual(fast_families, 0)
         self.assertEqual(slow_families, 1)
+
+    def test_verified_prerequisite_returns_to_an_independent_parent_check(self) -> None:
+        report = self.simulator.run(
+            SyntheticLearner(
+                "intermediate",
+                default_ability=0.55,
+                slip_probability=0.04,
+                guess_probability=0.02,
+                seed=17,
+            ),
+            learner_id="verified-boundary",
+            root_concept_id="t_large_language_models",
+            policy_seed=21,
+            trial_index=4,
+            max_steps=16,
+            start_at=START,
+        )
+
+        self.assertFalse(report.has_blockers, report.summary())
+        with self.simulator.engine.database.read() as connection:
+            session_id = connection.execute(
+                "SELECT id FROM sessions WHERE learner_id='verified-boundary'"
+            ).fetchone()["id"]
+        session_report = self.simulator.engine.session_report(
+            session_id, now=report.ended_at
+        )
+        reasons = [
+            step["transition_reason"]
+            for step in session_report["adaptive_path"]
+        ]
+        self.assertIn("descend_to_evidence_boundary", reasons)
+        self.assertIn("prerequisite_verified_resume_parent", reasons)
+        path = session_report["adaptive_path"]
+        resume_index = reasons.index("prerequisite_verified_resume_parent")
+        self.assertEqual(path[resume_index]["to_phase"], "verify")
+        self.assertEqual(
+            path[resume_index + 1]["primary_concept_id"],
+            path[resume_index]["focus_after"],
+        )
+        self.assertEqual(
+            path[resume_index + 1]["pedagogical_role"], "verification"
+        )
+
+    def test_recursive_planner_avoids_an_exhausted_boundary(self) -> None:
+        report = self.simulator.run(
+            SyntheticLearner(
+                "intermediate",
+                default_ability=0.55,
+                slip_probability=0.04,
+                guess_probability=0.02,
+                seed=17,
+            ),
+            learner_id="four-family-boundary",
+            root_concept_id="t_large_language_models",
+            policy_seed=17,
+            max_steps=24,
+            start_at=START,
+        )
+
+        self.assertFalse(report.has_blockers, report.summary())
+        with self.simulator.engine.database.read() as connection:
+            session_id = connection.execute(
+                "SELECT id FROM sessions WHERE learner_id='four-family-boundary'"
+            ).fetchone()["id"]
+        session_report = self.simulator.engine.session_report(
+            session_id, now=report.ended_at
+        )
+        reasons = [
+            step["transition_reason"]
+            for step in session_report["adaptive_path"]
+        ]
+        self.assertIn("prerequisite_verified_resume_parent", reasons)
+        self.assertIn("no_serviceable_prerequisite_boundary", reasons)
+        self.assertGreaterEqual(
+            session_report["adaptive_routing"]["capacity_exits"], 1
+        )
 
 
 if __name__ == "__main__":

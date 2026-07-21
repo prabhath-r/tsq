@@ -20,7 +20,8 @@ from .store import SCHEMA_VERSION, Database, question_content_hash
 
 
 REPLAY_FORMAT_VERSION = 1
-SUPPORTED_EVENT_SCHEMA_VERSION = 1
+RESPONSE_EVENT_SCHEMA_VERSION = 1
+PROJECTION_EVENT_SCHEMA_VERSIONS = frozenset({1, 2})
 
 _RESPONSE_FIELDS = frozenset(
     {
@@ -48,7 +49,7 @@ _RESPONSE_METADATA_FIELDS = frozenset(
         "application_learner_revision",
     }
 )
-_PROJECTION_FIELDS = frozenset(
+_PROJECTION_FIELDS_V1 = frozenset(
     {
         "response_event_id",
         "state_changes",
@@ -62,8 +63,34 @@ _PROJECTION_FIELDS = frozenset(
         "projection_hash",
     }
 )
+_PROJECTION_FIELDS_V2 = _PROJECTION_FIELDS_V1 | frozenset(
+    {"transition_reason", "boundary_decision"}
+)
 _PROJECTION_METADATA_FIELDS = frozenset(
     {"learner_model_version", "corpus_release_id", "evidence_weight"}
+)
+_BOUNDARY_DECISION_FIELDS = frozenset(
+    {
+        "focus_concept_id",
+        "selected_concept_id",
+        "algorithm_version",
+        "selected",
+        "candidates",
+    }
+)
+_BOUNDARY_CANDIDATE_FIELDS = frozenset(
+    {
+        "concept_id",
+        "edge_weight",
+        "score",
+        "need",
+        "uncertainty_value",
+        "evidence_gap",
+        "recent_failure_rate",
+        "prerequisite_support",
+        "effective_readiness",
+        "recursive_bottleneck_concept_id",
+    }
 )
 
 
@@ -128,6 +155,68 @@ def _require_sha256(value: Any, label: str) -> str:
     ):
         raise ValidationError(f"{label} must be a lowercase SHA-256 digest.")
     return value
+
+
+def _require_nonblank_string(value: Any, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ValidationError(f"{label} must be a non-blank string.")
+    return value
+
+
+def _validate_boundary_candidate(value: Any, label: str) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ValidationError(f"{label} must be an object.")
+    _require_exact_fields(value, _BOUNDARY_CANDIDATE_FIELDS, label)
+    _require_nonblank_string(value["concept_id"], f"{label} concept_id")
+    _require_nonblank_string(
+        value["recursive_bottleneck_concept_id"],
+        f"{label} recursive_bottleneck_concept_id",
+    )
+    for field in _BOUNDARY_CANDIDATE_FIELDS - {
+        "concept_id",
+        "recursive_bottleneck_concept_id",
+    }:
+        number = _require_optional_number(value[field], f"{label} {field}")
+        if number is None or not 0.0 <= number <= 1.0:
+            raise ValidationError(f"{label} {field} must be between zero and one.")
+    return value
+
+
+def _validate_boundary_decision(value: Any, label: str) -> None:
+    if value is None:
+        return
+    if type(value) is not dict:
+        raise ValidationError(f"{label} must be an object or null.")
+    _require_exact_fields(value, _BOUNDARY_DECISION_FIELDS, label)
+    focus = _require_nonblank_string(
+        value["focus_concept_id"], f"{label} focus_concept_id"
+    )
+    selected_id = _require_nonblank_string(
+        value["selected_concept_id"], f"{label} selected_concept_id"
+    )
+    _require_nonblank_string(
+        value["algorithm_version"], f"{label} algorithm_version"
+    )
+    if focus == selected_id:
+        raise ValidationError(f"{label} cannot select its own focus concept.")
+    candidates = value["candidates"]
+    if type(candidates) is not list or not candidates:
+        raise ValidationError(f"{label} candidates must be a non-empty array.")
+    validated = [
+        _validate_boundary_candidate(candidate, f"{label} candidate {index}")
+        for index, candidate in enumerate(candidates)
+    ]
+    candidate_ids = [candidate["concept_id"] for candidate in validated]
+    if len(candidate_ids) != len(set(candidate_ids)):
+        raise ValidationError(f"{label} candidate concept IDs must be unique.")
+    if selected_id not in candidate_ids:
+        raise ValidationError(f"{label} selected concept is absent from candidates.")
+    selected = _validate_boundary_candidate(value["selected"], f"{label} selected")
+    matching = next(
+        candidate for candidate in validated if candidate["concept_id"] == selected_id
+    )
+    if selected != matching:
+        raise ValidationError(f"{label} selected candidate snapshot does not match.")
 
 
 class ProjectionReplay:
@@ -260,13 +349,22 @@ class ProjectionReplay:
         response: sqlite3.Row,
         projection: sqlite3.Row,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+        if response["schema_version"] != RESPONSE_EVENT_SCHEMA_VERSION:
+            raise ValidationError(
+                f"Event {response['event_id']} uses unsupported schema version "
+                f"{response['schema_version']}; replay supports exactly version "
+                f"{RESPONSE_EVENT_SCHEMA_VERSION} for ResponseSubmitted."
+            )
+        if projection["schema_version"] not in PROJECTION_EVENT_SCHEMA_VERSIONS:
+            supported = ", ".join(
+                str(version) for version in sorted(PROJECTION_EVENT_SCHEMA_VERSIONS)
+            )
+            raise ValidationError(
+                f"Event {projection['event_id']} uses unsupported schema version "
+                f"{projection['schema_version']}; replay supports versions {supported} "
+                "for LearnerProjectionAdvanced."
+            )
         for event in (response, projection):
-            if event["schema_version"] != SUPPORTED_EVENT_SCHEMA_VERSION:
-                raise ValidationError(
-                    f"Event {event['event_id']} uses unsupported schema version "
-                    f"{event['schema_version']}; replay supports exactly version "
-                    f"{SUPPORTED_EVENT_SCHEMA_VERSION}."
-                )
             if event["learner_id"] != learner_id:
                 raise ValidationError(f"Event {event['event_id']} has a learner mismatch.")
         if projection["causation_id"] != response["event_id"]:
@@ -306,7 +404,11 @@ class ProjectionReplay:
         )
         _require_exact_fields(
             projection_payload,
-            _PROJECTION_FIELDS,
+            (
+                _PROJECTION_FIELDS_V2
+                if projection["schema_version"] == 2
+                else _PROJECTION_FIELDS_V1
+            ),
             f"Projection event {projection['event_id']} payload",
         )
         _require_exact_fields(
@@ -317,6 +419,17 @@ class ProjectionReplay:
         if projection_payload["response_event_id"] != response["event_id"]:
             raise ValidationError(
                 f"Projection event {projection['event_id']} names a different response."
+            )
+        if projection["schema_version"] == 2:
+            reason = projection_payload["transition_reason"]
+            if type(reason) is not str or not reason.strip():
+                raise ValidationError(
+                    f"Projection event {projection['event_id']} has an invalid "
+                    "transition reason."
+                )
+            _validate_boundary_decision(
+                projection_payload["boundary_decision"],
+                f"Projection event {projection['event_id']} boundary decision",
             )
         for label, metadata in (
             (f"Response event {response['event_id']}", response_metadata),

@@ -389,6 +389,114 @@ class StoreIntegrityTests(unittest.TestCase):
                        WHERE key = 'active_corpus_release'"""
                 )
 
+    def test_catalog_snapshot_and_cross_topic_projection_are_release_pinned(self) -> None:
+        parsed = read_and_parse(CORPUS, include_catalog=True)
+        release_id = self.database.import_corpus(*parsed)["release_id"]
+
+        catalog = self.database.get_catalog(release_id)
+        self.assertEqual(len(catalog["domains"]), 1)
+        self.assertEqual(len(catalog["topics"]), 16)
+        self.assertEqual(
+            {
+                entry["relation"]
+                for entry in self.database.question_topics(
+                    "q_rag_grounding_boundaries_001", release_id
+                )
+            },
+            {"primary", "cross"},
+        )
+        self.assertTrue(
+            {
+                "c_attention",
+                "c_transformers",
+                "c_attention_scaling",
+                "c_causal_masking",
+            }.issubset(self.database.topic_scope("t_transformers", release_id))
+        )
+        with self.assertRaises(sqlite3.IntegrityError):
+            with self.database.transaction() as connection:
+                connection.execute(
+                    """UPDATE release_topics SET name = 'Changed'
+                       WHERE release_id = ? AND topic_id = 't_transformers'""",
+                    (release_id,),
+                )
+
+    def test_integrity_reconstructs_catalog_hashes_after_trigger_bypass(self) -> None:
+        release_id = self.database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )["release_id"]
+        with self.database.transaction() as connection:
+            self.database._drop_release_snapshot_triggers(connection)
+            connection.execute(
+                """UPDATE release_topics
+                   SET description = 'tampered', content_hash = 'forged'
+                   WHERE release_id = ? AND topic_id = 't_transformers'""",
+                (release_id,),
+            )
+
+        report = self.database.verify_integrity()
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any(
+                "topic t_transformers content hash mismatch" in error
+                for error in report["errors"]
+            ),
+            report["errors"],
+        )
+        self.assertTrue(
+            any("bundle hash mismatch" in error for error in report["errors"]),
+            report["errors"],
+        )
+
+    def test_v6_migration_adds_catalog_tables_without_rehashing_legacy_release(self) -> None:
+        legacy = Database(Path(self.tempdir.name) / "legacy-v6.db")
+        legacy.initialize()
+        release_id = legacy.import_corpus(*read_and_parse(CORPUS))["release_id"]
+        with legacy.transaction() as connection:
+            legacy._drop_release_snapshot_triggers(connection)
+            for table in (
+                "release_question_topics",
+                "release_topic_concepts",
+                "release_topics",
+                "release_domains",
+            ):
+                connection.execute(f"DROP TABLE {table}")
+            connection.execute("ALTER TABLE sessions DROP COLUMN topic_id")
+            connection.execute("ALTER TABLE sessions DROP COLUMN exploration_mode")
+            connection.execute(
+                "UPDATE meta SET value = '6' WHERE key = 'schema_version'"
+            )
+
+        legacy.initialize()
+
+        with legacy.read() as connection:
+            columns = {
+                row["name"]
+                for row in connection.execute("PRAGMA table_info(sessions)")
+            }
+            tables = {
+                row["name"]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                )
+            }
+            stored_release = connection.execute(
+                "SELECT id FROM corpus_releases WHERE id = ?", (release_id,)
+            ).fetchone()
+        self.assertTrue({"topic_id", "exploration_mode"}.issubset(columns))
+        self.assertTrue(
+            {
+                "release_domains",
+                "release_topics",
+                "release_topic_concepts",
+                "release_question_topics",
+            }.issubset(tables)
+        )
+        self.assertIsNotNone(stored_release)
+        self.assertEqual(legacy.get_catalog(release_id)["topics"], [])
+        self.assertTrue(legacy.verify_integrity()["ok"])
+
     def test_versioned_corpus_registry_is_immutable_except_question_status(self) -> None:
         bundle = tiny_corpus()
         self.database.import_corpus(*bundle)
@@ -567,11 +675,13 @@ class StoreIntegrityTests(unittest.TestCase):
         )
 
     def test_integrity_checks_decision_response_and_attempt_projection(self) -> None:
-        self.database.import_corpus(*read_and_parse(CORPUS))
+        self.database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )
         engine = AdaptiveEngine(self.database)
         engine.create_learner("learner")
         session = engine.start_session(
-            "learner", "c_ai_learning_systems", seed=11
+            "learner", "t_machine_learning", seed=11
         )
         presentation = engine.next_question(session["id"])
         engine.submit_answer(
