@@ -13,6 +13,10 @@ import unittest
 from importlib.resources import files
 from pathlib import Path
 
+from tsq.corpus import parse_bundle
+from tsq.engine import AdaptiveEngine
+from tsq.store import Database
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE_CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -116,6 +120,86 @@ class PackagingTestCase(unittest.TestCase):
             self.assertIn("Large Language Models", result.stdout)
             self.assertIn("Session stopped", result.stdout)
             self.assertTrue(database.is_file())
+
+    def test_start_upgrades_legacy_catalog_without_rewriting_history(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            isolated = Path(temporary)
+            database_path = isolated / "legacy.db"
+            bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+            bundle.pop("domains")
+            bundle.pop("topics")
+            legacy_source = next(
+                source
+                for source in bundle["sources"]
+                if source["id"] == "src_vaswani_attention_2017"
+            )
+            legacy_source.pop("uri", None)
+
+            database = Database(database_path)
+            database.initialize()
+            legacy_release = database.import_corpus(*parse_bundle(bundle))["release_id"]
+            engine = AdaptiveEngine(database)
+            engine.create_learner("legacy-learner", "Legacy Learner")
+            legacy_session = engine.start_session(
+                "legacy-learner", "c_transformers", seed=11
+            )
+
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tsq",
+                    "--db",
+                    str(database_path),
+                    "start",
+                    "--learner",
+                    "upgraded-learner",
+                    "--topic",
+                    "Large Language Models",
+                    "--seed",
+                    "13",
+                ],
+                cwd=isolated,
+                env=environment,
+                input="q\n",
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(
+                "Installed the bundled reviewed curriculum catalog.", result.stdout
+            )
+            with database.read() as connection:
+                active_release = connection.execute(
+                    "SELECT value FROM meta WHERE key = 'active_corpus_release'"
+                ).fetchone()["value"]
+                pinned_release = connection.execute(
+                    "SELECT corpus_release_id FROM sessions WHERE id = ?",
+                    (legacy_session["id"],),
+                ).fetchone()["corpus_release_id"]
+                release_count = connection.execute(
+                    "SELECT COUNT(*) AS n FROM corpus_releases"
+                ).fetchone()["n"]
+                legacy_topics = connection.execute(
+                    "SELECT COUNT(*) AS n FROM release_topics WHERE release_id = ?",
+                    (legacy_release,),
+                ).fetchone()["n"]
+                active_topics = connection.execute(
+                    "SELECT COUNT(*) AS n FROM release_topics WHERE release_id = ?",
+                    (active_release,),
+                ).fetchone()["n"]
+
+            self.assertNotEqual(active_release, legacy_release)
+            self.assertEqual(pinned_release, legacy_release)
+            self.assertEqual(release_count, 2)
+            self.assertEqual(legacy_topics, 0)
+            self.assertGreater(active_topics, 0)
+            self.assertTrue(database.verify_integrity()["ok"])
 
     def test_repository_start_launcher_is_executable(self) -> None:
         launcher = ROOT / "start"
