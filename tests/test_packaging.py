@@ -35,6 +35,10 @@ class PackagingTestCase(unittest.TestCase):
         manifest = (ROOT / "MANIFEST.in").read_text().splitlines()
         self.assertIn("include LICENSE", manifest)
         self.assertIn("include NOTICE", manifest)
+        self.assertIn("include start", manifest)
+        self.assertFalse(
+            any(line.startswith("recursive-include docs ") for line in manifest)
+        )
         for source_file in (ROOT / "src" / "tsq").rglob("*.py"):
             with self.subTest(source_file=source_file.relative_to(ROOT)):
                 self.assertIn(
@@ -77,6 +81,74 @@ class PackagingTestCase(unittest.TestCase):
             payload = json.loads(result.stdout)
             self.assertEqual(payload["corpus"], "tsq.data:ai_curriculum.json")
             self.assertGreaterEqual(payload["questions"], 20)
+            self.assertTrue(database.is_file())
+
+    def test_start_command_bootstraps_catalog_and_uses_friendly_default(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            isolated = Path(temporary)
+            database = isolated / "starter.db"
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tsq",
+                    "--db",
+                    str(database),
+                    "start",
+                    "--learner",
+                    "starter",
+                    "--seed",
+                    "7",
+                ],
+                cwd=isolated,
+                env=environment,
+                input="q\n",
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Installed the bundled reviewed curriculum catalog.", result.stdout)
+            self.assertIn("Large Language Models", result.stdout)
+            self.assertIn("Session stopped", result.stdout)
+            self.assertTrue(database.is_file())
+
+    def test_repository_start_launcher_is_executable(self) -> None:
+        launcher = ROOT / "start"
+        self.assertTrue(launcher.is_file())
+        self.assertTrue(os.access(launcher, os.X_OK))
+        self.assertIn("SPDX-License-Identifier: MPL-2.0", launcher.read_text())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "launcher.db"
+            environment = os.environ.copy()
+            environment["TSQ_DB"] = str(database)
+            result = subprocess.run(
+                [
+                    str(launcher),
+                    "--learner",
+                    "launcher-test",
+                    "--topic",
+                    "Transformers",
+                    "--seed",
+                    "5",
+                ],
+                cwd=temporary,
+                env=environment,
+                input="q\n",
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Transformers", result.stdout)
+            self.assertIn("Session stopped", result.stdout)
             self.assertTrue(database.is_file())
 
 

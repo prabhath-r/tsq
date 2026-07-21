@@ -45,7 +45,9 @@ def build_golden_database(path: Path) -> Database:
     ):
         database = Database(path)
         database.initialize()
-        database.import_corpus(*read_and_parse(CORPUS))
+        database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )
         engine = AdaptiveEngine(database)
         engine.create_learner("replay-golden", "Projection Replay Fixture")
         session = engine.start_session(
@@ -245,15 +247,39 @@ class ProjectionReplayTestCase(unittest.TestCase):
                    ORDER BY stream_version LIMIT 1"""
             ).fetchone()["event_id"]
             connection.execute(
-                "UPDATE events SET schema_version=2 WHERE event_id=?", (event_id,)
+                "UPDATE events SET schema_version=3 WHERE event_id=?", (event_id,)
             )
-        with self.assertRaisesRegex(ValidationError, "unsupported schema version 2"):
+        with self.assertRaisesRegex(ValidationError, "unsupported schema version 3"):
+            ProjectionReplay(self.database).check("replay-golden")
+
+    def test_projection_v2_rejects_malformed_boundary_trace(self) -> None:
+        with self.database.transaction() as connection:
+            connection.execute("DROP TRIGGER events_no_update")
+            row = connection.execute(
+                """SELECT event_id, payload_json FROM events
+                   WHERE learner_id='replay-golden'
+                     AND event_type='LearnerProjectionAdvanced'
+                   ORDER BY stream_version LIMIT 1"""
+            ).fetchone()
+            payload = json.loads(row["payload_json"])
+            payload["boundary_decision"] = {
+                "focus_concept_id": "advanced",
+                "selected_concept_id": "foundation",
+            }
+            connection.execute(
+                "UPDATE events SET payload_json=? WHERE event_id=?",
+                (json.dumps(payload), row["event_id"]),
+            )
+
+        with self.assertRaisesRegex(ValidationError, "boundary decision.*missing"):
             ProjectionReplay(self.database).check("replay-golden")
 
     def test_replay_uses_historical_family_counts_when_a_family_repeats(self) -> None:
         database = Database(Path(self.tempdir.name) / "repeated-family.db")
         database.initialize()
-        database.import_corpus(*read_and_parse(CORPUS))
+        database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )
         engine = AdaptiveEngine(database)
         engine.create_learner("repeat-family")
         families: list[str] = []

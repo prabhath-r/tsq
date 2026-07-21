@@ -1,17 +1,7 @@
 # The Second Question
 
-## Start
+Adaptive learning backend and CLI.
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e .
+Source checkout: `./start`
 
-tsq init
-tsq study \
-  --learner me \
-  --topic c_ai_learning_systems \
-  --mode diagnose \
-  --limit 10 \
-  --explain-policy
-```
+Installed package: `tsq start`

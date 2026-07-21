@@ -73,10 +73,10 @@
       ]
     },
     {
-      "family_id": "f_penalty_units_reparameterization",
+      "family_id": "f_sparse_penalty_scale_choice",
       "projection_event_id": "evt_golden_017",
-      "projection_hash": "fcdb6ea7cf692eb6d64a1bd1abc1add023dff5b8afeba20ba6b694569695c96c",
-      "question_id": "q_scaling_penalty_reparameterization_001",
+      "projection_hash": "68ce77bd5a261271f23bb6dbe6235272770c2ffb972058a8e970645c3ee9b69f",
+      "question_id": "q_scaling_lasso_selection_001",
       "response_event_id": "evt_golden_016",
       "revision": 4,
       "state_changes": [
@@ -97,7 +97,7 @@
       ]
     }
   ],
-  "final_projection_hash": "fcdb6ea7cf692eb6d64a1bd1abc1add023dff5b8afeba20ba6b694569695c96c",
+  "final_projection_hash": "68ce77bd5a261271f23bb6dbe6235272770c2ffb972058a8e970645c3ee9b69f",
   "format_version": 1,
   "learner_id": "replay-golden",
   "learner_model_version": "irt-gaussian-retention-v3",

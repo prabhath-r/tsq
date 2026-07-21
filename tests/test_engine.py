@@ -27,7 +27,9 @@ class EngineTestCase(unittest.TestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.database = Database(Path(self.tempdir.name) / "test.db")
         self.database.initialize()
-        self.database.import_corpus(*read_and_parse(CORPUS))
+        self.database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )
         self.engine = AdaptiveEngine(self.database)
         self.engine.create_learner("learner-1", "Test Learner")
 
@@ -36,7 +38,7 @@ class EngineTestCase(unittest.TestCase):
 
     def start(self, *, mode: str = "learn", seed: int = 17):
         return self.engine.start_session(
-            "learner-1", "c_ai_learning_systems", mode=mode, seed=seed
+            "learner-1", "t_machine_learning", mode=mode, seed=seed
         )
 
     def downgrade_current_database_to_v3(self) -> None:
@@ -75,6 +77,8 @@ class EngineTestCase(unittest.TestCase):
             connection.execute(
                 "ALTER TABLE sessions DROP COLUMN remediation_path_json"
             )
+            connection.execute("ALTER TABLE sessions DROP COLUMN topic_id")
+            connection.execute("ALTER TABLE sessions DROP COLUMN exploration_mode")
             for table, column in (
                 ("sessions", "corpus_release_id"),
                 ("sessions", "revision"),
@@ -85,6 +89,10 @@ class EngineTestCase(unittest.TestCase):
             ):
                 connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
 
+            connection.execute("DROP TABLE release_question_topics")
+            connection.execute("DROP TABLE release_topic_concepts")
+            connection.execute("DROP TABLE release_topics")
+            connection.execute("DROP TABLE release_domains")
             connection.execute("DROP TABLE release_questions")
             connection.execute("DROP TABLE release_edges")
             connection.execute("DROP TABLE release_concepts")
@@ -93,6 +101,27 @@ class EngineTestCase(unittest.TestCase):
             connection.execute("DROP TABLE corpus_releases")
             connection.execute("DROP TABLE stream_heads")
             connection.execute("DELETE FROM meta WHERE key = 'active_corpus_release'")
+
+            for event in connection.execute(
+                "SELECT event_id, event_type, payload_json, metadata_json FROM events"
+            ).fetchall():
+                payload = json.loads(event["payload_json"])
+                metadata = json.loads(event["metadata_json"])
+                payload.pop("corpus_release_id", None)
+                metadata.pop("corpus_release_id", None)
+                if event["event_type"] == "SessionStarted":
+                    payload.pop("topic_id", None)
+                    payload.pop("exploration_mode", None)
+                    payload.pop("requested_root_concept_id", None)
+                connection.execute(
+                    """UPDATE events SET payload_json = ?, metadata_json = ?
+                       WHERE event_id = ?""",
+                    (
+                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
+                        json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                        event["event_id"],
+                    ),
+                )
 
             for event in connection.execute(
                 """SELECT event_id, payload_json FROM events
@@ -142,8 +171,125 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 6)
+        self.assertEqual(SCHEMA_VERSION, 7)
         self.assertEqual(value, str(SCHEMA_VERSION))
+
+    def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:
+        session = self.engine.start_session(
+            "learner-1", "Transformers", mode="learn", seed=9
+        )
+        self.assertEqual(session["topic_id"], "t_transformers")
+        self.assertEqual(session["exploration_mode"], "adaptive")
+        owned = self.database.topic_owned_concepts("t_transformers")
+
+        for index in range(3):
+            presentation = self.engine.next_question(session["id"])
+            decision = self.database.recent_decisions(session["id"], 1)[0]
+            self.assertEqual(decision["pedagogical_role"], "main")
+            self.assertIn(presentation.question.primary_concept_id, owned)
+            self.engine.submit_answer(
+                presentation.decision_id,
+                presentation.question.correct_option.id,
+                confidence=0.9,
+                response_ms=1800,
+                idempotency_key=f"topic-continuity-{index}",
+            )
+
+        exploration = self.engine.next_question(session["id"])
+        decision = self.database.recent_decisions(session["id"], 1)[0]
+        self.assertEqual(decision["pedagogical_role"], "exploration_probe")
+        self.assertNotIn(exploration.question.primary_concept_id, owned)
+        self.assertIn("deliberate_related_topic_probe", exploration.rationale)
+
+        wrong = next(option for option in exploration.question.options if not option.correct)
+        result = self.engine.submit_answer(
+            exploration.decision_id,
+            wrong.id,
+            confidence=0.9,
+            response_ms=1800,
+            idempotency_key="topic-exploration-wrong",
+        )
+        self.assertEqual(result.next_phase, SessionPhase.REMEDIATE)
+        self.assertEqual(
+            result.focus_concept_id, exploration.question.primary_concept_id
+        )
+        repair = self.engine.next_question(session["id"])
+        repair_decision = self.database.recent_decisions(session["id"], 1)[0]
+        self.assertEqual(repair_decision["pedagogical_role"], "remediation_probe")
+        self.assertNotEqual(repair.question.family_id, exploration.question.family_id)
+        self.assertIn(result.focus_misconception_id, repair.question.misconception_ids)
+
+    def test_session_report_exposes_time_difficulty_and_uncertainty_paths(self) -> None:
+        session = self.engine.start_session(
+            "learner-1", "LLM Agents", mode="learn", seed=21
+        )
+        first = self.engine.next_question(session["id"])
+        self.engine.submit_answer(
+            first.decision_id,
+            first.question.correct_option.id,
+            confidence=0.85,
+            response_ms=2400,
+            idempotency_key="report-first",
+        )
+        second = self.engine.next_question(session["id"])
+        self.engine.submit_answer(
+            second.decision_id,
+            None,
+            confidence=0.2,
+            response_ms=5100,
+            idempotency_key="report-second",
+        )
+        self.engine.end_session(
+            session["id"], status="completed", reason="report_test"
+        )
+
+        report = self.engine.session_report(session["id"])
+
+        self.assertEqual(report["topic"]["id"], "t_llm_agents")
+        self.assertEqual(report["questions_answered"], 2)
+        self.assertEqual(report["abstained"], 1)
+        self.assertEqual(report["response_time"]["active_seconds"], 7.5)
+        self.assertIsNotNone(report["difficulty"]["average"])
+        self.assertEqual(report["unique_families"], 2)
+        self.assertTrue(report["concept_changes"])
+        self.assertIn("scale", report["difficulty"])
+        self.assertEqual(len(report["adaptive_path"]), 2)
+        self.assertTrue(
+            all("transition_reason" in step for step in report["adaptive_path"])
+        )
+        self.assertTrue(report["concept_performance"])
+        self.assertTrue(report["diagnostic_findings"])
+        self.assertTrue(
+            any(
+                "uncertain_or_noncredible_evidence"
+                in finding["attention_reasons"]
+                for finding in report["diagnostic_findings"]
+            )
+        )
+        self.assertIn("boundary_algorithm_version", report)
+        self.assertIn("transition_counts", report["adaptive_routing"])
+        self.assertEqual(
+            sum(report["adaptive_routing"]["transition_counts"].values()), 2
+        )
+
+        profile = self.engine.profile("learner-1", root_concept_id="LLM Agents")
+        self.assertIn("boundary_algorithm_version", profile)
+        assessed = [
+            skill for skill in profile["skills"] if skill["evidence_mass"] > 0
+        ]
+        self.assertTrue(assessed)
+        self.assertTrue(
+            all(
+                {
+                    "intrinsic_readiness",
+                    "prerequisite_support",
+                    "effective_readiness",
+                    "bottleneck_concept_id",
+                }
+                <= set(skill)
+                for skill in assessed
+            )
+        )
 
     def test_v1_database_is_migrated_and_question_hashes_are_backfilled(self) -> None:
         with self.database.transaction() as connection:
@@ -619,6 +765,29 @@ class EngineTestCase(unittest.TestCase):
         self.assertTrue(blueprint["source_ids"])
         self.assertEqual(jobs[0]["status"], "planned")
 
+    def test_topic_corpus_gap_targets_an_owned_objective(self) -> None:
+        session = self.engine.start_session(
+            "learner-1",
+            "Transformers",
+            mode="learn",
+            seed=127,
+        )
+        self.engine._record_corpus_gap(
+            session["id"],
+            message="Corpus gap: synthetic topic-bound regression.",
+            now=datetime.now(timezone.utc),
+        )
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT blueprint_json FROM generation_jobs"
+            ).fetchone()
+        self.assertIsNotNone(row)
+        blueprint = json.loads(row["blueprint_json"])
+        self.assertIn(
+            blueprint["concept_id"],
+            self.database.topic_owned_concepts("t_transformers"),
+        )
+
     def test_session_end_is_durable_idempotent_and_blocks_pending_work(self) -> None:
         session = self.start(seed=13)
         presentation = self.engine.next_question(session["id"])
@@ -650,12 +819,18 @@ class EngineTestCase(unittest.TestCase):
             ).fetchone()["n"]
         self.assertEqual(events, 1)
 
-    def test_selected_primary_concept_stays_inside_requested_scope(self) -> None:
+    def test_selected_primary_concept_stays_in_scope_unless_exploration_is_labeled(self) -> None:
         session = self.start()
-        scope = self.database.get_graph().learning_scope("c_ai_learning_systems")
+        scope = self.database.topic_scope("t_machine_learning")
         for index in range(6):
             presentation = self.engine.next_question(session["id"])
-            self.assertIn(presentation.question.primary_concept_id, scope)
+            if presentation.pedagogical_role == "exploration_probe":
+                self.assertNotIn(presentation.question.primary_concept_id, scope)
+                self.assertIn(
+                    "deliberate_related_topic_probe", presentation.rationale
+                )
+            else:
+                self.assertIn(presentation.question.primary_concept_id, scope)
             self.engine.submit_answer(
                 presentation.decision_id,
                 presentation.question.correct_option.id,
@@ -792,6 +967,20 @@ class EngineTestCase(unittest.TestCase):
         descended_session = self.database.get_session(session["id"])
         self.assertEqual(descended.focus_concept_id, "c_feature_scaling")
         self.assertEqual(
+            descended.transition_reason, "descend_to_evidence_boundary"
+        )
+        self.assertIsNotNone(descended.boundary_decision)
+        assert descended.boundary_decision is not None
+        self.assertEqual(
+            descended.boundary_decision["selected_concept_id"],
+            "c_feature_scaling",
+        )
+        self.assertEqual(
+            descended.boundary_decision["selected"]["concept_id"],
+            "c_feature_scaling",
+        )
+        self.assertTrue(descended.boundary_decision["candidates"])
+        self.assertEqual(
             descended_session["remediation_path"],
             [
                 {
@@ -818,11 +1007,20 @@ class EngineTestCase(unittest.TestCase):
             idempotency_key="parent-prerequisite-verify",
         )
         returned_session = self.database.get_session(session["id"])
-        self.assertEqual(returned.next_phase, SessionPhase.REMEDIATE)
+        self.assertEqual(returned.next_phase, SessionPhase.VERIFY)
         self.assertEqual(returned.focus_concept_id, original_concept)
         self.assertEqual(returned.focus_misconception_id, original_misconception)
         self.assertEqual(returned_session["remediation_path"], [])
         self.assertEqual(returned_session["remediation_depth"], 1)
+        self.assertEqual(
+            returned.transition_reason, "prerequisite_verified_resume_parent"
+        )
+
+        parent_recheck = self.engine.next_question(session["id"])
+        self.assertEqual(parent_recheck.pedagogical_role, "verification")
+        self.assertEqual(
+            parent_recheck.question.primary_concept_id, original_concept
+        )
 
     def test_uncertain_or_instant_success_requires_independent_confirmation(self) -> None:
         scenarios = (
@@ -834,7 +1032,7 @@ class EngineTestCase(unittest.TestCase):
             self.engine.create_learner(learner_id, label)
             session = self.engine.start_session(
                 learner_id,
-                "c_ai_learning_systems",
+                "t_machine_learning",
                 mode="learn",
                 seed=127 + index,
             )
@@ -902,7 +1100,9 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(certified, 0)
 
     def test_review_verify_failure_without_deeper_prerequisite_exits_bounded_tunnel(self) -> None:
-        session = self.start(mode="review")
+        session = self.engine.start_session(
+            "learner-1", "c_probability_reasoning", mode="review", seed=17
+        )
         first = self.engine.next_question(session["id"])
         wrong = next(option for option in first.question.options if not option.correct)
         self.engine.submit_answer(first.decision_id, wrong.id, idempotency_key="review-1")
@@ -949,7 +1149,7 @@ class EngineTestCase(unittest.TestCase):
                 self.engine.create_learner(learner_id)
                 session = self.engine.start_session(
                     learner_id,
-                    "c_ai_learning_systems",
+                    "t_machine_learning",
                     mode="learn",
                     seed=211 + confidence,
                 )
@@ -1022,6 +1222,8 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(replay.focus_concept_id, first.focus_concept_id)
         self.assertEqual(replay.focus_misconception_id, first.focus_misconception_id)
         self.assertEqual(replay.state_changes, first.state_changes)
+        self.assertEqual(replay.transition_reason, first.transition_reason)
+        self.assertEqual(replay.boundary_decision, first.boundary_decision)
 
         changed_commands = (
             {**inputs, "confidence": 0.91},
@@ -1101,6 +1303,8 @@ class EngineTestCase(unittest.TestCase):
             self.assertEqual(current["previous_hash"], previous["payload_hash"])
         response = next(row for row in events if row["event_type"] == "ResponseSubmitted")
         projection = next(row for row in events if row["event_type"] == "LearnerProjectionAdvanced")
+        self.assertEqual(response["schema_version"], 1)
+        self.assertEqual(projection["schema_version"], 2)
         self.assertEqual(json.loads(projection["payload_json"])["response_event_id"], response["event_id"])
         self.assertTrue(self.database.verify_integrity()["ok"])
 
@@ -1173,7 +1377,7 @@ class EngineTestCase(unittest.TestCase):
                        learner_id, concept_id, mean, variance, stability_hours,
                        exposures, last_seen_at, next_review_at, evidence_mass,
                        as_of_event_id, model_version
-                   ) VALUES ('learner-1', 'c_ai_learning_systems', 2.5, 1.0,
+                   ) VALUES ('learner-1', 'c_probability_reasoning', 2.5, 1.0,
                              24.0, 1, NULL, NULL, 1.0, NULL, 'forged')"""
             )
 

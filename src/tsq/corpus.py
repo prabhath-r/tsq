@@ -15,6 +15,7 @@ from .models import (
     ConceptEdge,
     ConceptRole,
     ConceptWeight,
+    Domain,
     Misconception,
     Option,
     Question,
@@ -23,6 +24,7 @@ from .models import (
     QualityIssue,
     RelationType,
     Source,
+    Topic,
 )
 from .quality import audit_corpus
 
@@ -33,6 +35,7 @@ def _relation(value: str) -> RelationType:
 
 
 _LIST_FIELDS = ("concepts", "edges", "misconceptions", "sources", "questions")
+_CATALOG_LIST_FIELDS = ("domains", "topics")
 
 
 def _reject_json_constant(value: str) -> None:
@@ -88,6 +91,18 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
             add("missing_field", f"Required field '{field}' is missing.", field)
         elif not isinstance(bundle[field], list):
             add("field_type", f"Field '{field}' must be a list.", field)
+
+    catalog_present = any(field in bundle for field in _CATALOG_LIST_FIELDS)
+    if catalog_present:
+        for field in _CATALOG_LIST_FIELDS:
+            if field not in bundle:
+                add(
+                    "missing_field",
+                    f"Catalog field '{field}' is required when a curriculum catalog is present.",
+                    field,
+                )
+            elif not isinstance(bundle[field], list):
+                add("field_type", f"Field '{field}' must be a list.", field)
 
     def rows(field: str):
         value = bundle.get(field)
@@ -212,6 +227,55 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
             exclusive_minimum=True,
             exclusive_maximum=True,
         )
+
+    for index, value in enumerate(rows("domains")):
+        path = f"domains[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "id", path)
+        string_field(row, "name", path)
+        string_field(row, "description", path)
+        sort_order = row.get("sort_order", 0)
+        if not isinstance(sort_order, int) or isinstance(sort_order, bool):
+            add("field_type", "Field 'sort_order' must be an integer.", f"{path}.sort_order")
+        elif sort_order < 0:
+            add("out_of_range", "Field 'sort_order' must be non-negative.", f"{path}.sort_order")
+
+    for index, value in enumerate(rows("topics")):
+        path = f"topics[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "id", path)
+        string_field(row, "domain_id", path)
+        string_field(row, "name", path)
+        string_field(row, "description", path)
+        string_field(row, "parent_id", path, required=False, nullable=True)
+        concept_ids = list_field(row, "concept_ids", path)
+        for concept_index, concept_id in enumerate(concept_ids):
+            if not isinstance(concept_id, str) or not concept_id.strip():
+                add(
+                    "field_type",
+                    "Every concept_ids entry must be a non-blank string.",
+                    f"{path}.concept_ids[{concept_index}]",
+                )
+        related = row.get("related_topic_ids", [])
+        if not isinstance(related, list):
+            add("field_type", "Field 'related_topic_ids' must be a list.", f"{path}.related_topic_ids")
+        else:
+            for related_index, topic_id in enumerate(related):
+                if not isinstance(topic_id, str) or not topic_id.strip():
+                    add(
+                        "field_type",
+                        "Every related_topic_ids entry must be a non-blank string.",
+                        f"{path}.related_topic_ids[{related_index}]",
+                    )
+        sort_order = row.get("sort_order", 0)
+        if not isinstance(sort_order, int) or isinstance(sort_order, bool):
+            add("field_type", "Field 'sort_order' must be an integer.", f"{path}.sort_order")
+        elif sort_order < 0:
+            add("out_of_range", "Field 'sort_order' must be non-negative.", f"{path}.sort_order")
 
     for index, value in enumerate(rows("edges")):
         path = f"edges[{index}]"
@@ -452,6 +516,225 @@ def load_bundle(path: str | Path, *, validate: bool = True) -> dict[str, Any]:
     if validate:
         _raise_issues("Corpus structure", validate_bundle(bundle))
     return bundle
+
+
+def parse_catalog(
+    bundle: dict[str, Any],
+    concepts: list[Concept],
+    questions: list[Question] | None = None,
+) -> tuple[list[Domain], list[Topic]]:
+    """Parse and validate the optional learner-facing curriculum catalog.
+
+    Concept ownership is intentionally canonical: every concept belongs directly
+    to exactly one topic.  Cross-topic questions are expressed by mapping the
+    question to concepts owned by different topics, rather than assigning one
+    concept ambiguously to several buckets.
+    """
+
+    if "domains" not in bundle and "topics" not in bundle:
+        return [], []
+    _raise_issues("Corpus structure", validate_bundle(bundle))
+    try:
+        domains = [
+            Domain(
+                id=row["id"],
+                name=row["name"],
+                description=row["description"],
+                sort_order=row.get("sort_order", 0),
+            )
+            for row in bundle["domains"]
+        ]
+        topics = [
+            Topic(
+                id=row["id"],
+                domain_id=row["domain_id"],
+                name=row["name"],
+                description=row["description"],
+                concept_ids=tuple(row["concept_ids"]),
+                parent_id=row.get("parent_id"),
+                related_topic_ids=tuple(row.get("related_topic_ids", [])),
+                sort_order=row.get("sort_order", 0),
+            )
+            for row in bundle["topics"]
+        ]
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValidationError(f"Invalid curriculum catalog object: {exc}") from exc
+
+    issues: list[QualityIssue] = []
+
+    def add(code: str, message: str, path: str) -> None:
+        issues.append(QualityIssue(code, "error", message, path=path))
+
+    domain_counts = Counter(domain.id for domain in domains)
+    topic_counts = Counter(topic.id for topic in topics)
+    duplicate_domains = sorted(key for key, count in domain_counts.items() if count > 1)
+    duplicate_topics = sorted(key for key, count in topic_counts.items() if count > 1)
+    if duplicate_domains:
+        add(
+            "duplicate_domain_id",
+            "Domain IDs must be unique: " + ", ".join(duplicate_domains) + ".",
+            "domains",
+        )
+    if duplicate_topics:
+        add(
+            "duplicate_topic_id",
+            "Topic IDs must be unique: " + ", ".join(duplicate_topics) + ".",
+            "topics",
+        )
+
+    domain_ids = set(domain_counts)
+    topic_by_id = {
+        topic.id: topic for topic in topics if topic_counts[topic.id] == 1
+    }
+    concept_ids = {concept.id for concept in concepts}
+    children: Counter[str] = Counter()
+    concept_owners: dict[str, list[str]] = {}
+    for topic in topics:
+        if topic.domain_id not in domain_ids:
+            add(
+                "unknown_domain_reference",
+                f"Topic {topic.id} references unknown domain {topic.domain_id}.",
+                "topics[].domain_id",
+            )
+        if topic.parent_id:
+            parent = topic_by_id.get(topic.parent_id)
+            if parent is None:
+                add(
+                    "unknown_parent_topic",
+                    f"Topic {topic.id} references unknown parent {topic.parent_id}.",
+                    "topics[].parent_id",
+                )
+            elif parent.domain_id != topic.domain_id:
+                add(
+                    "cross_domain_parent",
+                    f"Topic {topic.id} and parent {parent.id} must share a domain.",
+                    "topics[].parent_id",
+                )
+            children[topic.parent_id] += 1
+        duplicate_concepts = sorted(
+            key for key, count in Counter(topic.concept_ids).items() if count > 1
+        )
+        if duplicate_concepts:
+            add(
+                "duplicate_topic_concept",
+                f"Topic {topic.id} repeats concepts: {', '.join(duplicate_concepts)}.",
+                "topics[].concept_ids",
+            )
+        for concept_id in topic.concept_ids:
+            if concept_id not in concept_ids:
+                add(
+                    "unknown_topic_concept",
+                    f"Topic {topic.id} references unknown concept {concept_id}.",
+                    "topics[].concept_ids",
+                )
+            concept_owners.setdefault(concept_id, []).append(topic.id)
+        duplicate_related = sorted(
+            key for key, count in Counter(topic.related_topic_ids).items() if count > 1
+        )
+        if duplicate_related:
+            add(
+                "duplicate_related_topic",
+                f"Topic {topic.id} repeats related topics: {', '.join(duplicate_related)}.",
+                "topics[].related_topic_ids",
+            )
+        for related_id in topic.related_topic_ids:
+            if related_id == topic.id:
+                add(
+                    "self_related_topic",
+                    f"Topic {topic.id} cannot relate to itself.",
+                    "topics[].related_topic_ids",
+                )
+            elif related_id not in topic_by_id:
+                add(
+                    "unknown_related_topic",
+                    f"Topic {topic.id} references unknown related topic {related_id}.",
+                    "topics[].related_topic_ids",
+                )
+
+    for topic in topics:
+        for related_id in topic.related_topic_ids:
+            related = topic_by_id.get(related_id)
+            if related and topic.id not in related.related_topic_ids:
+                add(
+                    "asymmetric_related_topic",
+                    f"Topic relation {topic.id} <-> {related_id} must be declared symmetrically.",
+                    "topics[].related_topic_ids",
+                )
+
+    for topic in topics:
+        if not topic.concept_ids and children[topic.id] == 0:
+            add(
+                "empty_topic",
+                f"Topic {topic.id} owns no concepts and has no child topics.",
+                "topics[].concept_ids",
+            )
+
+    for start in topic_by_id:
+        trail: set[str] = set()
+        current = start
+        while current in topic_by_id:
+            if current in trail:
+                add(
+                    "topic_cycle",
+                    f"Topic parent hierarchy contains a cycle involving {current}.",
+                    "topics[].parent_id",
+                )
+                break
+            trail.add(current)
+            parent = topic_by_id[current].parent_id
+            if not parent:
+                break
+            current = parent
+
+    unowned = sorted(concept_ids - set(concept_owners))
+    multiply_owned = sorted(
+        (concept_id, owners)
+        for concept_id, owners in concept_owners.items()
+        if len(owners) != 1
+    )
+    if unowned:
+        add(
+            "unowned_concept",
+            f"Every concept must have one canonical topic owner; unowned: {', '.join(unowned)}.",
+            "topics[].concept_ids",
+        )
+    if multiply_owned:
+        rendered = "; ".join(
+            f"{concept_id}={','.join(sorted(owners))}"
+            for concept_id, owners in multiply_owned
+        )
+        add(
+            "multiple_topic_owners",
+            "Concepts must have one canonical topic owner: " + rendered + ".",
+            "topics[].concept_ids",
+        )
+
+    if questions is not None:
+        for question in questions:
+            mapped = {mapping.concept_id for mapping in question.concepts}
+            missing = sorted(mapped - set(concept_owners))
+            if missing:
+                add(
+                    "unbucketed_question_concept",
+                    f"Question {question.id} maps concepts without topic ownership: "
+                    + ", ".join(missing)
+                    + ".",
+                    "questions[].concepts",
+                )
+
+    for domain_id in domain_ids:
+        if not any(
+            topic.domain_id == domain_id and topic.parent_id is None
+            for topic in topics
+        ):
+            add(
+                "domain_without_root_topic",
+                f"Domain {domain_id} has no top-level topic.",
+                "topics[].domain_id",
+            )
+
+    _raise_issues("Curriculum catalog", issues)
+    return domains, topics
 
 
 def parse_bundle(bundle: dict[str, Any]) -> tuple[
@@ -735,6 +1018,8 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
             knowledge_graph = KnowledgeGraph(concepts, edges)
         except ValidationError as exc:
             add("graph_integrity", str(exc), path="edges")
+    if not any(issue.severity == "error" for issue in issues):
+        parse_catalog(bundle, concepts, questions)
     issues.extend(
         audit_corpus(
             questions,
@@ -749,5 +1034,10 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
     return concepts, edges, misconceptions, sources, questions
 
 
-def read_and_parse(path: str | Path):
-    return parse_bundle(load_bundle(path))
+def read_and_parse(path: str | Path, *, include_catalog: bool = False):
+    bundle = load_bundle(path)
+    parsed = parse_bundle(bundle)
+    if not include_catalog:
+        return parsed
+    domains, topics = parse_catalog(bundle, parsed[0], parsed[4])
+    return (*parsed, domains, topics)

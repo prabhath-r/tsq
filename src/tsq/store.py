@@ -19,6 +19,7 @@ from .models import (
     Concept,
     ConceptEdge,
     ConceptWeight,
+    Domain,
     Misconception,
     MisconceptionBelief,
     Option,
@@ -30,11 +31,12 @@ from .models import (
     SessionPhase,
     SkillState,
     Source,
+    Topic,
 )
 from .quality import audit_corpus
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Candidate retrieval deliberately has a separate, compact SQL kernel.  Keeping
 # it module-level lets the large-bank benchmark inspect the exact production
@@ -204,6 +206,32 @@ def concept_content_hash(concept: Concept) -> str:
     )
 
 
+def domain_content_hash(domain: Domain) -> str:
+    return _content_hash(
+        {
+            "id": domain.id,
+            "name": domain.name,
+            "description": domain.description,
+            "sort_order": domain.sort_order,
+        }
+    )
+
+
+def topic_content_hash(topic: Topic) -> str:
+    return _content_hash(
+        {
+            "id": topic.id,
+            "domain_id": topic.domain_id,
+            "name": topic.name,
+            "description": topic.description,
+            "concept_ids": list(topic.concept_ids),
+            "parent_id": topic.parent_id,
+            "related_topic_ids": list(topic.related_topic_ids),
+            "sort_order": topic.sort_order,
+        }
+    )
+
+
 def misconception_content_hash(misconception: Misconception) -> str:
     return _content_hash(
         {
@@ -349,7 +377,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     recent_families_json TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL DEFAULT 'active',
     created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    topic_id TEXT,
+    exploration_mode TEXT NOT NULL DEFAULT 'off'
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_learner ON sessions(learner_id, created_at);
@@ -428,6 +458,67 @@ CREATE TABLE IF NOT EXISTS release_questions (
 
 CREATE INDEX IF NOT EXISTS idx_release_questions_question_release
 ON release_questions(question_id, release_id);
+
+CREATE TABLE IF NOT EXISTS release_domains (
+    release_id TEXT NOT NULL REFERENCES corpus_releases(id),
+    domain_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    sort_order INTEGER NOT NULL CHECK(sort_order >= 0),
+    PRIMARY KEY(release_id, domain_id)
+);
+
+CREATE TABLE IF NOT EXISTS release_topics (
+    release_id TEXT NOT NULL REFERENCES corpus_releases(id),
+    topic_id TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    domain_id TEXT NOT NULL,
+    parent_topic_id TEXT,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    related_topic_ids_json TEXT NOT NULL,
+    sort_order INTEGER NOT NULL CHECK(sort_order >= 0),
+    PRIMARY KEY(release_id, topic_id),
+    FOREIGN KEY(release_id, domain_id)
+        REFERENCES release_domains(release_id, domain_id),
+    FOREIGN KEY(release_id, parent_topic_id)
+        REFERENCES release_topics(release_id, topic_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_topics_parent
+ON release_topics(release_id, parent_topic_id, sort_order, topic_id);
+
+CREATE TABLE IF NOT EXISTS release_topic_concepts (
+    release_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    concept_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK(position >= 0),
+    PRIMARY KEY(release_id, topic_id, concept_id),
+    UNIQUE(release_id, concept_id),
+    FOREIGN KEY(release_id, topic_id)
+        REFERENCES release_topics(release_id, topic_id),
+    FOREIGN KEY(release_id, concept_id)
+        REFERENCES release_concepts(release_id, concept_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_topic_concepts_concept
+ON release_topic_concepts(release_id, concept_id, topic_id);
+
+CREATE TABLE IF NOT EXISTS release_question_topics (
+    release_id TEXT NOT NULL,
+    question_id TEXT NOT NULL,
+    topic_id TEXT NOT NULL,
+    relation TEXT NOT NULL CHECK(relation IN ('primary', 'cross')),
+    PRIMARY KEY(release_id, question_id, topic_id),
+    FOREIGN KEY(release_id, question_id)
+        REFERENCES release_questions(release_id, question_id),
+    FOREIGN KEY(release_id, topic_id)
+        REFERENCES release_topics(release_id, topic_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_question_topics_topic
+ON release_question_topics(release_id, topic_id, relation, question_id);
 
 CREATE TABLE IF NOT EXISTS decisions (
     id TEXT PRIMARY KEY,
@@ -770,6 +861,9 @@ class Database:
             if current_version < 6:
                 self._migrate_v5_to_v6(connection)
                 current_version = 6
+            if current_version < 7:
+                self._migrate_v6_to_v7(connection)
+                current_version = 7
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -852,6 +946,10 @@ class Database:
             "release_misconceptions",
             "release_sources",
             "release_questions",
+            "release_domains",
+            "release_topics",
+            "release_topic_concepts",
+            "release_question_topics",
         ):
             connection.execute(
                 f"""CREATE TRIGGER IF NOT EXISTS {table}_no_update
@@ -910,6 +1008,10 @@ class Database:
             "release_misconceptions",
             "release_sources",
             "release_questions",
+            "release_domains",
+            "release_topics",
+            "release_topic_concepts",
+            "release_question_topics",
         ):
             for suffix in ("no_update", "no_delete"):
                 connection.execute(
@@ -1620,6 +1722,25 @@ class Database:
             )
 
     @staticmethod
+    def _migrate_v6_to_v7(connection: sqlite3.Connection) -> None:
+        """Add release-pinned curriculum catalogs and exploration state.
+
+        Historical releases intentionally remain catalog-less: their bundle
+        hashes and session meanings are left untouched.  A subsequent corpus
+        import can publish a catalog as part of a new immutable release.
+        """
+
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(sessions)")
+        }
+        if "topic_id" not in columns:
+            connection.execute("ALTER TABLE sessions ADD COLUMN topic_id TEXT")
+        if "exploration_mode" not in columns:
+            connection.execute(
+                "ALTER TABLE sessions ADD COLUMN exploration_mode TEXT NOT NULL DEFAULT 'off'"
+            )
+
+    @staticmethod
     def _install_v5_indexes(connection: sqlite3.Connection) -> None:
         connection.execute(
             """CREATE UNIQUE INDEX IF NOT EXISTS idx_one_pending_decision
@@ -1773,9 +1894,11 @@ class Database:
         misconceptions: Sequence[Misconception],
         sources: Sequence[Source],
         questions: Sequence[Question],
+        domains: Sequence[Domain] = (),
+        topics: Sequence[Topic] = (),
     ) -> dict[str, int | str]:
         self._validate_corpus_activation(
-            concepts, edges, misconceptions, sources, questions
+            concepts, edges, misconceptions, sources, questions, domains, topics
         )
         # Canonicalization is CPU work and must not extend SQLite's single-writer
         # critical section. Reuse these exact hashes for registry inserts and the
@@ -1793,6 +1916,52 @@ class Database:
         question_hashes = {
             question.id: question_content_hash(question) for question in questions
         }
+        domain_hashes = {
+            domain.id: domain_content_hash(domain) for domain in domains
+        }
+        topic_hashes = {
+            topic.id: topic_content_hash(topic) for topic in topics
+        }
+        topic_by_concept = {
+            concept_id: topic.id
+            for topic in topics
+            for concept_id in topic.concept_ids
+        }
+        question_topic_rows: list[tuple[str, str, str]] = []
+        for question in questions:
+            relations: dict[str, str] = {}
+            for mapping in question.concepts:
+                topic_id = topic_by_concept.get(mapping.concept_id)
+                if topic_id is None:
+                    continue
+                relation = (
+                    "primary"
+                    if mapping.role.value == "primary"
+                    else "cross"
+                )
+                if relation == "primary" or topic_id not in relations:
+                    relations[topic_id] = relation
+            question_topic_rows.extend(
+                (question.id, topic_id, relation)
+                for topic_id, relation in sorted(relations.items())
+            )
+        ordered_topics: list[Topic] = []
+        remaining_topics = {topic.id: topic for topic in topics}
+        while remaining_topics:
+            ready = sorted(
+                (
+                    topic
+                    for topic in remaining_topics.values()
+                    if topic.parent_id is None
+                    or topic.parent_id not in remaining_topics
+                ),
+                key=lambda topic: (topic.sort_order, topic.id),
+            )
+            if not ready:
+                raise ValidationError("Curriculum topic hierarchy contains a cycle.")
+            ordered_topics.extend(ready)
+            for topic in ready:
+                del remaining_topics[topic.id]
         release_payload = {
             "concepts": sorted(concept_hashes.items()),
             "edges": sorted(
@@ -1815,6 +1984,14 @@ class Database:
                 for question in questions
             ),
         }
+        if domains or topics:
+            release_payload.update(
+                {
+                    "domains": sorted(domain_hashes.items()),
+                    "topics": sorted(topic_hashes.items()),
+                    "question_topics": sorted(question_topic_rows),
+                }
+            )
         bundle_hash = _content_hash(release_payload)
         release_id = f"rel_{bundle_hash[:24]}"
         imported_at = datetime.now(timezone.utc).isoformat()
@@ -2030,6 +2207,62 @@ class Database:
                         for question in questions
                     ),
                 )
+                connection.executemany(
+                    """INSERT INTO release_domains(
+                           release_id, domain_id, content_hash, name,
+                           description, sort_order
+                       ) VALUES (?, ?, ?, ?, ?, ?)""",
+                    (
+                        (
+                            release_id,
+                            domain.id,
+                            domain_hashes[domain.id],
+                            domain.name,
+                            domain.description,
+                            domain.sort_order,
+                        )
+                        for domain in sorted(
+                            domains, key=lambda item: (item.sort_order, item.id)
+                        )
+                    ),
+                )
+                for topic in ordered_topics:
+                    connection.execute(
+                        """INSERT INTO release_topics(
+                               release_id, topic_id, content_hash, domain_id,
+                               parent_topic_id, name, description,
+                               related_topic_ids_json, sort_order
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            release_id,
+                            topic.id,
+                            topic_hashes[topic.id],
+                            topic.domain_id,
+                            topic.parent_id,
+                            topic.name,
+                            topic.description,
+                            json.dumps(list(topic.related_topic_ids)),
+                            topic.sort_order,
+                        ),
+                    )
+                    connection.executemany(
+                        """INSERT INTO release_topic_concepts(
+                               release_id, topic_id, concept_id, position
+                           ) VALUES (?, ?, ?, ?)""",
+                        (
+                            (release_id, topic.id, concept_id, position)
+                            for position, concept_id in enumerate(topic.concept_ids)
+                        ),
+                    )
+                connection.executemany(
+                    """INSERT INTO release_question_topics(
+                           release_id, question_id, topic_id, relation
+                       ) VALUES (?, ?, ?, ?)""",
+                    (
+                        (release_id, question_id, topic_id, relation)
+                        for question_id, topic_id, relation in question_topic_rows
+                    ),
+                )
             stored_edges = [
                 tuple(row)
                 for row in connection.execute(
@@ -2070,6 +2303,31 @@ class Database:
                     (release_id,),
                 ).fetchall()
             ]
+            stored_domains = [
+                (row["domain_id"], row["content_hash"])
+                for row in connection.execute(
+                    """SELECT domain_id, content_hash FROM release_domains
+                       WHERE release_id = ? ORDER BY domain_id""",
+                    (release_id,),
+                ).fetchall()
+            ]
+            stored_topics = [
+                (row["topic_id"], row["content_hash"])
+                for row in connection.execute(
+                    """SELECT topic_id, content_hash FROM release_topics
+                       WHERE release_id = ? ORDER BY topic_id""",
+                    (release_id,),
+                ).fetchall()
+            ]
+            stored_question_topics = [
+                tuple(row)
+                for row in connection.execute(
+                    """SELECT question_id, topic_id, relation
+                       FROM release_question_topics WHERE release_id = ?
+                       ORDER BY question_id, topic_id, relation""",
+                    (release_id,),
+                ).fetchall()
+            ]
             expected_questions = sorted(
                 (
                     question.id,
@@ -2085,6 +2343,9 @@ class Database:
                 != sorted(item.id for item in misconceptions)
                 or stored_sources != sorted(source.id for source in sources)
                 or stored_questions != expected_questions
+                or stored_domains != sorted(domain_hashes.items())
+                or stored_topics != sorted(topic_hashes.items())
+                or stored_question_topics != sorted(question_topic_rows)
             ):
                 raise ConflictError(
                     "Stored corpus release snapshot differs from its immutable manifest."
@@ -2111,6 +2372,8 @@ class Database:
                     "concept_count": len(concepts),
                     "misconception_count": len(misconceptions),
                     "question_count": len(questions),
+                    "domain_count": len(domains),
+                    "topic_count": len(topics),
                     "corpus_release_id": release_id,
                     "bundle_hash": bundle_hash,
                 },
@@ -2122,6 +2385,8 @@ class Database:
             "misconceptions": len(misconceptions),
             "sources": len(sources),
             "questions": len(questions),
+            "domains": len(domains),
+            "topics": len(topics),
             "release_id": release_id,
         }
 
@@ -2132,6 +2397,8 @@ class Database:
         misconceptions: Sequence[Misconception],
         sources: Sequence[Source],
         questions: Sequence[Question],
+        domains: Sequence[Domain] = (),
+        topics: Sequence[Topic] = (),
     ) -> None:
         """Revalidate typed corpus objects at the storage trust boundary."""
 
@@ -2149,6 +2416,8 @@ class Database:
             "misconception": [item.id for item in misconceptions],
             "source": [item.id for item in sources],
             "question": [item.id for item in questions],
+            "domain": [item.id for item in domains],
+            "topic": [item.id for item in topics],
         }
         violations: list[str] = []
         for label, identifiers in identity_groups.items():
@@ -2170,6 +2439,104 @@ class Database:
         misconception_by_id = {item.id: item for item in misconceptions}
         source_ids = set(identity_groups["source"])
         question_by_id = {item.id: item for item in questions}
+        domain_ids = set(identity_groups["domain"])
+        topic_by_id = {item.id: item for item in topics}
+
+        if bool(domains) != bool(topics):
+            violations.append(
+                "curriculum activation requires both domains and topics"
+            )
+        for domain in domains:
+            if (
+                not domain.id.strip()
+                or not domain.name.strip()
+                or not domain.description.strip()
+                or isinstance(domain.sort_order, bool)
+                or not isinstance(domain.sort_order, int)
+                or domain.sort_order < 0
+            ):
+                violations.append(f"domain {domain.id!r} has invalid fields")
+
+        concept_owners: dict[str, list[str]] = {}
+        for topic in topics:
+            if (
+                not topic.id.strip()
+                or not topic.name.strip()
+                or not topic.description.strip()
+                or isinstance(topic.sort_order, bool)
+                or not isinstance(topic.sort_order, int)
+                or topic.sort_order < 0
+            ):
+                violations.append(f"topic {topic.id!r} has invalid fields")
+            if topic.domain_id not in domain_ids:
+                violations.append(
+                    f"topic {topic.id} references unknown domain {topic.domain_id}"
+                )
+            if topic.parent_id:
+                parent = topic_by_id.get(topic.parent_id)
+                if parent is None:
+                    violations.append(
+                        f"topic {topic.id} references unknown parent {topic.parent_id}"
+                    )
+                elif parent.domain_id != topic.domain_id:
+                    violations.append(
+                        f"topic {topic.id} and its parent must share a domain"
+                    )
+            if len(set(topic.concept_ids)) != len(topic.concept_ids):
+                violations.append(f"topic {topic.id} repeats a concept")
+            for concept_id in topic.concept_ids:
+                if concept_id not in concept_ids:
+                    violations.append(
+                        f"topic {topic.id} references unknown concept {concept_id}"
+                    )
+                concept_owners.setdefault(concept_id, []).append(topic.id)
+            if len(set(topic.related_topic_ids)) != len(topic.related_topic_ids):
+                violations.append(f"topic {topic.id} repeats a related topic")
+            for related_id in topic.related_topic_ids:
+                related = topic_by_id.get(related_id)
+                if related_id == topic.id:
+                    violations.append(f"topic {topic.id} relates to itself")
+                elif related is None:
+                    violations.append(
+                        f"topic {topic.id} references unknown related topic {related_id}"
+                    )
+                elif topic.id not in related.related_topic_ids:
+                    violations.append(
+                        f"topic relation {topic.id}<->{related_id} is asymmetric"
+                    )
+
+        for start in topic_by_id:
+            trail: set[str] = set()
+            current: str | None = start
+            while current is not None and current in topic_by_id:
+                if current in trail:
+                    violations.append(
+                        f"topic parent hierarchy contains a cycle at {current}"
+                    )
+                    break
+                trail.add(current)
+                current = topic_by_id[current].parent_id
+        if topics:
+            for concept_id in concept_ids:
+                owners = concept_owners.get(concept_id, [])
+                if len(owners) != 1:
+                    violations.append(
+                        f"concept {concept_id} must have exactly one topic owner"
+                    )
+            child_parents = {topic.parent_id for topic in topics if topic.parent_id}
+            for topic in topics:
+                if not topic.concept_ids and topic.id not in child_parents:
+                    violations.append(
+                        f"topic {topic.id} owns no concepts and has no children"
+                    )
+            for domain_id in domain_ids:
+                if not any(
+                    topic.domain_id == domain_id and topic.parent_id is None
+                    for topic in topics
+                ):
+                    violations.append(
+                        f"domain {domain_id} has no top-level topic"
+                    )
         for edge in edges:
             unknown = {edge.source_id, edge.target_id} - concept_ids
             if unknown:
@@ -2262,6 +2629,7 @@ class Database:
         stream_id: str,
         event_type: str,
         payload: dict[str, Any],
+        schema_version: int = 1,
         metadata: dict[str, Any] | None = None,
         learner_id: str | None = None,
         session_id: str | None = None,
@@ -2270,6 +2638,8 @@ class Database:
         causation_id: str | None = None,
         occurred_at: datetime | None = None,
     ) -> sqlite3.Row:
+        if type(schema_version) is not int or schema_version < 1:
+            raise ValidationError("Event schema_version must be a positive integer.")
         if idempotency_key:
             prior = connection.execute(
                 "SELECT * FROM events WHERE idempotency_key = ?", (idempotency_key,)
@@ -2318,7 +2688,7 @@ class Database:
             "stream_id": stream_id,
             "stream_version": stream_version,
             "event_type": event_type,
-            "schema_version": 1,
+            "schema_version": schema_version,
             "occurred_at": occurred_timestamp,
             "recorded_at": recorded_timestamp,
             "learner_id": learner_id,
@@ -2337,12 +2707,13 @@ class Database:
                    occurred_at, recorded_at, learner_id, session_id, correlation_id,
                    causation_id, idempotency_key, payload_json, metadata_json,
                    previous_hash, payload_hash
-               ) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 event_id,
                 stream_id,
                 stream_version,
                 event_type,
+                schema_version,
                 occurred_timestamp,
                 recorded_timestamp,
                 learner_id,
@@ -2550,6 +2921,195 @@ class Database:
             for row in edge_rows
         ]
         return KnowledgeGraph(concepts, edges)
+
+    def get_catalog(self, release_id: str | None = None) -> dict[str, Any]:
+        """Return the immutable learner-facing curriculum catalog for a release."""
+        with self.read() as connection:
+            resolved_release = release_id or self.get_active_release_id(connection)
+            if not connection.execute(
+                "SELECT 1 FROM corpus_releases WHERE id = ?", (resolved_release,)
+            ).fetchone():
+                raise NotFoundError(f"Unknown corpus release: {resolved_release}")
+            domain_rows = connection.execute(
+                """SELECT domain_id, name, description, sort_order
+                   FROM release_domains WHERE release_id = ?
+                   ORDER BY sort_order, name, domain_id""",
+                (resolved_release,),
+            ).fetchall()
+            topic_rows = connection.execute(
+                """SELECT topic_id, domain_id, parent_topic_id, name,
+                          description, related_topic_ids_json, sort_order
+                   FROM release_topics WHERE release_id = ?
+                   ORDER BY sort_order, name, topic_id""",
+                (resolved_release,),
+            ).fetchall()
+            concept_rows = connection.execute(
+                """SELECT membership.topic_id, membership.concept_id,
+                          membership.position, concept.name
+                   FROM release_topic_concepts membership
+                   JOIN concepts concept ON concept.id = membership.concept_id
+                   WHERE membership.release_id = ?
+                   ORDER BY membership.topic_id, membership.position""",
+                (resolved_release,),
+            ).fetchall()
+            coverage_rows = connection.execute(
+                """SELECT mapping.topic_id,
+                          COUNT(DISTINCT CASE WHEN mapping.relation = 'primary'
+                                             THEN mapping.question_id END) AS primary_items,
+                          COUNT(DISTINCT CASE WHEN mapping.relation = 'cross'
+                                             THEN mapping.question_id END) AS cross_items
+                   FROM release_question_topics mapping
+                   JOIN release_questions question
+                     ON question.release_id = mapping.release_id
+                    AND question.question_id = mapping.question_id
+                   WHERE mapping.release_id = ?
+                     AND question.status IN ('approved', 'calibrated')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM question_revocations revoked
+                         WHERE revoked.question_id = mapping.question_id
+                     )
+                   GROUP BY mapping.topic_id""",
+                (resolved_release,),
+            ).fetchall()
+        concepts_by_topic: dict[str, list[dict[str, Any]]] = {}
+        for row in concept_rows:
+            concepts_by_topic.setdefault(row["topic_id"], []).append(
+                {"id": row["concept_id"], "name": row["name"]}
+            )
+        coverage = {row["topic_id"]: row for row in coverage_rows}
+        return {
+            "release_id": resolved_release,
+            "domains": [
+                {
+                    "id": row["domain_id"],
+                    "name": row["name"],
+                    "description": row["description"],
+                    "sort_order": row["sort_order"],
+                }
+                for row in domain_rows
+            ],
+            "topics": [
+                {
+                    "id": row["topic_id"],
+                    "domain_id": row["domain_id"],
+                    "parent_id": row["parent_topic_id"],
+                    "name": row["name"],
+                    "description": row["description"],
+                    "related_topic_ids": json.loads(
+                        row["related_topic_ids_json"]
+                    ),
+                    "sort_order": row["sort_order"],
+                    "concepts": concepts_by_topic.get(row["topic_id"], []),
+                    "direct_primary_questions": int(
+                        coverage.get(row["topic_id"], {"primary_items": 0})[
+                            "primary_items"
+                        ]
+                    ),
+                    "cross_topic_questions": int(
+                        coverage.get(row["topic_id"], {"cross_items": 0})[
+                            "cross_items"
+                        ]
+                    ),
+                }
+                for row in topic_rows
+            ],
+        }
+
+    def resolve_topic(
+        self, reference: str, release_id: str | None = None
+    ) -> dict[str, Any]:
+        if not isinstance(reference, str) or not reference.strip():
+            raise ValidationError("Topic reference must be a non-blank string.")
+        catalog = self.get_catalog(release_id)
+        normalized = " ".join(reference.split()).casefold()
+        exact = [topic for topic in catalog["topics"] if topic["id"] == reference]
+        named = [
+            topic
+            for topic in catalog["topics"]
+            if " ".join(topic["name"].split()).casefold() == normalized
+        ]
+        matches = exact or named
+        if not matches:
+            raise NotFoundError(f"Unknown curriculum topic: {reference}")
+        if len(matches) > 1:
+            raise ValidationError(
+                f"Topic name {reference!r} is ambiguous; use a stable topic ID."
+            )
+        return {**matches[0], "release_id": catalog["release_id"]}
+
+    def topic_scope(self, topic_id: str, release_id: str | None = None) -> set[str]:
+        """Return owned objectives, descendants, and their prerequisites."""
+        catalog = self.get_catalog(release_id)
+        owned = self.topic_owned_concepts(
+            topic_id, catalog["release_id"], include_descendants=True
+        )
+        graph = self.get_graph(catalog["release_id"])
+        scope: set[str] = set()
+        for concept_id in owned:
+            scope.update(graph.learning_scope(concept_id))
+        return scope
+
+    def topic_owned_concepts(
+        self,
+        topic_id: str,
+        release_id: str | None = None,
+        *,
+        include_descendants: bool = True,
+    ) -> set[str]:
+        catalog = self.get_catalog(release_id)
+        topic_by_id = {topic["id"]: topic for topic in catalog["topics"]}
+        if topic_id not in topic_by_id:
+            raise NotFoundError(
+                f"Topic {topic_id} is not in corpus release {catalog['release_id']}."
+            )
+        selected_topics = {topic_id}
+        if include_descendants:
+            changed = True
+            while changed:
+                changed = False
+                for topic in catalog["topics"]:
+                    if (
+                        topic["parent_id"] in selected_topics
+                        and topic["id"] not in selected_topics
+                    ):
+                        selected_topics.add(topic["id"])
+                        changed = True
+        return {
+            concept["id"]
+            for candidate_id in selected_topics
+            for concept in topic_by_id[candidate_id]["concepts"]
+        }
+
+    def topic_for_concept(
+        self, concept_id: str, release_id: str | None = None
+    ) -> dict[str, Any] | None:
+        catalog = self.get_catalog(release_id)
+        for topic in catalog["topics"]:
+            if any(concept["id"] == concept_id for concept in topic["concepts"]):
+                return {**topic, "release_id": catalog["release_id"]}
+        return None
+
+    def question_topics(
+        self, question_id: str, release_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        catalog = self.get_catalog(release_id)
+        topics = {topic["id"]: topic for topic in catalog["topics"]}
+        with self.read() as connection:
+            rows = connection.execute(
+                """SELECT topic_id, relation FROM release_question_topics
+                   WHERE release_id = ? AND question_id = ?
+                   ORDER BY CASE relation WHEN 'primary' THEN 0 ELSE 1 END, topic_id""",
+                (catalog["release_id"], question_id),
+            ).fetchall()
+        return [
+            {
+                "id": row["topic_id"],
+                "name": topics[row["topic_id"]]["name"],
+                "relation": row["relation"],
+            }
+            for row in rows
+            if row["topic_id"] in topics
+        ]
 
     def get_misconceptions(
         self,
@@ -2812,11 +3372,20 @@ class Database:
         }
         return [by_id[question_id] for question_id in question_ids if question_id in by_id]
 
-    def get_skill_states(self, learner_id: str) -> dict[str, SkillState]:
-        with self.read() as connection:
-            rows = connection.execute(
+    def get_skill_states(
+        self,
+        learner_id: str,
+        connection: sqlite3.Connection | None = None,
+    ) -> dict[str, SkillState]:
+        owns_connection = connection is None
+        conn = connection or self.connect()
+        try:
+            rows = conn.execute(
                 "SELECT * FROM skill_states WHERE learner_id = ?", (learner_id,)
             ).fetchall()
+        finally:
+            if owns_connection:
+                conn.close()
         return {
             row["concept_id"]: SkillState(
                 learner_id=row["learner_id"],
@@ -2974,6 +3543,41 @@ class Database:
             "families": {row["family_id"] for row in rows},
         }
 
+    def session_recent_performance(
+        self, session_id: str, *, limit: int = 3
+    ) -> list[dict[str, Any]]:
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise ValidationError("Performance history limit must be a positive integer.")
+        with self.read() as connection:
+            rows = connection.execute(
+                """SELECT attempt.is_correct, attempt.confidence,
+                          attempt.response_ms, attempt.hint_count,
+                          decision.pedagogical_role, question.id AS question_id,
+                          primary_mapping.concept_id AS primary_concept_id
+                   FROM attempts attempt
+                   JOIN decisions decision ON decision.id = attempt.decision_id
+                   JOIN questions question ON question.id = attempt.question_id
+                   JOIN question_concepts primary_mapping
+                     ON primary_mapping.question_id = question.id
+                    AND primary_mapping.role = 'primary'
+                   WHERE attempt.session_id = ?
+                   ORDER BY attempt.answered_at DESC, attempt.id DESC
+                   LIMIT ?""",
+                (session_id, limit),
+            ).fetchall()
+        return [
+            {
+                "correct": bool(row["is_correct"]),
+                "confidence": row["confidence"],
+                "response_ms": row["response_ms"],
+                "hint_count": row["hint_count"],
+                "pedagogical_role": row["pedagogical_role"],
+                "question_id": row["question_id"],
+                "primary_concept_id": row["primary_concept_id"],
+            }
+            for row in rows
+        ]
+
     def independent_evidence_summary(self, learner_id: str, concept_id: str) -> dict[str, int]:
         return self.independent_evidence_summaries(learner_id, {concept_id})[concept_id]
 
@@ -3014,16 +3618,32 @@ class Database:
     def create_session(
         self,
         learner_id: str,
-        root_concept_id: str,
+        root_concept_id: str | None,
         *,
+        topic_id: str | None = None,
+        exploration_mode: str = "off",
         mode: str = "learn",
         seed: int | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         if not isinstance(learner_id, str) or not learner_id.strip():
             raise ValidationError("learner_id must be a non-blank string.")
-        if not isinstance(root_concept_id, str) or not root_concept_id.strip():
-            raise ValidationError("root_concept_id must be a non-blank string.")
+        if root_concept_id is not None and (
+            not isinstance(root_concept_id, str) or not root_concept_id.strip()
+        ):
+            raise ValidationError("root_concept_id must be null or a non-blank string.")
+        if topic_id is not None and (
+            not isinstance(topic_id, str) or not topic_id.strip()
+        ):
+            raise ValidationError("topic_id must be null or a non-blank string.")
+        if root_concept_id is None and topic_id is None:
+            raise ValidationError("A concept or curriculum topic is required.")
+        if exploration_mode not in {"off", "adaptive"}:
+            raise ValidationError("exploration_mode must be off or adaptive.")
+        if topic_id is None and exploration_mode != "off":
+            raise ValidationError(
+                "Related-topic exploration requires a curriculum topic session."
+            )
         if mode not in {"learn", "diagnose", "review"}:
             raise ValidationError("Mode must be learn, diagnose, or review.")
         if seed is not None and (
@@ -3048,6 +3668,61 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         resolved_seed = seed if seed is not None else secrets.randbelow(2**31)
         with self.transaction() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM learners WHERE id = ?", (learner_id,)
+            ).fetchone():
+                raise NotFoundError(f"Unknown learner: {learner_id}")
+            release_id = self.get_active_release_id(connection)
+            requested_root_concept_id = root_concept_id
+            if topic_id is not None:
+                if not connection.execute(
+                    """SELECT 1 FROM release_topics
+                       WHERE release_id = ? AND topic_id = ?""",
+                    (release_id, topic_id),
+                ).fetchone():
+                    raise NotFoundError(
+                        f"Topic {topic_id} is not in active release {release_id}."
+                    )
+                owned_rows = connection.execute(
+                    """WITH RECURSIVE descendants(topic_id) AS (
+                           SELECT ?
+                           UNION ALL
+                           SELECT child.topic_id
+                           FROM release_topics child
+                           JOIN descendants parent
+                             ON child.parent_topic_id = parent.topic_id
+                           WHERE child.release_id = ?
+                       )
+                       SELECT membership.concept_id,
+                              CASE WHEN membership.topic_id = ? THEN 0 ELSE 1 END AS rank,
+                              membership.position
+                       FROM descendants
+                       JOIN release_topic_concepts membership
+                         ON membership.release_id = ?
+                        AND membership.topic_id = descendants.topic_id
+                       ORDER BY rank, membership.position, membership.concept_id""",
+                    (topic_id, release_id, topic_id, release_id),
+                ).fetchall()
+                if not owned_rows:
+                    raise ConflictError(
+                        f"Topic {topic_id} has no assessable concept scope."
+                    )
+                owned_concepts = {row["concept_id"] for row in owned_rows}
+                if root_concept_id is None:
+                    root_concept_id = owned_rows[0]["concept_id"]
+                elif root_concept_id not in owned_concepts:
+                    raise ValidationError(
+                        f"Root concept {root_concept_id} is not owned by topic {topic_id}."
+                    )
+            assert root_concept_id is not None
+            if not connection.execute(
+                """SELECT 1 FROM release_concepts
+                   WHERE release_id = ? AND concept_id = ?""",
+                (release_id, root_concept_id),
+            ).fetchone():
+                raise NotFoundError(
+                    f"Concept {root_concept_id} is not in active release {release_id}."
+                )
             if idempotency_key:
                 prior = connection.execute(
                     "SELECT * FROM events WHERE idempotency_key = ?", (idempotency_key,)
@@ -3057,24 +3732,19 @@ class Database:
                         raise ConflictError("Idempotency key belongs to a different command.")
                     payload = json.loads(prior["payload_json"])
                     if (
-                        payload.get("root_concept_id") != root_concept_id
+                        payload.get(
+                            "requested_root_concept_id",
+                            payload.get("root_concept_id"),
+                        ) != requested_root_concept_id
+                        or payload.get("topic_id") != topic_id
+                        or payload.get("exploration_mode", "off")
+                        != exploration_mode
                         or payload.get("mode") != mode
                         or payload.get("requested_seed") != seed
                         or prior["learner_id"] != learner_id
                     ):
                         raise ConflictError("Idempotency key was reused with different session inputs.")
                     return self.get_session(payload["session_id"], connection)
-            if not connection.execute("SELECT 1 FROM learners WHERE id = ?", (learner_id,)).fetchone():
-                raise NotFoundError(f"Unknown learner: {learner_id}")
-            release_id = self.get_active_release_id(connection)
-            if not connection.execute(
-                """SELECT 1 FROM release_concepts
-                   WHERE release_id = ? AND concept_id = ?""",
-                (release_id, root_concept_id),
-            ).fetchone():
-                raise NotFoundError(
-                    f"Concept {root_concept_id} is not in active release {release_id}."
-                )
             self.append_event(
                 connection,
                 stream_id=f"learner:{learner_id}",
@@ -3082,6 +3752,9 @@ class Database:
                 payload={
                     "session_id": session_id,
                     "root_concept_id": root_concept_id,
+                    "requested_root_concept_id": requested_root_concept_id,
+                    "topic_id": topic_id,
+                    "exploration_mode": exploration_mode,
                     "mode": mode,
                     "initial_phase": phase.value,
                     "requested_seed": seed,
@@ -3096,8 +3769,9 @@ class Database:
             connection.execute(
                 """INSERT INTO sessions(
                        id, learner_id, root_concept_id, corpus_release_id,
-                       mode, phase, rng_seed, created_at, updated_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       mode, phase, rng_seed, created_at, updated_at,
+                       topic_id, exploration_mode
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     session_id,
                     learner_id,
@@ -3108,6 +3782,8 @@ class Database:
                     resolved_seed,
                     now,
                     now,
+                    topic_id,
+                    exploration_mode,
                 ),
             )
             return self.get_session(session_id, connection)
@@ -3238,6 +3914,7 @@ class Database:
                 score=score,
                 propensity=row["propensity"],
                 rationale=row["rationale"],
+                pedagogical_role=row["pedagogical_role"],
             )
 
     def recent_decisions(self, session_id: str, limit: int = 50) -> list[dict[str, Any]]:
@@ -3659,6 +4336,31 @@ class Database:
                        ORDER BY membership.concept_id""",
                     (release_id,),
                 ).fetchall()
+                domain_rows = connection.execute(
+                    """SELECT domain_id, content_hash, name, description, sort_order
+                       FROM release_domains WHERE release_id = ?
+                       ORDER BY domain_id""",
+                    (release_id,),
+                ).fetchall()
+                topic_rows = connection.execute(
+                    """SELECT topic_id, content_hash, domain_id, parent_topic_id,
+                              name, description, related_topic_ids_json, sort_order
+                       FROM release_topics WHERE release_id = ?
+                       ORDER BY topic_id""",
+                    (release_id,),
+                ).fetchall()
+                topic_concept_rows = connection.execute(
+                    """SELECT topic_id, concept_id, position
+                       FROM release_topic_concepts WHERE release_id = ?
+                       ORDER BY topic_id, position, concept_id""",
+                    (release_id,),
+                ).fetchall()
+                question_topic_rows = connection.execute(
+                    """SELECT question_id, topic_id, relation
+                       FROM release_question_topics WHERE release_id = ?
+                       ORDER BY question_id, topic_id, relation""",
+                    (release_id,),
+                ).fetchall()
                 concept_ids_in_release = {row["concept_id"] for row in concept_rows}
                 edge_rows = connection.execute(
                     """SELECT source_id, target_id, relation, weight
@@ -3726,6 +4428,186 @@ class Database:
                                 f"{prefix}: question {question['question_id']} has "
                                 "an evidence weight inconsistent with its status"
                             )
+
+                catalog_present = bool(
+                    domain_rows
+                    or topic_rows
+                    or topic_concept_rows
+                    or question_topic_rows
+                )
+                domain_ids_in_release = {row["domain_id"] for row in domain_rows}
+                topic_by_id = {row["topic_id"]: row for row in topic_rows}
+                topic_concepts: dict[str, list[str]] = {}
+                owner_by_concept: dict[str, str] = {}
+                expected_position: dict[str, int] = {}
+                for membership in topic_concept_rows:
+                    topic_id = membership["topic_id"]
+                    position = membership["position"]
+                    if position != expected_position.get(topic_id, 0):
+                        errors.append(
+                            f"{prefix}: topic {topic_id} concept positions are not contiguous"
+                        )
+                    expected_position[topic_id] = position + 1
+                    topic_concepts.setdefault(topic_id, []).append(
+                        membership["concept_id"]
+                    )
+                    prior_owner = owner_by_concept.get(membership["concept_id"])
+                    if prior_owner is not None:
+                        errors.append(
+                            f"{prefix}: concept {membership['concept_id']} has multiple "
+                            "topic owners"
+                        )
+                    owner_by_concept[membership["concept_id"]] = topic_id
+
+                related_by_topic: dict[str, tuple[str, ...]] = {}
+                for domain in domain_rows:
+                    try:
+                        hydrated_domain = Domain(
+                            domain["domain_id"],
+                            domain["name"],
+                            domain["description"],
+                            domain["sort_order"],
+                        )
+                        expected_hash = domain_content_hash(hydrated_domain)
+                    except (TypeError, ValueError) as exc:
+                        errors.append(
+                            f"{prefix}: domain {domain['domain_id']} is invalid ({exc})"
+                        )
+                    else:
+                        if domain["content_hash"] != expected_hash:
+                            errors.append(
+                                f"{prefix}: domain {domain['domain_id']} content hash mismatch"
+                            )
+                for topic in topic_rows:
+                    related_value = json_value(
+                        topic["related_topic_ids_json"],
+                        f"{prefix} topic {topic['topic_id']} related topics",
+                        list,
+                    )
+                    related_ids = tuple(related_value or [])
+                    related_by_topic[topic["topic_id"]] = related_ids
+                    try:
+                        hydrated_topic = Topic(
+                            id=topic["topic_id"],
+                            domain_id=topic["domain_id"],
+                            name=topic["name"],
+                            description=topic["description"],
+                            concept_ids=tuple(
+                                topic_concepts.get(topic["topic_id"], [])
+                            ),
+                            parent_id=topic["parent_topic_id"],
+                            related_topic_ids=related_ids,
+                            sort_order=topic["sort_order"],
+                        )
+                        expected_hash = topic_content_hash(hydrated_topic)
+                    except (TypeError, ValueError) as exc:
+                        errors.append(
+                            f"{prefix}: topic {topic['topic_id']} is invalid ({exc})"
+                        )
+                    else:
+                        if topic["content_hash"] != expected_hash:
+                            errors.append(
+                                f"{prefix}: topic {topic['topic_id']} content hash mismatch"
+                            )
+                    if topic["domain_id"] not in domain_ids_in_release:
+                        errors.append(
+                            f"{prefix}: topic {topic['topic_id']} has no release domain"
+                        )
+                    parent_id = topic["parent_topic_id"]
+                    if parent_id:
+                        parent = topic_by_id.get(parent_id)
+                        if parent is None:
+                            errors.append(
+                                f"{prefix}: topic {topic['topic_id']} has no release parent"
+                            )
+                        elif parent["domain_id"] != topic["domain_id"]:
+                            errors.append(
+                                f"{prefix}: topic {topic['topic_id']} crosses domain hierarchy"
+                            )
+                    for related_id in related_ids:
+                        if related_id == topic["topic_id"]:
+                            errors.append(
+                                f"{prefix}: topic {topic['topic_id']} relates to itself"
+                            )
+                        elif related_id not in topic_by_id:
+                            errors.append(
+                                f"{prefix}: topic {topic['topic_id']} has unknown relation "
+                                f"{related_id}"
+                            )
+
+                for topic_id, related_ids in related_by_topic.items():
+                    for related_id in related_ids:
+                        if (
+                            related_id in related_by_topic
+                            and topic_id not in related_by_topic[related_id]
+                        ):
+                            errors.append(
+                                f"{prefix}: topic relation {topic_id}<->{related_id} "
+                                "is asymmetric"
+                            )
+                for start in topic_by_id:
+                    trail: set[str] = set()
+                    current: str | None = start
+                    while current is not None and current in topic_by_id:
+                        if current in trail:
+                            errors.append(
+                                f"{prefix}: topic hierarchy contains a cycle at {current}"
+                            )
+                            break
+                        trail.add(current)
+                        current = topic_by_id[current]["parent_topic_id"]
+
+                if catalog_present:
+                    missing_owners = concept_ids_in_release - set(owner_by_concept)
+                    outside_owners = set(owner_by_concept) - concept_ids_in_release
+                    if missing_owners:
+                        errors.append(
+                            f"{prefix}: concepts have no topic owner: "
+                            + ", ".join(sorted(missing_owners))
+                        )
+                    if outside_owners:
+                        errors.append(
+                            f"{prefix}: topic ownership includes outside concepts: "
+                            + ", ".join(sorted(outside_owners))
+                        )
+                    if not domain_rows or not topic_rows:
+                        errors.append(f"{prefix}: curriculum catalog is incomplete")
+
+                    expected_question_topics: list[tuple[str, str, str]] = []
+                    mapped_rows = connection.execute(
+                        """SELECT qc.question_id, qc.concept_id, qc.role
+                           FROM release_questions rq
+                           JOIN question_concepts qc
+                             ON qc.question_id = rq.question_id
+                           WHERE rq.release_id = ?
+                           ORDER BY qc.question_id, qc.concept_id, qc.role""",
+                        (release_id,),
+                    ).fetchall()
+                    relations_by_question: dict[str, dict[str, str]] = {}
+                    for mapping in mapped_rows:
+                        topic_id = owner_by_concept.get(mapping["concept_id"])
+                        if topic_id is None:
+                            continue
+                        relation = (
+                            "primary" if mapping["role"] == "primary" else "cross"
+                        )
+                        relations = relations_by_question.setdefault(
+                            mapping["question_id"], {}
+                        )
+                        if relation == "primary" or topic_id not in relations:
+                            relations[topic_id] = relation
+                    for question_id, relations in relations_by_question.items():
+                        expected_question_topics.extend(
+                            (question_id, topic_id, relation)
+                            for topic_id, relation in relations.items()
+                        )
+                    actual_question_topics = [
+                        tuple(row) for row in question_topic_rows
+                    ]
+                    if actual_question_topics != sorted(expected_question_topics):
+                        errors.append(
+                            f"{prefix}: question-topic projection does not match concept mappings"
+                        )
 
                 outside_concepts = connection.execute(
                     """SELECT DISTINCT qc.question_id, qc.concept_id
@@ -3806,6 +4688,22 @@ class Database:
                         for row in question_rows
                     ],
                 }
+                if catalog_present:
+                    release_payload.update(
+                        {
+                            "domains": [
+                                (row["domain_id"], row["content_hash"])
+                                for row in domain_rows
+                            ],
+                            "topics": [
+                                (row["topic_id"], row["content_hash"])
+                                for row in topic_rows
+                            ],
+                            "question_topics": [
+                                tuple(row) for row in question_topic_rows
+                            ],
+                        }
+                    )
                 expected_bundle_hash = _content_hash(release_payload)
                 if release["bundle_hash"] != expected_bundle_hash:
                     errors.append(f"{prefix}: bundle hash mismatch")
@@ -3822,6 +4720,75 @@ class Database:
                     errors.append("active corpus release does not exist")
                 elif active["sealed_at"] is None:
                     errors.append("active corpus release is not sealed")
+
+            invalid_sessions = connection.execute(
+                """SELECT session.id, session.topic_id, session.exploration_mode,
+                          session.root_concept_id, session.corpus_release_id,
+                          topic.topic_id AS matched_topic,
+                          concept.concept_id AS matched_concept
+                   FROM sessions session
+                   LEFT JOIN release_topics topic
+                     ON topic.release_id = session.corpus_release_id
+                    AND topic.topic_id = session.topic_id
+                   LEFT JOIN release_concepts concept
+                     ON concept.release_id = session.corpus_release_id
+                    AND concept.concept_id = session.root_concept_id
+                   WHERE session.exploration_mode NOT IN ('off', 'adaptive')
+                      OR (session.topic_id IS NULL
+                          AND session.exploration_mode != 'off')
+                      OR (session.topic_id IS NOT NULL
+                          AND topic.topic_id IS NULL)
+                      OR concept.concept_id IS NULL
+                   ORDER BY session.id"""
+            ).fetchall()
+            for session_row in invalid_sessions:
+                prefix = f"session {session_row['id']}"
+                if session_row["exploration_mode"] not in {"off", "adaptive"}:
+                    errors.append(f"{prefix}: invalid exploration mode")
+                if (
+                    session_row["topic_id"] is None
+                    and session_row["exploration_mode"] != "off"
+                ):
+                    errors.append(f"{prefix}: exploration has no topic")
+                if (
+                    session_row["topic_id"] is not None
+                    and session_row["matched_topic"] is None
+                ):
+                    errors.append(f"{prefix}: topic is outside its corpus release")
+                if session_row["matched_concept"] is None:
+                    errors.append(f"{prefix}: root concept is outside its corpus release")
+            topic_sessions = connection.execute(
+                """SELECT id, topic_id, root_concept_id, corpus_release_id
+                   FROM sessions WHERE topic_id IS NOT NULL ORDER BY id"""
+            ).fetchall()
+            for session_row in topic_sessions:
+                owned = connection.execute(
+                    """WITH RECURSIVE descendants(topic_id) AS (
+                           SELECT ?
+                           UNION ALL
+                           SELECT child.topic_id
+                           FROM release_topics child
+                           JOIN descendants parent
+                             ON child.parent_topic_id = parent.topic_id
+                           WHERE child.release_id = ?
+                       )
+                       SELECT 1 FROM descendants
+                       JOIN release_topic_concepts membership
+                         ON membership.release_id = ?
+                        AND membership.topic_id = descendants.topic_id
+                       WHERE membership.concept_id = ? LIMIT 1""",
+                    (
+                        session_row["topic_id"],
+                        session_row["corpus_release_id"],
+                        session_row["corpus_release_id"],
+                        session_row["root_concept_id"],
+                    ),
+                ).fetchone()
+                if owned is None:
+                    errors.append(
+                        f"session {session_row['id']}: root concept is not owned "
+                        "by its topic hierarchy"
+                    )
 
             if stream_id:
                 events = connection.execute(

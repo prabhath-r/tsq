@@ -9,7 +9,13 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from tsq.corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
+from tsq.corpus import (
+    load_bundle,
+    parse_bundle,
+    parse_catalog,
+    read_and_parse,
+    validate_bundle,
+)
 from tsq.errors import ConflictError, ValidationError
 from tsq.graph import KnowledgeGraph
 from tsq.models import (
@@ -32,7 +38,84 @@ CORPUS = ROOT / "corpus" / "ai_curriculum.json"
 class CorpusTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.concepts, cls.edges, cls.misconceptions, cls.sources, cls.questions = read_and_parse(CORPUS)
+        (
+            cls.concepts,
+            cls.edges,
+            cls.misconceptions,
+            cls.sources,
+            cls.questions,
+            cls.domains,
+            cls.topics,
+        ) = read_and_parse(CORPUS, include_catalog=True)
+
+    def test_curriculum_catalog_is_clear_complete_and_canonical(self) -> None:
+        self.assertEqual([domain.name for domain in self.domains], ["Artificial Intelligence"])
+        topic_by_id = {topic.id: topic for topic in self.topics}
+        self.assertEqual(
+            topic_by_id["t_large_language_models"].parent_id,
+            None,
+        )
+        self.assertEqual(
+            {
+                topic.name
+                for topic in self.topics
+                if topic.parent_id == "t_large_language_models"
+            },
+            {
+                "Language Modeling",
+                "Transformers",
+                "Retrieval-Augmented Generation",
+                "LLM Agents",
+            },
+        )
+        owners = [
+            concept_id for topic in self.topics for concept_id in topic.concept_ids
+        ]
+        self.assertCountEqual(owners, [concept.id for concept in self.concepts])
+        self.assertEqual(len(owners), len(set(owners)))
+        self.assertNotIn("c_ai_learning_systems", owners)
+
+    def test_catalog_rejects_ambiguous_ownership_and_asymmetric_relations(self) -> None:
+        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        concepts, _, _, _, questions = parse_bundle(bundle)
+        bundle["topics"][0]["concept_ids"].append(
+            bundle["topics"][1]["concept_ids"][0]
+        )
+        related = bundle["topics"][0]["related_topic_ids"][0]
+        counterpart = next(topic for topic in bundle["topics"] if topic["id"] == related)
+        counterpart["related_topic_ids"].remove(bundle["topics"][0]["id"])
+
+        with self.assertRaises(ValidationError) as raised:
+            parse_catalog(bundle, concepts, questions)
+
+        codes = {issue.code for issue in raised.exception.issues}
+        self.assertIn("multiple_topic_owners", codes)
+        self.assertIn("asymmetric_related_topic", codes)
+
+    def test_new_llm_objectives_have_independent_misconception_families(self) -> None:
+        new_objectives = {
+            "c_autoregressive_language_modeling",
+            "c_attention_scaling",
+            "c_causal_masking",
+            "c_rag_grounding",
+            "c_rag_retrieval_quality",
+            "c_agent_tool_use",
+            "c_agent_observation_loop",
+        }
+        for concept_id in new_objectives:
+            items = [
+                question
+                for question in self.questions
+                if question.primary_concept_id == concept_id
+            ]
+            self.assertGreaterEqual(len(items), 3, concept_id)
+            self.assertEqual(len({item.family_id for item in items}), len(items), concept_id)
+            misconception_sets = [item.misconception_ids for item in items]
+            self.assertTrue(all(len(values) == 3 for values in misconception_sets))
+            self.assertTrue(
+                all(values == misconception_sets[0] for values in misconception_sets),
+                concept_id,
+            )
 
     def test_seed_corpus_has_no_blocking_deterministic_quality_issues(self) -> None:
         errors = [issue for issue in audit_corpus(self.questions) if issue.severity == "error"]

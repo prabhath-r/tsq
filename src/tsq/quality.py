@@ -371,14 +371,19 @@ def _audit_contextual_serviceability(
             if question.primary_concept_id != root_id:
                 continue
             reasons: list[str] = []
-            if (
-                len(
-                    families_by_concept[root_id]
-                    - {question.family_id}
-                )
-                < minimum_primary_families - 1
-            ):
+            remaining_primary = (
+                families_by_concept[root_id] - {question.family_id}
+            )
+            remaining_verification = (
+                verification_by_concept[root_id] - {question.family_id}
+            )
+            if len(remaining_primary) < minimum_primary_families - 1:
                 reasons.append("independent-main-families")
+            if not any(
+                remaining_verification - {repair_family}
+                for repair_family in remaining_primary
+            ):
+                reasons.append("generic-focus-pair")
             for misconception_id in question.misconception_ids:
                 owner = misconception_owners.get(misconception_id)
                 if owner is None:

@@ -11,13 +11,14 @@ from datetime import datetime, timezone
 from statistics import median
 from typing import Iterable
 
+from .adaptive import RecursiveEvidenceBoundary
 from .errors import ExhaustedError, ValidationError
 from .learner import MODEL_VERSION, LearnerModel
 from .models import CandidateScore, Presentation, Question, SessionPhase
 from .store import Database, new_id
 
 
-POLICY_VERSION = "constrained-info-gain-v3"
+POLICY_VERSION = "recursive-evidence-graph-v5"
 MAX_REMEDIATION_DEPTH = 3
 
 
@@ -27,54 +28,59 @@ class _RetrySelection(Exception):
 
 _PHASE_WEIGHTS: dict[SessionPhase, dict[str, float]] = {
     SessionPhase.DIAGNOSE: {
-        "information_gain": 0.32,
+        "information_gain": 0.28,
         "learning_fit": 0.08,
         "concept_need": 0.18,
         "misconception_value": 0.14,
-        "prerequisite_value": 0.14,
+        "prerequisite_value": 0.10,
         "review_value": 0.03,
         "novelty": 0.08,
         "kind_fit": 0.03,
+        "boundary_fit": 0.08,
     },
     SessionPhase.LEARN: {
         "information_gain": 0.15,
-        "learning_fit": 0.25,
-        "concept_need": 0.22,
+        "learning_fit": 0.22,
+        "concept_need": 0.19,
         "misconception_value": 0.12,
-        "prerequisite_value": 0.10,
+        "prerequisite_value": 0.06,
         "review_value": 0.05,
         "novelty": 0.08,
         "kind_fit": 0.03,
+        "boundary_fit": 0.10,
     },
     SessionPhase.REMEDIATE: {
-        "information_gain": 0.18,
-        "learning_fit": 0.18,
+        "information_gain": 0.16,
+        "learning_fit": 0.16,
         "concept_need": 0.15,
         "misconception_value": 0.27,
-        "prerequisite_value": 0.09,
+        "prerequisite_value": 0.06,
         "review_value": 0.00,
         "novelty": 0.08,
         "kind_fit": 0.05,
+        "boundary_fit": 0.07,
     },
     SessionPhase.VERIFY: {
-        "information_gain": 0.14,
-        "learning_fit": 0.16,
+        "information_gain": 0.12,
+        "learning_fit": 0.14,
         "concept_need": 0.14,
         "misconception_value": 0.12,
-        "prerequisite_value": 0.06,
+        "prerequisite_value": 0.05,
         "review_value": 0.00,
         "novelty": 0.13,
         "kind_fit": 0.25,
+        "boundary_fit": 0.05,
     },
     SessionPhase.REVIEW: {
         "information_gain": 0.12,
-        "learning_fit": 0.18,
+        "learning_fit": 0.16,
         "concept_need": 0.10,
         "misconception_value": 0.08,
-        "prerequisite_value": 0.03,
+        "prerequisite_value": 0.02,
         "review_value": 0.32,
-        "novelty": 0.10,
-        "kind_fit": 0.07,
+        "novelty": 0.09,
+        "kind_fit": 0.06,
+        "boundary_fit": 0.05,
     },
 }
 
@@ -138,6 +144,7 @@ class AdaptivePolicy:
     def __init__(self, database: Database, learner_model: LearnerModel | None = None):
         self.database = database
         self.learner_model = learner_model or LearnerModel()
+        self.boundary_planner = RecursiveEvidenceBoundary(self.learner_model)
 
     def choose(self, session_id: str, *, now: datetime | None = None) -> Presentation:
         now = now or datetime.now(timezone.utc)
@@ -235,7 +242,44 @@ class AdaptivePolicy:
         release_id = session["corpus_release_id"]
         phase = SessionPhase(session["phase"])
         graph = self.database.get_graph(release_id)
-        scope = graph.learning_scope(session["root_concept_id"])
+        topic_id = session.get("topic_id")
+        if topic_id:
+            base_scope = self.database.topic_scope(topic_id, release_id)
+            owned_targets = self.database.topic_owned_concepts(
+                topic_id, release_id, include_descendants=True
+            )
+        else:
+            base_scope = graph.learning_scope(session["root_concept_id"])
+            owned_targets = {session["root_concept_id"]}
+        scope = set(base_scope)
+        # A failed deliberate exploration can focus remediation outside the
+        # requested topic. The focused tunnel must remain serviceable even
+        # though ordinary main questions return to the requested curriculum.
+        if session["focus_concept_id"]:
+            scope.update(graph.learning_scope(session["focus_concept_id"]))
+
+        recent_performance = self.database.session_recent_performance(
+            session_id, limit=3
+        )
+        exploration_topic_ids: tuple[str, ...] = ()
+        exploring = False
+        if self._should_explore(session, phase, recent_performance):
+            catalog = self.database.get_catalog(release_id)
+            topic = next(
+                (item for item in catalog["topics"] if item["id"] == topic_id),
+                None,
+            )
+            if topic is not None:
+                exploration_topic_ids = tuple(topic["related_topic_ids"])
+                exploration_scope: set[str] = set()
+                for related_topic_id in exploration_topic_ids:
+                    exploration_scope.update(
+                        self.database.topic_scope(related_topic_id, release_id)
+                    )
+                exploration_scope -= base_scope
+                if exploration_scope:
+                    scope = exploration_scope
+                    exploring = True
         concepts = graph.concepts
         stored_states = self.database.get_skill_states(session["learner_id"])
         target_ids = [session["focus_concept_id"]] if session["focus_concept_id"] else list(scope)
@@ -259,9 +303,8 @@ class AdaptivePolicy:
             limit=600,
         )
         if not questions:
-            raise ExhaustedError(
-                f"Corpus gap: no approved questions cover {session['root_concept_id']}."
-            )
+            target = topic_id or session["root_concept_id"]
+            raise ExhaustedError(f"Corpus gap: no approved questions cover {target}.")
 
         beliefs = self.database.get_misconception_beliefs(session["learner_id"])
         exposure = self.database.get_exposure_summary(
@@ -287,7 +330,7 @@ class AdaptivePolicy:
             )
         candidate_pool = independent_pool
 
-        pedagogical_role = "main"
+        pedagogical_role = "exploration_probe" if exploring else "main"
         focus_valid = False
         eligible = candidate_pool
         if phase == SessionPhase.REMEDIATE and (focus_concept or focus_misconception):
@@ -313,17 +356,11 @@ class AdaptivePolicy:
                 ]
             # Do not consume the last independent transfer family as the repair
             # probe; verification must remain possible before serving anything.
-            if session["remediation_depth"] >= MAX_REMEDIATION_DEPTH - 1:
-                # The next failure exits the bounded tunnel. A focused probe is
-                # still useful even if no fourth family remains; a success stays
-                # unresolved in VERIFY and will surface a durable corpus gap.
-                focused = probes
-            else:
-                focused = [
-                    question
-                    for question in probes
-                    if verification_families - {question.family_id}
-                ]
+            focused = [
+                question
+                for question in probes
+                if verification_families - {question.family_id}
+            ]
             if not focused:
                 raise ExhaustedError(
                     "Corpus gap: no remediation-plus-verification pair exists for "
@@ -384,7 +421,16 @@ class AdaptivePolicy:
                 primary = question.primary_concept_id
                 # A skipped/uncategorized error still needs one repair and one
                 # independent transfer family after the trigger.
-                if len(families_by_concept.get(primary, set()) - {trigger_family}) < 2:
+                primary_repairs = (
+                    families_by_concept.get(primary, set()) - {trigger_family}
+                )
+                primary_verifications = (
+                    verification_by_concept.get(primary, set()) - {trigger_family}
+                )
+                if not any(
+                    primary_verifications - {repair_family}
+                    for repair_family in primary_repairs
+                ):
                     return False
                 for misconception_id in question.misconception_ids:
                     owner = misconception_owners.get(misconception_id, primary)
@@ -410,6 +456,22 @@ class AdaptivePolicy:
                     "independent repair and verification families."
                 )
             eligible = safe
+            if topic_id and not exploring:
+                direct_topic_items = [
+                    question
+                    for question in eligible
+                    if question.primary_concept_id in owned_targets
+                ]
+                if not direct_topic_items:
+                    raise ExhaustedError(
+                        "Corpus gap: no safely serviceable question remains for "
+                        f"curriculum topic {topic_id}."
+                    )
+                # Prerequisites remain in the modeled scope and can become a
+                # focused remediation target after evidence warrants descent.
+                # They are not silently substituted for the topic the learner
+                # explicitly selected.
+                eligible = direct_topic_items
 
         # Across sessions, prefer genuinely independent evidence before reusing
         # a family for the same primary concept.  Review is intentionally
@@ -418,8 +480,34 @@ class AdaptivePolicy:
         if phase != SessionPhase.REVIEW:
             eligible = self._least_exposed_families_by_primary(eligible, exposure)
 
-        prerequisite_distances = graph.learning_distances_to(
-            session["root_concept_id"]
+        prerequisite_distances: dict[str, int] = {}
+        for target_id in owned_targets:
+            for concept_id, distance in graph.learning_distances_to(
+                target_id
+            ).items():
+                prior = prerequisite_distances.get(concept_id)
+                if prior is None or distance < prior:
+                    prerequisite_distances[concept_id] = distance
+
+        topic_by_concept: dict[str, str] = {}
+        if topic_id:
+            for catalog_topic in self.database.get_catalog(release_id)["topics"]:
+                for concept in catalog_topic["concepts"]:
+                    topic_by_concept[concept["id"]] = catalog_topic["id"]
+        last_primary_concept = (
+            recent_performance[0]["primary_concept_id"]
+            if recent_performance
+            else None
+        )
+        connected_pairs = {
+            frozenset((edge.source_id, edge.target_id)) for edge in graph.edges
+        }
+        readiness = self.boundary_planner.readiness_map(
+            learner_id=session["learner_id"],
+            graph=graph,
+            stored_states=stored_states,
+            now=now,
+            concept_ids={question.primary_concept_id for question in eligible},
         )
 
         scores = [
@@ -433,6 +521,11 @@ class AdaptivePolicy:
                 beliefs=beliefs,
                 exposure=exposure,
                 recent_families=recent,
+                last_primary_concept=last_primary_concept,
+                topic_by_concept=topic_by_concept,
+                base_scope=base_scope,
+                connected_pairs=connected_pairs,
+                readiness=readiness,
                 now=now,
             )
             for question in eligible
@@ -453,7 +546,14 @@ class AdaptivePolicy:
 
         digest_material = "|".join(f"{score.question_id}:{score.total:.8f}" for score in scores)
         candidate_digest = hashlib.sha256(digest_material.encode("utf-8")).hexdigest()
-        rationale = self._rationale(chosen, chosen_score, phase, focus_concept, focus_misconception)
+        rationale = self._rationale(
+            chosen,
+            chosen_score,
+            phase,
+            focus_concept,
+            focus_misconception,
+            exploration_topic_ids=exploration_topic_ids if exploring else (),
+        )
         decision_id = new_id("dec")
 
         with self.database.transaction() as connection:
@@ -587,6 +687,43 @@ class AdaptivePolicy:
         return durable
 
     @staticmethod
+    def _should_explore(
+        session: dict,
+        phase: SessionPhase,
+        recent_performance: list[dict],
+    ) -> bool:
+        """Gate bounded, explicit probes outside a learner's requested topic."""
+        if (
+            not session.get("topic_id")
+            or session.get("exploration_mode") != "adaptive"
+            or phase not in {
+                SessionPhase.LEARN,
+                SessionPhase.DIAGNOSE,
+                SessionPhase.REVIEW,
+            }
+            or session.get("focus_concept_id")
+            or session.get("focus_misconception_id")
+            or len(recent_performance) < 3
+            or session["step"] < 3
+            or (session["step"] - 3) % 5 != 0
+        ):
+            return False
+        return all(
+            attempt["correct"]
+            and attempt["pedagogical_role"] in {"main", "exploration_probe"}
+            and attempt["hint_count"] == 0
+            and (
+                attempt["confidence"] is None
+                or attempt["confidence"] >= 0.65
+            )
+            and (
+                attempt["response_ms"] is None
+                or attempt["response_ms"] >= 250
+            )
+            for attempt in recent_performance
+        )
+
+    @staticmethod
     def _least_exposed_families_by_primary(
         questions: Iterable[Question], exposure: dict
     ) -> list[Question]:
@@ -618,6 +755,11 @@ class AdaptivePolicy:
         beliefs,
         exposure,
         recent_families: list[str],
+        last_primary_concept: str | None,
+        topic_by_concept: dict[str, str],
+        base_scope: set[str],
+        connected_pairs: set[frozenset[str]],
+        readiness,
         now: datetime,
     ) -> CandidateScore:
         states = self.learner_model.states_for_question(
@@ -660,6 +802,40 @@ class AdaptivePolicy:
             novelty *= 0.08
 
         kind_fit = _KIND_FIT[phase].get(question.kind.value, 0.55)
+        primary = question.primary_concept_id
+        primary_readiness = readiness[primary]
+        if primary_readiness.bottleneck_concept_id is None:
+            boundary_fit = 1.0
+        else:
+            target_support = {
+                SessionPhase.DIAGNOSE: 0.55,
+                SessionPhase.LEARN: 0.68,
+                SessionPhase.REMEDIATE: 0.76,
+                SessionPhase.VERIFY: 0.74,
+                SessionPhase.REVIEW: 0.82,
+            }[phase]
+            # Readiness is a floor, not a narrow target: strong prerequisite
+            # evidence must never make an otherwise useful advanced item less
+            # eligible. Unsupported items are reduced smoothly instead.
+            boundary_fit = min(
+                1.0, primary_readiness.prerequisite_support / target_support
+            )
+        if last_primary_concept is None:
+            continuity = 0.50
+        elif primary == last_primary_concept:
+            continuity = 1.0
+        elif frozenset((primary, last_primary_concept)) in connected_pairs:
+            continuity = 0.85
+        elif (
+            topic_by_concept.get(primary) is not None
+            and topic_by_concept.get(primary)
+            == topic_by_concept.get(last_primary_concept)
+        ):
+            continuity = 0.70
+        elif primary in base_scope:
+            continuity = 0.40
+        else:
+            continuity = 0.15
         values = {
             "information_gain": information_gain,
             "learning_fit": learning_fit,
@@ -669,8 +845,17 @@ class AdaptivePolicy:
             "review_value": review_value,
             "novelty": novelty,
             "kind_fit": kind_fit,
+            "boundary_fit": boundary_fit,
         }
         total = sum(_PHASE_WEIGHTS[phase][name] * value for name, value in values.items())
+        if session.get("topic_id"):
+            total += {
+                SessionPhase.DIAGNOSE: 0.05,
+                SessionPhase.LEARN: 0.10,
+                SessionPhase.REMEDIATE: 0.12,
+                SessionPhase.VERIFY: 0.12,
+                SessionPhase.REVIEW: 0.08,
+            }[phase] * continuity
         if session["focus_concept_id"] and any(
             mapping.concept_id == session["focus_concept_id"] for mapping in question.concepts
         ):
@@ -689,6 +874,8 @@ class AdaptivePolicy:
             review_value=review_value,
             novelty=novelty,
             kind_fit=kind_fit,
+            continuity=continuity,
+            boundary_fit=boundary_fit,
         )
 
     @staticmethod
@@ -717,6 +904,8 @@ class AdaptivePolicy:
         phase: SessionPhase,
         focus_concept: str | None,
         focus_misconception: str | None,
+        *,
+        exploration_topic_ids: tuple[str, ...] = (),
     ) -> str:
         reasons = [
             f"phase={phase.value}",
@@ -730,4 +919,12 @@ class AdaptivePolicy:
             reasons.append(f"tests_focus={focus_concept}")
         if score.review_value > 0.2:
             reasons.append(f"review_due={score.review_value:.2f}")
+        if score.boundary_fit < 0.70:
+            reasons.append(f"boundary_fit={score.boundary_fit:.2f}")
+        if exploration_topic_ids:
+            reasons.append(
+                "deliberate_related_topic_probe=" + ",".join(exploration_topic_ids)
+            )
+        elif score.continuity >= 0.70:
+            reasons.append(f"continuity={score.continuity:.2f}")
         return "; ".join(reasons)
