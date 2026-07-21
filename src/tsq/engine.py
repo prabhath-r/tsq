@@ -769,13 +769,39 @@ class AdaptiveEngine:
                     "remediation_depth": 0,
                     "remediation_path": [],
                 }
-            # A hinted or stale-focus success can teach, but cannot certify that
-            # the active gap has been repaired.
+            if current == SessionPhase.VERIFY:
+                # The independent check was completed, but a hinted,
+                # low-confidence, implausibly fast, or stale-focus success still
+                # cannot certify retrieval. Do not consume an unbounded number
+                # of independent families waiting for response behavior to
+                # change. Return to the main phase with the unresolved
+                # projection intact so later need/review scoring can revisit it.
+                return {
+                    "phase": _main_phase(session["mode"]),
+                    "focus_concept_id": None,
+                    "focus_misconception_id": None,
+                    "remediation_depth": 0,
+                    "remediation_path": [],
+                }
+            # A hinted or stale-focus repair success can teach, but cannot
+            # certify that the active gap has been repaired. Permit one more
+            # independent repair probe, then leave the bounded tunnel.
+            next_depth = session["remediation_depth"]
+            if current == SessionPhase.REMEDIATE:
+                next_depth += 1
+                if next_depth >= MAX_REMEDIATION_DEPTH:
+                    return {
+                        "phase": _main_phase(session["mode"]),
+                        "focus_concept_id": None,
+                        "focus_misconception_id": None,
+                        "remediation_depth": 0,
+                        "remediation_path": [],
+                    }
             return {
                 "phase": current,
                 "focus_concept_id": session["focus_concept_id"],
                 "focus_misconception_id": session["focus_misconception_id"],
-                "remediation_depth": session["remediation_depth"],
+                "remediation_depth": next_depth,
                 "remediation_path": remediation_path,
             }
 

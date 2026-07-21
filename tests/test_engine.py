@@ -792,6 +792,42 @@ class EngineTestCase(unittest.TestCase):
             )
             self.assertEqual(confirmed.next_phase, SessionPhase.LEARN, label)
 
+    def test_repeated_instant_success_exits_inconclusive_verification_boundedly(self) -> None:
+        self.engine.create_learner("instant-repeat", "Repeated instant responses")
+        session = self.engine.start_session(
+            "instant-repeat", "c_feature_scaling", mode="learn", seed=313
+        )
+        first = self.engine.next_question(session["id"])
+        routed = self.engine.submit_answer(
+            first.decision_id,
+            first.question.correct_option.id,
+            confidence=0.95,
+            response_ms=0,
+            idempotency_key="instant-repeat-main",
+        )
+        self.assertEqual(routed.next_phase, SessionPhase.VERIFY)
+
+        verification = self.engine.next_question(session["id"])
+        self.assertNotEqual(verification.question.family_id, first.question.family_id)
+        inconclusive = self.engine.submit_answer(
+            verification.decision_id,
+            verification.question.correct_option.id,
+            confidence=0.95,
+            response_ms=0,
+            idempotency_key="instant-repeat-verification",
+        )
+
+        self.assertEqual(inconclusive.next_phase, SessionPhase.LEARN)
+        current = self.database.get_session(session["id"])
+        self.assertEqual(current["remediation_depth"], 0)
+        self.assertIsNone(current["focus_concept_id"])
+        with self.database.read() as connection:
+            certified = connection.execute(
+                """SELECT COUNT(*) AS n FROM learner_skill_families
+                   WHERE learner_id='instant-repeat'"""
+            ).fetchone()["n"]
+        self.assertEqual(certified, 0)
+
     def test_review_verify_failure_without_deeper_prerequisite_exits_bounded_tunnel(self) -> None:
         session = self.start(mode="review")
         first = self.engine.next_question(session["id"])
