@@ -17,7 +17,7 @@ from .models import CandidateScore, Presentation, Question, SessionPhase
 from .store import Database, new_id
 
 
-POLICY_VERSION = "constrained-info-gain-v2"
+POLICY_VERSION = "constrained-info-gain-v3"
 MAX_REMEDIATION_DEPTH = 3
 
 
@@ -411,6 +411,13 @@ class AdaptivePolicy:
                 )
             eligible = safe
 
+        # Across sessions, prefer genuinely independent evidence before reusing
+        # a family for the same primary concept.  Review is intentionally
+        # exempt: spaced retrieval sometimes needs the previously learned
+        # family, and its due-date signal should remain authoritative.
+        if phase != SessionPhase.REVIEW:
+            eligible = self._least_exposed_families_by_primary(eligible, exposure)
+
         prerequisite_distances = graph.learning_distances_to(
             session["root_concept_id"]
         )
@@ -578,6 +585,26 @@ class AdaptivePolicy:
         if not durable:
             raise ExhaustedError("Selection was not persisted.")
         return durable
+
+    @staticmethod
+    def _least_exposed_families_by_primary(
+        questions: Iterable[Question], exposure: dict
+    ) -> list[Question]:
+        candidates = list(questions)
+        least_by_concept: dict[str, int] = {}
+        for question in candidates:
+            family_count = exposure["families"].get(
+                question.family_id, {}
+            ).get("count", 0)
+            previous = least_by_concept.get(question.primary_concept_id)
+            if previous is None or family_count < previous:
+                least_by_concept[question.primary_concept_id] = family_count
+        return [
+            question
+            for question in candidates
+            if exposure["families"].get(question.family_id, {}).get("count", 0)
+            == least_by_concept[question.primary_concept_id]
+        ]
 
     def _score(
         self,
