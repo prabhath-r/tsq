@@ -729,9 +729,10 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
             current_id = parent_id
         completed_revision_nodes.update(trail)
 
+    knowledge_graph = None
     if not any(issue.code == "unknown_concept_reference" for issue in issues):
         try:
-            KnowledgeGraph(concepts, edges)
+            knowledge_graph = KnowledgeGraph(concepts, edges)
         except ValidationError as exc:
             add("graph_integrity", str(exc), path="edges")
     issues.extend(
@@ -740,6 +741,8 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
             expected_primary_concept_ids={
                 mapping.concept_id for question in questions for mapping in question.concepts
             },
+            knowledge_graph=knowledge_graph,
+            misconceptions=misconceptions,
         )
     )
     _raise_issues("Corpus", issues)

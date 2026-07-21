@@ -331,6 +331,41 @@ class CorpusTestCase(unittest.TestCase):
         self.assertIn("missing_primary_mapping_coverage", codes)
         self.assertIn("insufficient_primary_family_coverage", codes)
 
+    def test_corpus_audit_detects_contextually_unserviceable_families(self) -> None:
+        without_third_safe_family = [
+            question
+            for question in self.questions
+            if question.id != "q_bias_variance_bagging_001"
+        ]
+
+        issues = audit_corpus(
+            without_third_safe_family,
+            knowledge_graph=KnowledgeGraph(self.concepts, self.edges),
+            misconceptions=self.misconceptions,
+        )
+
+        contextual = [
+            issue
+            for issue in issues
+            if issue.code == "insufficient_contextual_family_coverage"
+            and "c_bias_variance" in issue.message
+        ]
+        self.assertEqual(len(contextual), 1)
+
+    def test_seed_has_three_serviceable_families_for_every_primary_root(self) -> None:
+        issues = audit_corpus(
+            self.questions,
+            knowledge_graph=KnowledgeGraph(self.concepts, self.edges),
+            misconceptions=self.misconceptions,
+        )
+
+        contextual = [
+            issue
+            for issue in issues
+            if issue.code == "insufficient_contextual_family_coverage"
+        ]
+        self.assertEqual(contextual, [])
+
     def test_ineligible_items_do_not_satisfy_live_bank_coverage(self) -> None:
         retired = replace(self.questions[0], status=QuestionStatus.RETIRED)
 
