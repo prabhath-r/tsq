@@ -564,10 +564,30 @@ class EngineTestCase(unittest.TestCase):
         )
 
     def test_live_corpus_gap_creates_one_durable_authoring_demand(self) -> None:
-        self.database.revoke_question(
-            "q_leakage_global_feature_selection_001",
-            "Gap regression: remove the sole live transfer family.",
-        )
+        verification_kinds = {
+            "application",
+            "calculation",
+            "comparison",
+            "counterfactual",
+            "debugging",
+            "transfer",
+        }
+        verification_questions = [
+            question
+            for question in self.database.questions_for_scope(
+                {"c_data_leakage"},
+                release_id=self.database.get_active_release_id(),
+                limit=600,
+            )
+            if question.primary_concept_id == "c_data_leakage"
+            and question.kind.value in verification_kinds
+        ]
+        self.assertGreaterEqual(len(verification_questions), 1)
+        for question in verification_questions:
+            self.database.revoke_question(
+                question.id,
+                "Gap regression: remove every live verification family.",
+            )
         session = self.engine.start_session(
             "learner-1", "c_data_leakage", mode="learn", seed=113
         )
@@ -640,6 +660,59 @@ class EngineTestCase(unittest.TestCase):
                 presentation.decision_id,
                 presentation.question.correct_option.id,
                 idempotency_key=f"scope-{index}",
+            )
+
+    def test_cold_learner_can_repair_safely_at_every_graph_root(self) -> None:
+        graph = self.database.get_graph()
+        for index, root_id in enumerate(sorted(graph.concepts)):
+            learner_id = f"all-roots-{index}"
+            self.engine.create_learner(learner_id, root_id)
+            session = self.engine.start_session(
+                learner_id, root_id, mode="learn", seed=700 + index
+            )
+
+            presentation = self.engine.next_question(session["id"])
+
+            self.assertIn(
+                presentation.question.primary_concept_id,
+                graph.learning_scope(root_id),
+                root_id,
+            )
+            wrong = next(
+                option for option in presentation.question.options if not option.correct
+            )
+            self.engine.submit_answer(
+                presentation.decision_id,
+                wrong.id,
+                confidence=0.9,
+                response_ms=900,
+                idempotency_key=f"all-roots-wrong-{index}",
+            )
+
+            repair = self.engine.next_question(session["id"])
+            self.assertNotEqual(
+                repair.question.family_id, presentation.question.family_id, root_id
+            )
+            self.engine.submit_answer(
+                repair.decision_id,
+                repair.question.correct_option.id,
+                confidence=0.9,
+                response_ms=900,
+                idempotency_key=f"all-roots-repair-{index}",
+            )
+
+            verification = self.engine.next_question(session["id"])
+            self.assertNotIn(
+                verification.question.family_id,
+                {presentation.question.family_id, repair.question.family_id},
+                root_id,
+            )
+            self.engine.submit_answer(
+                verification.decision_id,
+                verification.question.correct_option.id,
+                confidence=0.9,
+                response_ms=900,
+                idempotency_key=f"all-roots-verify-{index}",
             )
 
     def test_wrong_answer_enters_targeted_remediation_without_repeating_item(self) -> None:

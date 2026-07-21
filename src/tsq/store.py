@@ -2229,7 +2229,7 @@ class Database:
                 "Corpus activation rejected: " + "; ".join(violations[:20])
             )
         # Construction validates both strict-readiness and part-of DAGs.
-        KnowledgeGraph(concepts, edges)
+        knowledge_graph = KnowledgeGraph(concepts, edges)
         quality_errors = [
             issue
             for issue in audit_corpus(
@@ -2239,6 +2239,8 @@ class Database:
                     for question in questions
                     for mapping in question.concepts
                 },
+                knowledge_graph=knowledge_graph,
+                misconceptions=misconceptions,
             )
             if issue.severity == "error"
         ]

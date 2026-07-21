@@ -17,6 +17,7 @@ from .corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
 from .authoring import AuthoringJobs, CoveragePlanner, deterministic_test_pipeline
 from .engine import AdaptiveEngine
 from .errors import TSQError, ValidationError
+from .graph import KnowledgeGraph
 from .quality import audit_corpus
 from .replay import ProjectionReplay, replay_or_error
 from .store import Database, new_id
@@ -118,11 +119,15 @@ def command_audit(args: argparse.Namespace) -> int:
     issues = list(structural_issues)
     if not any(issue.severity == "error" for issue in structural_issues):
         try:
-            _, _, _, _, questions = parse_bundle(bundle)
+            concepts, edges, misconceptions, _, questions = parse_bundle(bundle)
         except ValidationError as exc:
             issues.extend(exc.issues)
         else:
-            issues = audit_corpus(questions)
+            issues = audit_corpus(
+                questions,
+                knowledge_graph=KnowledgeGraph(concepts, edges),
+                misconceptions=misconceptions,
+            )
     result = {
         "path": corpus_label,
         "questions": (

@@ -8,7 +8,8 @@ from math import isfinite
 from statistics import median
 from typing import Iterable
 
-from .models import ConceptRole, QualityIssue, Question
+from .graph import KnowledgeGraph
+from .models import ConceptRole, Misconception, QualityIssue, Question
 
 
 _BANNED_OPTION_PATTERNS = (
@@ -25,6 +26,9 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 _MIN_CORPUS_METRIC_ITEMS = 12
 _LONGEST_HEURISTIC_WARNING = 0.45
 _ABSOLUTE_RATE_GAP_WARNING = 0.15
+_VERIFICATION_KINDS = frozenset(
+    {"application", "calculation", "comparison", "counterfactual", "debugging", "transfer"}
+)
 
 
 def _normalized(text: str) -> str:
@@ -171,6 +175,8 @@ def audit_corpus(
     *,
     expected_primary_concept_ids: Iterable[str] | None = None,
     minimum_primary_families: int = 3,
+    knowledge_graph: KnowledgeGraph | None = None,
+    misconceptions: Iterable[Misconception] | None = None,
 ) -> list[QualityIssue]:
     all_items = list(questions)
     issues = [issue for item in all_items for issue in validate_question(item)]
@@ -313,4 +319,99 @@ def audit_corpus(
                 path="questions[].family_id",
             )
         )
+    if knowledge_graph is not None and misconceptions is not None:
+        issues.extend(
+            _audit_contextual_serviceability(
+                items,
+                knowledge_graph=knowledge_graph,
+                misconceptions=misconceptions,
+                minimum_primary_families=minimum_primary_families,
+            )
+        )
+    return issues
+
+
+def _audit_contextual_serviceability(
+    questions: list[Question],
+    *,
+    knowledge_graph: KnowledgeGraph,
+    misconceptions: Iterable[Misconception],
+    minimum_primary_families: int,
+) -> list[QualityIssue]:
+    """Check that count-covered roots can actually preserve repair paths.
+
+    Primary-family counts alone can include an item whose distractor belongs to
+    a supporting concept outside the root's learning scope.  The live policy
+    correctly withholds such an item, so the release audit must count only
+    families that can leave both an independent repair and a distinct
+    verification family in that same root scope.
+    """
+
+    misconception_owners = {item.id: item.concept_id for item in misconceptions}
+    primary_roots = sorted({question.primary_concept_id for question in questions})
+    issues: list[QualityIssue] = []
+    for root_id in primary_roots:
+        scope = knowledge_graph.learning_scope(root_id)
+        pool = [question for question in questions if question.primary_concept_id in scope]
+        families_by_concept: dict[str, set[str]] = defaultdict(set)
+        families_by_misconception: dict[str, set[str]] = defaultdict(set)
+        verification_by_concept: dict[str, set[str]] = defaultdict(set)
+        for question in pool:
+            families_by_concept[question.primary_concept_id].add(question.family_id)
+            if question.kind.value in _VERIFICATION_KINDS:
+                verification_by_concept[question.primary_concept_id].add(
+                    question.family_id
+                )
+            for misconception_id in question.misconception_ids:
+                families_by_misconception[misconception_id].add(question.family_id)
+
+        serviceable_families: set[str] = set()
+        blocked: list[str] = []
+        for question in pool:
+            if question.primary_concept_id != root_id:
+                continue
+            reasons: list[str] = []
+            if (
+                len(
+                    families_by_concept[root_id]
+                    - {question.family_id}
+                )
+                < minimum_primary_families - 1
+            ):
+                reasons.append("independent-main-families")
+            for misconception_id in question.misconception_ids:
+                owner = misconception_owners.get(misconception_id)
+                if owner is None:
+                    reasons.append(misconception_id)
+                    continue
+                repair_families = (
+                    families_by_misconception[misconception_id]
+                    - {question.family_id}
+                )
+                verification_families = (
+                    verification_by_concept[owner] - {question.family_id}
+                )
+                if not any(
+                    verification_families - {repair_family}
+                    for repair_family in repair_families
+                ):
+                    reasons.append(misconception_id)
+            if reasons:
+                blocked.append(f"{question.id}({','.join(sorted(set(reasons)))})")
+            else:
+                serviceable_families.add(question.family_id)
+
+        if len(serviceable_families) < minimum_primary_families:
+            detail = "; ".join(blocked[:4])
+            suffix = f" (+{len(blocked) - 4} more)" if len(blocked) > 4 else ""
+            issues.append(
+                QualityIssue(
+                    "insufficient_contextual_family_coverage",
+                    "warning",
+                    f"Root {root_id} has {len(serviceable_families)} safely serviceable "
+                    f"primary families; {minimum_primary_families} are required. "
+                    f"Blocked paths: {detail}{suffix}",
+                    path="questions[].options[].misconception_id",
+                )
+            )
     return issues
