@@ -1,4 +1,4 @@
-.PHONY: audit behavior-audit benchmark-100k init corpus-check test study
+.PHONY: audit behavior-audit init corpus-check test study
 
 PYTHON := python3
 DB ?= tsq.db
@@ -12,9 +12,6 @@ audit:
 behavior-audit:
 	PYTHONPATH=src $(PYTHON) scripts/run_behavioral_audit.py --root c_ai_learning_systems --profile strong --trials 5 --steps 24 --summary-only
 	PYTHONPATH=src $(PYTHON) scripts/run_behavioral_audit.py --root c_ai_learning_systems --profile always-wrong --trials 5 --steps 24 --summary-only
-
-benchmark-100k:
-	$(PYTHON) benchmarks/benchmark_candidate_retrieval.py
 
 init:
 	PYTHONPATH=src $(PYTHON) -m tsq --db $(DB) init
