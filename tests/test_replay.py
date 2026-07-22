@@ -16,7 +16,7 @@ from tsq.cli import main
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError, ValidationError
-from tsq.learner import MODEL_VERSION
+from tsq.learner import LEGACY_MODEL_VERSION, MODEL_VERSION, LearnerModel
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
@@ -36,19 +36,25 @@ class FixedIds:
         return f"{prefix}_golden_{self.counts[prefix]:03d}"
 
 
-def build_golden_database(path: Path) -> Database:
+def build_golden_database(
+    path: Path,
+    *,
+    model_version: str = MODEL_VERSION,
+) -> Database:
     identifiers = FixedIds()
     with (
         patch("tsq.store.new_id", side_effect=identifiers),
         patch("tsq.engine.new_id", side_effect=identifiers),
         patch("tsq.policy.new_id", side_effect=identifiers),
+        patch("tsq.engine.MODEL_VERSION", model_version),
+        patch("tsq.policy.MODEL_VERSION", model_version),
     ):
         database = Database(path)
         database.initialize()
         database.import_corpus(
             *read_and_parse(CORPUS, include_catalog=True)
         )
-        engine = AdaptiveEngine(database)
+        engine = AdaptiveEngine(database, LearnerModel(model_version))
         engine.create_learner("replay-golden", "Projection Replay Fixture")
         session = engine.start_session(
             "replay-golden", "c_clustering", mode="learn", seed=31
@@ -313,6 +319,42 @@ class ProjectionReplayTestCase(unittest.TestCase):
     def test_golden_fixture_declares_current_model(self) -> None:
         expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
         self.assertEqual(expected["learner_model_version"], MODEL_VERSION)
+
+    def test_mixed_supported_model_history_replays_exactly(self) -> None:
+        database = build_golden_database(
+            Path(self.tempdir.name) / "mixed-model.db",
+            model_version=LEGACY_MODEL_VERSION,
+        )
+        engine = AdaptiveEngine(database)
+        session = engine.start_session(
+            "replay-golden", "c_clustering", mode="learn", seed=47
+        )
+        selected_at = START + timedelta(days=10)
+        presentation = engine.next_question(session["id"], now=selected_at)
+        engine.submit_answer(
+            presentation.decision_id,
+            presentation.question.correct_option.id,
+            confidence=0.9,
+            response_ms=1200,
+            idempotency_key="mixed-model-v4-response",
+            now=selected_at + timedelta(minutes=1),
+        )
+
+        report = ProjectionReplay(database).check("replay-golden")
+
+        self.assertTrue(report["ok"], report["errors"])
+        self.assertEqual(report["response_count"], 5)
+        self.assertTrue(report["source_projection_matches_replay"])
+        self.assertTrue(report["commitment_matches_replay"])
+        with database.read() as connection:
+            versions = {
+                json.loads(row["metadata_json"])["learner_model_version"]
+                for row in connection.execute(
+                    """SELECT metadata_json FROM events
+                       WHERE event_type = 'ResponseSubmitted'"""
+                )
+            }
+        self.assertEqual(versions, {LEGACY_MODEL_VERSION, MODEL_VERSION})
 
 
 if __name__ == "__main__":

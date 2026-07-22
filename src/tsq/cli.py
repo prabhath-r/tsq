@@ -557,6 +557,12 @@ def command_session_report(args: argparse.Namespace) -> None:
         f"  active response time {response['active_seconds']:.1f}s · "
         f"wall time {response['wall_seconds']:.1f}s"
     )
+    if response["selection_window_inconsistencies"]:
+        print(
+            "  timing warning: "
+            f"{response['selection_window_inconsistencies']} submitted value(s) "
+            "exceeded their selection-to-answer window"
+        )
     if difficulty["average"] is not None:
         print(
             f"  authored difficulty {difficulty['average']:+.2f} average "
