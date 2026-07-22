@@ -19,7 +19,7 @@ from .models import CandidateScore, Presentation, Question, SessionPhase
 from .store import Database, new_id
 
 
-POLICY_VERSION = "recursive-evidence-graph-v5"
+POLICY_VERSION = "recursive-evidence-graph-v6"
 MAX_REMEDIATION_DEPTH = 3
 
 
@@ -301,6 +301,46 @@ class AdaptivePolicy:
             question_ids={question.id for question in questions},
             family_ids={question.family_id for question in questions},
         )
+        reuse_eligible: list[Question] = []
+        for question in questions:
+            family_exposure = exposure["families"].get(question.family_id)
+            if family_exposure is None:
+                reuse_eligible.append(question)
+                continue
+            try:
+                family_last_at = datetime.fromisoformat(family_exposure["last_at"])
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"Family {question.family_id} has an invalid exposure "
+                    "timestamp."
+                ) from exc
+            if family_last_at.tzinfo is None or family_last_at.utcoffset() is None:
+                raise ValidationError(
+                    f"Family {question.family_id} has a timezone-naive exposure "
+                    "timestamp."
+                )
+            concept = concepts[question.primary_concept_id]
+            state = stored_states.get(question.primary_concept_id)
+            if state is None:
+                state = self.learner_model.initial_state(
+                    session["learner_id"], concept
+                )
+            projected = self.learner_model.project_state(state, concept, now)
+            if now - family_last_at < self.learner_model.required_family_spacing(
+                projected
+            ):
+                continue
+            if phase == SessionPhase.REVIEW and (
+                projected.next_review_at is None
+                or projected.next_review_at > now
+            ):
+                continue
+            reuse_eligible.append(question)
+        questions = reuse_eligible
+        if not questions:
+            raise ExhaustedError(
+                "No safely independent question family is due yet for this learner."
+            )
         recent = list(session["recent_families"])
         focus_concept = session["focus_concept_id"]
         focus_misconception = session["focus_misconception_id"]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timedelta
-from math import pi
+from math import pi, sqrt
 from typing import Mapping
 
 from .models import (
@@ -20,7 +20,9 @@ from .models import (
 from .store import to_timestamp
 
 
-MODEL_VERSION = "irt-gaussian-retention-v3"
+LEGACY_MODEL_VERSION = "irt-gaussian-retention-v3"
+MODEL_VERSION = "irt-gaussian-retention-v4"
+SUPPORTED_MODEL_VERSIONS = frozenset({LEGACY_MODEL_VERSION, MODEL_VERSION})
 INITIAL_VARIANCE = 2.25
 INITIAL_STABILITY_HOURS = 48.0
 MIN_POSTERIOR_VARIANCE = 1e-6
@@ -37,6 +39,11 @@ class LearnerModel:
     a separate, small learning transition so one response is not counted twice as
     both evidence and acquisition.
     """
+
+    def __init__(self, model_version: str = MODEL_VERSION):
+        if model_version not in SUPPORTED_MODEL_VERSIONS:
+            raise ValueError(f"Unsupported learner model version: {model_version}")
+        self.model_version = model_version
 
     def initial_state(self, learner_id: str, concept: Concept) -> SkillState:
         return SkillState(
@@ -205,6 +212,16 @@ class LearnerModel:
             return 1.0
         return 0.25 / float(prior_family_attempts**2)
 
+    @staticmethod
+    def required_family_spacing(state: SkillState) -> timedelta:
+        """Minimum interval before one family can be independent evidence again."""
+        return timedelta(
+            hours=max(
+                24.0,
+                min(24.0 * 30.0, state.stability_hours * 0.50),
+            )
+        )
+
     def update_from_response(
         self,
         connection: sqlite3.Connection,
@@ -333,9 +350,7 @@ class LearnerModel:
         if prior_primary_family:
             last_at = datetime.fromisoformat(prior_primary_family["last_unguided_correct_at"])
             primary_state = projected[primary_mapping.concept_id]
-            required_spacing = timedelta(
-                hours=max(24.0, min(24.0 * 30.0, primary_state.stability_hours * 0.50))
-            )
+            required_spacing = self.required_family_spacing(primary_state)
             independent_retrieval = (now - last_at) >= required_spacing
         new_states: dict[str, SkillState] = {}
         changes: list[dict[str, object]] = []
@@ -354,7 +369,9 @@ class LearnerModel:
             post_evidence_mean = before.mean + evidence_delta
 
             learning_delta = 0.0
-            if feedback_shown:
+            if feedback_shown and (
+                is_correct or self.model_version == LEGACY_MODEL_VERSION
+            ):
                 transition_rate = 0.025 if is_correct else 0.085
                 learning_delta = (
                     transition_rate
@@ -369,6 +386,28 @@ class LearnerModel:
                 new_variance
                 + (0.02 * feedback_weight if feedback_shown else 0.0),
             )
+            if not is_correct and self.model_version != LEGACY_MODEL_VERSION:
+                # Feedback proves exposure, not acquisition. A wrong retrieval
+                # must not improve either published competence measure merely
+                # because its explanation was displayed. Returning at most the
+                # response's precision gain preserves uncertainty without
+                # turning feedback into positive evidence.
+                new_variance = min(before.variance, new_variance)
+                mastery_boundary = logit(MASTERY_THRESHOLD)
+                mastery_mean_cap = mastery_boundary + sqrt(
+                    new_variance / before.variance
+                ) * (before.mean - mastery_boundary)
+                competence_mean_cap = sqrt(
+                    (1.0 + pi * new_variance / 8.0)
+                    / (1.0 + pi * before.variance / 8.0)
+                ) * before.mean
+                new_mean = min(
+                    new_mean,
+                    before.mean,
+                    mastery_mean_cap,
+                    competence_mean_cap,
+                )
+                new_mean = max(-6.0, min(6.0, new_mean))
 
             overdue_factor = 0.0
             if before.last_seen_at:
@@ -424,7 +463,7 @@ class LearnerModel:
                     to_timestamp(after.next_review_at),
                     after.evidence_mass,
                     event_id,
-                    MODEL_VERSION,
+                    self.model_version,
                 ),
             )
             if certifying_retrieval and mapping.role is ConceptRole.PRIMARY:
@@ -568,7 +607,7 @@ class LearnerModel:
                     evidence_count + 1,
                     to_timestamp(now),
                     event_id,
-                    MODEL_VERSION,
+                    self.model_version,
                 ),
             )
 

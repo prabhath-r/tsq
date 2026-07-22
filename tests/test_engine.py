@@ -259,6 +259,17 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(report["questions_answered"], 2)
         self.assertEqual(report["abstained"], 1)
         self.assertEqual(report["response_time"]["active_seconds"], 7.5)
+        self.assertEqual(
+            report["response_time"]["selection_window_inconsistencies"], 2
+        )
+        self.assertTrue(report["response_time"]["active_exceeds_session_wall"])
+        self.assertIn(
+            "submitted telemetry",
+            report["response_time"]["evidence_contract"],
+        )
+        self.assertIn("cross_topic_definition", report)
+        self.assertIn("outside_requested_topic_questions", report)
+        self.assertEqual(report["behavior_trace"]["submitted_hint_count"], 0)
         self.assertIsNotNone(report["difficulty"]["average"])
         self.assertEqual(report["unique_families"], 2)
         self.assertTrue(report["concept_changes"])
@@ -493,6 +504,28 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(
             exposure["families"][presentation.question.family_id]["count"], 1
         )
+
+    def test_recent_family_is_reserved_across_sessions_before_answer(self) -> None:
+        selected_families: set[str] = set()
+        selection_time = datetime(2100, 1, 1, tzinfo=timezone.utc)
+        for offset in range(4):
+            session = self.engine.start_session(
+                "learner-1",
+                "Transformers",
+                mode="review" if offset % 2 else "learn",
+                seed=301 + offset,
+            )
+            presentation = self.engine.next_question(
+                session["id"],
+                now=selection_time + timedelta(seconds=offset),
+            )
+            self.assertNotIn(
+                presentation.question.family_id,
+                selected_families,
+            )
+            selected_families.add(presentation.question.family_id)
+
+        self.assertEqual(len(selected_families), 4)
 
     def test_parallel_session_stale_decision_is_rejected_and_invalidated(self) -> None:
         first_session = self.start(seed=103)

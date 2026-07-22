@@ -22,7 +22,7 @@ from .evidence import (
     summarize_actions,
 )
 from .errors import ConflictError, NotFoundError, TSQError, ValidationError
-from .learner import MODEL_VERSION, LearnerModel
+from .learner import MODEL_VERSION, SUPPORTED_MODEL_VERSIONS, LearnerModel
 from .models import QuestionStatus
 from .store import SCHEMA_VERSION, Database, question_content_hash
 
@@ -354,7 +354,6 @@ class ProjectionReplay:
 
     def __init__(self, database: Database):
         self.database = database
-        self.learner_model = LearnerModel()
 
     def _validate_source(self) -> int:
         path = self.database.path
@@ -1095,16 +1094,29 @@ class ProjectionReplay:
                 projection_payload["boundary_decision"],
                 f"Projection event {projection['event_id']} boundary decision",
             )
+        pair_model_versions: set[str] = set()
         for label, metadata in (
             (f"Response event {response['event_id']}", response_metadata),
             (f"Projection event {projection['event_id']}", projection_metadata),
         ):
-            if metadata["learner_model_version"] != MODEL_VERSION:
+            model_version = metadata["learner_model_version"]
+            if model_version not in SUPPORTED_MODEL_VERSIONS:
                 raise ValidationError(
-                    f"{label} uses learner model {metadata['learner_model_version']!r}; "
-                    f"this binary replays exactly {MODEL_VERSION!r}."
+                    f"{label} uses unsupported learner model {model_version!r}; "
+                    f"this binary supports {sorted(SUPPORTED_MODEL_VERSIONS)!r}."
                 )
-        return response_payload, response_metadata, projection_payload, projection_metadata
+            pair_model_versions.add(model_version)
+        if len(pair_model_versions) != 1:
+            raise ValidationError(
+                f"Response {response['event_id']} and projection "
+                f"{projection['event_id']} name different learner models."
+            )
+        return (
+            response_payload,
+            response_metadata,
+            projection_payload,
+            projection_metadata,
+        )
 
     def _rebuild_projection(
         self, work_database: Database, learner_id: str
@@ -1275,7 +1287,10 @@ class ProjectionReplay:
                     raise ValidationError(f"{label} learner revision sequence mismatch.")
 
                 prior_family_attempts = family_attempts.get(question.family_id, 0)
-                _, changes = self.learner_model.update_from_response(
+                event_model = LearnerModel(
+                    response_metadata["learner_model_version"]
+                )
+                _, changes = event_model.update_from_response(
                     connection,
                     learner_id=learner_id,
                     question=question,

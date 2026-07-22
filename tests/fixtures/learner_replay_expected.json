@@ -3,7 +3,7 @@
     {
       "family_id": "f_distance_units_geometry",
       "projection_event_id": "evt_golden_006",
-      "projection_hash": "f816720cbed75bf2dacaa0aed4006e5af493aec8bb970e644be1f0323b696fb5",
+      "projection_hash": "cb83b9cec19ef8eddc801560fa7c5c1fa5293ac309edf73ed0e58500e25d47bc",
       "question_id": "q_scaling_distance_metric_001",
       "response_event_id": "evt_golden_005",
       "revision": 1,
@@ -27,7 +27,7 @@
     {
       "family_id": "f_training_fitted_transform",
       "projection_event_id": "evt_golden_009",
-      "projection_hash": "76d56a1b35b67383994556276f12889f967901af5e8856b65b03c63177cdcecc",
+      "projection_hash": "efa935bfc3d82511c384520c72385588cfc4983b200911dac411973021c1c564",
       "question_id": "q_scaling_training_transform_001",
       "response_event_id": "evt_golden_008",
       "revision": 2,
@@ -36,9 +36,9 @@
           "concept_id": "c_feature_scaling",
           "effective_evidence_weight": 0.0975,
           "evidence_delta": -0.09266,
-          "feedback_transition": 0.04022,
-          "posterior_expected_competence": 0.32798,
-          "posterior_mastery": 0.12634,
+          "feedback_transition": 0.0,
+          "posterior_expected_competence": 0.32129,
+          "posterior_mastery": 0.12034,
           "posterior_variance": 1.86842,
           "prior_expected_competence": 0.33772,
           "prior_mastery": 0.1378,
@@ -51,7 +51,7 @@
     {
       "family_id": "f_monotone_tree_threshold_equivalence",
       "projection_event_id": "evt_golden_013",
-      "projection_hash": "54b8dd352925398205cb563e963dd787bf11aadb2f75fcfc099a564e31571877",
+      "projection_hash": "b0928639c0c6f7105ccbc10f5771d72a155789633aa319e0a5329564703a9700",
       "question_id": "q_scaling_tree_threshold_equivalence_001",
       "response_event_id": "evt_golden_012",
       "revision": 3,
@@ -59,13 +59,13 @@
         {
           "concept_id": "c_feature_scaling",
           "effective_evidence_weight": 0.065,
-          "evidence_delta": -0.05472,
-          "feedback_transition": 0.01467,
-          "posterior_expected_competence": 0.29987,
-          "posterior_mastery": 0.10666,
-          "posterior_variance": 1.97482,
-          "prior_expected_competence": 0.30701,
-          "prior_mastery": 0.11441,
+          "evidence_delta": -0.05366,
+          "feedback_transition": 0.0,
+          "posterior_expected_competence": 0.29353,
+          "posterior_mastery": 0.10148,
+          "posterior_variance": 1.97559,
+          "prior_expected_competence": 0.30274,
+          "prior_mastery": 0.11078,
           "prior_variance": 2.0164,
           "retrieval_certified": false,
           "stability_hours": 37.96
@@ -75,7 +75,7 @@
     {
       "family_id": "f_sparse_penalty_scale_choice",
       "projection_event_id": "evt_golden_017",
-      "projection_hash": "68ce77bd5a261271f23bb6dbe6235272770c2ffb972058a8e970645c3ee9b69f",
+      "projection_hash": "7c6c0c4a2cbc536f02b68b0d39ec6731b915b0dcc5bcdca40418678aa4a2e16a",
       "question_id": "q_scaling_lasso_selection_001",
       "response_event_id": "evt_golden_016",
       "revision": 4,
@@ -83,23 +83,23 @@
         {
           "concept_id": "c_feature_scaling",
           "effective_evidence_weight": 0.65,
-          "evidence_delta": 0.33617,
-          "feedback_transition": 0.0115,
-          "posterior_expected_competence": 0.34329,
-          "posterior_mastery": 0.1497,
-          "posterior_variance": 2.06775,
-          "prior_expected_competence": 0.28896,
-          "prior_mastery": 0.10396,
-          "prior_variance": 2.13448,
+          "evidence_delta": 0.32836,
+          "feedback_transition": 0.01162,
+          "posterior_expected_competence": 0.33773,
+          "posterior_mastery": 0.14459,
+          "posterior_variance": 2.07306,
+          "prior_expected_competence": 0.28502,
+          "prior_mastery": 0.1008,
+          "prior_variance": 2.13525,
           "retrieval_certified": true,
           "stability_hours": 55.35
         }
       ]
     }
   ],
-  "final_projection_hash": "68ce77bd5a261271f23bb6dbe6235272770c2ffb972058a8e970645c3ee9b69f",
+  "final_projection_hash": "7c6c0c4a2cbc536f02b68b0d39ec6731b915b0dcc5bcdca40418678aa4a2e16a",
   "format_version": 1,
   "learner_id": "replay-golden",
-  "learner_model_version": "irt-gaussian-retention-v3",
+  "learner_model_version": "irt-gaussian-retention-v4",
   "response_count": 4
 }

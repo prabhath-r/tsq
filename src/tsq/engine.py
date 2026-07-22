@@ -178,9 +178,13 @@ def _main_phase(mode: str) -> SessionPhase:
 class AdaptiveEngine:
     """Application service coordinating sessions, policy, evidence, and projections."""
 
-    def __init__(self, database: Database):
+    def __init__(
+        self,
+        database: Database,
+        learner_model: LearnerModel | None = None,
+    ):
         self.database = database
-        self.learner_model = LearnerModel()
+        self.learner_model = learner_model or LearnerModel()
         self.boundary_planner = RecursiveEvidenceBoundary(self.learner_model)
         self.policy = AdaptivePolicy(database, self.learner_model)
 
@@ -1946,6 +1950,13 @@ class AdaptiveEngine:
                           attempt.answered_at, attempt.outcome_json,
                           selected_option.misconception_id
                               AS selected_misconception_id,
+                          (SELECT topic_map.topic_id
+                           FROM release_question_topics topic_map
+                           WHERE topic_map.release_id = decision.corpus_release_id
+                             AND topic_map.question_id = decision.question_id
+                             AND topic_map.relation = 'primary'
+                           ORDER BY topic_map.topic_id LIMIT 1
+                          ) AS primary_topic_id,
                           (SELECT COUNT(*) FROM release_question_topics topic_map
                            WHERE topic_map.release_id = decision.corpus_release_id
                              AND topic_map.question_id = decision.question_id
@@ -1999,6 +2010,18 @@ class AdaptiveEngine:
             for row in answered
             if row["response_ms"] is not None
         ]
+        timing_inconsistencies = 0
+        for row in answered:
+            if row["response_ms"] is None:
+                continue
+            selected_at = datetime.fromisoformat(row["created_at"])
+            answered_at = datetime.fromisoformat(row["answered_at"])
+            available_ms = max(
+                0,
+                int((answered_at - selected_at).total_seconds() * 1000),
+            )
+            if int(row["response_ms"]) > available_ms:
+                timing_inconsistencies += 1
         predicted = []
         continuity = []
         for row in answered:
@@ -2459,6 +2482,16 @@ class AdaptiveEngine:
                     median(response_times) / 1000.0 if response_times else None
                 ),
                 "wall_seconds": wall_seconds,
+                "submitted_values": len(response_times),
+                "selection_window_inconsistencies": timing_inconsistencies,
+                "active_exceeds_session_wall": (
+                    sum(response_times) / 1000.0 > wall_seconds
+                ),
+                "evidence_contract": (
+                    "Elapsed values are submitted telemetry. Values longer than "
+                    "the server-side selection-to-answer window are flagged and "
+                    "must not be interpreted as trusted human timing."
+                ),
             },
             "difficulty": {
                 "average": mean(difficulties) if difficulties else None,
@@ -2489,6 +2522,15 @@ class AdaptiveEngine:
             "cross_topic_questions": sum(
                 int(row["topic_count"] or 0) > 1 for row in answered
             ),
+            "cross_topic_definition": (
+                "Questions mapped to more than one curriculum topic; this is "
+                "different from an adaptive excursion outside the requested topic."
+            ),
+            "outside_requested_topic_questions": sum(
+                bool(session.get("topic_id"))
+                and row["primary_topic_id"] != session["topic_id"]
+                for row in answered
+            ),
             "topic_distribution": [dict(row) for row in topic_counts],
             "evidence_delta": total_evidence_delta,
             "concept_changes": concept_changes,
@@ -2510,6 +2552,12 @@ class AdaptiveEngine:
                 "hint_requests": action_type_counts[
                     ActionKind.HINT_REQUESTED.value
                 ],
+                "submitted_hint_count": sum(
+                    int(row["hint_count"]) for row in answered
+                ),
+                "hinted_responses": sum(
+                    int(row["hint_count"]) > 0 for row in answered
+                ),
                 "answer_revisions": action_type_counts[
                     ActionKind.ANSWER_REVISED.value
                 ],

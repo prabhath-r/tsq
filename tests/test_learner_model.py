@@ -183,6 +183,58 @@ def project_response(
 
 
 class LearnerMathTests(unittest.TestCase):
+    def test_one_wrong_response_cannot_gain_competence_from_feedback(self) -> None:
+        question = make_question()
+        for mean, variance in ((-1.4, 2.25), (0.3, 0.2), (1.2, 0.05)):
+            with self.subTest(mean=mean, variance=variance):
+                connection = model_connection("c_primary")
+                try:
+                    insert_state(
+                        connection,
+                        mean=mean,
+                        variance=variance,
+                        last_seen_at=NOW,
+                    )
+                    before = SkillState(
+                        "learner",
+                        "c_primary",
+                        mean,
+                        variance,
+                        100.0,
+                        exposures=1,
+                        last_seen_at=NOW,
+                    )
+                    connection.execute(
+                        "INSERT INTO attempts VALUES (?, 'learner', ?)",
+                        ("single-wrong", question.family_id),
+                    )
+                    states, changes = LearnerModel().update_from_response(
+                        connection,
+                        learner_id="learner",
+                        question=question,
+                        selected_option=question.options[1],
+                        confidence=0.99,
+                        hint_count=0,
+                        feedback_shown=True,
+                        evidence_weight_override=1.0,
+                        event_id="single-wrong",
+                        now=NOW,
+                        response_ms=120,
+                    )
+                    after = states["c_primary"]
+                    self.assertEqual(changes[0]["feedback_transition"], 0.0)
+                    self.assertLessEqual(after.mean, before.mean)
+                    self.assertLessEqual(
+                        after.mastery_probability,
+                        before.mastery_probability + 1e-12,
+                    )
+                    self.assertLessEqual(
+                        after.expected_competence,
+                        before.expected_competence + 1e-12,
+                    )
+                finally:
+                    connection.close()
+
     def test_repeated_wrong_feedback_cannot_manufacture_mastery(self) -> None:
         question = make_question()
         connection = model_connection("c_primary")

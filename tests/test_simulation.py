@@ -325,9 +325,18 @@ class BehavioralSimulationTests(unittest.TestCase):
             for step in session_report["adaptive_path"]
         ]
         self.assertIn("prerequisite_verified_resume_parent", reasons)
-        self.assertIn("no_serviceable_prerequisite_boundary", reasons)
+        self.assertTrue(
+            {
+                "no_serviceable_prerequisite_boundary",
+                "verified_prerequisite_not_reopened",
+            }
+            & set(reasons),
+            reasons,
+        )
         self.assertGreaterEqual(
-            session_report["adaptive_routing"]["capacity_exits"], 1
+            session_report["adaptive_routing"]["capacity_exits"]
+            + session_report["adaptive_routing"]["prevented_reopenings"],
+            1,
         )
 
 
