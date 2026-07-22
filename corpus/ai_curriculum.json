@@ -2139,6 +2139,24 @@
       "locator": "Springer"
     },
     {
+      "id": "src_shazeer_fast_decoding_2019",
+      "type": "paper",
+      "title": "Fast Transformer Decoding: One Write-Head is All You Need",
+      "authors": ["Noam Shazeer"],
+      "year": 2019,
+      "locator": "arXiv:1911.02150",
+      "uri": "https://arxiv.org/abs/1911.02150"
+    },
+    {
+      "id": "src_krell_sequence_packing_2021",
+      "type": "paper",
+      "title": "Efficient Sequence Packing without Cross-contamination: Accelerating Large Language Models without Impacting Performance",
+      "authors": ["Mario Michael Krell", "Matej Kosec", "Sergio P. Perez", "Andrew Fitzgibbon"],
+      "year": 2021,
+      "locator": "arXiv:2107.02027",
+      "uri": "https://arxiv.org/abs/2107.02027"
+    },
+    {
       "id": "src_expert_synthesis_2026",
       "type": "original_authorship",
       "title": "Original diagnostic scenarios and distractor analysis for the AI foundations seed corpus",
@@ -8894,6 +8912,153 @@
       "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
       "provenance": {"method": "source_grounded_original_scenario", "created_on": "2026-07-21", "review_status": "deterministic_quality_reviewed", "psychometrics": "expert_prior_needs_empirical_calibration"},
       "tags": ["llm", "transformers", "attention", "permutation", "matrix_calculation"]
+    },
+    {
+      "id": "q_attention_scaled_variance_nonunit_001",
+      "version": 1,
+      "family_id": "f_attention_scaled_variance_nonunit",
+      "status": "approved",
+      "stem": "For one attention head, the 64 coordinate products q_r k_r are independent, zero mean, and each has variance 9. What is the variance of the scaled logit (q dot k) / sqrt(64), and what does it demonstrate?",
+      "kind": "calculation",
+      "difficulty": 1.1,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {"concept_id": "c_attention_scaling", "weight": 0.8, "role": "primary"},
+        {"concept_id": "c_attention", "weight": 0.2, "role": "prerequisite"}
+      ],
+      "options": [
+        {"id": "a", "text": "It is 9/64; the unscaled dot product retains variance 9 as dimension grows, and square-root division then reduces that variance by 64.", "correct": false, "misconception_id": "m_attention_unscaled_dimension_invariant", "rationale": "Independent coordinate-product variances add, so the raw variance is 64 times 9 rather than 9."},
+        {"id": "b", "text": "It approaches 0, because adding independent high-dimensional terms drives the attention scores toward equality and uniform weights.", "correct": false, "misconception_id": "m_attention_high_dimension_uniform", "rationale": "Independent variances add; increasing key dimension expands raw score variance rather than collapsing every score to the same value."},
+        {"id": "c", "text": "It is 9; square-root scaling removes the factor from summing 64 terms but does not remove their non-unit coordinate scale.", "correct": true, "misconception_id": null, "rationale": "The raw variance is 64 times 9, and division by sqrt(64) divides variance by 64, leaving 9."},
+        {"id": "d", "text": "It is 9, but the scaling can change which key has the largest logit because each key's ranking depends on the divisor.", "correct": false, "misconception_id": "m_attention_scaling_reorders_keys", "rationale": "The numeric variance is right, but one shared positive divisor preserves the ordering of keys for a fixed query."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
+      "provenance": {"method": "source_grounded_original_scenario", "created_on": "2026-07-22", "review_status": "deterministic_quality_reviewed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["llm", "transformers", "attention", "scaling", "variance", "calculation"]
+    },
+    {
+      "id": "q_attention_scaling_covariance_audit_001",
+      "version": 1,
+      "family_id": "f_attention_scaling_covariance_audit",
+      "status": "approved",
+      "stem": "A trained attention head has zero-mean query-key coordinate products, but products from different coordinates are strongly correlated. An audit claims division by sqrt(d_k) therefore guarantees unit-variance logits. Which conclusion is most defensible?",
+      "kind": "debugging",
+      "difficulty": 1.25,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {"concept_id": "c_attention_scaling", "weight": 0.8, "role": "primary"},
+        {"concept_id": "c_attention", "weight": 0.2, "role": "prerequisite"}
+      ],
+      "options": [
+        {"id": "a", "text": "The guarantee holds because raw dot-product variance is dimension invariant even when coordinate products are correlated.", "correct": false, "misconception_id": "m_attention_unscaled_dimension_invariant", "rationale": "Covariance terms contribute to the variance of the sum, so neither the raw variance nor its scaled value is universally fixed."},
+        {"id": "b", "text": "The guarantee is unnecessary because correlation makes high-dimensional logits converge to equality and yields uniform attention.", "correct": false, "misconception_id": "m_attention_high_dimension_uniform", "rationale": "Correlation need not collapse logits or force uniform weights; it can instead increase or decrease their variance."},
+        {"id": "c", "text": "The guarantee fails because the common positive divisor can reorder keys once cross-coordinate covariance is present.", "correct": false, "misconception_id": "m_attention_scaling_reorders_keys", "rationale": "For a fixed query, dividing every finite logit by the same positive scalar preserves their ordering regardless of covariance."},
+        {"id": "d", "text": "The guarantee is too strong: sqrt(d_k) controls nominal growth under approximate independence, while covariance terms can alter the resulting variance.", "correct": true, "misconception_id": null, "rationale": "The standard variance argument assumes roughly independent unit-scale coordinate products; learned correlations add covariance terms not canceled by sqrt(d_k)."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
+      "provenance": {"method": "source_grounded_original_scenario", "created_on": "2026-07-22", "review_status": "deterministic_quality_reviewed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["llm", "transformers", "attention", "scaling", "covariance", "debugging"]
+    },
+    {
+      "id": "q_causal_mask_packed_sequences_001",
+      "version": 1,
+      "family_id": "f_causal_mask_packed_sequences",
+      "status": "approved",
+      "stem": "Two unrelated training examples are concatenated into one packed decoder row, with the second example placed after the first. A single global lower-triangular attention mask is applied. What additional constraint is needed for independent-example semantics?",
+      "kind": "application",
+      "difficulty": 1.15,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {"concept_id": "c_causal_masking", "weight": 0.8, "role": "primary"},
+        {"concept_id": "c_transformers", "weight": 0.2, "role": "supporting"}
+      ],
+      "options": [
+        {"id": "a", "text": "Remove masking during packed training and restore it during generation, when cross-example leakage can first affect predictions.", "correct": false, "misconception_id": "m_mask_only_inference", "rationale": "All packed target tokens are available during teacher forcing, so training requires causal visibility and example-boundary isolation."},
+        {"id": "b", "text": "Use a strict lower triangle within the whole packed row, hiding each position's aligned shifted input as well as later positions.", "correct": false, "misconception_id": "m_mask_hides_current_token", "rationale": "A strict diagonal does not isolate the examples and incorrectly removes the standard aligned shifted-input position."},
+        {"id": "c", "text": "Run every token of each example serially, because segment boundaries make a parallel masked attention matrix invalid.", "correct": false, "misconception_id": "m_mask_prevents_parallel_training", "rationale": "A block-diagonal causal mask can represent both within-example prefix visibility and segment isolation in one parallel operation."},
+        {"id": "d", "text": "Combine the causal rule with a segment-boundary mask so tokens cannot attend to positions belonging to the other example.", "correct": true, "misconception_id": null, "rationale": "A global lower triangle blocks future positions but still exposes the earlier packed example; segment-aware blocks remove that unintended path."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_krell_sequence_packing_2021", "src_expert_synthesis_2026"],
+      "provenance": {"method": "source_grounded_original_scenario", "created_on": "2026-07-22", "review_status": "deterministic_quality_reviewed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["llm", "transformers", "causal_mask", "sequence_packing", "leakage"]
+    },
+    {
+      "id": "q_causal_mask_cached_query_001",
+      "version": 1,
+      "family_id": "f_causal_mask_cached_query",
+      "status": "approved",
+      "stem": "During incremental decoder inference, one new query is evaluated against a key-value cache containing only its permitted prefix and its current input position; no future keys exist. Is a full triangular mask required for this attention call?",
+      "kind": "transfer",
+      "difficulty": 1.05,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {"concept_id": "c_causal_masking", "weight": 0.8, "role": "primary"},
+        {"concept_id": "c_transformers", "weight": 0.2, "role": "supporting"}
+      ],
+      "options": [
+        {"id": "a", "text": "Yes; causal masking is reserved for inference, so every generation call needs a materialized triangular matrix despite absent future keys.", "correct": false, "misconception_id": "m_mask_only_inference", "rationale": "Causality is also enforced during training, and in this single-query call the cache contents already restrict the visible key set."},
+        {"id": "b", "text": "No; for this single query, only permitted positions exist in the cache, although batching unequal positions may still require masking.", "correct": true, "misconception_id": null, "rationale": "When the key set contains no future position, attending over the entire cache is causal; padding or multi-position batching can add separate mask requirements."},
+        {"id": "c", "text": "Yes; the mask must hide the current cached key as well as nonexistent future keys, leaving access strictly to earlier positions.", "correct": false, "misconception_id": "m_mask_hides_current_token", "rationale": "With the standard shifted decoder alignment, the current input position is permitted; causality blocks positions to its right."},
+        {"id": "d", "text": "No; but the query must be recomputed once per cached key because causal dependence prevents a vectorized attention operation.", "correct": false, "misconception_id": "m_mask_prevents_parallel_training", "rationale": "The single query can score every permitted cached key in one vectorized operation; masking and serial matrix evaluation are separate issues."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_shazeer_fast_decoding_2019", "src_expert_synthesis_2026"],
+      "provenance": {"method": "source_grounded_original_scenario", "created_on": "2026-07-22", "review_status": "deterministic_quality_reviewed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["llm", "transformers", "causal_mask", "inference", "kv_cache"]
+    },
+    {
+      "id": "q_transformer_kv_cache_complexity_001",
+      "version": 1,
+      "family_id": "f_transformer_kv_cache_complexity",
+      "status": "approved",
+      "stem": "A decoder generates L tokens autoregressively. Without a key-value cache, it recomputes full-prefix self-attention at every step; with an exact cache, each step projects only the new token and attends from its new query to all cached keys. For fixed width and layer count, which asymptotic comparison is correct?",
+      "kind": "comparison",
+      "difficulty": 1.3,
+      "discrimination": 1.8,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {"concept_id": "c_transformers", "weight": 0.6, "role": "primary"},
+        {"concept_id": "c_attention", "weight": 0.4, "role": "supporting"}
+      ],
+      "options": [
+        {"id": "a", "text": "Cached decoding is O(L) in total attention scores because producing one token per step makes full attention linear in sequence length.", "correct": false, "misconception_id": "m_full_attention_is_linear_in_length", "rationale": "The new query scores a growing prefix, so summing 1 through L cached-key comparisons is quadratic, not linear."},
+        {"id": "b", "text": "The cache turns prior keys and values into learned parameters, so parameter count grows with L even though computation falls.", "correct": false, "misconception_id": "m_parameter_count_scales_with_tokens", "rationale": "Cached keys and values are input-dependent activations; the learned projection matrices remain shared and fixed in size."},
+        {"id": "c", "text": "Naive recomputation sums O(t squared) attention work over prefixes, giving O(L cubed), while caching sums O(t) new-query scores, giving O(L squared).", "correct": true, "misconception_id": null, "rationale": "Recomputing every prefix score matrix costs the sum of t squared, whereas exact caching retains past projections and forms one growing score row per step."},
+        {"id": "d", "text": "Both versions are O(L) at inference because quadratic attention is a training artifact of retaining gradient tensors.", "correct": false, "misconception_id": "m_quadratic_attention_only_during_training", "rationale": "Removing backpropagation does not remove pairwise forward score computations; caching changes their reuse pattern but leaves quadratic total scoring."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_shazeer_fast_decoding_2019", "src_expert_synthesis_2026"],
+      "provenance": {"method": "source_grounded_original_scenario", "created_on": "2026-07-22", "review_status": "deterministic_quality_reviewed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["llm", "transformers", "autoregressive_inference", "kv_cache", "complexity"]
+    },
+    {
+      "id": "q_transformer_cross_attention_shapes_001",
+      "version": 1,
+      "family_id": "f_transformer_cross_attention_shapes",
+      "status": "approved",
+      "stem": "An encoder-decoder Transformer has S source positions and T decoder positions. In the decoder cross-attention sublayer, which assignment produces a T-by-S compatibility matrix and source-conditioned decoder outputs?",
+      "kind": "application",
+      "difficulty": 1.05,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [{"concept_id": "c_transformers", "weight": 1.0, "role": "primary"}],
+      "options": [
+        {"id": "a", "text": "Project T decoder states as queries and S encoder states as keys and values, then compute decoder-query by encoder-key scores.", "correct": true, "misconception_id": null, "rationale": "Each decoder position queries the encoded source; Q_dec K_enc-transpose has shape T by S and weights encoder-derived values."},
+        {"id": "b", "text": "Use encoder states for queries, keys, and values because Transformer cross-attention is inherently bidirectional and needs no decoder-side query.", "correct": false, "misconception_id": "m_transformers_are_inherently_bidirectional", "rationale": "Cross-attention direction follows the assigned tensors; the decoder state supplies each output position's query into the encoder memory."},
+        {"id": "c", "text": "Let the position-wise feed-forward matrices multiply the T and S axes, while attention independently transforms each decoder position.", "correct": false, "misconception_id": "m_feedforward_layers_mix_token_positions", "rationale": "The feed-forward sublayer acts separately at each decoder position; cross-attention creates the T-by-S sequence interaction."},
+        {"id": "d", "text": "Allocate learned projection matrices with T-by-S dimensions, so changing source or target length creates a different parameter set.", "correct": false, "misconception_id": "m_parameter_count_scales_with_tokens", "rationale": "Projection weights act on feature dimensions and are shared across positions; T and S affect activation shapes, not learned parameter count."}
+      ],
+      "source_ids": ["src_vaswani_attention_2017", "src_expert_synthesis_2026"],
+      "provenance": {"method": "source_grounded_original_scenario", "created_on": "2026-07-22", "review_status": "deterministic_quality_reviewed", "psychometrics": "expert_prior_needs_empirical_calibration"},
+      "tags": ["llm", "transformers", "encoder_decoder", "cross_attention", "tensor_shapes"]
     }
   ]
 }
