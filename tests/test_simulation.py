@@ -308,7 +308,7 @@ class BehavioralSimulationTests(unittest.TestCase):
             learner_id="four-family-boundary",
             root_concept_id="t_large_language_models",
             policy_seed=17,
-            max_steps=24,
+            max_steps=30,
             start_at=START,
         )
 
