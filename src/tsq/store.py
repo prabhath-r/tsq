@@ -12,9 +12,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+from .evidence import (
+    ActionKind,
+    ActionPhase,
+    LearningAction,
+    canonical_json,
+    summarize_actions,
+)
 from .errors import ConflictError, NotFoundError, ValidationError
 from .graph import KnowledgeGraph
 from .models import (
+    MAX_HINT_COUNT,
+    MAX_RESPONSE_MS,
     CandidateScore,
     Concept,
     ConceptEdge,
@@ -36,7 +45,7 @@ from .models import (
 from .quality import audit_corpus
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Candidate retrieval deliberately has a separate, compact SQL kernel.  Keeping
 # it module-level lets the large-bank benchmark inspect the exact production
@@ -584,6 +593,48 @@ ON attempts(learner_id, family_id, answered_at);
 CREATE INDEX IF NOT EXISTS idx_attempts_question ON attempts(question_id, answered_at);
 CREATE INDEX IF NOT EXISTS idx_attempts_session ON attempts(session_id, question_id, family_id);
 
+CREATE TABLE IF NOT EXISTS learning_artifacts (
+    id TEXT PRIMARY KEY,
+    sha256 TEXT NOT NULL UNIQUE
+        CHECK(length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
+    size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0 AND size_bytes <= 1073741824),
+    media_type TEXT NOT NULL CHECK(length(media_type) BETWEEN 1 AND 127),
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS learning_actions (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    decision_id TEXT NOT NULL REFERENCES decisions(id),
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    learner_id TEXT NOT NULL REFERENCES learners(id),
+    sequence INTEGER NOT NULL CHECK(sequence > 0),
+    stage TEXT NOT NULL CHECK(stage IN ('unassisted', 'assisted', 'post_feedback')),
+    action_type TEXT NOT NULL CHECK(action_type IN (
+        'started', 'hint_requested', 'answer_revised', 'artifact_checkpoint',
+        'explanation_checkpoint', 'check_run', 'tool_used', 'submitted',
+        'feedback_shown', 'abandoned'
+    )),
+    payload_json TEXT NOT NULL CHECK(
+        length(payload_json) <= 16384
+        AND json_valid(payload_json)
+        AND json_type(payload_json) = 'object'
+    ),
+    artifact_id TEXT REFERENCES learning_artifacts(id),
+    occurred_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    command_hash TEXT NOT NULL
+        CHECK(length(command_hash) = 64 AND command_hash NOT GLOB '*[^0-9a-f]*'),
+    UNIQUE(decision_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_learning_actions_decision
+ON learning_actions(decision_id, sequence);
+CREATE INDEX IF NOT EXISTS idx_learning_actions_session
+ON learning_actions(session_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_learning_actions_learner
+ON learning_actions(learner_id, occurred_at);
+
 CREATE TABLE IF NOT EXISTS skill_states (
     learner_id TEXT NOT NULL REFERENCES learners(id),
     concept_id TEXT NOT NULL REFERENCES concepts(id),
@@ -864,6 +915,9 @@ class Database:
             if current_version < 7:
                 self._migrate_v6_to_v7(connection)
                 current_version = 7
+            if current_version < 8:
+                self._migrate_v7_to_v8(connection)
+                current_version = 8
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -871,6 +925,7 @@ class Database:
             self._install_v5_indexes(connection)
             self._install_v6_authoring_triggers(connection)
             self._install_v4_attempt_triggers(connection)
+            self._install_v8_learning_action_triggers(connection)
             self._install_release_snapshot_triggers(connection)
             self._install_corpus_registry_triggers(connection)
             connection.commit()
@@ -915,6 +970,21 @@ class Database:
                 )
                 BEGIN
                     SELECT RAISE(ABORT, 'attempts are immutable after outcome finalization');
+                END"""
+        )
+        connection.execute("DROP TRIGGER IF EXISTS attempts_validate_bounds_insert")
+        connection.execute(
+            f"""CREATE TRIGGER attempts_validate_bounds_insert
+                BEFORE INSERT ON attempts BEGIN
+                    SELECT CASE WHEN NEW.response_ms IS NOT NULL AND (
+                        typeof(NEW.response_ms) != 'integer'
+                        OR NEW.response_ms < 0
+                        OR NEW.response_ms > {MAX_RESPONSE_MS}
+                    ) THEN RAISE(ABORT, 'attempt response_ms is out of bounds') END;
+                    SELECT CASE WHEN typeof(NEW.hint_count) != 'integer'
+                        OR NEW.hint_count < 0
+                        OR NEW.hint_count > {MAX_HINT_COUNT}
+                    THEN RAISE(ABORT, 'attempt hint_count is out of bounds') END;
                 END"""
         )
 
@@ -1739,6 +1809,297 @@ class Database:
             connection.execute(
                 "ALTER TABLE sessions ADD COLUMN exploration_mode TEXT NOT NULL DEFAULT 'off'"
             )
+
+    @staticmethod
+    def _migrate_v7_to_v8(connection: sqlite3.Connection) -> None:
+        """Add an observational, append-only learner-action ledger.
+
+        The v8 tables are created by the main DDL before this migration runs.
+        Historical decisions intentionally receive no fabricated action rows:
+        absence is neutral evidence, and old event streams remain byte-for-byte
+        unchanged.
+        """
+        required = {"learning_artifacts", "learning_actions"}
+        present = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        missing = required - present
+        if missing:
+            raise ConflictError(
+                "Schema v8 action tables were not installed: "
+                + ", ".join(sorted(missing))
+            )
+
+    @staticmethod
+    def _install_v8_learning_action_triggers(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Bind immutable action projections to their semantic events."""
+        connection.executescript(
+            """
+            DROP TRIGGER IF EXISTS learning_artifacts_no_update;
+            DROP TRIGGER IF EXISTS learning_artifacts_no_delete;
+            DROP TRIGGER IF EXISTS learning_actions_validate_insert;
+            DROP TRIGGER IF EXISTS learning_actions_no_update;
+            DROP TRIGGER IF EXISTS learning_actions_no_delete;
+
+            CREATE TRIGGER learning_artifacts_no_update
+            BEFORE UPDATE ON learning_artifacts BEGIN
+                SELECT RAISE(ABORT, 'learning artifacts are immutable');
+            END;
+
+            CREATE TRIGGER learning_artifacts_no_delete
+            BEFORE DELETE ON learning_artifacts BEGIN
+                SELECT RAISE(ABORT, 'learning artifacts are immutable');
+            END;
+
+            CREATE TRIGGER learning_actions_validate_insert
+            BEFORE INSERT ON learning_actions BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM decisions decision
+                    JOIN sessions session ON session.id = decision.session_id
+                    WHERE decision.id = NEW.decision_id
+                      AND decision.session_id = NEW.session_id
+                      AND decision.learner_id = NEW.learner_id
+                      AND session.learner_id = NEW.learner_id
+                ) THEN RAISE(ABORT, 'learning action does not match decision/session') END;
+                SELECT CASE WHEN NEW.sequence != COALESCE((
+                    SELECT MAX(action.sequence) + 1
+                    FROM learning_actions action
+                    WHERE action.decision_id = NEW.decision_id
+                ), 1) THEN RAISE(ABORT, 'learning action sequence is not contiguous') END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM events event
+                    WHERE event.event_id = NEW.event_id
+                      AND event.event_type = 'LearnerActionRecorded'
+                      AND event.schema_version = 1
+                      AND event.stream_id = 'learner:' || NEW.learner_id
+                      AND event.learner_id = NEW.learner_id
+                      AND event.session_id = NEW.session_id
+                      AND event.causation_id = NEW.decision_id
+                      AND event.occurred_at = NEW.occurred_at
+                      AND event.recorded_at = NEW.recorded_at
+                      AND json_extract(event.payload_json, '$.action_id') = NEW.id
+                      AND json_extract(event.payload_json, '$.decision_id') = NEW.decision_id
+                      AND json_extract(event.payload_json, '$.sequence') = NEW.sequence
+                      AND json_extract(event.payload_json, '$.stage') = NEW.stage
+                      AND json_extract(event.payload_json, '$.action_type') = NEW.action_type
+                      AND json_extract(event.payload_json, '$.payload') = json(NEW.payload_json)
+                      AND (
+                          (NEW.artifact_id IS NULL
+                           AND json_type(event.payload_json, '$.artifact') = 'null')
+                          OR EXISTS (
+                              SELECT 1 FROM learning_artifacts artifact
+                              WHERE artifact.id = NEW.artifact_id
+                                AND json_extract(
+                                    event.payload_json, '$.artifact.sha256'
+                                ) = artifact.sha256
+                                AND json_extract(
+                                    event.payload_json, '$.artifact.size_bytes'
+                                ) = artifact.size_bytes
+                                AND json_extract(
+                                    event.payload_json, '$.artifact.media_type'
+                                ) = artifact.media_type
+                          )
+                      )
+                ) THEN RAISE(ABORT, 'learning action does not match its event') END;
+                SELECT CASE WHEN (
+                    SELECT COUNT(*)
+                    FROM events selection_event
+                    JOIN events action_event ON action_event.event_id = NEW.event_id
+                    WHERE selection_event.event_type = 'QuestionSelected'
+                      AND selection_event.schema_version = 1
+                      AND selection_event.stream_id = action_event.stream_id
+                      AND selection_event.learner_id = NEW.learner_id
+                      AND selection_event.session_id = NEW.session_id
+                      AND json_extract(
+                          selection_event.payload_json, '$.decision_id'
+                      ) = NEW.decision_id
+                      AND selection_event.stream_version < action_event.stream_version
+                ) != 1 THEN RAISE(
+                    ABORT, 'learning action lacks a unique prior selection event'
+                ) END;
+                SELECT CASE WHEN (
+                    SELECT COUNT(*)
+                    FROM events started_event
+                    JOIN events action_event ON action_event.event_id = NEW.event_id
+                    WHERE started_event.event_type = 'SessionStarted'
+                      AND started_event.schema_version = 1
+                      AND started_event.stream_id = action_event.stream_id
+                      AND started_event.learner_id = NEW.learner_id
+                      AND started_event.session_id = NEW.session_id
+                      AND json_extract(
+                          started_event.payload_json, '$.session_id'
+                      ) = NEW.session_id
+                      AND started_event.stream_version < action_event.stream_version
+                ) != 1 THEN RAISE(
+                    ABORT, 'learning action falls outside session start boundary'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM events ended_event
+                    JOIN events action_event ON action_event.event_id = NEW.event_id
+                    WHERE ended_event.event_type = 'SessionEnded'
+                      AND ended_event.stream_id = action_event.stream_id
+                      AND ended_event.learner_id = NEW.learner_id
+                      AND ended_event.session_id = NEW.session_id
+                      AND ended_event.stream_version <= action_event.stream_version
+                ) THEN RAISE(
+                    ABORT, 'learning action follows session end boundary'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM events invalidation_event
+                    JOIN events action_event ON action_event.event_id = NEW.event_id
+                    WHERE invalidation_event.event_type = 'DecisionInvalidated'
+                      AND invalidation_event.stream_id = action_event.stream_id
+                      AND invalidation_event.learner_id = NEW.learner_id
+                      AND invalidation_event.session_id = NEW.session_id
+                      AND invalidation_event.causation_id = NEW.decision_id
+                      AND invalidation_event.stream_version <= action_event.stream_version
+                ) THEN RAISE(
+                    ABORT, 'learning action follows decision invalidation boundary'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM decisions decision
+                    JOIN question_revocations revocation
+                      ON revocation.question_id = decision.question_id
+                    JOIN events revocation_event
+                      ON revocation_event.event_id = revocation.event_id
+                    JOIN events action_event ON action_event.event_id = NEW.event_id
+                    WHERE decision.id = NEW.decision_id
+                      AND action_event.recorded_at >= revocation_event.recorded_at
+                ) THEN RAISE(
+                    ABORT, 'learning action was recorded after emergency revocation'
+                ) END;
+                SELECT CASE WHEN NEW.stage IN ('unassisted', 'assisted') AND EXISTS (
+                    SELECT 1
+                    FROM events selection_event
+                    JOIN events action_event ON action_event.event_id = NEW.event_id
+                    JOIN events projection_event
+                      ON projection_event.stream_id = action_event.stream_id
+                     AND projection_event.event_type = 'LearnerProjectionAdvanced'
+                     AND projection_event.stream_version
+                         > selection_event.stream_version
+                     AND projection_event.stream_version
+                         < action_event.stream_version
+                    WHERE selection_event.event_type = 'QuestionSelected'
+                      AND selection_event.stream_id = action_event.stream_id
+                      AND selection_event.session_id = NEW.session_id
+                      AND json_extract(
+                          selection_event.payload_json, '$.decision_id'
+                      ) = NEW.decision_id
+                ) THEN RAISE(
+                    ABORT, 'pre-response learning action follows learner projection advance'
+                ) END;
+                SELECT CASE WHEN NEW.artifact_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1
+                    FROM learning_artifacts artifact
+                    WHERE artifact.id = NEW.artifact_id
+                      AND artifact.sha256 = CASE NEW.action_type
+                          WHEN 'answer_revised' THEN
+                              json_extract(NEW.payload_json, '$.answer_digest')
+                          WHEN 'artifact_checkpoint' THEN
+                              json_extract(NEW.payload_json, '$.artifact_digest')
+                          WHEN 'explanation_checkpoint' THEN
+                              json_extract(NEW.payload_json, '$.explanation_digest')
+                          WHEN 'check_run' THEN
+                              json_extract(NEW.payload_json, '$.result_digest')
+                          WHEN 'submitted' THEN
+                              json_extract(NEW.payload_json, '$.submission_digest')
+                          WHEN 'feedback_shown' THEN
+                              json_extract(NEW.payload_json, '$.feedback_digest')
+                          ELSE NULL
+                      END
+                ) THEN RAISE(ABORT, 'learning action artifact does not match payload digest') END;
+                SELECT CASE WHEN NEW.action_type = 'feedback_shown'
+                    AND NEW.stage != 'post_feedback'
+                    THEN RAISE(ABORT, 'feedback_shown requires post_feedback stage') END;
+                SELECT CASE WHEN NEW.action_type IN (
+                        'started', 'submitted', 'abandoned', 'feedback_shown'
+                    ) AND EXISTS (
+                        SELECT 1 FROM learning_actions action
+                        WHERE action.decision_id = NEW.decision_id
+                          AND action.action_type = NEW.action_type
+                    ) THEN RAISE(ABORT, 'learning action repeats lifecycle singleton') END;
+                SELECT CASE WHEN NEW.action_type = 'hint_requested' AND (
+                    SELECT COUNT(*) FROM learning_actions action
+                    WHERE action.decision_id = NEW.decision_id
+                      AND action.action_type = 'hint_requested'
+                ) >= 10000 THEN RAISE(
+                    ABORT, 'learning action exceeds hint request bound'
+                ) END;
+                SELECT CASE WHEN NEW.action_type = 'started' AND EXISTS (
+                        SELECT 1 FROM learning_actions action
+                        WHERE action.decision_id = NEW.decision_id
+                    ) THEN RAISE(ABORT, 'started must be the first learning action') END;
+                SELECT CASE WHEN EXISTS (
+                        SELECT 1 FROM learning_actions action
+                        WHERE action.decision_id = NEW.decision_id
+                          AND action.action_type = 'abandoned'
+                    ) THEN RAISE(ABORT, 'learning action follows abandoned trace') END;
+                SELECT CASE WHEN NEW.action_type = 'abandoned' AND EXISTS (
+                        SELECT 1 FROM learning_actions action
+                        WHERE action.decision_id = NEW.decision_id
+                          AND action.action_type = 'submitted'
+                    ) THEN RAISE(ABORT, 'learning trace cannot be submitted and abandoned') END;
+                SELECT CASE WHEN NEW.stage IN ('unassisted', 'assisted') AND EXISTS (
+                        SELECT 1 FROM learning_actions action
+                        WHERE action.decision_id = NEW.decision_id
+                          AND action.action_type = 'submitted'
+                    ) THEN RAISE(ABORT, 'pre-response action follows submitted checkpoint') END;
+                SELECT CASE WHEN NEW.stage IN ('unassisted', 'assisted')
+                    AND NOT EXISTS (
+                        SELECT 1 FROM decisions decision
+                        JOIN sessions session ON session.id = decision.session_id
+                        JOIN learners learner ON learner.id = decision.learner_id
+                        WHERE decision.id = NEW.decision_id
+                          AND decision.consumed_at IS NULL
+                          AND decision.invalidated_at IS NULL
+                          AND session.status = 'active'
+                          AND session.phase = decision.phase
+                          AND session.focus_concept_id IS decision.focus_concept_id
+                          AND session.focus_misconception_id
+                              IS decision.focus_misconception_id
+                          AND session.corpus_release_id = decision.corpus_release_id
+                          AND session.revision = decision.session_revision + 1
+                          AND learner.revision = decision.learner_revision
+                    ) THEN RAISE(ABORT, 'pre-response action requires a pending decision') END;
+                SELECT CASE WHEN NEW.stage = 'post_feedback'
+                    AND NOT EXISTS (
+                        SELECT 1 FROM decisions decision
+                        JOIN sessions session ON session.id = decision.session_id
+                        JOIN attempts attempt ON attempt.decision_id = decision.id
+                        JOIN events response_event
+                          ON response_event.event_id = attempt.event_id
+                        JOIN events action_event
+                          ON action_event.event_id = NEW.event_id
+                        WHERE decision.id = NEW.decision_id
+                          AND decision.invalidated_at IS NULL
+                          AND decision.consumed_at IS NOT NULL
+                          AND session.status = 'active'
+                          AND attempt.answered_at <= NEW.occurred_at
+                          AND action_event.stream_id = response_event.stream_id
+                          AND action_event.stream_version > response_event.stream_version
+                    ) THEN RAISE(ABORT, 'post-feedback action requires an answered decision') END;
+            END;
+
+            CREATE TRIGGER learning_actions_no_update
+            BEFORE UPDATE ON learning_actions BEGIN
+                SELECT RAISE(ABORT, 'learning actions are immutable');
+            END;
+
+            CREATE TRIGGER learning_actions_no_delete
+            BEFORE DELETE ON learning_actions BEGIN
+                SELECT RAISE(ABORT, 'learning actions are immutable');
+            END;
+            """
+        )
 
     @staticmethod
     def _install_v5_indexes(connection: sqlite3.Connection) -> None:
@@ -3989,6 +4350,19 @@ class Database:
                 elif actual[field] != expected_value:
                     errors.append(f"{label}: {field} mismatch")
 
+        def aware_timestamp(raw: Any, label: str) -> datetime | None:
+            """Parse one integrity timestamp without allowing naive arithmetic."""
+
+            try:
+                parsed = datetime.fromisoformat(raw)
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    errors.append(f"{label}: timestamp is timezone-naive")
+                    return None
+                return parsed.astimezone(timezone.utc)
+            except (TypeError, ValueError, OverflowError) as exc:
+                errors.append(f"{label}: invalid timestamp ({exc})")
+                return None
+
         with self.read() as connection:
             quick_check = [row[0] for row in connection.execute("PRAGMA quick_check")]
             if quick_check != ["ok"]:
@@ -3999,6 +4373,483 @@ class Database:
             ]
             if foreign_key_failures:
                 errors.append(f"{len(foreign_key_failures)} foreign-key violations")
+
+            # Action telemetry is observational, but it is still part of the
+            # learner's immutable semantic history.  Verify both halves of the
+            # projection instead of trusting either the row or event alone.
+            artifact_rows = connection.execute(
+                "SELECT * FROM learning_artifacts ORDER BY id"
+            ).fetchall()
+            artifacts = {row["id"]: row for row in artifact_rows}
+            referenced_artifact_ids: set[str] = set()
+            for artifact in artifact_rows:
+                prefix = f"learning artifact {artifact['id']}"
+                digest = artifact["sha256"]
+                if not (
+                    type(digest) is str
+                    and len(digest) == 64
+                    and all(character in "0123456789abcdef" for character in digest)
+                ):
+                    errors.append(f"{prefix}: invalid SHA-256 digest")
+                if artifact["id"] != f"art_{digest}":
+                    errors.append(f"{prefix}: ID is not content addressed")
+                if (
+                    type(artifact["size_bytes"]) is not int
+                    or not 0 <= artifact["size_bytes"] <= 1_073_741_824
+                ):
+                    errors.append(f"{prefix}: invalid size")
+                media_type = artifact["media_type"]
+                if not (
+                    type(media_type) is str
+                    and media_type.strip() == media_type
+                    and 1 <= len(media_type) <= 127
+                    and "/" in media_type
+                    and not any(character.isspace() for character in media_type)
+                ):
+                    errors.append(f"{prefix}: invalid media type")
+                aware_timestamp(artifact["created_at"], f"{prefix} creation time")
+
+            action_rows = connection.execute(
+                """SELECT action.*,
+                          decision.created_at AS decision_created_at,
+                          decision.corpus_release_id AS decision_release_id,
+                          decision.question_id AS decision_question_id,
+                          decision.invalidated_at AS decision_invalidated_at,
+                          attempt.answered_at,
+                          response_event.event_id AS response_event_id,
+                          response_event.stream_id AS response_stream_id,
+                          response_event.stream_version AS response_stream_version,
+                          artifact.sha256 AS artifact_sha256,
+                          artifact.size_bytes AS artifact_size_bytes,
+                          artifact.media_type AS artifact_media_type
+                   FROM learning_actions action
+                   JOIN decisions decision ON decision.id = action.decision_id
+                   LEFT JOIN attempts attempt ON attempt.decision_id = action.decision_id
+                   LEFT JOIN events response_event
+                     ON response_event.event_id = attempt.event_id
+                   LEFT JOIN learning_artifacts artifact
+                     ON artifact.id = action.artifact_id
+                   ORDER BY action.decision_id, action.sequence"""
+            ).fetchall()
+            action_events = {
+                row["event_id"]: row
+                for row in connection.execute(
+                    """SELECT * FROM events
+                       WHERE event_type='LearnerActionRecorded'"""
+                ).fetchall()
+            }
+            selection_events_by_decision: dict[str, list[sqlite3.Row]] = {}
+            invalidation_events_for_actions: dict[str, list[sqlite3.Row]] = {}
+            session_boundaries: dict[str, dict[str, list[sqlite3.Row]]] = {}
+            projection_versions_by_stream: dict[str, list[int]] = {}
+            for boundary in connection.execute(
+                """SELECT * FROM events
+                   WHERE event_type IN (
+                       'QuestionSelected', 'DecisionInvalidated',
+                       'SessionStarted', 'SessionEnded',
+                       'LearnerProjectionAdvanced'
+                   )
+                   ORDER BY stream_id, stream_version"""
+            ).fetchall():
+                if boundary["event_type"] == "QuestionSelected":
+                    boundary_payload = event_object(
+                        boundary, "payload_json", payload_cache
+                    )
+                    decision_id = (
+                        boundary_payload.get("decision_id")
+                        if boundary_payload is not None
+                        else None
+                    )
+                    if isinstance(decision_id, str) and decision_id:
+                        selection_events_by_decision.setdefault(
+                            decision_id, []
+                        ).append(boundary)
+                elif boundary["event_type"] == "DecisionInvalidated":
+                    boundary_payload = event_object(
+                        boundary, "payload_json", payload_cache
+                    )
+                    decision_id = (
+                        boundary_payload.get("decision_id")
+                        if boundary_payload is not None
+                        else None
+                    )
+                    if isinstance(decision_id, str) and decision_id:
+                        invalidation_events_for_actions.setdefault(
+                            decision_id, []
+                        ).append(boundary)
+                elif boundary["event_type"] in {"SessionStarted", "SessionEnded"}:
+                    boundary_session_id = boundary["session_id"]
+                    if isinstance(boundary_session_id, str) and boundary_session_id:
+                        session_boundaries.setdefault(
+                            boundary_session_id, {"started": [], "ended": []}
+                        )[
+                            "started"
+                            if boundary["event_type"] == "SessionStarted"
+                            else "ended"
+                        ].append(boundary)
+                else:
+                    projection_versions_by_stream.setdefault(
+                        boundary["stream_id"], []
+                    ).append(boundary["stream_version"])
+            revocation_boundaries = {
+                row["question_id"]: row
+                for row in connection.execute(
+                    """SELECT revocation.question_id,
+                              revocation.revoked_at,
+                              event.event_id AS revocation_event_id,
+                              event.occurred_at AS revocation_occurred_at,
+                              event.recorded_at AS revocation_recorded_at
+                       FROM question_revocations revocation
+                       JOIN events event ON event.event_id = revocation.event_id"""
+                ).fetchall()
+            }
+            projected_action_events: set[str] = set()
+            expected_action_sequence: dict[str, int] = {}
+            latest_action_time: dict[str, datetime] = {}
+            hint_actions_by_decision: dict[str, int] = {}
+            typed_actions_by_decision: dict[str, list[LearningAction]] = {}
+            artifact_digest_fields = {
+                ActionKind.ANSWER_REVISED.value: "answer_digest",
+                ActionKind.ARTIFACT_CHECKPOINT.value: "artifact_digest",
+                ActionKind.EXPLANATION_CHECKPOINT.value: "explanation_digest",
+                ActionKind.CHECK_RUN.value: "result_digest",
+                ActionKind.SUBMITTED.value: "submission_digest",
+                ActionKind.FEEDBACK_SHOWN.value: "feedback_digest",
+            }
+            for action in action_rows:
+                prefix = f"learning action {action['id']}"
+                expected_sequence = expected_action_sequence.get(
+                    action["decision_id"], 1
+                )
+                if action["sequence"] != expected_sequence:
+                    errors.append(
+                        f"{prefix}: expected sequence {expected_sequence}, "
+                        f"found {action['sequence']}"
+                    )
+                expected_action_sequence[action["decision_id"]] = (
+                    action["sequence"] + 1
+                    if type(action["sequence"]) is int
+                    else expected_sequence + 1
+                )
+                if action["artifact_id"] is not None:
+                    referenced_artifact_ids.add(action["artifact_id"])
+                    if action["artifact_id"] not in artifacts:
+                        errors.append(f"{prefix}: missing artifact projection")
+                artifact_payload = (
+                    {
+                        "sha256": action["artifact_sha256"],
+                        "size_bytes": action["artifact_size_bytes"],
+                        "media_type": action["artifact_media_type"],
+                    }
+                    if action["artifact_sha256"] is not None
+                    else None
+                )
+                payload = json_value(
+                    action["payload_json"], f"{prefix} payload", dict
+                )
+                if action["artifact_id"] is not None and payload is not None:
+                    digest_field = artifact_digest_fields.get(action["action_type"])
+                    if (
+                        digest_field is None
+                        or payload.get(digest_field) != action["artifact_sha256"]
+                    ):
+                        errors.append(f"{prefix}: artifact digest does not match payload")
+                if (
+                    action["action_type"] == ActionKind.FEEDBACK_SHOWN.value
+                    and action["stage"] != ActionPhase.POST_FEEDBACK.value
+                ):
+                    errors.append(
+                        f"{prefix}: feedback_shown action is not post_feedback"
+                    )
+                selected_at = aware_timestamp(
+                    action["decision_created_at"], f"{prefix} selection time"
+                )
+                occurred_at = aware_timestamp(
+                    action["occurred_at"], f"{prefix} occurrence time"
+                )
+                recorded_at = aware_timestamp(
+                    action["recorded_at"], f"{prefix} recording time"
+                )
+                answered_at = (
+                    aware_timestamp(
+                        action["answered_at"], f"{prefix} linked answer time"
+                    )
+                    if action["answered_at"] is not None
+                    else None
+                )
+                if selected_at is not None and occurred_at is not None:
+                    prior_time = latest_action_time.get(action["decision_id"])
+                    if prior_time is not None and occurred_at < prior_time:
+                        errors.append(f"{prefix}: occurrence time is not monotonic")
+                    latest_action_time[action["decision_id"]] = occurred_at
+                    if occurred_at < selected_at:
+                        errors.append(f"{prefix}: occurred before selection")
+                    if action["stage"] in {"unassisted", "assisted"}:
+                        if answered_at is not None and occurred_at > answered_at:
+                            errors.append(f"{prefix}: pre-response action follows answer")
+                    elif action["stage"] == "post_feedback":
+                        if action["answered_at"] is None:
+                            errors.append(
+                                f"{prefix}: post-feedback action has no answer"
+                            )
+                        elif answered_at is not None and occurred_at < answered_at:
+                            errors.append(
+                                f"{prefix}: post-feedback action precedes answer"
+                            )
+                if payload is not None:
+                    try:
+                        kind = ActionKind(action["action_type"])
+                        phase = ActionPhase(action["stage"])
+                        typed_action = LearningAction(
+                            id=action["id"],
+                            trace_id=action["decision_id"],
+                            sequence=action["sequence"],
+                            kind=kind,
+                            phase=phase,
+                            payload=payload,
+                            elapsed_ms=(
+                                max(
+                                    0,
+                                    int(
+                                        (occurred_at - selected_at).total_seconds()
+                                        * 1000
+                                    ),
+                                )
+                                if occurred_at is not None and selected_at is not None
+                                else None
+                            ),
+                        )
+                        typed_actions_by_decision.setdefault(
+                            action["decision_id"], []
+                        ).append(typed_action)
+                        if action["payload_json"] != canonical_json(payload):
+                            errors.append(f"{prefix}: payload is not canonical JSON")
+                    except (TypeError, ValueError) as exc:
+                        errors.append(f"{prefix}: invalid typed payload ({exc})")
+                if action["action_type"] == ActionKind.HINT_REQUESTED.value:
+                    hint_actions_by_decision[action["decision_id"]] = (
+                        hint_actions_by_decision.get(action["decision_id"], 0) + 1
+                    )
+
+                event = action_events.get(action["event_id"])
+                if event is None:
+                    errors.append(f"{prefix}: missing LearnerActionRecorded event")
+                    continue
+                projected_action_events.add(event["event_id"])
+                response_stream_version = action["response_stream_version"]
+                if response_stream_version is not None:
+                    if event["stream_id"] != action["response_stream_id"]:
+                        errors.append(f"{prefix}: action and response use different streams")
+                    elif action["stage"] in {"unassisted", "assisted"} and (
+                        event["stream_version"] >= response_stream_version
+                    ):
+                        errors.append(
+                            f"{prefix}: pre-response event does not precede response event"
+                        )
+                    elif action["stage"] == "post_feedback" and (
+                        event["stream_version"] <= response_stream_version
+                    ):
+                        errors.append(
+                            f"{prefix}: post-feedback event does not follow response event"
+                        )
+                event_payload = event_object(event, "payload_json", payload_cache)
+                event_metadata = event_object(
+                    event, "metadata_json", metadata_cache
+                )
+                expected_event_payload = {
+                    "action_id": action["id"],
+                    "decision_id": action["decision_id"],
+                    "sequence": action["sequence"],
+                    "stage": action["stage"],
+                    "action_type": action["action_type"],
+                    "payload": payload,
+                    "artifact": artifact_payload,
+                }
+                if event_payload is not None and event_payload != expected_event_payload:
+                    errors.append(f"{prefix}: event payload mismatch")
+                if (
+                    event["schema_version"] != 1
+                    or event["stream_id"] != f"learner:{action['learner_id']}"
+                    or event["learner_id"] != action["learner_id"]
+                    or event["session_id"] != action["session_id"]
+                    or event["causation_id"] != action["decision_id"]
+                    or event["occurred_at"] != action["occurred_at"]
+                    or event["recorded_at"] != action["recorded_at"]
+                ):
+                    errors.append(f"{prefix}: event envelope mismatch")
+
+                selection_events = selection_events_by_decision.get(
+                    action["decision_id"], []
+                )
+                selection_event = (
+                    selection_events[0] if len(selection_events) == 1 else None
+                )
+                if selection_event is None:
+                    errors.append(
+                        f"{prefix}: expected one QuestionSelected event boundary, "
+                        f"found {len(selection_events)}"
+                    )
+                elif (
+                    selection_event["schema_version"] != 1
+                    or selection_event["stream_id"] != event["stream_id"]
+                    or selection_event["learner_id"] != action["learner_id"]
+                    or selection_event["session_id"] != action["session_id"]
+                    or selection_event["stream_version"] >= event["stream_version"]
+                ):
+                    errors.append(
+                        f"{prefix}: action does not follow its selection boundary"
+                    )
+
+                bounds = session_boundaries.get(action["session_id"])
+                started_events = bounds["started"] if bounds is not None else []
+                ended_events = bounds["ended"] if bounds is not None else []
+                if len(started_events) != 1:
+                    errors.append(
+                        f"{prefix}: expected one SessionStarted boundary, "
+                        f"found {len(started_events)}"
+                    )
+                else:
+                    started_event = started_events[0]
+                    started_payload = event_object(
+                        started_event, "payload_json", payload_cache
+                    )
+                    if (
+                        started_payload is None
+                        or started_payload.get("session_id") != action["session_id"]
+                        or started_event["stream_id"] != event["stream_id"]
+                        or started_event["learner_id"] != action["learner_id"]
+                        or started_event["stream_version"] >= event["stream_version"]
+                    ):
+                        errors.append(
+                            f"{prefix}: action falls outside its session-active interval"
+                        )
+                if len(ended_events) > 1:
+                    errors.append(
+                        f"{prefix}: multiple SessionEnded boundaries exist"
+                    )
+                elif ended_events:
+                    ended_event = ended_events[0]
+                    ended_payload = event_object(
+                        ended_event, "payload_json", payload_cache
+                    )
+                    if (
+                        ended_payload is None
+                        or ended_payload.get("session_id") != action["session_id"]
+                        or ended_event["stream_id"] != event["stream_id"]
+                        or ended_event["learner_id"] != action["learner_id"]
+                        or ended_event["stream_version"] <= event["stream_version"]
+                    ):
+                        errors.append(
+                            f"{prefix}: action falls outside its session-active interval"
+                        )
+
+                invalidation_events = invalidation_events_for_actions.get(
+                    action["decision_id"], []
+                )
+                if action["decision_invalidated_at"] is not None:
+                    if len(invalidation_events) != 1:
+                        errors.append(
+                            f"{prefix}: expected one DecisionInvalidated boundary, "
+                            f"found {len(invalidation_events)}"
+                        )
+                    elif invalidation_events[0]["stream_version"] <= event[
+                        "stream_version"
+                    ]:
+                        errors.append(
+                            f"{prefix}: action was appended at or after decision invalidation"
+                        )
+                elif invalidation_events:
+                    errors.append(
+                        f"{prefix}: unprojected DecisionInvalidated boundary exists"
+                    )
+
+                revocation = revocation_boundaries.get(
+                    action["decision_question_id"]
+                )
+                if revocation is not None:
+                    revoked_recorded_at = aware_timestamp(
+                        revocation["revocation_recorded_at"],
+                        f"revocation event {revocation['revocation_event_id']} recording time",
+                    )
+                    if (
+                        recorded_at is not None
+                        and revoked_recorded_at is not None
+                        and recorded_at >= revoked_recorded_at
+                    ):
+                        errors.append(
+                            f"{prefix}: action was recorded at or after emergency revocation"
+                        )
+
+                if (
+                    action["stage"] in {"unassisted", "assisted"}
+                    and selection_event is not None
+                    and any(
+                        selection_event["stream_version"]
+                        < version
+                        < event["stream_version"]
+                        for version in projection_versions_by_stream.get(
+                            event["stream_id"], []
+                        )
+                    )
+                ):
+                    errors.append(
+                        f"{prefix}: pre-response action follows a learner projection advance"
+                    )
+                if event_metadata is not None:
+                    compare_payload(
+                        event_metadata,
+                        {
+                            "action_schema_version": 1,
+                            "observational_only": True,
+                            "corpus_release_id": action["decision_release_id"],
+                        },
+                        f"{prefix} metadata",
+                    )
+                expected_command_hash = _content_hash(
+                    {
+                        "decision_id": action["decision_id"],
+                        "stage": action["stage"],
+                        "action_type": action["action_type"],
+                        "payload": payload,
+                        "artifact": artifact_payload,
+                    }
+                )
+                if action["command_hash"] != expected_command_hash:
+                    errors.append(f"{prefix}: command hash mismatch")
+
+            for decision_id, typed_actions in typed_actions_by_decision.items():
+                try:
+                    summarize_actions(typed_actions)
+                except (TypeError, ValueError) as exc:
+                    errors.append(
+                        f"decision {decision_id}: invalid learning-action lifecycle ({exc})"
+                    )
+
+            for decision_id, traced_hints in hint_actions_by_decision.items():
+                if traced_hints > MAX_HINT_COUNT:
+                    errors.append(
+                        f"decision {decision_id}: traced hint count is out of bounds"
+                    )
+
+            for event_id in sorted(set(action_events) - projected_action_events):
+                errors.append(
+                    f"event {event_id}: LearnerActionRecorded has no action projection"
+                )
+            for artifact_id in sorted(set(artifacts) - referenced_artifact_ids):
+                errors.append(
+                    f"learning artifact {artifact_id}: no action references this artifact"
+                )
+            for attempt in connection.execute(
+                "SELECT decision_id, hint_count FROM attempts"
+            ):
+                traced_hints = hint_actions_by_decision.get(
+                    attempt["decision_id"], 0
+                )
+                if attempt["hint_count"] < traced_hints:
+                    errors.append(
+                        f"decision {attempt['decision_id']}: attempt omits "
+                        f"{traced_hints - attempt['hint_count']} traced hints"
+                    )
 
             # Offline generation is intentionally outside the live question
             # registry, but its operational history still needs ledger-like
@@ -5257,6 +6108,16 @@ class Database:
             for attempt in attempt_rows:
                 attempt_id = attempt["id"]
                 prefix = f"attempt {attempt_id}"
+                if attempt["response_ms"] is not None and (
+                    type(attempt["response_ms"]) is not int
+                    or not 0 <= attempt["response_ms"] <= MAX_RESPONSE_MS
+                ):
+                    errors.append(f"{prefix}: response_ms is out of bounds")
+                if (
+                    type(attempt["hint_count"]) is not int
+                    or not 0 <= attempt["hint_count"] <= MAX_HINT_COUNT
+                ):
+                    errors.append(f"{prefix}: hint_count is out of bounds")
                 attempts_by_decision.setdefault(attempt["decision_id"], []).append(attempt)
                 attempts_by_event[attempt["event_id"]] = attempt
                 decision = decisions.get(attempt["decision_id"])
@@ -5519,6 +6380,8 @@ class Database:
             "ok": not errors,
             "event_count": len(events),
             "stream_count": len(expected_version),
+            "learning_action_count": len(action_rows),
+            "learning_artifact_count": len(artifact_rows),
             "errors": errors,
             "foreign_key_failures": foreign_key_failures,
             "quick_check": quick_check,

@@ -121,6 +121,58 @@ class PackagingTestCase(unittest.TestCase):
             self.assertIn("Session stopped", result.stdout)
             self.assertTrue(database.is_file())
 
+    def test_answer_cli_rejects_oversize_integer_without_traceback_or_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            isolated = Path(temporary)
+            database_path = isolated / "bounded-answer.db"
+            database = Database(database_path)
+            database.initialize()
+            database.import_corpus(
+                *parse_bundle(json.loads(SOURCE_CORPUS.read_text(encoding="utf-8")))
+            )
+            engine = AdaptiveEngine(database)
+            engine.create_learner("bounded-cli")
+            session = engine.start_session(
+                "bounded-cli", "c_transformers", seed=17
+            )
+            presentation = engine.next_question(session["id"])
+
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tsq",
+                    "--db",
+                    str(database_path),
+                    "answer",
+                    presentation.decision_id,
+                    presentation.question.correct_option.id,
+                    "--response-ms",
+                    str(2**100),
+                ],
+                cwd=isolated,
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("response_ms must be an integer", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            with database.read() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT COUNT(*) AS n FROM attempts"
+                    ).fetchone()["n"],
+                    0,
+                )
+
     def test_start_upgrades_legacy_catalog_without_rewriting_history(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             isolated = Path(temporary)

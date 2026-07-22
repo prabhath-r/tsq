@@ -52,9 +52,19 @@ class EngineTestCase(unittest.TestCase):
                 "attempts_validate_insert",
                 "attempts_no_update",
                 "attempts_no_delete",
+                "learning_artifacts_no_update",
+                "learning_artifacts_no_delete",
+                "learning_actions_validate_insert",
+                "learning_actions_no_update",
+                "learning_actions_no_delete",
             ):
                 connection.execute(f"DROP TRIGGER IF EXISTS {trigger}")
             connection.execute("DROP INDEX IF EXISTS idx_one_pending_decision")
+
+            # These tables were introduced after the legacy schema being
+            # reconstructed and must not leak into the migration fixture.
+            connection.execute("DROP TABLE learning_actions")
+            connection.execute("DROP TABLE learning_artifacts")
 
             for column in ("command_hash", "outcome_json"):
                 connection.execute(f"ALTER TABLE attempts DROP COLUMN {column}")
@@ -171,7 +181,7 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 7)
+        self.assertEqual(SCHEMA_VERSION, 8)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:

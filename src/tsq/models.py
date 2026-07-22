@@ -28,6 +28,13 @@ def logit(probability: float) -> float:
 
 MASTERY_THRESHOLD = 0.65
 
+# Public command bounds keep adversarial integers inside both the pedagogical
+# meaning of an MCQ attempt and SQLite's fixed-width INTEGER representation.
+# Long-running project telemetry uses semantic checkpoints, not one enormous
+# multiple-choice response duration.
+MAX_RESPONSE_MS = 7 * 24 * 60 * 60 * 1000
+MAX_HINT_COUNT = 10_000
+
 
 class RelationType(StrEnum):
     PREREQUISITE = "prerequisite"
