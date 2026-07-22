@@ -8,6 +8,7 @@ from math import isfinite
 from statistics import median
 from typing import Iterable
 
+from .capacity import VERIFICATION_KINDS
 from .graph import KnowledgeGraph
 from .models import ConceptRole, Misconception, QualityIssue, Question
 
@@ -26,11 +27,6 @@ _TOKEN = re.compile(r"[a-z0-9]+")
 _MIN_CORPUS_METRIC_ITEMS = 12
 _LONGEST_HEURISTIC_WARNING = 0.45
 _ABSOLUTE_RATE_GAP_WARNING = 0.15
-_VERIFICATION_KINDS = frozenset(
-    {"application", "calculation", "comparison", "counterfactual", "debugging", "transfer"}
-)
-
-
 def _normalized(text: str) -> str:
     return " ".join(_TOKEN.findall(text.casefold()))
 
@@ -358,7 +354,7 @@ def _audit_contextual_serviceability(
         verification_by_concept: dict[str, set[str]] = defaultdict(set)
         for question in pool:
             families_by_concept[question.primary_concept_id].add(question.family_id)
-            if question.kind.value in _VERIFICATION_KINDS:
+            if question.kind in VERIFICATION_KINDS:
                 verification_by_concept[question.primary_concept_id].add(
                     question.family_id
                 )

@@ -13,9 +13,17 @@ from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Any, Iterator
 
+from .capacity import (
+    DEFAULT_STATE_LIMIT,
+    CapacityAnalysisLimitError,
+    analyze_sustained_capacity,
+    concept_target,
+    topic_target,
+)
 from .corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
 from .authoring import AuthoringJobs, CoveragePlanner, deterministic_test_pipeline
 from .engine import AdaptiveEngine
+from .evidence import ACTION_PAYLOAD_CONTRACTS, ActionKind
 from .errors import ExhaustedError, NotFoundError, TSQError, ValidationError
 from .graph import KnowledgeGraph
 from .quality import audit_corpus
@@ -241,6 +249,117 @@ def command_audit(args: argparse.Namespace) -> int:
         for issue in issues:
             print(f"[{issue.severity.upper()}] {issue.question_id or 'corpus'} {issue.code}: {issue.message}")
     return 2 if result["errors"] or (args.strict and result["warnings"]) else 0
+
+
+def command_capacity(args: argparse.Namespace) -> int:
+    with _corpus_path(args.path) as (corpus_path, corpus_label):
+        (
+            concepts,
+            edges,
+            misconceptions,
+            _,
+            questions,
+            _,
+            topics,
+        ) = read_and_parse(corpus_path, include_catalog=True)
+    try:
+        if args.concept:
+            targets = (concept_target(args.concept),)
+        elif args.topic:
+            targets = (topic_target(args.topic, topics),)
+        else:
+            if not topics:
+                raise ValueError(
+                    "The corpus has no curriculum topics; select --concept explicitly."
+                )
+            targets = tuple(
+                topic_target(topic.id, topics)
+                for topic in sorted(topics, key=lambda value: value.id)
+            )
+        report = analyze_sustained_capacity(
+            questions,
+            KnowledgeGraph(concepts, edges),
+            misconceptions,
+            targets,
+            state_limit=args.state_limit,
+        )
+    except CapacityAnalysisLimitError as exc:
+        raise ValidationError(
+            "Capacity analysis is incomplete and no heuristic result was used: "
+            + str(exc)
+        ) from exc
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    strict_failures = [
+        result.target.target_id
+        for result in report.targets
+        if result.status in {"blocked", "thin", "order_sensitive"}
+    ]
+    payload = {
+        "path": corpus_label,
+        "exact": True,
+        "strict": bool(args.strict),
+        "summary": {
+            "target_count": len(report.targets),
+            "strict_failure_count": len(strict_failures),
+            "strict_failure_targets": strict_failures,
+        },
+        **report.to_dict(),
+    }
+    if args.json:
+        _emit(payload, as_json=True)
+    else:
+        print(f"Exact sustained-capacity analysis: {corpus_label}")
+        print(
+            "  robust = safe under every eligible family order; "
+            "achievable = best capacity-preserving order"
+        )
+        for result in report.targets:
+            print(
+                f"  {result.target.target_id:<34} "
+                f"families={result.eligible_family_count:>3}  "
+                f"robust={result.order_robust_main_capacity:>3}  "
+                f"achievable={result.achievable_main_capacity:>3}  "
+                f"concept-floor={result.owned_concept_order_robust_floor:>2}  "
+                f"target={result.target_main_count:>2}  "
+                f"order-loss={result.order_loss:>2}  {result.status}"
+            )
+        if len(report.targets) == 1:
+            result = report.targets[0]
+            reserve = result.maximum_capacity.terminal_main_family_ids
+            print(
+                f"  initial-safe={len(result.initial_safe_family_ids)}  "
+                f"scope-concepts={len(result.scope_concept_ids)}  "
+                f"terminal-reserve={len(reserve)}"
+            )
+            if result.aggregate_status != result.status:
+                print(
+                    f"  aggregate-status={result.aggregate_status}; "
+                    f"owned-concept floor lowers final status to {result.status}"
+                )
+            concept_deficits = (
+                ("missing", result.missing_owned_concept_ids),
+                ("thin", result.thin_owned_concept_ids),
+                ("order-sensitive", result.order_sensitive_owned_concept_ids),
+            )
+            for label, concept_ids in concept_deficits:
+                if concept_ids:
+                    print(f"  {label} concepts: " + ", ".join(concept_ids))
+            if reserve:
+                print("  reserve: " + ", ".join(reserve))
+            for blocker in result.maximum_capacity.blockers[:5]:
+                path = blocker.misconception_id or blocker.path_kind
+                print(
+                    f"  blocked: {blocker.family_id} / {path} "
+                    f"({blocker.reason})"
+                )
+        if args.strict and strict_failures:
+            print(
+                "Strict capacity gate failed: " + ", ".join(strict_failures),
+                file=sys.stderr,
+            )
+    return 2 if args.strict and strict_failures else 0
 
 
 def command_topics(args: argparse.Namespace) -> None:
@@ -558,6 +677,109 @@ def command_answer(args: argparse.Namespace) -> None:
         if result.focus_misconception_id:
             print(f"Current hypothesis: {result.focus_misconception_id}")
         print(f"Adaptive path: {result.transition_reason}")
+
+
+def _action_payload(args: argparse.Namespace) -> dict[str, Any]:
+    if args.payload_file is not None:
+        try:
+            if args.payload_file.stat().st_size > 16_384:
+                raise ValidationError(
+                    "Action payload files must not exceed 16384 bytes."
+                )
+            raw = args.payload_file.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise ValidationError(
+                f"Could not read action payload file {args.payload_file}: {exc}"
+            ) from exc
+    else:
+        raw = args.payload
+    if not isinstance(raw, str) or len(raw.encode("utf-8")) > 16_384:
+        raise ValidationError("Action payload JSON must not exceed 16384 bytes.")
+    try:
+        payload = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise ValidationError(f"Action payload must be valid JSON: {exc}") from exc
+    if type(payload) is not dict:
+        raise ValidationError("Action payload JSON must be an object.")
+    return payload
+
+
+def command_action_record(args: argparse.Namespace) -> None:
+    database = _database(args)
+    artifact_values = (
+        args.artifact_sha256,
+        args.artifact_size_bytes,
+        args.artifact_media_type,
+    )
+    if any(value is not None for value in artifact_values) and not all(
+        value is not None for value in artifact_values
+    ):
+        raise ValidationError(
+            "Artifact references require --artifact-sha256, "
+            "--artifact-size-bytes, and --artifact-media-type together."
+        )
+    artifact = (
+        {
+            "sha256": args.artifact_sha256,
+            "size_bytes": args.artifact_size_bytes,
+            "media_type": args.artifact_media_type,
+        }
+        if all(value is not None for value in artifact_values)
+        else None
+    )
+    action = AdaptiveEngine(database).record_action(
+        args.decision,
+        args.action_type,
+        _action_payload(args),
+        stage=args.stage,
+        artifact=artifact,
+        idempotency_key=args.idempotency_key,
+    )
+    if args.json:
+        _emit(action, as_json=True)
+        return
+    replay = " (idempotent replay)" if action["idempotent_replay"] else ""
+    print(
+        f"Recorded {action['action_type']} action #{action['sequence']} "
+        f"for {action['decision_id']}{replay}."
+    )
+    print(f"Action: {action['id']}")
+    print(f"Event: {action['event_id']}")
+
+
+def command_action_list(args: argparse.Namespace) -> None:
+    database = _database(args)
+    actions = AdaptiveEngine(database).list_actions(args.decision)
+    if args.json:
+        _emit(actions, as_json=True)
+        return
+    if not actions:
+        print("No semantic actions recorded for this decision.")
+        return
+    for action in actions:
+        print(
+            f"{action['sequence']:>3}. {action['stage']:<13} "
+            f"{action['action_type']:<24} {action['occurred_at']}"
+        )
+        print(f"     {json.dumps(action['payload'], sort_keys=True)}")
+
+
+def command_action_kinds(args: argparse.Namespace) -> None:
+    contracts = {
+        kind.value: dict(ACTION_PAYLOAD_CONTRACTS[kind]) for kind in ActionKind
+    }
+    if args.json:
+        _emit(contracts, as_json=True)
+        return
+    print("Exact semantic-action payload contracts:")
+    for kind, fields in contracts.items():
+        rendered = (
+            ", ".join(f"{name}: {field_type}" for name, field_type in fields.items())
+            if fields
+            else "empty object"
+        )
+        print(f"  {kind:<24} {rendered}")
+    print("Content is never accepted directly; content-bearing fields use SHA-256 digests.")
 
 
 def command_profile(args: argparse.Namespace) -> None:
@@ -1002,6 +1224,35 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--strict", action="store_true", help="Treat warnings as a failing audit")
     audit.set_defaults(func=command_audit)
 
+    capacity = subparsers.add_parser(
+        "capacity",
+        help="Measure exact sustained main-family capacity and safety reserves",
+    )
+    capacity.add_argument(
+        "path",
+        type=Path,
+        nargs="?",
+        default=None,
+        help=f"Corpus JSON path (default: bundled {BUNDLED_CORPUS_NAME})",
+    )
+    capacity_scope = capacity.add_mutually_exclusive_group()
+    capacity_scope.add_argument("--concept", help="Analyze one stable concept ID")
+    capacity_scope.add_argument("--topic", help="Analyze one stable topic ID")
+    capacity_scope.add_argument(
+        "--all",
+        action="store_true",
+        help="Analyze every curriculum topic (the default)",
+    )
+    capacity.add_argument("--strict", action="store_true")
+    capacity.add_argument(
+        "--state-limit",
+        type=int,
+        default=DEFAULT_STATE_LIMIT,
+        help="Maximum exact search states per target (never falls back to a heuristic)",
+    )
+    capacity.add_argument("--json", action="store_true")
+    capacity.set_defaults(func=command_capacity)
+
     topics = subparsers.add_parser("topics", help="List the curriculum topic hierarchy")
     topics.add_argument(
         "--concepts",
@@ -1068,6 +1319,50 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("--idempotency-key")
     answer.add_argument("--json", action="store_true")
     answer.set_defaults(func=command_answer)
+
+    action = subparsers.add_parser(
+        "action",
+        help="Record or inspect privacy-minimized semantic learner actions",
+    )
+    action_sub = action.add_subparsers(dest="action_command", required=True)
+    action_record = action_sub.add_parser(
+        "record", help="Append one immutable observational action"
+    )
+    action_record.add_argument("decision")
+    action_record.add_argument(
+        "action_type", choices=[kind.value for kind in ActionKind]
+    )
+    action_payload = action_record.add_mutually_exclusive_group(required=True)
+    action_payload.add_argument(
+        "--payload", help="Exact action payload as a JSON object"
+    )
+    action_payload.add_argument(
+        "--payload-file", type=Path, help="Read the exact JSON payload from a file"
+    )
+    action_record.add_argument(
+        "--stage",
+        choices=["unassisted", "assisted", "post_feedback"],
+        default="unassisted",
+    )
+    action_record.add_argument("--artifact-sha256")
+    action_record.add_argument("--artifact-size-bytes", type=int)
+    action_record.add_argument("--artifact-media-type")
+    action_record.add_argument("--idempotency-key")
+    action_record.add_argument("--json", action="store_true")
+    action_record.set_defaults(func=command_action_record)
+
+    action_list = action_sub.add_parser(
+        "list", help="List the semantic trace for one decision"
+    )
+    action_list.add_argument("decision")
+    action_list.add_argument("--json", action="store_true")
+    action_list.set_defaults(func=command_action_list)
+
+    action_kinds = action_sub.add_parser(
+        "kinds", help="Show the exact allowlisted payload contracts"
+    )
+    action_kinds.add_argument("--json", action="store_true")
+    action_kinds.set_defaults(func=command_action_kinds)
 
     study = subparsers.add_parser("study", help="Run an interactive adaptive CLI session")
     study.add_argument("--learner", required=True)

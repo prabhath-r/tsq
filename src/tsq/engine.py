@@ -13,9 +13,13 @@ from statistics import mean, median
 from typing import Any
 
 from .adaptive import BOUNDARY_ALGORITHM_VERSION, RecursiveEvidenceBoundary
+from .capacity import VERIFICATION_KINDS
+from .evidence import ActionKind, ActionPhase, LearningAction, summarize_actions
 from .errors import ConflictError, ExhaustedError, NotFoundError, ValidationError
 from .learner import LearnerModel, MODEL_VERSION
 from .models import (
+    MAX_HINT_COUNT,
+    MAX_RESPONSE_MS,
     Option,
     Presentation,
     QuestionStatus,
@@ -31,6 +35,113 @@ def _canonical_hash(payload: dict[str, Any]) -> str:
         payload, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_artifact_reference(
+    artifact: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate a content-addressed artifact without accepting its contents."""
+    if artifact is None:
+        return None
+    if type(artifact) is not dict:
+        raise ValidationError("artifact must be an object or null.")
+    required = {"sha256", "size_bytes", "media_type"}
+    if set(artifact) != required:
+        missing = sorted(required - set(artifact))
+        unknown = sorted(set(artifact) - required)
+        details = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unknown:
+            details.append("unexpected " + ", ".join(unknown))
+        raise ValidationError("artifact has " + "; ".join(details) + ".")
+    digest = artifact["sha256"]
+    if not (
+        type(digest) is str
+        and len(digest) == 64
+        and all(character in "0123456789abcdef" for character in digest)
+    ):
+        raise ValidationError("artifact sha256 must be a lowercase SHA-256 digest.")
+    size_bytes = artifact["size_bytes"]
+    if (
+        type(size_bytes) is not int
+        or size_bytes < 0
+        or size_bytes > 1_073_741_824
+    ):
+        raise ValidationError(
+            "artifact size_bytes must be an integer between 0 and 1073741824."
+        )
+    media_type = artifact["media_type"]
+    if (
+        type(media_type) is not str
+        or not media_type.strip()
+        or media_type != media_type.strip()
+        or len(media_type) > 127
+        or any(character.isspace() for character in media_type)
+        or "/" not in media_type
+    ):
+        raise ValidationError(
+            "artifact media_type must be a compact MIME type of at most 127 characters."
+        )
+    return {
+        "sha256": digest,
+        "size_bytes": size_bytes,
+        "media_type": media_type,
+    }
+
+
+def _validated_learning_action(
+    *,
+    action_id: str,
+    decision_id: str,
+    sequence: int,
+    action_type: str,
+    stage: str,
+    payload: dict[str, Any],
+    elapsed_ms: int,
+) -> LearningAction:
+    """Build the shared strict action model and translate its errors."""
+    if not isinstance(action_type, str):
+        raise ValidationError("action_type must name an allowed action kind.")
+    try:
+        kind = ActionKind(action_type)
+    except ValueError as exc:
+        choices = ", ".join(kind.value for kind in ActionKind)
+        raise ValidationError(
+            f"Unknown action_type {action_type!r}; expected one of: {choices}."
+        ) from exc
+    canonical_stage = "unassisted" if stage == "pre_response" else stage
+    try:
+        phase = ActionPhase(canonical_stage)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            "stage must be unassisted, assisted, or post_feedback."
+        ) from exc
+    if type(payload) is not dict:
+        raise ValidationError("action payload must be an object.")
+    try:
+        validated = LearningAction(
+            id=action_id,
+            trace_id=decision_id,
+            sequence=sequence,
+            kind=kind,
+            phase=phase,
+            payload=payload,
+            elapsed_ms=elapsed_ms,
+        )
+        encoded_payload = json.dumps(
+            validated.terms()["payload"],
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (OverflowError, ValueError) as exc:
+        raise ValidationError(f"Invalid {kind.value} action: {exc}") from exc
+    if len(encoded_payload) > 16_384:
+        raise ValidationError(
+            f"Invalid {kind.value} action: canonical payload exceeds 16384 bytes."
+        )
+    return validated
 
 
 def _option_payload(option: Option | None) -> dict[str, Any] | None:
@@ -367,6 +478,467 @@ class AdaptiveEngine:
             idempotency_key=idempotency_key,
         )
 
+    @staticmethod
+    def _action_projection(
+        row: sqlite3.Row, *, idempotent_replay: bool = False
+    ) -> dict[str, Any]:
+        artifact = (
+            {
+                "sha256": row["artifact_sha256"],
+                "size_bytes": row["artifact_size_bytes"],
+                "media_type": row["artifact_media_type"],
+            }
+            if row["artifact_sha256"] is not None
+            else None
+        )
+        selected_at = datetime.fromisoformat(row["decision_created_at"])
+        occurred_at = datetime.fromisoformat(row["occurred_at"])
+        return {
+            "id": row["id"],
+            "event_id": row["event_id"],
+            "decision_id": row["decision_id"],
+            "session_id": row["session_id"],
+            "learner_id": row["learner_id"],
+            "sequence": row["sequence"],
+            "stage": row["stage"],
+            "action_type": row["action_type"],
+            "payload": json.loads(row["payload_json"]),
+            "artifact": artifact,
+            "elapsed_ms": max(
+                0, int((occurred_at - selected_at).total_seconds() * 1000)
+            ),
+            "occurred_at": row["occurred_at"],
+            "recorded_at": row["recorded_at"],
+            "idempotent_replay": idempotent_replay,
+        }
+
+    @staticmethod
+    def _action_row_for_event(
+        connection: sqlite3.Connection, event_id: str
+    ) -> sqlite3.Row | None:
+        return connection.execute(
+            """SELECT action.*,
+                      decision.created_at AS decision_created_at,
+                      artifact.sha256 AS artifact_sha256,
+                      artifact.size_bytes AS artifact_size_bytes,
+                      artifact.media_type AS artifact_media_type
+               FROM learning_actions action
+               JOIN decisions decision ON decision.id = action.decision_id
+               LEFT JOIN learning_artifacts artifact
+                 ON artifact.id = action.artifact_id
+               WHERE action.event_id = ?""",
+            (event_id,),
+        ).fetchone()
+
+    def record_action(
+        self,
+        decision_id: str,
+        action_type: str,
+        payload: dict[str, Any],
+        *,
+        stage: str = "unassisted",
+        artifact: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Append validated behavior telemetry without treating it as mastery.
+
+        Only content digests, stable identifiers, and bounded counters enter the
+        ledger.  This command never advances learner/session revisions or skill
+        projections; rubric evaluation is an explicit later boundary.  An
+        ``abandoned`` checkpoint atomically invalidates its pending decision so
+        the session can continue with a fresh question.
+        """
+        if not isinstance(decision_id, str) or not decision_id.strip():
+            raise ValidationError("decision_id must be a non-blank string.")
+        if idempotency_key is not None and (
+            not isinstance(idempotency_key, str)
+            or not idempotency_key.strip()
+            or len(idempotency_key) > 200
+        ):
+            raise ValidationError(
+                "idempotency_key must be a non-blank string of at most 200 characters."
+            )
+        artifact_reference = _canonical_artifact_reference(artifact)
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValidationError("now must be timezone-aware.")
+        now = now.astimezone(timezone.utc)
+
+        with self.database.transaction() as connection:
+            decision = connection.execute(
+                "SELECT * FROM decisions WHERE id = ?", (decision_id,)
+            ).fetchone()
+            if not decision:
+                raise NotFoundError(f"Unknown decision: {decision_id}")
+            session = self.database.get_session(decision["session_id"], connection)
+            selected_at = datetime.fromisoformat(decision["created_at"])
+
+            # Validate the closed payload before looking for an idempotent
+            # projection.  The placeholder identity never reaches storage.
+            preliminary = _validated_learning_action(
+                action_id="validation",
+                decision_id=decision_id,
+                sequence=0,
+                action_type=action_type,
+                stage=stage,
+                payload=payload,
+                elapsed_ms=max(
+                    0, int((now - selected_at).total_seconds() * 1000)
+                ),
+            )
+            action_type = preliminary.kind.value
+            stage = preliminary.phase.value
+            canonical_payload = preliminary.terms()["payload"]
+            if (
+                preliminary.kind is ActionKind.FEEDBACK_SHOWN
+                and preliminary.phase is not ActionPhase.POST_FEEDBACK
+            ):
+                raise ValidationError(
+                    "feedback_shown actions must use the post_feedback stage."
+                )
+            command_payload = {
+                "decision_id": decision_id,
+                "stage": stage,
+                "action_type": action_type,
+                "payload": canonical_payload,
+                "artifact": artifact_reference,
+            }
+            command_hash = _canonical_hash(command_payload)
+
+            if idempotency_key:
+                prior_event = connection.execute(
+                    "SELECT * FROM events WHERE idempotency_key = ?",
+                    (idempotency_key,),
+                ).fetchone()
+                if prior_event:
+                    prior_payload = json.loads(prior_event["payload_json"])
+                    comparable = {
+                        field: prior_payload.get(field)
+                        for field in (
+                            "decision_id",
+                            "stage",
+                            "action_type",
+                            "payload",
+                            "artifact",
+                        )
+                    }
+                    if (
+                        prior_event["event_type"] != "LearnerActionRecorded"
+                        or prior_event["schema_version"] != 1
+                        or prior_event["stream_id"]
+                        != f"learner:{session['learner_id']}"
+                        or prior_event["learner_id"] != session["learner_id"]
+                        or prior_event["session_id"] != session["id"]
+                        or prior_event["causation_id"] != decision_id
+                        or comparable != command_payload
+                    ):
+                        raise ConflictError(
+                            "Idempotency key was reused with different action inputs."
+                        )
+                    projected = self._action_row_for_event(
+                        connection, prior_event["event_id"]
+                    )
+                    if projected is None:
+                        raise ConflictError(
+                            "Idempotent action event has no projection; database needs repair."
+                        )
+                    if projected["command_hash"] != command_hash:
+                        raise ConflictError(
+                            "Idempotency key was reused with different action inputs."
+                        )
+                    return self._action_projection(
+                        projected, idempotent_replay=True
+                    )
+
+            if decision["invalidated_at"]:
+                raise ConflictError(
+                    "This decision was invalidated or became stale; request a new question."
+                )
+            revocation = connection.execute(
+                "SELECT reason FROM question_revocations WHERE question_id = ?",
+                (decision["question_id"],),
+            ).fetchone()
+            if revocation:
+                raise ConflictError(
+                    "This question was emergency-revoked; no new actions may be attached."
+                )
+            if session["status"] != "active":
+                raise ConflictError("Session is not active.")
+            if now < selected_at:
+                raise ValidationError(
+                    "A learning action cannot occur before its question was selected."
+                )
+
+            if preliminary.phase is ActionPhase.POST_FEEDBACK:
+                attempt = connection.execute(
+                    "SELECT answered_at FROM attempts WHERE decision_id = ?",
+                    (decision_id,),
+                ).fetchone()
+                if decision["consumed_at"] is None or attempt is None:
+                    raise ConflictError(
+                        "A post-feedback action requires an answered decision."
+                    )
+                if now < datetime.fromisoformat(attempt["answered_at"]):
+                    raise ValidationError(
+                        "A post-feedback action cannot occur before the answer."
+                    )
+            else:
+                if decision["consumed_at"]:
+                    raise ConflictError(
+                        "This decision has already been answered; pre-response actions "
+                        "require a pending decision."
+                    )
+                learner = connection.execute(
+                    "SELECT revision FROM learners WHERE id = ?",
+                    (session["learner_id"],),
+                ).fetchone()
+                if learner is None:
+                    raise ConflictError("Session learner no longer exists.")
+                if (
+                    session["phase"] != decision["phase"]
+                    or session["focus_concept_id"] != decision["focus_concept_id"]
+                    or session["focus_misconception_id"]
+                    != decision["focus_misconception_id"]
+                    or session["corpus_release_id"]
+                    != decision["corpus_release_id"]
+                    or session["revision"] != decision["session_revision"] + 1
+                    or learner["revision"] != decision["learner_revision"]
+                ):
+                    raise ConflictError(
+                        "This decision is stale; request a new question before recording actions."
+                    )
+
+            prior_rows = connection.execute(
+                """SELECT sequence, occurred_at, action_type, stage, payload_json
+                   FROM learning_actions WHERE decision_id = ?
+                   ORDER BY sequence""",
+                (decision_id,),
+            ).fetchall()
+            prior = prior_rows[-1] if prior_rows else None
+            if (
+                preliminary.kind is ActionKind.HINT_REQUESTED
+                and sum(
+                    row["action_type"] == ActionKind.HINT_REQUESTED.value
+                    for row in prior_rows
+                )
+                >= MAX_HINT_COUNT
+            ):
+                raise ValidationError(
+                    f"A decision may record at most {MAX_HINT_COUNT} hint requests."
+                )
+            if prior and now < datetime.fromisoformat(prior["occurred_at"]):
+                raise ValidationError(
+                    "Learning action times must be monotonic for a decision."
+                )
+            sequence = prior["sequence"] + 1 if prior else 1
+            action_id = new_id("act")
+            elapsed_ms = max(
+                0, int((now - selected_at).total_seconds() * 1000)
+            )
+            validated = _validated_learning_action(
+                action_id=action_id,
+                decision_id=decision_id,
+                sequence=sequence,
+                action_type=action_type,
+                stage=stage,
+                payload=canonical_payload,
+                elapsed_ms=elapsed_ms,
+            )
+            canonical_payload = validated.terms()["payload"]
+            try:
+                prior_actions = tuple(
+                    LearningAction(
+                        id=f"stored_{row['sequence']}",
+                        trace_id=decision_id,
+                        sequence=row["sequence"],
+                        kind=ActionKind(row["action_type"]),
+                        phase=ActionPhase(row["stage"]),
+                        payload=json.loads(row["payload_json"]),
+                        elapsed_ms=max(
+                            0,
+                            int(
+                                (
+                                    datetime.fromisoformat(row["occurred_at"])
+                                    - selected_at
+                                ).total_seconds()
+                                * 1000
+                            ),
+                        ),
+                    )
+                    for row in prior_rows
+                )
+                summarize_actions((*prior_actions, validated))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValidationError(
+                    f"Invalid learner-action lifecycle: {exc}"
+                ) from exc
+
+            if artifact_reference is not None:
+                payload_digests = {
+                    value
+                    for field, value in canonical_payload.items()
+                    if field.endswith("_digest") and isinstance(value, str)
+                }
+                if not payload_digests or artifact_reference["sha256"] not in payload_digests:
+                    raise ValidationError(
+                        "artifact sha256 must match a digest declared by the action payload."
+                    )
+
+            artifact_id = None
+            if artifact_reference is not None:
+                existing_artifact = connection.execute(
+                    "SELECT * FROM learning_artifacts WHERE sha256 = ?",
+                    (artifact_reference["sha256"],),
+                ).fetchone()
+                if existing_artifact:
+                    if (
+                        existing_artifact["size_bytes"]
+                        != artifact_reference["size_bytes"]
+                        or existing_artifact["media_type"]
+                        != artifact_reference["media_type"]
+                    ):
+                        raise ConflictError(
+                            "This artifact digest was already declared with different metadata."
+                        )
+                    artifact_id = existing_artifact["id"]
+                else:
+                    artifact_id = f"art_{artifact_reference['sha256']}"
+                    connection.execute(
+                        """INSERT INTO learning_artifacts(
+                               id, sha256, size_bytes, media_type, created_at
+                           ) VALUES (?, ?, ?, ?, ?)""",
+                        (
+                            artifact_id,
+                            artifact_reference["sha256"],
+                            artifact_reference["size_bytes"],
+                            artifact_reference["media_type"],
+                            now.isoformat(),
+                        ),
+                    )
+
+            event_payload = {
+                "action_id": action_id,
+                "decision_id": decision_id,
+                "sequence": sequence,
+                "stage": stage,
+                "action_type": action_type,
+                "payload": canonical_payload,
+                "artifact": artifact_reference,
+            }
+            event = self.database.append_event(
+                connection,
+                stream_id=f"learner:{session['learner_id']}",
+                event_type="LearnerActionRecorded",
+                schema_version=1,
+                payload=event_payload,
+                metadata={
+                    "action_schema_version": 1,
+                    "observational_only": True,
+                    "corpus_release_id": decision["corpus_release_id"],
+                },
+                learner_id=session["learner_id"],
+                session_id=session["id"],
+                idempotency_key=idempotency_key,
+                causation_id=decision_id,
+                occurred_at=now,
+            )
+            connection.execute(
+                """INSERT INTO learning_actions(
+                       id, event_id, decision_id, session_id, learner_id,
+                       sequence, stage, action_type, payload_json, artifact_id,
+                       occurred_at, recorded_at, command_hash
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    action_id,
+                    event["event_id"],
+                    decision_id,
+                    session["id"],
+                    session["learner_id"],
+                    sequence,
+                    stage,
+                    action_type,
+                    json.dumps(
+                        canonical_payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ),
+                    artifact_id,
+                    now.isoformat(),
+                    event["recorded_at"],
+                    command_hash,
+                ),
+            )
+            projected = self._action_row_for_event(connection, event["event_id"])
+            if projected is None:
+                raise ConflictError("Learning action projection was not persisted.")
+            if preliminary.kind is ActionKind.ABANDONED:
+                invalidated = connection.execute(
+                    """UPDATE decisions
+                       SET invalidated_at = ?, invalidation_reason = ?
+                       WHERE id = ? AND consumed_at IS NULL
+                         AND invalidated_at IS NULL""",
+                    (now.isoformat(), "learner_abandoned_trace", decision_id),
+                )
+                if invalidated.rowcount != 1:
+                    raise ConflictError(
+                        "The abandoned decision changed before it could be invalidated."
+                    )
+                current_learner = connection.execute(
+                    "SELECT revision FROM learners WHERE id = ?",
+                    (session["learner_id"],),
+                ).fetchone()
+                if current_learner is None:
+                    raise ConflictError("Session learner no longer exists.")
+                self.database.append_event(
+                    connection,
+                    stream_id=f"learner:{session['learner_id']}",
+                    event_type="DecisionInvalidated",
+                    schema_version=1,
+                    payload={
+                        "decision_id": decision_id,
+                        "reason": "learner_abandoned_trace",
+                        "selection_learner_revision": decision["learner_revision"],
+                        "current_learner_revision": current_learner["revision"],
+                    },
+                    metadata={
+                        "policy_version": decision["policy_version"],
+                        "learner_model_version": MODEL_VERSION,
+                        "corpus_release_id": decision["corpus_release_id"],
+                    },
+                    learner_id=session["learner_id"],
+                    session_id=session["id"],
+                    causation_id=decision_id,
+                    occurred_at=now,
+                )
+            return self._action_projection(projected)
+
+    def list_actions(self, decision_id: str) -> list[dict[str, Any]]:
+        """Return the immutable semantic trace for one selected question."""
+        if not isinstance(decision_id, str) or not decision_id.strip():
+            raise ValidationError("decision_id must be a non-blank string.")
+        with self.database.read() as connection:
+            if not connection.execute(
+                "SELECT 1 FROM decisions WHERE id = ?", (decision_id,)
+            ).fetchone():
+                raise NotFoundError(f"Unknown decision: {decision_id}")
+            rows = connection.execute(
+                """SELECT action.*,
+                          decision.created_at AS decision_created_at,
+                          artifact.sha256 AS artifact_sha256,
+                          artifact.size_bytes AS artifact_size_bytes,
+                          artifact.media_type AS artifact_media_type
+                   FROM learning_actions action
+                   JOIN decisions decision ON decision.id = action.decision_id
+                   LEFT JOIN learning_artifacts artifact
+                     ON artifact.id = action.artifact_id
+                   WHERE action.decision_id = ?
+                   ORDER BY action.sequence""",
+                (decision_id,),
+            ).fetchall()
+        return [self._action_projection(row) for row in rows]
+
     def submit_answer(
         self,
         decision_id: str,
@@ -399,11 +971,16 @@ class AdaptiveEngine:
             # the same numeric representation.
             confidence = float(confidence)
         if response_ms is not None and (
-            not isinstance(response_ms, int) or isinstance(response_ms, bool) or response_ms < 0
+            type(response_ms) is not int
+            or not 0 <= response_ms <= MAX_RESPONSE_MS
         ):
-            raise ValidationError("response_ms must be a non-negative integer.")
-        if not isinstance(hint_count, int) or isinstance(hint_count, bool) or hint_count < 0:
-            raise ValidationError("hint_count must be a non-negative integer.")
+            raise ValidationError(
+                f"response_ms must be an integer between 0 and {MAX_RESPONSE_MS}."
+            )
+        if type(hint_count) is not int or not 0 <= hint_count <= MAX_HINT_COUNT:
+            raise ValidationError(
+                f"hint_count must be an integer between 0 and {MAX_HINT_COUNT}."
+            )
         if not isinstance(feedback_shown, bool):
             raise ValidationError("feedback_shown must be true or false.")
         if idempotency_key is not None and (
@@ -445,6 +1022,38 @@ class AdaptiveEngine:
             selected_option = options.get(selected_option_id) if selected_option_id else None
             correct = bool(selected_option and selected_option.correct)
             presented_order = json.loads(decision["option_order_json"])
+            action_trace = connection.execute(
+                """SELECT COUNT(*) AS action_count,
+                          SUM(CASE WHEN action_type='hint_requested' THEN 1 ELSE 0 END)
+                              AS hint_count,
+                          SUM(CASE WHEN action_type='abandoned' THEN 1 ELSE 0 END)
+                              AS abandoned_count,
+                          MAX(occurred_at) AS latest_occurred_at
+                   FROM learning_actions
+                   WHERE decision_id = ?
+                     AND stage IN ('unassisted', 'assisted')""",
+                (decision_id,),
+            ).fetchone()
+            if action_trace["latest_occurred_at"] and now < datetime.fromisoformat(
+                action_trace["latest_occurred_at"]
+            ):
+                raise ValidationError(
+                    "An answer cannot occur before its latest recorded learning action."
+                )
+            if int(action_trace["abandoned_count"] or 0):
+                raise ConflictError(
+                    "This learning trace was abandoned; request a new question."
+                )
+            # Instrumented hint events are authoritative lower bounds.  Legacy
+            # and external clients may still report additional uninstrumented
+            # hints, so never reduce a caller's conservative count.
+            traced_hint_count = int(action_trace["hint_count"] or 0)
+            if traced_hint_count > MAX_HINT_COUNT:
+                raise ConflictError(
+                    "The stored hint trace exceeds the supported bound; "
+                    "verify and repair the database before answering."
+                )
+            hint_count = max(hint_count, traced_hint_count)
             command_payload = {
                 "decision_id": decision_id,
                 "question_id": decision["question_id"],
@@ -1161,14 +1770,7 @@ class AdaptiveEngine:
             concept_id: {"families": set(), "verification_families": set()}
             for concept_id in concept_ids
         }
-        verification_kinds = {
-            "application",
-            "calculation",
-            "comparison",
-            "counterfactual",
-            "debugging",
-            "transfer",
-        }
+        verification_kinds = {kind.value for kind in VERIFICATION_KINDS}
         for row in rows:
             result[row["concept_id"]]["families"].add(row["family_id"])
             if row["kind"] in verification_kinds:
@@ -1378,6 +1980,15 @@ class AdaptiveEngine:
                      AND decision.consumed_at IS NOT NULL
                    GROUP BY topic.topic_id, topic.name
                    ORDER BY n DESC, topic.name""",
+                (session_id,),
+            ).fetchall()
+            action_rows = connection.execute(
+                """SELECT action.id, action.decision_id, action.sequence, action.stage,
+                          action.action_type, action.payload_json,
+                          action.artifact_id, action.occurred_at
+                   FROM learning_actions action
+                   WHERE action.session_id = ?
+                   ORDER BY action.occurred_at, action.decision_id, action.sequence""",
                 (session_id,),
             ).fetchall()
 
@@ -1779,6 +2390,46 @@ class AdaptiveEngine:
                 row["name"],
             )
         )
+        action_type_counts = Counter(row["action_type"] for row in action_rows)
+        action_stage_counts = Counter(row["stage"] for row in action_rows)
+        phase_rank = {"unassisted": 0, "assisted": 1, "post_feedback": 2}
+        phase_for_rank = {rank: phase for phase, rank in phase_rank.items()}
+        current_rank_by_decision: dict[str, int] = {}
+        effective_stage_by_action: dict[str, str] = {}
+        phase_corrections = 0
+        for row in action_rows:
+            current_rank = current_rank_by_decision.get(row["decision_id"], 0)
+            effective_rank = max(current_rank, phase_rank[row["stage"]])
+            effective_stage = phase_for_rank[effective_rank]
+            effective_stage_by_action[row["id"]] = effective_stage
+            phase_corrections += int(effective_stage != row["stage"])
+            if row["action_type"] == ActionKind.HINT_REQUESTED.value:
+                effective_rank = max(effective_rank, 1)
+            elif row["action_type"] == ActionKind.FEEDBACK_SHOWN.value:
+                effective_rank = 2
+            current_rank_by_decision[row["decision_id"]] = effective_rank
+        effective_stage_counts = Counter(effective_stage_by_action.values())
+        check_progression = []
+        for row in action_rows:
+            if row["action_type"] != ActionKind.CHECK_RUN.value:
+                continue
+            payload = json.loads(row["payload_json"])
+            attempted = payload["passed"] + payload["failed"] + payload["errored"]
+            check_progression.append(
+                {
+                    "decision_id": row["decision_id"],
+                    "sequence": row["sequence"],
+                    "check_set_id": payload["check_set_id"],
+                    "passed": payload["passed"],
+                    "failed": payload["failed"],
+                    "errored": payload["errored"],
+                    "skipped": payload["skipped"],
+                    "pass_rate": (
+                        payload["passed"] / attempted if attempted else None
+                    ),
+                    "stage": effective_stage_by_action[row["id"]],
+                }
+            )
         return {
             "session_id": session_id,
             "learner_id": session["learner_id"],
@@ -1846,6 +2497,33 @@ class AdaptiveEngine:
             "adaptive_path": adaptive_path,
             "concept_performance": concept_performance,
             "diagnostic_findings": diagnostic_findings,
+            "behavior_trace": {
+                "observational_only": True,
+                "actions": len(action_rows),
+                "decisions_observed": len(
+                    {row["decision_id"] for row in action_rows}
+                ),
+                "by_type": dict(action_type_counts),
+                "by_stage": dict(action_stage_counts),
+                "effective_by_stage": dict(effective_stage_counts),
+                "phase_corrections": phase_corrections,
+                "hint_requests": action_type_counts[
+                    ActionKind.HINT_REQUESTED.value
+                ],
+                "answer_revisions": action_type_counts[
+                    ActionKind.ANSWER_REVISED.value
+                ],
+                "tool_uses": action_type_counts[ActionKind.TOOL_USED.value],
+                "check_runs": action_type_counts[ActionKind.CHECK_RUN.value],
+                "artifact_references": sum(
+                    row["artifact_id"] is not None for row in action_rows
+                ),
+                "check_progression": check_progression,
+                "evidence_contract": (
+                    "Telemetry describes behavior but does not update competence "
+                    "without a release-pinned rubric and independently valid evaluation."
+                ),
+            },
             "diagnostic_contract": (
                 "Findings expose observed evidence and posterior hypotheses; "
                 "they are not causal or clinical diagnoses."

@@ -12,6 +12,7 @@ from statistics import median
 from typing import Iterable
 
 from .adaptive import RecursiveEvidenceBoundary
+from .capacity import VERIFICATION_KINDS
 from .errors import ExhaustedError, ValidationError
 from .learner import MODEL_VERSION, LearnerModel
 from .models import CandidateScore, Presentation, Question, SessionPhase
@@ -92,18 +93,6 @@ _TARGET_SUCCESS = {
     SessionPhase.VERIFY: 0.64,
     SessionPhase.REVIEW: 0.74,
 }
-
-
-_VERIFICATION_KINDS = frozenset(
-    {
-        "application",
-        "calculation",
-        "comparison",
-        "counterfactual",
-        "debugging",
-        "transfer",
-    }
-)
 
 
 _KIND_FIT = {
@@ -339,7 +328,7 @@ class AdaptivePolicy:
                 for question in independent_pool
                 if focus_concept
                 and question.primary_concept_id == focus_concept
-                and question.kind.value in _VERIFICATION_KINDS
+                and question.kind in VERIFICATION_KINDS
             }
             if focus_misconception:
                 probes = [
@@ -374,7 +363,7 @@ class AdaptivePolicy:
                 question
                 for question in independent_pool
                 if question.primary_concept_id == focus_concept
-                and question.kind.value in _VERIFICATION_KINDS
+                and question.kind in VERIFICATION_KINDS
             ]
             if not focused:
                 raise ExhaustedError(
@@ -396,7 +385,7 @@ class AdaptivePolicy:
                 families_by_concept.setdefault(
                     question.primary_concept_id, set()
                 ).add(question.family_id)
-                if question.kind.value in _VERIFICATION_KINDS:
+                if question.kind in VERIFICATION_KINDS:
                     verification_by_concept.setdefault(
                         question.primary_concept_id, set()
                     ).add(question.family_id)

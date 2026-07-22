@@ -1,0 +1,7 @@
+# SPDX-License-Identifier: MPL-2.0
+
+# Experimental outputs can contain synthetic learner traces and SQLite state.
+results/
+*.db
+*.db-shm
+*.db-wal
