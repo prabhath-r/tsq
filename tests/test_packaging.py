@@ -13,7 +13,8 @@ import unittest
 from importlib.resources import files
 from pathlib import Path
 
-from tsq.corpus import parse_bundle
+from tsq.corpus import parse_bundle, parse_catalog
+from tsq.cli import BUNDLED_RELEASE_MARKER, _ensure_starter_corpus
 from tsq.engine import AdaptiveEngine
 from tsq.store import Database
 
@@ -40,6 +41,7 @@ class PackagingTestCase(unittest.TestCase):
         self.assertIn("include LICENSE", manifest)
         self.assertIn("include NOTICE", manifest)
         self.assertIn("include start", manifest)
+        self.assertIn("include tsq", manifest)
         self.assertFalse(
             any(line.startswith("recursive-include docs ") for line in manifest)
         )
@@ -120,6 +122,53 @@ class PackagingTestCase(unittest.TestCase):
             self.assertIn("Large Language Models", result.stdout)
             self.assertIn("Session stopped", result.stdout)
             self.assertTrue(database.is_file())
+
+    def test_starter_tracks_its_lineage_without_overriding_custom_corpus(self) -> None:
+        bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+        removed_id = "q_bayes_base_rate_positive_test_001"
+        bundle["questions"] = [
+            question
+            for question in bundle["questions"]
+            if question["id"] != removed_id
+        ]
+        parsed = parse_bundle(bundle)
+        domains, topics = parse_catalog(bundle, parsed[0], parsed[4])
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "custom.db"
+            database = Database(path)
+            database.initialize()
+            custom_release = database.import_corpus(
+                *parsed, domains, topics
+            )["release_id"]
+
+            self.assertFalse(_ensure_starter_corpus(database))
+            with database.read() as connection:
+                active = connection.execute(
+                    "SELECT value FROM meta WHERE key='active_corpus_release'"
+                ).fetchone()["value"]
+                marker = connection.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    (BUNDLED_RELEASE_MARKER,),
+                ).fetchone()
+            self.assertEqual(active, custom_release)
+            self.assertIsNone(marker)
+
+            with database.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    (BUNDLED_RELEASE_MARKER, custom_release),
+                )
+            self.assertTrue(_ensure_starter_corpus(database))
+            with database.read() as connection:
+                upgraded = connection.execute(
+                    "SELECT value FROM meta WHERE key='active_corpus_release'"
+                ).fetchone()["value"]
+                marker = connection.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    (BUNDLED_RELEASE_MARKER,),
+                ).fetchone()["value"]
+            self.assertNotEqual(upgraded, custom_release)
+            self.assertEqual(marker, upgraded)
 
     def test_answer_cli_rejects_oversize_integer_without_traceback_or_write(
         self,
@@ -285,6 +334,34 @@ class PackagingTestCase(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("Transformers", result.stdout)
             self.assertIn("Session stopped", result.stdout)
+            self.assertTrue(database.is_file())
+
+    def test_repository_cli_launcher_exposes_full_command_surface(self) -> None:
+        launcher = ROOT / "tsq"
+        self.assertTrue(launcher.is_file())
+        self.assertTrue(os.access(launcher, os.X_OK))
+        self.assertIn("SPDX-License-Identifier: MPL-2.0", launcher.read_text())
+
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Path(temporary) / "launcher.db"
+            result = subprocess.run(
+                [
+                    str(launcher),
+                    "--db",
+                    str(database),
+                    "init",
+                    "--json",
+                ],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertGreaterEqual(payload["questions"], 20)
             self.assertTrue(database.is_file())
 
 

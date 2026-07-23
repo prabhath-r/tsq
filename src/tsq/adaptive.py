@@ -20,7 +20,7 @@ from .learner import LearnerModel
 from .models import SkillState
 
 
-BOUNDARY_ALGORITHM_VERSION = "recursive-evidence-boundary-v1"
+BOUNDARY_ALGORITHM_VERSION = "recursive-evidence-boundary-v3"
 
 
 def _clamp(value: float) -> float:

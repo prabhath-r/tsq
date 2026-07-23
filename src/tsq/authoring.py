@@ -13,6 +13,8 @@ from typing import Any, Protocol
 from .models import (
     ConceptRole,
     ConceptWeight,
+    LearningObjective,
+    ObjectiveOperation,
     Option,
     Question,
     QuestionKind,
@@ -23,7 +25,8 @@ from .quality import validate_question
 from .store import Database, new_id
 
 
-PROMPT_VERSION = "item-blueprint-v1"
+PROMPT_VERSION = "item-blueprint-v2"
+SUPPORTED_PROMPT_VERSIONS = frozenset({"item-blueprint-v1", PROMPT_VERSION})
 
 
 def _canonical_json(value: Any) -> str:
@@ -110,7 +113,9 @@ def _normalized_identity(value: str) -> str:
     return " ".join(value.split()).casefold()
 
 
-def _blind_for_review(item: dict[str, Any]) -> dict[str, Any]:
+def _blind_for_review(
+    item: dict[str, Any], blueprint: "GenerationBlueprint | None" = None
+) -> dict[str, Any]:
     """Construct an allow-listed solver copy with no authored answer metadata."""
 
     blinded = {
@@ -124,6 +129,7 @@ def _blind_for_review(item: dict[str, Any]) -> dict[str, Any]:
             "difficulty",
             "concepts",
             "source_ids",
+            "learning_objective_id",
         )
         if field in item
     }
@@ -139,6 +145,14 @@ def _blind_for_review(item: dict[str, Any]) -> dict[str, Any]:
             else copy.deepcopy(option)
             for option in options
         ]
+    if blueprint is not None and blueprint.learning_objective_id is not None:
+        blinded["learning_objective"] = {
+            "id": blueprint.learning_objective_id,
+            "name": blueprint.learning_objective_name,
+            "description": blueprint.learning_objective_description,
+            "operation": blueprint.learning_objective_operation,
+            "evidence_type": blueprint.learning_objective_evidence_type,
+        }
     return blinded
 
 
@@ -168,6 +182,14 @@ class GenerationBlueprint:
     misconception_ids: tuple[str, ...]
     source_ids: tuple[str, ...]
     family_constraint: str
+    corpus_release_id: str | None = None
+    learning_objective_id: str | None = None
+    learning_objective_name: str | None = None
+    learning_objective_description: str | None = None
+    learning_objective_operation: str | None = None
+    learning_objective_evidence_type: str | None = None
+    target_misconception_id: str | None = None
+    coverage_goal: str = "concept_kind"
     quality_contract: tuple[str, ...] = (
         "Exactly one defensible best answer under the stated assumptions.",
         "Every distractor instantiates a named misconception, not random noise.",
@@ -217,7 +239,18 @@ def _parse_blueprint(raw: str, *, label: str = "Generation blueprint") -> Genera
         "source_ids",
         "family_constraint",
     }
-    allowed = required | {"quality_contract"}
+    optional = {
+        "quality_contract",
+        "corpus_release_id",
+        "learning_objective_id",
+        "learning_objective_name",
+        "learning_objective_description",
+        "learning_objective_operation",
+        "learning_objective_evidence_type",
+        "target_misconception_id",
+        "coverage_goal",
+    }
+    allowed = required | optional
     missing = required - set(payload)
     unknown = set(payload) - allowed
     if missing:
@@ -248,6 +281,84 @@ def _parse_blueprint(raw: str, *, label: str = "Generation blueprint") -> Genera
     if not arrays["source_ids"]:
         raise ValidationError(f"{label} must cite at least one approved source ID.")
 
+    corpus_release_id = payload.get("corpus_release_id")
+    if corpus_release_id is not None and (
+        type(corpus_release_id) is not str or not corpus_release_id.strip()
+    ):
+        raise ValidationError(
+            f"{label} field 'corpus_release_id' must be a non-empty string or null."
+        )
+    objective_fields = (
+        "learning_objective_id",
+        "learning_objective_name",
+        "learning_objective_description",
+        "learning_objective_operation",
+        "learning_objective_evidence_type",
+    )
+    objective_values = {field: payload.get(field) for field in objective_fields}
+    if objective_values["learning_objective_id"] is None:
+        supplied = sorted(
+            field for field, value in objective_values.items() if value is not None
+        )
+        if supplied:
+            raise ValidationError(
+                f"{label} supplies objective metadata without learning_objective_id: "
+                + ", ".join(supplied)
+                + "."
+            )
+    else:
+        invalid = [
+            field
+            for field, value in objective_values.items()
+            if type(value) is not str or not value.strip()
+        ]
+        if invalid:
+            raise ValidationError(
+                f"{label} objective fields must all be non-empty strings: "
+                + ", ".join(sorted(invalid))
+                + "."
+            )
+        try:
+            ObjectiveOperation(objective_values["learning_objective_operation"])
+        except ValueError as exc:
+            raise ValidationError(
+                f"{label} has unsupported learning objective operation "
+                f"{objective_values['learning_objective_operation']!r}."
+            ) from exc
+        if objective_values["learning_objective_evidence_type"] != "selected_response":
+            raise ValidationError(
+                f"{label} supports only selected_response objective evidence."
+            )
+
+    target_misconception_id = payload.get("target_misconception_id")
+    if target_misconception_id is not None and (
+        type(target_misconception_id) is not str
+        or not target_misconception_id.strip()
+    ):
+        raise ValidationError(
+            f"{label} field 'target_misconception_id' must be a non-empty string or null."
+        )
+    if target_misconception_id is not None and target_misconception_id not in arrays[
+        "misconception_ids"
+    ]:
+        raise ValidationError(
+            f"{label} target_misconception_id must occur in misconception_ids."
+        )
+    if target_misconception_id is not None and objective_values[
+        "learning_objective_id"
+    ] is None:
+        raise ValidationError(
+            f"{label} cannot target an exact misconception without a learning objective."
+        )
+    coverage_goal = payload.get("coverage_goal", "concept_kind")
+    if type(coverage_goal) is not str or coverage_goal not in {
+        "concept_kind",
+        "objective_serviceability",
+        "objective_misconception_serviceability",
+        "live_corpus_gap",
+    }:
+        raise ValidationError(f"{label} has unsupported coverage_goal {coverage_goal!r}.")
+
     quality_contract = payload.get("quality_contract")
     if quality_contract is not None and (
         type(quality_contract) is not list
@@ -265,6 +376,20 @@ def _parse_blueprint(raw: str, *, label: str = "Generation blueprint") -> Genera
         "misconception_ids": arrays["misconception_ids"],
         "source_ids": arrays["source_ids"],
         "family_constraint": payload["family_constraint"],
+        "corpus_release_id": corpus_release_id,
+        "learning_objective_id": objective_values["learning_objective_id"],
+        "learning_objective_name": objective_values["learning_objective_name"],
+        "learning_objective_description": objective_values[
+            "learning_objective_description"
+        ],
+        "learning_objective_operation": objective_values[
+            "learning_objective_operation"
+        ],
+        "learning_objective_evidence_type": objective_values[
+            "learning_objective_evidence_type"
+        ],
+        "target_misconception_id": target_misconception_id,
+        "coverage_goal": coverage_goal,
     }
     if quality_contract is not None:
         kwargs["quality_contract"] = tuple(quality_contract)
@@ -295,14 +420,27 @@ class CoveragePlanner:
         "transfer": 2,
     }
     DIFFICULTY_SEQUENCE = (-1.0, -0.35, 0.25, 0.85, 1.45)
+    SERVICEABILITY_TARGET = 3
+    _VERIFICATION_KINDS = (
+        "application",
+        "calculation",
+        "comparison",
+        "counterfactual",
+        "debugging",
+        "transfer",
+    )
 
     def __init__(self, database: Database):
         self.database = database
 
     def gaps(self, *, limit: int = 100, source_ids: tuple[str, ...] = ()) -> list[CoverageGap]:
-        graph = self.database.get_graph()
         with self.database.read() as connection:
             release_id = self.database.get_active_release_id(connection)
+        graph = self.database.get_graph(release_id)
+        with self.database.read() as connection:
+            verification_placeholders = ",".join(
+                "?" for _ in self._VERIFICATION_KINDS
+            )
             counts = {
                 (row["concept_id"], row["kind"]): row["n"]
                 for row in connection.execute(
@@ -363,25 +501,228 @@ class CoveragePlanner:
                    ORDER BY qc.concept_id, qs.source_id""",
                 (release_id,),
             ).fetchall()
+            objective_count_rows = connection.execute(
+                """SELECT direct.objective_id, q.kind,
+                          COUNT(DISTINCT q.family_id) AS n
+                   FROM release_question_objectives direct
+                   JOIN release_questions rq
+                     ON rq.release_id = direct.release_id
+                    AND rq.question_id = direct.question_id
+                   JOIN questions q ON q.id = direct.question_id
+                   WHERE direct.release_id = ?
+                     AND rq.status IN ('approved', 'calibrated')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM question_revocations revoked
+                         WHERE revoked.question_id = q.id
+                     )
+                   GROUP BY direct.objective_id, q.kind""",
+                (release_id,),
+            ).fetchall()
+            objective_family_rows = connection.execute(
+                f"""SELECT direct.objective_id,
+                          COUNT(DISTINCT q.family_id) AS n,
+                          COUNT(DISTINCT CASE
+                              WHEN q.kind IN ({verification_placeholders})
+                              THEN q.family_id END) AS verification_n
+                   FROM release_question_objectives direct
+                   JOIN release_questions rq
+                     ON rq.release_id = direct.release_id
+                    AND rq.question_id = direct.question_id
+                   JOIN questions q ON q.id = direct.question_id
+                   WHERE direct.release_id = ?
+                     AND rq.status IN ('approved', 'calibrated')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM question_revocations revoked
+                         WHERE revoked.question_id = q.id
+                     )
+                   GROUP BY direct.objective_id""",
+                (*self._VERIFICATION_KINDS, release_id),
+            ).fetchall()
+            objective_source_rows = connection.execute(
+                """SELECT DISTINCT direct.objective_id, qs.source_id
+                   FROM release_question_objectives direct
+                   JOIN question_sources qs ON qs.question_id = direct.question_id
+                   JOIN release_questions rq
+                     ON rq.release_id = direct.release_id
+                    AND rq.question_id = direct.question_id
+                   WHERE direct.release_id = ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM question_revocations revoked
+                         WHERE revoked.question_id = direct.question_id
+                     )
+                   ORDER BY direct.objective_id, qs.source_id""",
+                (release_id,),
+            ).fetchall()
+            objective_misconception_rows = connection.execute(
+                f"""SELECT diagnostic.objective_id, option.misconception_id,
+                           misconception.concept_id,
+                           COUNT(DISTINCT CASE
+                               WHEN rq.status IN ('approved', 'calibrated')
+                                AND direct.objective_id = diagnostic.objective_id
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM question_revocations revoked
+                                    WHERE revoked.question_id = q.id
+                                ) THEN q.family_id END) AS uses,
+                           COUNT(DISTINCT CASE
+                               WHEN rq.status IN ('approved', 'calibrated')
+                                AND direct.objective_id = diagnostic.objective_id
+                                AND q.kind IN ({verification_placeholders})
+                                AND NOT EXISTS (
+                                    SELECT 1 FROM question_revocations revoked
+                                    WHERE revoked.question_id = q.id
+                                ) THEN q.family_id END) AS verification_uses
+                    FROM release_option_objectives diagnostic
+                    JOIN release_questions rq
+                      ON rq.release_id = diagnostic.release_id
+                     AND rq.question_id = diagnostic.question_id
+                    JOIN questions q ON q.id = diagnostic.question_id
+                    LEFT JOIN release_question_objectives direct
+                      ON direct.release_id = diagnostic.release_id
+                     AND direct.question_id = diagnostic.question_id
+                    JOIN options option
+                      ON option.question_id = diagnostic.question_id
+                     AND option.option_id = diagnostic.option_id
+                    JOIN misconceptions misconception
+                      ON misconception.id = option.misconception_id
+                    WHERE diagnostic.release_id = ? AND option.is_correct = 0
+                    GROUP BY diagnostic.objective_id, option.misconception_id,
+                             misconception.concept_id
+                    ORDER BY uses, diagnostic.objective_id,
+                             option.misconception_id""",
+                (*self._VERIFICATION_KINDS, release_id),
+            ).fetchall()
+        objectives = self.database.get_learning_objectives(release_id)
         misconceptions_by_concept: dict[str, list[str]] = {}
         for row in misconception_rows:
             misconceptions_by_concept.setdefault(row["concept_id"], []).append(row["id"])
         sources_by_concept: dict[str, list[str]] = {}
         for row in source_rows:
             sources_by_concept.setdefault(row["concept_id"], []).append(row["source_id"])
+        objective_counts = {
+            (row["objective_id"], row["kind"]): int(row["n"])
+            for row in objective_count_rows
+        }
+        objective_family_capacity = {
+            row["objective_id"]: (
+                int(row["n"]), int(row["verification_n"])
+            )
+            for row in objective_family_rows
+        }
+        objective_total_counts: dict[str, int] = {}
+        for (objective_id, _kind), count in objective_counts.items():
+            objective_total_counts[objective_id] = (
+                objective_total_counts.get(objective_id, 0) + count
+            )
+        sources_by_objective: dict[str, list[str]] = {}
+        for row in objective_source_rows:
+            sources_by_objective.setdefault(row["objective_id"], []).append(
+                row["source_id"]
+            )
+        objectives_by_concept: dict[str, list[LearningObjective]] = {}
+        for objective in objectives:
+            for concept_id in objective.concept_ids:
+                objectives_by_concept.setdefault(concept_id, []).append(objective)
+        misconception_rows_by_objective: dict[str, list[Any]] = {}
+        for row in objective_misconception_rows:
+            misconception_rows_by_objective.setdefault(
+                row["objective_id"], []
+            ).append(row)
 
         # Containers have PART_OF children and are navigation nodes, not mastery variables.
         containers = {
             edge.target_id for edge in graph.edges if edge.relation.value == "part_of"
         }
         gaps: list[CoverageGap] = []
+
+        # Exact objective/misconception serviceability is a separate authoring
+        # debt from broad concept-kind coverage.  Three families, including at
+        # least two verification-capable families, are sufficient for any one
+        # trigger to retain a distinct repair and a distinct verification.
+        objective_by_id = {objective.id: objective for objective in objectives}
+        planned_direct_jobs: dict[str, int] = {
+            objective.id: 0 for objective in objectives
+        }
+        planned_verification_jobs: dict[str, int] = {
+            objective.id: 0 for objective in objectives
+        }
+        for objective_id, rows in sorted(misconception_rows_by_objective.items()):
+            objective = objective_by_id[objective_id]
+            effective_capacity_by_misconception = {
+                row["misconception_id"]: min(
+                    int(row["uses"]), int(row["verification_uses"]) + 1
+                )
+                for row in rows
+            }
+            remaining = {
+                misconception_id: max(
+                    0, self.SERVICEABILITY_TARGET - effective_capacity
+                )
+                for misconception_id, effective_capacity in (
+                    effective_capacity_by_misconception.items()
+                )
+            }
+            chosen_sources = source_ids or tuple(
+                sources_by_objective.get(objective.id, ())
+            )
+            if not chosen_sources:
+                chosen_sources = tuple(
+                    sources_by_concept.get(objective.primary_concept_id, ())
+                ) or available_sources
+            while any(deficit > 0 for deficit in remaining.values()):
+                misconception_ids = tuple(
+                    misconception_id
+                    for misconception_id, _deficit in sorted(
+                        (
+                            (misconception_id, deficit)
+                            for misconception_id, deficit in remaining.items()
+                            if deficit > 0
+                        ),
+                        key=lambda pair: (-pair[1], pair[0]),
+                    )[:3]
+                )
+                target_misconception_id = misconception_ids[0]
+                current_capacity = (
+                    self.SERVICEABILITY_TARGET
+                    - remaining[target_misconception_id]
+                )
+                blueprint = self._blueprint(
+                    release_id=release_id,
+                    concept_id=objective.primary_concept_id,
+                    concept_name=graph.concepts[objective.primary_concept_id].name,
+                    kind="transfer",
+                    target_difficulty=self.DIFFICULTY_SEQUENCE[
+                        current_capacity % len(self.DIFFICULTY_SEQUENCE)
+                    ],
+                    misconception_ids=misconception_ids,
+                    source_ids=chosen_sources,
+                    objective=objective,
+                    target_misconception_id=target_misconception_id,
+                    coverage_goal="objective_misconception_serviceability",
+                    family_constraint=(
+                        "Create an independent transfer family that directly assesses "
+                        f"{objective.id} and exposes every listed named misconception; "
+                        "do not reuse a scenario, derivation, or solution path from "
+                        "the release."
+                    ),
+                )
+                priority = 5.0 + 0.2 * max(remaining.values()) - 0.01 * current_capacity
+                gaps.append(
+                    CoverageGap(
+                        priority,
+                        blueprint,
+                        current_capacity,
+                        self.SERVICEABILITY_TARGET,
+                    )
+                )
+                planned_direct_jobs[objective.id] += 1
+                planned_verification_jobs[objective.id] += 1
+                for misconception_id in misconception_ids:
+                    remaining[misconception_id] -= 1
+
+        planned_objective_kind_counts = dict(objective_counts)
         for concept_id, concept in graph.concepts.items():
             if concept_id in containers:
                 continue
-            misconception_ids = tuple(misconceptions_by_concept.get(concept_id, [])[:3])
-            chosen_sources = source_ids or tuple(sources_by_concept.get(concept_id, ()))
-            if not chosen_sources:
-                chosen_sources = available_sources
             concept_total = sum(
                 count for (cid, _), count in counts.items() if cid == concept_id
             )
@@ -392,15 +733,65 @@ class CoveragePlanner:
                     target_difficulty = self.DIFFICULTY_SEQUENCE[
                         (current + offset) % len(self.DIFFICULTY_SEQUENCE)
                     ]
-                    blueprint = GenerationBlueprint(
+                    candidates = objectives_by_concept.get(concept_id, ())
+                    objective = min(
+                        candidates,
+                        key=lambda candidate: (
+                            planned_objective_kind_counts.get(
+                                (candidate.id, kind), 0
+                            ),
+                            objective_total_counts.get(candidate.id, 0),
+                            candidate.id,
+                        ),
+                        default=None,
+                    )
+                    if objective is not None:
+                        objective_misconceptions = tuple(
+                            row["misconception_id"]
+                            for row in misconception_rows_by_objective.get(
+                                objective.id, ()
+                            )[:3]
+                        )
+                        chosen_sources = source_ids or tuple(
+                            dict.fromkeys(
+                                [
+                                    *sources_by_objective.get(objective.id, ()),
+                                    *sources_by_concept.get(concept_id, ()),
+                                ]
+                            )
+                        )
+                        planned_objective_kind_counts[(objective.id, kind)] = (
+                            planned_objective_kind_counts.get(
+                                (objective.id, kind), 0
+                            )
+                            + 1
+                        )
+                        planned_direct_jobs[objective.id] += 1
+                        if kind in self._VERIFICATION_KINDS:
+                            planned_verification_jobs[objective.id] += 1
+                    else:
+                        objective_misconceptions = tuple(
+                            misconceptions_by_concept.get(concept_id, [])[:3]
+                        )
+                        chosen_sources = source_ids or tuple(
+                            sources_by_concept.get(concept_id, ())
+                        )
+                    if not chosen_sources:
+                        chosen_sources = available_sources
+                    blueprint = self._blueprint(
+                        release_id=release_id,
                         concept_id=concept_id,
                         concept_name=concept.name,
                         kind=kind,
                         target_difficulty=target_difficulty,
-                        misconception_ids=misconception_ids,
+                        misconception_ids=objective_misconceptions,
                         source_ids=chosen_sources,
+                        objective=objective,
+                        target_misconception_id=None,
+                        coverage_goal="concept_kind",
                         family_constraint=(
-                            "Create a new solution path and surface context; do not paraphrase an existing family."
+                            "Create a new solution path and surface context; do not "
+                            "paraphrase an existing family."
                         ),
                     )
                     # Diagnostics and concepts with no active item receive first priority.
@@ -408,22 +799,127 @@ class CoveragePlanner:
                     priority += {"diagnostic": 0.45, "transfer": 0.30, "application": 0.20}.get(kind, 0.0)
                     priority += 0.05 * (target - current)
                     gaps.append(CoverageGap(priority, blueprint, current, target))
+
+        # A sparse objective can remain unsafe even when its broad concept-kind
+        # quotas are already satisfied by sibling objectives.  Account for the
+        # exact-pair and concept-kind jobs already planned above, then request
+        # only the additional independent direct families still needed.
+        for objective in objectives:
+            current_total, current_verification = objective_family_capacity.get(
+                objective.id, (0, 0)
+            )
+            projected_total = current_total + planned_direct_jobs.get(
+                objective.id, 0
+            )
+            projected_verification = current_verification + (
+                planned_verification_jobs.get(objective.id, 0)
+            )
+            current = min(projected_total, projected_verification + 1)
+            missing = max(0, self.SERVICEABILITY_TARGET - current)
+            if missing <= 0:
+                continue
+            objective_misconceptions = tuple(
+                row["misconception_id"]
+                for row in misconception_rows_by_objective.get(objective.id, ())[:3]
+            )
+            chosen_sources = source_ids or tuple(
+                sources_by_objective.get(objective.id, ())
+            )
+            if not chosen_sources:
+                chosen_sources = tuple(
+                    sources_by_concept.get(objective.primary_concept_id, ())
+                ) or available_sources
+            for offset in range(missing):
+                projected_current = current + offset
+                blueprint = self._blueprint(
+                    release_id=release_id,
+                    concept_id=objective.primary_concept_id,
+                    concept_name=graph.concepts[objective.primary_concept_id].name,
+                    kind="transfer",
+                    target_difficulty=self.DIFFICULTY_SEQUENCE[
+                        projected_current % len(self.DIFFICULTY_SEQUENCE)
+                    ],
+                    misconception_ids=objective_misconceptions,
+                    source_ids=chosen_sources,
+                    objective=objective,
+                    target_misconception_id=None,
+                    coverage_goal="objective_serviceability",
+                    family_constraint=(
+                        "Create a new independent direct family for learning objective "
+                        f"{objective.id}; preserve a distinct verification route and do "
+                        "not paraphrase an existing family."
+                    ),
+                )
+                gaps.append(
+                    CoverageGap(
+                        4.5 + 0.1 * missing,
+                        blueprint,
+                        projected_current,
+                        self.SERVICEABILITY_TARGET,
+                    )
+                )
         gaps.sort(
             key=lambda gap: (
                 -gap.priority,
                 gap.blueprint.concept_id,
+                gap.blueprint.learning_objective_id or "",
+                gap.blueprint.target_misconception_id or "",
                 gap.blueprint.kind,
                 gap.blueprint.target_difficulty,
             )
         )
         return gaps[: max(0, limit)]
 
+    @staticmethod
+    def _blueprint(
+        *,
+        release_id: str,
+        concept_id: str,
+        concept_name: str,
+        kind: str,
+        target_difficulty: float,
+        misconception_ids: tuple[str, ...],
+        source_ids: tuple[str, ...],
+        objective: LearningObjective | None,
+        target_misconception_id: str | None,
+        coverage_goal: str,
+        family_constraint: str,
+    ) -> GenerationBlueprint:
+        return GenerationBlueprint(
+            concept_id=concept_id,
+            concept_name=concept_name,
+            kind=kind,
+            target_difficulty=target_difficulty,
+            misconception_ids=misconception_ids,
+            source_ids=source_ids,
+            family_constraint=family_constraint,
+            corpus_release_id=release_id,
+            learning_objective_id=(objective.id if objective is not None else None),
+            learning_objective_name=(objective.name if objective is not None else None),
+            learning_objective_description=(
+                objective.description if objective is not None else None
+            ),
+            learning_objective_operation=(
+                objective.operation.value if objective is not None else None
+            ),
+            learning_objective_evidence_type=(
+                objective.evidence_type if objective is not None else None
+            ),
+            target_misconception_id=target_misconception_id,
+            coverage_goal=coverage_goal,
+        )
+
     def enqueue(self, gaps: list[CoverageGap]) -> list[str]:
         job_ids: list[str] = []
         with self.database.transaction() as connection:
             existing = {
                 json.dumps(
-                    json.loads(row["blueprint_json"]),
+                    asdict(
+                        _parse_blueprint(
+                            row["blueprint_json"],
+                            label=f"Generation job {row['id']} blueprint",
+                        )
+                    ),
                     sort_keys=True,
                     separators=(",", ":"),
                 ): row["id"]
@@ -657,9 +1153,9 @@ class DeterministicTestGenerator:
     """Explicit test-only provider for exercising authoring operations offline."""
 
     provider_name = "deterministic-test-generator"
-    model_name = "blueprint-fixture-v1"
+    model_name = "blueprint-fixture-v2"
 
-    def __init__(self, misconceptions: dict[str, tuple[str, str]]):
+    def __init__(self, misconceptions: dict[str, tuple[str, str, str]]):
         self._misconceptions = copy.deepcopy(misconceptions)
 
     def generate(
@@ -679,14 +1175,21 @@ class DeterministicTestGenerator:
             misconception_ids[index % len(misconception_ids)] for index in range(3)
         )
         distractor_options: list[dict[str, Any]] = []
+        mapped_owner_ids: list[str] = []
         option_ids = ("a", "c", "d")
         for index, (option_id, misconception_id) in enumerate(
             zip(option_ids, distractor_ids, strict=True), start=1
         ):
-            name, description = self._misconceptions.get(
+            name, description, owner_id = self._misconceptions.get(
                 misconception_id,
-                (misconception_id, "No registered misconception description is available."),
+                (
+                    misconception_id,
+                    "No registered misconception description is available.",
+                    blueprint.concept_id,
+                ),
             )
+            if owner_id != blueprint.concept_id and owner_id not in mapped_owner_ids:
+                mapped_owner_ids.append(owner_id)
             distractor_options.append(
                 {
                     "id": option_id,
@@ -695,13 +1198,35 @@ class DeterministicTestGenerator:
                     ),
                     "correct": False,
                     "misconception_id": misconception_id,
+                    "diagnostic_objective_id": blueprint.learning_objective_id,
                     "rationale": (
                         f"This option directly states the named misconception {name}; "
                         "it is retained only as a quarantined fixture distractor."
                     ),
                 }
             )
-        return {
+        if mapped_owner_ids:
+            primary_weight = 0.70
+            supporting_weight = (1.0 - primary_weight) / len(mapped_owner_ids)
+        else:
+            primary_weight = 1.0
+            supporting_weight = 0.0
+        concepts = [
+            {
+                "concept_id": blueprint.concept_id,
+                "weight": primary_weight,
+                "role": "primary",
+            }
+        ]
+        concepts.extend(
+            {
+                "concept_id": owner_id,
+                "weight": supporting_weight,
+                "role": "supporting",
+            }
+            for owner_id in mapped_owner_ids
+        )
+        item = {
             "id": f"q_generated_fixture_{digest[:20]}",
             "version": 1,
             "family_id": f"f_generated_fixture_{digest[20:40]}",
@@ -716,13 +1241,7 @@ class DeterministicTestGenerator:
             "discrimination": 1.0,
             "guess_rate": 0.25,
             "slip_rate": 0.05,
-            "concepts": [
-                {
-                    "concept_id": blueprint.concept_id,
-                    "weight": 1.0,
-                    "role": "primary",
-                }
-            ],
+            "concepts": concepts,
             "source_ids": list(blueprint.source_ids),
             "options": [
                 distractor_options[0],
@@ -734,6 +1253,7 @@ class DeterministicTestGenerator:
                     ),
                     "correct": True,
                     "misconception_id": None,
+                    "diagnostic_objective_id": None,
                     "rationale": (
                         "This response tests assumptions against evidence without "
                         "turning an unsupported shortcut into a conclusion."
@@ -746,6 +1266,9 @@ class DeterministicTestGenerator:
             "tags": ["generated-fixture", "test-provider"],
             "revision_of": None,
         }
+        if blueprint.learning_objective_id is not None:
+            item["learning_objective_id"] = blueprint.learning_objective_id
+        return item
 
 
 class DeterministicTestReviewer:
@@ -785,9 +1308,9 @@ def deterministic_test_pipeline(database: Database) -> "OfflineAuthoringPipeline
 
     with database.read() as connection:
         misconceptions = {
-            row["id"]: (row["name"], row["description"])
+            row["id"]: (row["name"], row["description"], row["concept_id"])
             for row in connection.execute(
-                "SELECT id, name, description FROM misconceptions ORDER BY id"
+                "SELECT id, name, description, concept_id FROM misconceptions ORDER BY id"
             )
         }
     return OfflineAuthoringPipeline(
@@ -935,6 +1458,12 @@ class OfflineAuthoringPipeline:
         for field in ("status", "kind"):
             if field in item and type(item[field]) is not str:
                 add(f"Field {field!r} must be a string.")
+        learning_objective_id = item.get("learning_objective_id")
+        if learning_objective_id is not None and (
+            type(learning_objective_id) is not str
+            or not learning_objective_id.strip()
+        ):
+            add("Field 'learning_objective_id' must be a non-empty string or null.")
         for field in ("difficulty", "discrimination", "guess_rate", "slip_rate"):
             if field in item and (
                 type(item[field]) not in {int, float}
@@ -976,6 +1505,15 @@ class OfflineAuthoringPipeline:
                 misconception_id = option.get("misconception_id")
                 if misconception_id is not None and type(misconception_id) is not str:
                     add(f"{prefix}.misconception_id must be a string or null.")
+                diagnostic_objective_id = option.get("diagnostic_objective_id")
+                if diagnostic_objective_id is not None and (
+                    type(diagnostic_objective_id) is not str
+                    or not diagnostic_objective_id.strip()
+                ):
+                    add(
+                        f"{prefix}.diagnostic_objective_id must be a non-empty "
+                        "string or null."
+                    )
 
         source_ids = item.get("source_ids")
         if type(source_ids) is not list:
@@ -1036,8 +1574,49 @@ class OfflineAuthoringPipeline:
             "validation_errors": output_issues,
         }
 
+    @staticmethod
+    def _prior_artifact_collisions(
+        connection: Any,
+        item: dict[str, Any],
+        *,
+        exclude_job_id: str | None,
+    ) -> tuple[bool, bool, tuple[str, ...]]:
+        """Find identity reuse across immutable quarantined run artifacts."""
+
+        question_collision = False
+        family_collision = False
+        invalid_run_ids: list[str] = []
+        rows = connection.execute(
+            """SELECT id, raw_output_json FROM generation_job_runs
+               WHERE raw_output_json IS NOT NULL
+                 AND (? IS NULL OR job_id != ?)
+               ORDER BY id""",
+            (exclude_job_id, exclude_job_id),
+        ).fetchall()
+        for row in rows:
+            try:
+                prior_item = _decode_json(
+                    row["raw_output_json"],
+                    label=f"Generation run {row['id']} raw output",
+                    expected_type=dict,
+                )
+            except ValidationError:
+                invalid_run_ids.append(row["id"])
+                continue
+            question_collision = question_collision or (
+                prior_item.get("id") == item.get("id")
+            )
+            family_collision = family_collision or (
+                prior_item.get("family_id") == item.get("family_id")
+            )
+        return question_collision, family_collision, tuple(invalid_run_ids)
+
     def _deterministic_validation(
-        self, item: Any, blueprint: GenerationBlueprint
+        self,
+        item: Any,
+        blueprint: GenerationBlueprint,
+        *,
+        job_id: str | None = None,
     ) -> list[dict[str, str]]:
         issues = self._item_shape_issues(item)
         if issues:
@@ -1045,6 +1624,142 @@ class OfflineAuthoringPipeline:
 
         def add(code: str, message: str) -> None:
             issues.append({"code": code, "severity": "error", "message": message})
+
+        with self.database.read() as connection:
+            release_id = blueprint.corpus_release_id
+            if release_id is None:
+                release_id = self.database.get_active_release_id(connection)
+            release = connection.execute(
+                "SELECT sealed_at FROM corpus_releases WHERE id = ?", (release_id,)
+            ).fetchone()
+            if release is None or release["sealed_at"] is None:
+                add(
+                    "unknown_blueprint_release",
+                    f"Blueprint corpus release {release_id!r} is unavailable or unsealed.",
+                )
+                return issues
+            objective_by_id = {
+                row["id"]: self.database._objective_from_row(row)
+                for row in connection.execute(
+                    """SELECT objective.* FROM learning_objectives objective
+                       JOIN release_learning_objectives membership
+                         ON membership.objective_id = objective.id
+                       WHERE membership.release_id = ?""",
+                    (release_id,),
+                )
+            }
+            objective_covered_concepts = {
+                concept_id
+                for objective in objective_by_id.values()
+                for concept_id in objective.concept_ids
+            }
+            release_source_ids = {
+                row["source_id"]
+                for row in connection.execute(
+                    "SELECT source_id FROM release_sources WHERE release_id = ?",
+                    (release_id,),
+                )
+            }
+            release_concept_ids = {
+                row["concept_id"]
+                for row in connection.execute(
+                    "SELECT concept_id FROM release_concepts WHERE release_id = ?",
+                    (release_id,),
+                )
+            }
+            misconception_owners = {
+                row["id"]: row["concept_id"]
+                for row in connection.execute(
+                    """SELECT misconception.id, misconception.concept_id
+                       FROM misconceptions misconception
+                       JOIN release_misconceptions membership
+                         ON membership.misconception_id = misconception.id
+                       WHERE membership.release_id = ?""",
+                    (release_id,),
+                )
+            }
+            family_collision = connection.execute(
+                "SELECT 1 FROM questions WHERE family_id = ? LIMIT 1",
+                (item["family_id"],),
+            ).fetchone()
+            question_id_collision = connection.execute(
+                "SELECT 1 FROM questions WHERE id = ? LIMIT 1",
+                (item["id"],),
+            ).fetchone()
+            (
+                prior_question_id_collision,
+                prior_family_collision,
+                invalid_prior_run_ids,
+            ) = self._prior_artifact_collisions(
+                connection, item, exclude_job_id=job_id
+            )
+        for invalid_run_id in invalid_prior_run_ids:
+            add(
+                "invalid_prior_artifact",
+                f"Generation run {invalid_run_id} has an unreadable immutable artifact.",
+            )
+
+        blueprint_objective = None
+        if blueprint.learning_objective_id is not None:
+            blueprint_objective = objective_by_id.get(
+                blueprint.learning_objective_id
+            )
+            if blueprint_objective is None:
+                add(
+                    "unknown_blueprint_objective",
+                    f"Learning objective {blueprint.learning_objective_id} does not "
+                    f"belong to pinned release {release_id}.",
+                )
+            else:
+                declared_definition = (
+                    blueprint.learning_objective_name,
+                    blueprint.learning_objective_description,
+                    blueprint.learning_objective_operation,
+                    blueprint.learning_objective_evidence_type,
+                )
+                release_definition = (
+                    blueprint_objective.name,
+                    blueprint_objective.description,
+                    blueprint_objective.operation.value,
+                    blueprint_objective.evidence_type,
+                )
+                if declared_definition != release_definition:
+                    add(
+                        "blueprint_objective_definition_mismatch",
+                        "Blueprint learning-objective metadata does not match its "
+                        "immutable pinned-release definition.",
+                    )
+                if blueprint.concept_id not in blueprint_objective.concept_ids:
+                    add(
+                        "blueprint_objective_concept_mismatch",
+                        f"Concept {blueprint.concept_id} is outside learning objective "
+                        f"{blueprint_objective.id}.",
+                    )
+        elif blueprint.concept_id in objective_covered_concepts:
+            add(
+                "missing_blueprint_objective",
+                f"Concept {blueprint.concept_id} is objective-enabled in pinned "
+                f"release {release_id}; a concept-only item cannot be promoted into "
+                "that schema-v2 release.",
+            )
+
+        item_objective_id = item.get("learning_objective_id")
+        item_objective = (
+            objective_by_id.get(item_objective_id)
+            if item_objective_id is not None
+            else None
+        )
+        if item_objective_id != blueprint.learning_objective_id:
+            add(
+                "blueprint_objective_mismatch",
+                "Generated item learning_objective_id must exactly match its blueprint.",
+            )
+        if item_objective_id is not None and item_objective is None:
+            add(
+                "unknown_learning_objective",
+                f"Generated item objective {item_objective_id} does not belong to "
+                f"pinned release {release_id}.",
+            )
 
         try:
             question = Question(
@@ -1073,6 +1788,9 @@ class OfflineAuthoringPipeline:
                         correct=option["correct"],
                         rationale=option["rationale"],
                         misconception_id=option.get("misconception_id"),
+                        diagnostic_objective_id=option.get(
+                            "diagnostic_objective_id"
+                        ),
                     )
                     for option in item["options"]
                 ),
@@ -1080,6 +1798,7 @@ class OfflineAuthoringPipeline:
                 provenance=copy.deepcopy(item.get("provenance", {})),
                 tags=tuple(item.get("tags", ())),
                 revision_of=item.get("revision_of"),
+                objective=item_objective,
             )
         except (KeyError, TypeError, ValueError) as exc:
             add("invalid_item_shape", f"Generated item cannot be parsed: {exc}")
@@ -1105,43 +1824,153 @@ class OfflineAuthoringPipeline:
             )
         if set(question.source_ids) - set(blueprint.source_ids):
             add("unapproved_source", "Generated item cites a source outside its blueprint.")
+        if family_collision:
+            add("family_collision", "Generated item reuses an existing item family.")
+        if question_id_collision:
+            add("question_id_collision", "Generated item reuses an existing question ID.")
+        if prior_family_collision:
+            add(
+                "quarantine_family_collision",
+                "Generated item reuses a family already present in another immutable "
+                "generation-job artifact.",
+            )
+        if prior_question_id_collision:
+            add(
+                "quarantine_question_id_collision",
+                "Generated item reuses a question ID already present in another "
+                "immutable generation-job artifact.",
+            )
+        unknown_sources = set(question.source_ids) - release_source_ids
+        if unknown_sources:
+            add(
+                "unknown_source",
+                "Generated item cites source IDs outside its pinned release: "
+                + ", ".join(sorted(unknown_sources))
+                + ".",
+            )
+        unknown_concepts = {
+            mapping.concept_id for mapping in question.concepts
+        } - release_concept_ids
+        if unknown_concepts:
+            add(
+                "unknown_concept",
+                "Generated item maps concepts outside its pinned release: "
+                + ", ".join(sorted(unknown_concepts))
+                + ".",
+            )
 
-        with self.database.read() as connection:
-            if connection.execute(
-                "SELECT 1 FROM questions WHERE family_id = ? LIMIT 1",
-                (question.family_id,),
-            ).fetchone():
-                add("family_collision", "Generated item reuses an existing item family.")
-            known_sources = {
-                row["id"] for row in connection.execute("SELECT id FROM sources")
-            }
-            if set(question.source_ids) - known_sources:
-                add("unknown_source", "Generated item cites an unknown source ID.")
-            misconception_ids = question.misconception_ids
-            if misconception_ids:
-                placeholders = ",".join("?" for _ in misconception_ids)
-                owners = {
-                    row["id"]: row["concept_id"]
-                    for row in connection.execute(
-                        f"SELECT id, concept_id FROM misconceptions WHERE id IN ({placeholders})",
-                        tuple(sorted(misconception_ids)),
-                    )
-                }
-                unknown = misconception_ids - set(owners)
-                if unknown:
+        misconception_ids = question.misconception_ids
+        unknown_misconceptions = misconception_ids - set(misconception_owners)
+        if unknown_misconceptions:
+            add(
+                "unknown_misconception",
+                "Unknown pinned-release misconception IDs: "
+                + ", ".join(sorted(unknown_misconceptions))
+                + ".",
+            )
+        unexpected_misconceptions = misconception_ids - set(
+            blueprint.misconception_ids
+        )
+        if unexpected_misconceptions:
+            add(
+                "unplanned_misconception",
+                "Generated distractors use misconceptions outside the blueprint: "
+                + ", ".join(sorted(unexpected_misconceptions))
+                + ".",
+            )
+        mapped_concepts = {mapping.concept_id for mapping in question.concepts}
+        absent_owners = {
+            owner
+            for misconception_id, owner in misconception_owners.items()
+            if misconception_id in misconception_ids and owner not in mapped_concepts
+        }
+        if absent_owners:
+            add(
+                "unmapped_misconception_owner",
+                "Every distractor misconception's concept must be mapped by the item.",
+            )
+
+        exact_diagnostic_misconceptions: set[str] = set()
+        for option in question.options:
+            diagnostic_id = option.diagnostic_objective_id
+            if option.correct:
+                if diagnostic_id is not None:
                     add(
-                        "unknown_misconception",
-                        f"Unknown misconception IDs: {', '.join(sorted(unknown))}.",
+                        "correct_option_diagnostic_objective",
+                        f"Correct option {option.id} cannot declare a diagnostic objective.",
                     )
-                mapped_concepts = {mapping.concept_id for mapping in question.concepts}
-                absent_owners = {
-                    owner for owner in owners.values() if owner not in mapped_concepts
-                }
-                if absent_owners:
-                    add(
-                        "unmapped_misconception_owner",
-                        "Every distractor misconception's concept must be mapped by the item.",
-                    )
+                continue
+            if blueprint_objective is not None and diagnostic_id is None:
+                add(
+                    "missing_diagnostic_objective",
+                    f"Distractor {option.id} must explicitly preserve diagnostic_objective_id.",
+                )
+                continue
+            diagnostic_objective = (
+                objective_by_id.get(diagnostic_id)
+                if diagnostic_id is not None
+                else None
+            )
+            if diagnostic_id is not None and diagnostic_objective is None:
+                add(
+                    "unknown_diagnostic_objective",
+                    f"Distractor {option.id} diagnostic objective {diagnostic_id} "
+                    f"does not belong to pinned release {release_id}.",
+                )
+                continue
+            if blueprint_objective is None and diagnostic_id is not None:
+                add(
+                    "unexpected_diagnostic_objective",
+                    f"Distractor {option.id} declares a diagnostic objective that "
+                    "was not authorized by its legacy blueprint.",
+                )
+            if (
+                blueprint_objective is not None
+                and diagnostic_id != blueprint_objective.id
+            ):
+                add(
+                    "blueprint_diagnostic_objective_mismatch",
+                    f"Distractor {option.id} must diagnose blueprint objective "
+                    f"{blueprint_objective.id}.",
+                )
+            owner_id = misconception_owners.get(option.misconception_id)
+            if (
+                owner_id is not None
+                and diagnostic_objective is not None
+                and owner_id not in diagnostic_objective.concept_ids
+            ):
+                add(
+                    "diagnostic_objective_owner_mismatch",
+                    f"Distractor {option.id} misconception owner {owner_id} is outside "
+                    f"diagnostic objective {diagnostic_objective.id}.",
+                )
+            if (
+                option.misconception_id is not None
+                and diagnostic_id == blueprint.learning_objective_id
+            ):
+                exact_diagnostic_misconceptions.add(option.misconception_id)
+        if (
+            blueprint.target_misconception_id is not None
+            and blueprint.target_misconception_id
+            not in exact_diagnostic_misconceptions
+        ):
+            add(
+                "missing_exact_diagnostic_target",
+                "Generated item does not expose the blueprint's exact "
+                "objective/misconception target.",
+            )
+        if blueprint.coverage_goal == "objective_misconception_serviceability":
+            missing_targets = set(blueprint.misconception_ids) - (
+                exact_diagnostic_misconceptions
+            )
+            if missing_targets:
+                add(
+                    "missing_exact_diagnostic_targets",
+                    "Generated item omits planned exact objective/misconception "
+                    "targets: "
+                    + ", ".join(sorted(missing_targets))
+                    + ".",
+                )
         return issues
 
     def run_job(self, job_id: str, source_context: str) -> dict[str, Any]:
@@ -1164,7 +1993,7 @@ class OfflineAuthoringPipeline:
                     f"Generation job {job_id} is {row['status']}; retry it explicitly "
                     "before another execution."
                 )
-            if row["prompt_version"] != PROMPT_VERSION:
+            if row["prompt_version"] not in SUPPORTED_PROMPT_VERSIONS:
                 raise ConflictError(
                     f"Generation job {job_id} uses unsupported prompt version "
                     f"{row['prompt_version']!r}."
@@ -1172,6 +2001,14 @@ class OfflineAuthoringPipeline:
             blueprint = _parse_blueprint(
                 row["blueprint_json"], label=f"Generation job {job_id} blueprint"
             )
+            if (
+                row["prompt_version"] == PROMPT_VERSION
+                and blueprint.corpus_release_id is None
+            ):
+                raise ValidationError(
+                    f"Generation job {job_id} uses {PROMPT_VERSION} but is not "
+                    "pinned to an immutable corpus release."
+                )
             next_attempt = connection.execute(
                 """SELECT COALESCE(MAX(attempt), 0) + 1 AS attempt
                    FROM generation_job_runs WHERE job_id = ?""",
@@ -1210,7 +2047,9 @@ class OfflineAuthoringPipeline:
             )
         try:
             raw_output = self.generator.generate(blueprint, source_context)
-            deterministic_issues = self._deterministic_validation(raw_output, blueprint)
+            deterministic_issues = self._deterministic_validation(
+                raw_output, blueprint, job_id=job_id
+            )
             raw_json_issues = _strict_json_issues(raw_output)
             if not raw_json_issues:
                 generator_output_sha256 = _sha256_json(raw_output)
@@ -1258,7 +2097,7 @@ class OfflineAuthoringPipeline:
                 }
             )
 
-            blinded_item = _blind_for_review(item)
+            blinded_item = _blind_for_review(item, blueprint)
             reviews = [
                 self._collect_review(
                     reviewer,
@@ -1307,6 +2146,73 @@ class OfflineAuthoringPipeline:
                 "reviews_sha256": reviews_sha256,
             }
             with self.database.transaction() as connection:
+                # Generation and review run outside the write lock. Recheck
+                # identities here, under BEGIN IMMEDIATE, so two workers cannot
+                # concurrently certify the same question or family as independent.
+                final_question_collision = connection.execute(
+                    "SELECT 1 FROM questions WHERE id = ? LIMIT 1",
+                    (item.get("id"),),
+                ).fetchone()
+                final_family_collision = connection.execute(
+                    "SELECT 1 FROM questions WHERE family_id = ? LIMIT 1",
+                    (item.get("family_id"),),
+                ).fetchone()
+                (
+                    final_prior_question_collision,
+                    final_prior_family_collision,
+                    final_invalid_prior_runs,
+                ) = self._prior_artifact_collisions(
+                    connection, item, exclude_job_id=job_id
+                )
+                existing_issue_codes = {
+                    issue.get("code")
+                    for issue in deterministic_issues
+                    if type(issue) is dict
+                }
+
+                def final_issue(code: str, message: str) -> None:
+                    if code not in existing_issue_codes:
+                        deterministic_issues.append(
+                            {"code": code, "severity": "error", "message": message}
+                        )
+                        existing_issue_codes.add(code)
+
+                if final_question_collision:
+                    final_issue(
+                        "question_id_collision",
+                        "Generated item reuses an existing question ID.",
+                    )
+                if final_family_collision:
+                    final_issue(
+                        "family_collision",
+                        "Generated item reuses an existing item family.",
+                    )
+                if final_prior_question_collision:
+                    final_issue(
+                        "quarantine_question_id_collision",
+                        "Generated item reuses a question ID already present in "
+                        "another immutable generation-job artifact.",
+                    )
+                if final_prior_family_collision:
+                    final_issue(
+                        "quarantine_family_collision",
+                        "Generated item reuses a family already present in another "
+                        "immutable generation-job artifact.",
+                    )
+                if final_invalid_prior_runs:
+                    final_issue(
+                        "invalid_prior_artifact",
+                        "An immutable prior generation artifact is unreadable; "
+                        "identity uniqueness cannot be certified.",
+                    )
+                accepted = accepted_by_critics and not any(
+                    issue.get("severity") == "error"
+                    for issue in deterministic_issues
+                    if type(issue) is dict
+                )
+                status = "reviewed" if accepted else "rejected"
+                result["accepted_for_reviewed_quarantine"] = accepted
+                result["status"] = status
                 completed_at = datetime.now(timezone.utc).isoformat()
                 finalized_run = connection.execute(
                     """UPDATE generation_job_runs

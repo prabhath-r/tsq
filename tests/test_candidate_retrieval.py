@@ -59,20 +59,29 @@ class CandidateRetrievalTestCase(unittest.TestCase):
         self.learner_id = "candidate-learner"
         self.engine = AdaptiveEngine(self.database)
         self.engine.create_learner(self.learner_id, "Candidate learner")
-        self.root_concept_id = "c_adaptive_testing"
+        # Use a target with enough direct families to build history without
+        # exhausting the live policy's independent repair/verification reserve.
+        self.root_concept_id = "c_clustering"
         self.scope = self.database.get_graph(self.release_id).learning_scope(
             self.root_concept_id
         )
 
         # Give the learner a non-empty, non-uniform exposure history so the
         # equivalence test covers the personal-exposure ordering term.
-        session = self.engine.start_session(
-            self.learner_id,
-            self.root_concept_id,
-            mode="learn",
-            seed=193,
-        )
         for index in range(3):
+            # Keep this query-kernel fixture independent of the adaptive
+            # policy's within-session reserve contract.  The target has three
+            # direct families, so after one response a second main question
+            # would consume evidence needed for an independent repair and
+            # verification pair.  Separate sessions still create the intended
+            # non-uniform lifetime exposure history without asking the policy
+            # to violate that safety boundary.
+            session = self.engine.start_session(
+                self.learner_id,
+                self.root_concept_id,
+                mode="learn",
+                seed=193 + index,
+            )
             presentation = self.engine.next_question(session["id"])
             self.engine.submit_answer(
                 presentation.decision_id,

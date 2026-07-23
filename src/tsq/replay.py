@@ -7,12 +7,11 @@ import json
 import os
 import sqlite3
 import tempfile
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from math import isfinite
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from .evidence import (
     ActionKind,
@@ -21,15 +20,49 @@ from .evidence import (
     canonical_json,
     summarize_actions,
 )
+from .event_contracts import (
+    PROJECTION_FIELDS_V1 as _PROJECTION_FIELDS_V1,
+    PROJECTION_FIELDS_V2 as _PROJECTION_FIELDS_V2,
+    PROJECTION_FIELDS_V3 as _PROJECTION_FIELDS_V3,
+    PROJECTION_FIELDS_V4 as _PROJECTION_FIELDS_V4,
+    PROJECTION_METADATA_FIELDS as _PROJECTION_METADATA_FIELDS,
+    PROJECTION_METADATA_FIELDS_WITH_MISCONCEPTION_ALGORITHM as _PROJECTION_METADATA_FIELDS_WITH_MISCONCEPTION_ALGORITHM,
+    QUESTION_SELECTED_BASE_FIELDS,
+    QUESTION_SELECTED_METADATA_FIELDS,
+    QUESTION_SELECTED_OBJECTIVE_FIELDS,
+    RESPONSE_FIELDS as _RESPONSE_FIELDS,
+    RESPONSE_METADATA_FIELDS as _RESPONSE_METADATA_FIELDS,
+    RESPONSE_METADATA_FIELDS_WITH_MISCONCEPTION_ALGORITHM as _RESPONSE_METADATA_FIELDS_WITH_MISCONCEPTION_ALGORITHM,
+    same_json_value,
+)
 from .errors import ConflictError, NotFoundError, TSQError, ValidationError
-from .learner import MODEL_VERSION, SUPPORTED_MODEL_VERSIONS, LearnerModel
-from .models import QuestionStatus
+from .inference import (
+    LEGACY_MISCONCEPTION_ALGORITHM,
+    MISCONCEPTION_ALGORITHM_METADATA_KEY,
+    MISCONCEPTION_ALGORITHM_VERSION,
+    response_window,
+)
+from .learner import (
+    LearnerModel,
+)
+from .models import MAX_REMEDIATION_DEPTH, QuestionStatus, SessionPhase
 from .store import SCHEMA_VERSION, Database, question_content_hash
+from .versions import (
+    AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
+    BOUND_QUESTION_SELECTED_EVENT_SCHEMA_VERSION,
+    COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS,
+    DEFAULT_LEARNER_MODEL_VERSION,
+    PROJECTION_HASH_VERSION_BY_EVENT_SCHEMA,
+    PROJECTION_MODEL_VERSIONS_BY_EVENT_SCHEMA,
+    SUPPORTED_MODEL_VERSIONS,
+    question_selected_schema_for,
+)
 
 
 REPLAY_FORMAT_VERSION = 1
-RESPONSE_EVENT_SCHEMA_VERSION = 1
-PROJECTION_EVENT_SCHEMA_VERSIONS = frozenset({1, 2})
+RESPONSE_EVENT_SCHEMA_VERSIONS = frozenset({1, 2})
+CURRENT_RESPONSE_EVENT_SCHEMA_VERSION = 2
+PROJECTION_EVENT_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4})
 ACTION_EVENT_SCHEMA_VERSION = 1
 
 _ACTION_FIELDS = frozenset(
@@ -78,52 +111,6 @@ _ACTION_PROJECTION_COLUMNS = (
     "command_hash",
 )
 
-_RESPONSE_FIELDS = frozenset(
-    {
-        "decision_id",
-        "question_id",
-        "question_version",
-        "selected_option_id",
-        "is_correct",
-        "confidence",
-        "response_ms",
-        "hint_count",
-        "feedback_shown",
-        "presented_order",
-    }
-)
-_RESPONSE_METADATA_FIELDS = frozenset(
-    {
-        "policy_version",
-        "learner_model_version",
-        "corpus_release_id",
-        "question_content_hash",
-        "question_status",
-        "evidence_weight",
-        "selection_learner_revision",
-        "application_learner_revision",
-    }
-)
-_PROJECTION_FIELDS_V1 = frozenset(
-    {
-        "response_event_id",
-        "state_changes",
-        "phase",
-        "focus_concept_id",
-        "focus_misconception_id",
-        "remediation_depth",
-        "remediation_path",
-        "corpus_release_id",
-        "learner_revision",
-        "projection_hash",
-    }
-)
-_PROJECTION_FIELDS_V2 = _PROJECTION_FIELDS_V1 | frozenset(
-    {"transition_reason", "boundary_decision"}
-)
-_PROJECTION_METADATA_FIELDS = frozenset(
-    {"learner_model_version", "corpus_release_id", "evidence_weight"}
-)
 _BOUNDARY_DECISION_FIELDS = frozenset(
     {
         "focus_concept_id",
@@ -147,6 +134,32 @@ _BOUNDARY_CANDIDATE_FIELDS = frozenset(
         "recursive_bottleneck_concept_id",
     }
 )
+_OBJECTIVE_BOUNDARY_DECISION_FIELDS = frozenset(
+    {
+        "focus_objective_id",
+        "selected_objective_id",
+        "algorithm_version",
+        "selected",
+        "candidates",
+    }
+)
+_OBJECTIVE_BOUNDARY_CANDIDATE_FIELDS = frozenset(
+    {
+        "edge_id",
+        "objective_id",
+        "concept_id",
+        "relation",
+        "rationale",
+        "edge_weight",
+        "score",
+        "need",
+        "mastery_probability",
+        "expected_competence",
+        "uncertainty_value",
+        "evidence_gap",
+        "recent_failure_rate",
+    }
+)
 
 
 def _reject_duplicate_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -158,6 +171,13 @@ def _reject_duplicate_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
+def _finite_json_float(value: str) -> float:
+    parsed = float(value)
+    if not isfinite(parsed):
+        raise ValueError(f"non-finite JSON number {value}")
+    return parsed
+
+
 def _strict_object(raw: str, label: str) -> dict[str, Any]:
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON constant {value}")
@@ -166,6 +186,7 @@ def _strict_object(raw: str, label: str) -> dict[str, Any]:
         value = json.loads(
             raw,
             parse_constant=reject_constant,
+            parse_float=_finite_json_float,
             object_pairs_hook=_reject_duplicate_object,
         )
     except (TypeError, ValueError) as exc:
@@ -183,6 +204,7 @@ def _strict_array(raw: str, label: str) -> list[Any]:
         value = json.loads(
             raw,
             parse_constant=reject_constant,
+            parse_float=_finite_json_float,
             object_pairs_hook=_reject_duplicate_object,
         )
     except (TypeError, ValueError) as exc:
@@ -249,6 +271,219 @@ def _require_aware_timestamp(value: Any, label: str) -> datetime:
     return timestamp
 
 
+@dataclass(frozen=True, slots=True)
+class _SelectionBoundary:
+    event: sqlite3.Row
+    model_version: str
+    selected_at: datetime
+
+
+def _index_question_selected_events(
+    connection: sqlite3.Connection,
+) -> dict[str, list[tuple[sqlite3.Row, dict[str, Any]]]]:
+    """Index immutable selections once so replay stays linear in event count."""
+
+    indexed: dict[str, list[tuple[sqlite3.Row, dict[str, Any]]]] = {}
+    for event in connection.execute(
+        """SELECT * FROM events
+           WHERE event_type='QuestionSelected'
+           ORDER BY event_id"""
+    ).fetchall():
+        payload = _strict_object(
+            event["payload_json"],
+            f"QuestionSelected event {event['event_id']} payload",
+        )
+        decision_id = _require_nonblank_string(
+            payload.get("decision_id"),
+            f"QuestionSelected event {event['event_id']} decision_id",
+        )
+        indexed.setdefault(decision_id, []).append((event, payload))
+    return indexed
+
+
+def _validate_question_selected_event(
+    *,
+    decision: sqlite3.Row,
+    follower: sqlite3.Row,
+    label: str,
+    index: dict[str, list[tuple[sqlite3.Row, dict[str, Any]]]],
+    cache: dict[str, _SelectionBoundary] | None = None,
+) -> _SelectionBoundary:
+    """Resolve one immutable selection boundary and bind it to a later event."""
+
+    decision_id = _require_nonblank_string(
+        decision["id"], f"{label} decision ID"
+    )
+    boundary = cache.get(decision_id) if cache is not None else None
+    if boundary is None:
+        matching = index.get(decision_id, [])
+        if len(matching) != 1:
+            raise ValidationError(
+                f"{label} has no unique QuestionSelected event anchor."
+            )
+
+        selected_event, payload = matching[0]
+        selection_label = (
+            f"QuestionSelected event {selected_event['event_id']}"
+        )
+        metadata = _strict_object(
+            selected_event["metadata_json"], f"{selection_label} metadata"
+        )
+        _require_exact_fields(
+            metadata,
+            QUESTION_SELECTED_METADATA_FIELDS,
+            f"{selection_label} metadata",
+        )
+        model_version = metadata["learner_model_version"]
+        if (
+            type(model_version) is not str
+            or model_version not in SUPPORTED_MODEL_VERSIONS
+        ):
+            raise ValidationError(
+                f"{selection_label} uses unsupported learner model "
+                f"{model_version!r}; this binary supports "
+                f"{sorted(SUPPORTED_MODEL_VERSIONS)!r}."
+            )
+        policy_version = _require_nonblank_string(
+            metadata["policy_version"], f"{selection_label} policy_version"
+        )
+        corpus_release_id = _require_nonblank_string(
+            metadata["corpus_release_id"],
+            f"{selection_label} corpus_release_id",
+        )
+        if (
+            policy_version != decision["policy_version"]
+            or corpus_release_id != decision["corpus_release_id"]
+        ):
+            raise ValidationError(
+                f"{selection_label} metadata does not match its decision."
+            )
+
+        objective_aware = bool(
+            decision["question_objective_id"] is not None
+            or decision["focus_objective_id"] is not None
+        )
+        try:
+            expected_schema = question_selected_schema_for(
+                model_version, objective_aware=objective_aware
+            )
+        except ValueError as exc:
+            raise ValidationError(
+                f"{selection_label} has no supported schema boundary."
+            ) from exc
+        if selected_event["schema_version"] != expected_schema:
+            raise ValidationError(
+                f"{selection_label} schema does not match learner model "
+                f"{model_version}."
+            )
+
+        _require_exact_fields(
+            payload,
+            (
+                QUESTION_SELECTED_OBJECTIVE_FIELDS
+                if objective_aware
+                else QUESTION_SELECTED_BASE_FIELDS
+            ),
+            f"{selection_label} payload",
+        )
+        expected_payload = {
+            "decision_id": decision_id,
+            "question_id": decision["question_id"],
+            "phase": decision["phase"],
+            "candidate_count": decision["candidate_count"],
+            "candidate_digest": decision["candidate_digest"],
+            "propensity": decision["propensity"],
+            "score": _strict_object(
+                decision["selected_score_json"],
+                f"Decision {decision_id} selected score",
+            ),
+            "option_order": _strict_array(
+                decision["option_order_json"],
+                f"Decision {decision_id} option order",
+            ),
+            "question_version": decision["question_version"],
+            "question_content_hash": decision["question_content_hash"],
+            "question_status": decision["question_status"],
+            "evidence_weight": decision["evidence_weight"],
+            "corpus_release_id": decision["corpus_release_id"],
+            "session_revision": decision["session_revision"],
+            "learner_revision": decision["learner_revision"],
+            "focus_concept_id": decision["focus_concept_id"],
+            "focus_misconception_id": decision[
+                "focus_misconception_id"
+            ],
+            "pedagogical_role": decision["pedagogical_role"],
+            "focus_valid": bool(decision["focus_valid"]),
+        }
+        if objective_aware:
+            expected_payload.update(
+                {
+                    "question_objective_id": decision[
+                        "question_objective_id"
+                    ],
+                    "focus_objective_id": decision["focus_objective_id"],
+                }
+            )
+        if not same_json_value(payload, expected_payload):
+            raise ValidationError(
+                f"{selection_label} payload does not match its decision."
+            )
+
+        selected_at = _require_aware_timestamp(
+            selected_event["occurred_at"],
+            f"{selection_label} occurrence time",
+        )
+        if (
+            expected_schema == BOUND_QUESTION_SELECTED_EVENT_SCHEMA_VERSION
+            and (
+                selected_event["occurred_at"] != decision["created_at"]
+                or _require_aware_timestamp(
+                    decision["created_at"],
+                    f"Decision {decision_id} creation time",
+                )
+                != selected_at
+            )
+        ):
+            raise ValidationError(
+                f"{selection_label} occurrence time does not match its "
+                "decision clock."
+            )
+        boundary = _SelectionBoundary(
+            event=selected_event,
+            model_version=model_version,
+            selected_at=selected_at,
+        )
+        if cache is not None:
+            cache[decision_id] = boundary
+
+    selected_event = boundary.event
+    expected_stream_id = f"learner:{decision['learner_id']}"
+    if (
+        selected_event["learner_id"] != decision["learner_id"]
+        or selected_event["session_id"] != decision["session_id"]
+        or selected_event["stream_id"] != expected_stream_id
+        or follower["learner_id"] != decision["learner_id"]
+        or follower["session_id"] != decision["session_id"]
+        or follower["stream_id"] != expected_stream_id
+    ):
+        raise ValidationError(
+            f"{label} does not match its QuestionSelected event envelope."
+        )
+    selection_version = _require_int(
+        selected_event["stream_version"],
+        f"QuestionSelected event {selected_event['event_id']} stream version",
+        minimum=1,
+    )
+    follower_version = _require_int(
+        follower["stream_version"], f"{label} stream version", minimum=1
+    )
+    if selection_version >= follower_version:
+        raise ValidationError(
+            f"{label} does not follow its QuestionSelected event anchor."
+        )
+    return boundary
+
+
 def _validate_artifact_reference(value: Any, label: str) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -312,6 +547,79 @@ def _validate_boundary_decision(value: Any, label: str) -> None:
         return
     if type(value) is not dict:
         raise ValidationError(f"{label} must be an object or null.")
+    if "focus_objective_id" in value:
+        _require_exact_fields(value, _OBJECTIVE_BOUNDARY_DECISION_FIELDS, label)
+        focus_objective = _require_nonblank_string(
+            value["focus_objective_id"], f"{label} focus_objective_id"
+        )
+        selected_objective = _require_nonblank_string(
+            value["selected_objective_id"], f"{label} selected_objective_id"
+        )
+        _require_nonblank_string(
+            value["algorithm_version"], f"{label} algorithm_version"
+        )
+        if focus_objective == selected_objective:
+            raise ValidationError(f"{label} cannot select its own focus objective.")
+        candidates = value["candidates"]
+        if type(candidates) is not list or not candidates:
+            raise ValidationError(f"{label} candidates must be a non-empty array.")
+        candidate_ids: list[str] = []
+        for index, candidate in enumerate(candidates):
+            candidate_label = f"{label} candidate {index}"
+            if type(candidate) is not dict:
+                raise ValidationError(f"{candidate_label} must be an object.")
+            _require_exact_fields(
+                candidate, _OBJECTIVE_BOUNDARY_CANDIDATE_FIELDS, candidate_label
+            )
+            for field in (
+                "edge_id",
+                "objective_id",
+                "concept_id",
+                "rationale",
+            ):
+                _require_nonblank_string(
+                    candidate[field], f"{candidate_label} {field}"
+                )
+            relation = _require_nonblank_string(
+                candidate["relation"], f"{candidate_label} relation"
+            )
+            if relation not in {"prerequisite", "requires"}:
+                raise ValidationError(
+                    f"{candidate_label} relation must be a prerequisite relation."
+                )
+            for field in _OBJECTIVE_BOUNDARY_CANDIDATE_FIELDS - {
+                "edge_id",
+                "objective_id",
+                "concept_id",
+                "relation",
+                "rationale",
+            }:
+                number = _require_optional_number(
+                    candidate[field], f"{candidate_label} {field}"
+                )
+                if number is None or not 0.0 <= number <= 1.0:
+                    raise ValidationError(
+                        f"{candidate_label} {field} must be between zero and one."
+                    )
+            candidate_ids.append(candidate["objective_id"])
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValidationError(
+                f"{label} candidate objective IDs must be unique."
+            )
+        if selected_objective not in candidate_ids:
+            raise ValidationError(
+                f"{label} selected objective is absent from candidates."
+            )
+        selected = value["selected"]
+        if type(selected) is not dict or selected.get("objective_id") != selected_objective:
+            raise ValidationError(
+                f"{label} selected candidate does not match selected_objective_id."
+            )
+        if selected not in candidates:
+            raise ValidationError(
+                f"{label} selected candidate is absent from candidates."
+            )
+        return
     _require_exact_fields(value, _BOUNDARY_DECISION_FIELDS, label)
     focus = _require_nonblank_string(
         value["focus_concept_id"], f"{label} focus_concept_id"
@@ -357,14 +665,7 @@ class ProjectionReplay:
 
     def _validate_source(self) -> int:
         path = self.database.path
-        if not path.exists() or not path.is_file():
-            raise NotFoundError(f"Database does not exist: {path}")
-        uri = f"file:{quote(str(path.resolve()))}?mode=ro"
-        try:
-            connection = sqlite3.connect(uri, uri=True, timeout=20.0)
-        except sqlite3.Error as exc:
-            raise ValidationError(f"Could not open database read-only: {exc}") from exc
-        connection.row_factory = sqlite3.Row
+        connection = Database(path, read_only=True).connect()
         try:
             has_meta = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
@@ -390,11 +691,9 @@ class ProjectionReplay:
 
     def _backup_to(self, destination: Path) -> int:
         source_version = self._validate_source()
-        uri = f"file:{quote(str(self.database.path.resolve()))}?mode=ro"
-        source = sqlite3.connect(uri, uri=True, timeout=20.0)
+        source = Database(self.database.path, read_only=True).connect()
         destination_connection = sqlite3.connect(destination, timeout=20.0)
         try:
-            source.execute("PRAGMA query_only = ON")
             source.backup(destination_connection)
         except sqlite3.Error as exc:
             raise ValidationError(f"Could not create a consistent database copy: {exc}") from exc
@@ -406,25 +705,45 @@ class ProjectionReplay:
     @staticmethod
     def _projection_commitment(
         connection: sqlite3.Connection, learner_id: str
-    ) -> str | None:
+    ) -> tuple[str | None, int | None]:
         row = connection.execute(
-            """SELECT payload_json FROM events
+            """SELECT schema_version, payload_json FROM events
                WHERE stream_id=? AND event_type='LearnerProjectionAdvanced'
                ORDER BY stream_version DESC LIMIT 1""",
             (f"learner:{learner_id}",),
         ).fetchone()
         if row is None:
-            return None
+            return None, None
         payload = _strict_object(row["payload_json"], "Latest projection event payload")
-        return _require_sha256(
+        commitment = _require_sha256(
             payload.get("projection_hash"), "Latest projection event commitment"
         )
+        hash_version = payload.get("projection_hash_version", 1)
+        if type(hash_version) is not int or hash_version not in {1, 2, 3}:
+            raise ValidationError(
+                "Latest projection event has an invalid projection hash version."
+            )
+        required_hash_version = PROJECTION_HASH_VERSION_BY_EVENT_SCHEMA.get(
+            row["schema_version"]
+        )
+        if (
+            required_hash_version is not None
+            and hash_version != required_hash_version
+        ):
+            raise ValidationError(
+                "Latest projection event schema/hash version mismatch."
+            )
+        return commitment, hash_version
 
     @staticmethod
     def _recoverable_projection_errors(
         errors: list[str], learner_id: str
     ) -> tuple[list[str], list[str]]:
         recoverable_message = f"learner {learner_id}: projection hash mismatch"
+        projection_hash_failure = (
+            f"learner {learner_id}: projection cannot be hashed ("
+        )
+        objective_projection_prefix = f"objective state {learner_id}/"
 
         def action_projection_error(error: str) -> bool:
             return (
@@ -437,7 +756,12 @@ class ProjectionReplay:
         recoverable = [
             error
             for error in errors
-            if error == recoverable_message or action_projection_error(error)
+            if (
+                error == recoverable_message
+                or error.startswith(projection_hash_failure)
+                or error.startswith(objective_projection_prefix)
+                or action_projection_error(error)
+            )
         ]
         blocking = [error for error in errors if error not in recoverable]
         return recoverable, blocking
@@ -531,7 +855,8 @@ class ProjectionReplay:
                    JOIN events event ON event.event_id=revocation.event_id"""
             ).fetchall()
         }
-        selection_event_cache: dict[str, sqlite3.Row] = {}
+        selection_event_index = _index_question_selected_events(connection)
+        selection_event_cache: dict[str, _SelectionBoundary] = {}
         invalidation_events: dict[str, list[sqlite3.Row]] = {}
         for invalidation in connection.execute(
             """SELECT * FROM events
@@ -597,37 +922,14 @@ class ProjectionReplay:
                 raise ValidationError(f"{label} does not match its decision envelope.")
             if metadata["corpus_release_id"] != decision["corpus_release_id"]:
                 raise ValidationError(f"{label} has a corpus-release mismatch.")
-            selected_event = selection_event_cache.get(decision_id)
-            if selected_event is None:
-                matching_selections: list[sqlite3.Row] = []
-                for candidate in connection.execute(
-                    """SELECT * FROM events
-                       WHERE event_type='QuestionSelected'
-                         AND stream_id=? AND session_id=?
-                       ORDER BY stream_version""",
-                    (event["stream_id"], decision["session_id"]),
-                ).fetchall():
-                    candidate_payload = _strict_object(
-                        candidate["payload_json"],
-                        f"QuestionSelected event {candidate['event_id']} payload",
-                    )
-                    if candidate_payload.get("decision_id") == decision_id:
-                        matching_selections.append(candidate)
-                if len(matching_selections) != 1:
-                    raise ValidationError(
-                        f"{label} has no unique QuestionSelected event anchor."
-                    )
-                selected_event = matching_selections[0]
-                selection_event_cache[decision_id] = selected_event
-            if (
-                selected_event["schema_version"] != 1
-                or selected_event["learner_id"] != event["learner_id"]
-                or selected_event["session_id"] != event["session_id"]
-                or selected_event["stream_version"] >= event["stream_version"]
-            ):
-                raise ValidationError(
-                    f"{label} does not follow its QuestionSelected event anchor."
-                )
+            selection_boundary = _validate_question_selected_event(
+                decision=decision,
+                follower=event,
+                label=label,
+                index=selection_event_index,
+                cache=selection_event_cache,
+            )
+            selected_event = selection_boundary.event
             decision_invalidations = invalidation_events.get(decision_id, [])
             if decision["invalidated_at"] is not None:
                 if len(decision_invalidations) != 1:
@@ -1012,11 +1314,15 @@ class ProjectionReplay:
         response: sqlite3.Row,
         projection: sqlite3.Row,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
-        if response["schema_version"] != RESPONSE_EVENT_SCHEMA_VERSION:
+        if response["schema_version"] not in RESPONSE_EVENT_SCHEMA_VERSIONS:
+            supported = ", ".join(
+                str(version)
+                for version in sorted(RESPONSE_EVENT_SCHEMA_VERSIONS)
+            )
             raise ValidationError(
                 f"Event {response['event_id']} uses unsupported schema version "
-                f"{response['schema_version']}; replay supports exactly version "
-                f"{RESPONSE_EVENT_SCHEMA_VERSION} for ResponseSubmitted."
+                f"{response['schema_version']}; replay supports versions "
+                f"{supported} for ResponseSubmitted."
             )
         if projection["schema_version"] not in PROJECTION_EVENT_SCHEMA_VERSIONS:
             supported = ", ".join(
@@ -1062,28 +1368,134 @@ class ProjectionReplay:
         )
         _require_exact_fields(
             response_metadata,
-            _RESPONSE_METADATA_FIELDS,
+            (
+                _RESPONSE_METADATA_FIELDS_WITH_MISCONCEPTION_ALGORITHM
+                if response["schema_version"]
+                == CURRENT_RESPONSE_EVENT_SCHEMA_VERSION
+                else _RESPONSE_METADATA_FIELDS
+            ),
             f"Response event {response['event_id']} metadata",
         )
         _require_exact_fields(
             projection_payload,
             (
-                _PROJECTION_FIELDS_V2
-                if projection["schema_version"] == 2
-                else _PROJECTION_FIELDS_V1
+                _PROJECTION_FIELDS_V4
+                if projection["schema_version"] == 4
+                else (
+                    _PROJECTION_FIELDS_V3
+                    if projection["schema_version"] == 3
+                    else (
+                        _PROJECTION_FIELDS_V2
+                        if projection["schema_version"] == 2
+                        else _PROJECTION_FIELDS_V1
+                    )
+                )
             ),
             f"Projection event {projection['event_id']} payload",
         )
         _require_exact_fields(
             projection_metadata,
-            _PROJECTION_METADATA_FIELDS,
+            (
+                _PROJECTION_METADATA_FIELDS_WITH_MISCONCEPTION_ALGORITHM
+                if response["schema_version"]
+                == CURRENT_RESPONSE_EVENT_SCHEMA_VERSION
+                else _PROJECTION_METADATA_FIELDS
+            ),
             f"Projection event {projection['event_id']} metadata",
         )
-        if projection_payload["response_event_id"] != response["event_id"]:
+        response_misconception_algorithm = response_metadata.get(
+            MISCONCEPTION_ALGORITHM_METADATA_KEY
+        )
+        projection_misconception_algorithm = projection_metadata.get(
+            MISCONCEPTION_ALGORITHM_METADATA_KEY
+        )
+        if (
+            response_misconception_algorithm
+            != projection_misconception_algorithm
+        ):
+            raise ValidationError(
+                f"Response {response['event_id']} and projection "
+                f"{projection['event_id']} name different misconception "
+                "algorithms."
+            )
+        if (
+            response["schema_version"]
+            == CURRENT_RESPONSE_EVENT_SCHEMA_VERSION
+            and response_misconception_algorithm
+            != MISCONCEPTION_ALGORITHM_VERSION
+        ):
+            raise ValidationError(
+                f"Response event {response['event_id']} uses unsupported "
+                "misconception algorithm "
+                f"{response_misconception_algorithm!r}."
+            )
+        if (
+            type(projection_payload["response_event_id"]) is not str
+            or projection_payload["response_event_id"]
+            != response["event_id"]
+        ):
             raise ValidationError(
                 f"Projection event {projection['event_id']} names a different response."
             )
-        if projection["schema_version"] == 2:
+        try:
+            SessionPhase(projection_payload["phase"])
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"Projection event {projection['event_id']} has an invalid phase."
+            ) from exc
+        remediation_depth = _require_int(
+            projection_payload["remediation_depth"],
+            f"Projection event {projection['event_id']} remediation depth",
+        )
+        if remediation_depth > MAX_REMEDIATION_DEPTH:
+            raise ValidationError(
+                f"Projection event {projection['event_id']} remediation depth "
+                f"must be at most {MAX_REMEDIATION_DEPTH}."
+            )
+        remediation_path = projection_payload["remediation_path"]
+        if type(remediation_path) is not list or len(
+            remediation_path
+        ) > MAX_REMEDIATION_DEPTH:
+            raise ValidationError(
+                f"Projection event {projection['event_id']} has an invalid "
+                "remediation path."
+            )
+        for frame_index, frame in enumerate(remediation_path):
+            frame_label = (
+                f"Projection event {projection['event_id']} remediation path "
+                f"frame {frame_index}"
+            )
+            if type(frame) is not dict:
+                raise ValidationError(f"{frame_label} must be an object.")
+            expected_frame_fields = {
+                "concept_id",
+                "misconception_id",
+            }
+            if "objective_id" in frame:
+                expected_frame_fields.add("objective_id")
+            _require_exact_fields(frame, expected_frame_fields, frame_label)
+            _require_nonblank_string(
+                frame["concept_id"], f"{frame_label} concept_id"
+            )
+            for field in ("misconception_id", "objective_id"):
+                if field in frame and frame[field] is not None:
+                    _require_nonblank_string(
+                        frame[field], f"{frame_label} {field}"
+                    )
+        state_changes = projection_payload["state_changes"]
+        if type(state_changes) is not list or any(
+            type(change) is not dict for change in state_changes
+        ):
+            raise ValidationError(
+                f"Projection event {projection['event_id']} state changes must "
+                "be an array of objects."
+            )
+        _require_int(
+            projection_payload["learner_revision"],
+            f"Projection event {projection['event_id']} learner revision",
+            minimum=1,
+        )
+        if projection["schema_version"] >= 2:
             reason = projection_payload["transition_reason"]
             if type(reason) is not str or not reason.strip():
                 raise ValidationError(
@@ -1094,6 +1506,26 @@ class ProjectionReplay:
                 projection_payload["boundary_decision"],
                 f"Projection event {projection['event_id']} boundary decision",
             )
+        if projection["schema_version"] >= 3:
+            required_hash_version = (
+                3 if projection["schema_version"] == 4 else 2
+            )
+            if (
+                projection_payload["projection_hash_version"]
+                != required_hash_version
+            ):
+                raise ValidationError(
+                    f"Projection event {projection['event_id']} must use "
+                    f"projection hash version {required_hash_version}."
+                )
+            for field in ("question_objective_id", "focus_objective_id"):
+                value = projection_payload[field]
+                if value is not None and (
+                    type(value) is not str or not value.strip()
+                ):
+                    raise ValidationError(
+                        f"Projection event {projection['event_id']} has an invalid {field}."
+                    )
         pair_model_versions: set[str] = set()
         for label, metadata in (
             (f"Response event {response['event_id']}", response_metadata),
@@ -1111,6 +1543,21 @@ class ProjectionReplay:
                 f"Response {response['event_id']} and projection "
                 f"{projection['event_id']} name different learner models."
             )
+        pair_model_version = next(iter(pair_model_versions))
+        required_model_versions = (
+            PROJECTION_MODEL_VERSIONS_BY_EVENT_SCHEMA.get(
+                projection["schema_version"]
+            )
+        )
+        if (
+            required_model_versions is not None
+            and pair_model_version not in required_model_versions
+        ):
+            raise ValidationError(
+                f"Projection event {projection['event_id']} schema "
+                f"{projection['schema_version']} requires learner model "
+                f"in {sorted(required_model_versions)!r}."
+            )
         return (
             response_payload,
             response_metadata,
@@ -1124,6 +1571,7 @@ class ProjectionReplay:
         checkpoints: list[dict[str, Any]] = []
         replay_errors: list[str] = []
         family_attempts: dict[str, int] = {}
+        explicit_misconception_algorithm_seen = False
         with work_database.transaction() as connection:
             learner = connection.execute(
                 "SELECT * FROM learners WHERE id=?", (learner_id,)
@@ -1131,12 +1579,25 @@ class ProjectionReplay:
             if learner is None:
                 raise NotFoundError(f"Unknown learner: {learner_id}")
             pairs = self._pair_events(connection, learner_id)
+            selection_event_index = _index_question_selected_events(connection)
+            selection_event_cache: dict[str, _SelectionBoundary] = {}
             connection.execute("DELETE FROM skill_states WHERE learner_id=?", (learner_id,))
+            connection.execute(
+                "DELETE FROM objective_grid_states WHERE learner_id=?",
+                (learner_id,),
+            )
+            connection.execute(
+                "DELETE FROM objective_states WHERE learner_id=?", (learner_id,)
+            )
             connection.execute(
                 "DELETE FROM misconception_beliefs WHERE learner_id=?", (learner_id,)
             )
             connection.execute(
                 "DELETE FROM learner_skill_families WHERE learner_id=?", (learner_id,)
+            )
+            connection.execute(
+                "DELETE FROM learner_objective_families WHERE learner_id=?",
+                (learner_id,),
             )
             connection.execute(
                 "UPDATE learners SET revision=0 WHERE id=?", (learner_id,)
@@ -1151,6 +1612,19 @@ class ProjectionReplay:
                 ) = self._validate_pair_envelope(
                     learner_id, response, projection
                 )
+                misconception_algorithm = response_metadata.get(
+                    MISCONCEPTION_ALGORITHM_METADATA_KEY
+                )
+                if misconception_algorithm is None:
+                    if explicit_misconception_algorithm_seen:
+                        raise ValidationError(
+                            f"Response event {response['event_id']} omits the "
+                            "misconception algorithm after an explicitly "
+                            "versioned response."
+                        )
+                    misconception_algorithm = LEGACY_MISCONCEPTION_ALGORITHM
+                else:
+                    explicit_misconception_algorithm_seen = True
                 label = f"Response event {response['event_id']}"
                 decision_id = response_payload["decision_id"]
                 if type(decision_id) is not str or response["causation_id"] != decision_id:
@@ -1171,14 +1645,107 @@ class ProjectionReplay:
                     raise ValidationError(f"{label} has inconsistent session projections.")
                 if attempt["decision_id"] != decision_id:
                     raise ValidationError(f"{label} attempt references a different decision.")
+                selection_boundary = _validate_question_selected_event(
+                    decision=decision,
+                    follower=response,
+                    label=label,
+                    index=selection_event_index,
+                    cache=selection_event_cache,
+                )
+                if (
+                    response_metadata["learner_model_version"]
+                    != selection_boundary.model_version
+                ):
+                    raise ValidationError(
+                        f"{label} learner model does not match its "
+                        "QuestionSelected event."
+                    )
                 question_id = response_payload["question_id"]
                 if type(question_id) is not str or not question_id:
                     raise ValidationError(f"{label} has an invalid question ID.")
                 if decision["question_id"] != question_id or attempt["question_id"] != question_id:
                     raise ValidationError(f"{label} has inconsistent question projections.")
-                question = work_database.get_question(question_id, connection)
+                release_id = decision["corpus_release_id"]
+                boundary = projection_payload.get("boundary_decision")
+                if isinstance(boundary, dict) and "focus_objective_id" in boundary:
+                    if boundary["focus_objective_id"] != decision["focus_objective_id"]:
+                        raise ValidationError(
+                            f"{label} objective boundary does not start at the "
+                            "decision focus."
+                        )
+                    if (
+                        boundary["selected_objective_id"]
+                        != projection_payload["focus_objective_id"]
+                    ):
+                        raise ValidationError(
+                            f"{label} objective boundary does not match the "
+                            "projected focus."
+                        )
+                    graph = connection.execute(
+                        """SELECT graph_version FROM release_objective_graphs
+                           WHERE release_id=?""",
+                        (release_id,),
+                    ).fetchone()
+                    if graph is None or graph["graph_version"] != 1:
+                        raise ValidationError(
+                            f"{label} objective boundary has no declared pinned graph."
+                        )
+                    for candidate in boundary["candidates"]:
+                        edge = connection.execute(
+                            """SELECT edge_id, source_objective_id,
+                                      target_objective_id, relation, weight,
+                                      rationale, objective.primary_concept_id
+                               FROM release_objective_edges edge
+                               JOIN learning_objectives objective
+                                 ON objective.id=edge.source_objective_id
+                               WHERE edge.release_id=? AND edge.edge_id=?""",
+                            (release_id, candidate["edge_id"]),
+                        ).fetchone()
+                        if edge is None or any(
+                            (
+                                edge["source_objective_id"]
+                                != candidate["objective_id"],
+                                edge["target_objective_id"]
+                                != boundary["focus_objective_id"],
+                                edge["relation"] != candidate["relation"],
+                                edge["weight"] != candidate["edge_weight"],
+                                edge["rationale"] != candidate["rationale"],
+                                edge["primary_concept_id"]
+                                != candidate["concept_id"],
+                            )
+                        ):
+                            raise ValidationError(
+                                f"{label} objective boundary edge snapshot mismatch."
+                            )
+                question = work_database.get_question(
+                    question_id,
+                    connection,
+                    release_id=release_id,
+                )
+                if question.objective_id != decision["question_objective_id"]:
+                    raise ValidationError(
+                        f"{label} learning-objective snapshot mismatch."
+                    )
+                if projection["schema_version"] >= 3:
+                    if (
+                        projection_payload["question_objective_id"]
+                        != question.objective_id
+                    ):
+                        raise ValidationError(
+                            f"{label} projection objective mismatch."
+                        )
+                elif question.objective_id is not None:
+                    raise ValidationError(
+                        f"{label} uses an objective-aware release with a legacy "
+                        "projection event schema."
+                    )
+                response_question_version = _require_int(
+                    response_payload["question_version"],
+                    f"{label} question_version",
+                    minimum=1,
+                )
                 if (
-                    response_payload["question_version"] != question.version
+                    response_question_version != question.version
                     or decision["question_version"] != question.version
                     or attempt["question_version"] != question.version
                 ):
@@ -1255,6 +1822,26 @@ class ProjectionReplay:
                     raise ValidationError(f"{label} has an invalid occurrence time.") from exc
                 if occurred_at.tzinfo is None or occurred_at.utcoffset() is None:
                     raise ValidationError(f"{label} occurrence time is timezone-naive.")
+                if (
+                    response_metadata["learner_model_version"]
+                    in AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS
+                ):
+                    try:
+                        authoritative_window = response_window(
+                            selected_at=selection_boundary.selected_at,
+                            answered_at=occurred_at,
+                            response_ms=response_ms,
+                        )
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValidationError(
+                            f"{label} has an invalid authoritative response "
+                            f"window: {exc}"
+                        ) from exc
+                    if not authoritative_window.consistent:
+                        raise ValidationError(
+                            f"{label} response_ms exceeds its authoritative "
+                            "selection-to-answer window."
+                        )
 
                 evidence_weight = _require_optional_number(
                     response_metadata["evidence_weight"], f"{label} evidence weight"
@@ -1266,7 +1853,6 @@ class ProjectionReplay:
                     or projection_metadata["evidence_weight"] != evidence_weight
                 ):
                     raise ValidationError(f"{label} evidence-weight snapshot mismatch.")
-                release_id = decision["corpus_release_id"]
                 if any(
                     value != release_id
                     for value in (
@@ -1286,6 +1872,85 @@ class ProjectionReplay:
                 ):
                     raise ValidationError(f"{label} learner revision sequence mismatch.")
 
+                attempt_outcome = (
+                    _strict_object(
+                        attempt["outcome_json"],
+                        f"Attempt {attempt['id']} outcome",
+                    )
+                    if attempt["outcome_json"] is not None
+                    else None
+                )
+                if (
+                    response_metadata["learner_model_version"]
+                    in COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS
+                    and attempt_outcome is None
+                ):
+                    raise ValidationError(
+                        f"{label} lacks its complete transition outcome."
+                    )
+                if attempt_outcome is not None:
+                    expected_projection_values = {
+                        "response_event_id": response["event_id"],
+                        "state_changes": attempt_outcome.get("state_changes"),
+                        "phase": attempt_outcome.get("next_phase"),
+                        "focus_concept_id": attempt_outcome.get(
+                            "focus_concept_id"
+                        ),
+                        "focus_misconception_id": attempt_outcome.get(
+                            "focus_misconception_id"
+                        ),
+                        "corpus_release_id": release_id,
+                        "learner_revision": expected_revision,
+                    }
+                    if projection["schema_version"] >= 2:
+                        expected_projection_values.update(
+                            {
+                                "transition_reason": attempt_outcome.get(
+                                    "transition_reason"
+                                ),
+                                "boundary_decision": attempt_outcome.get(
+                                    "boundary_decision"
+                                ),
+                            }
+                        )
+                    if projection["schema_version"] >= 3:
+                        expected_projection_values.update(
+                            {
+                                "question_objective_id": decision[
+                                    "question_objective_id"
+                                ],
+                                "focus_objective_id": attempt_outcome.get(
+                                    "focus_objective_id"
+                                ),
+                            }
+                        )
+                    if (
+                        response_metadata["learner_model_version"]
+                        in COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS
+                    ):
+                        for field in (
+                            "remediation_depth",
+                            "remediation_path",
+                        ):
+                            if field not in attempt_outcome:
+                                raise ValidationError(
+                                    f"{label} complete transition outcome is "
+                                    f"missing {field}."
+                                )
+                            expected_projection_values[field] = (
+                                attempt_outcome[field]
+                            )
+                    for field, expected_value in (
+                        expected_projection_values.items()
+                    ):
+                        if not same_json_value(
+                            projection_payload.get(field), expected_value
+                        ):
+                            raise ValidationError(
+                                f"{label} projection {field} does not match "
+                                "its finalized attempt outcome."
+                            )
+
                 prior_family_attempts = family_attempts.get(question.family_id, 0)
                 event_model = LearnerModel(
                     response_metadata["learner_model_version"]
@@ -1303,14 +1968,22 @@ class ProjectionReplay:
                     now=occurred_at,
                     response_ms=response_ms,
                     prior_family_attempts_override=prior_family_attempts,
+                    misconception_algorithm=misconception_algorithm,
                 )
                 family_attempts[question.family_id] = prior_family_attempts + 1
                 connection.execute(
                     "UPDATE learners SET revision=? WHERE id=?",
                     (expected_revision, learner_id),
                 )
+                hash_version = (
+                    projection_payload["projection_hash_version"]
+                    if projection["schema_version"] >= 3
+                    else 1
+                )
                 actual_hash = work_database.learner_projection_hash(
-                    learner_id, connection
+                    learner_id,
+                    connection,
+                    hash_version=hash_version,
                 )
                 expected_hash = _require_sha256(
                     projection_payload["projection_hash"],
@@ -1341,13 +2014,31 @@ class ProjectionReplay:
                     }
                 )
 
+            final_hash_version = (
+                _strict_object(
+                    pairs[-1][1]["payload_json"],
+                    f"Projection event {pairs[-1][1]['event_id']} payload",
+                )["projection_hash_version"]
+                if pairs and pairs[-1][1]["schema_version"] >= 3
+                else 1
+            )
             reconstructed_hash = work_database.learner_projection_hash(
-                learner_id, connection
+                learner_id,
+                connection,
+                hash_version=final_hash_version,
             )
         return {
             "checkpoints": checkpoints,
             "replay_errors": replay_errors,
             "reconstructed_projection_hash": reconstructed_hash,
+            "learner_model_version": (
+                _strict_object(
+                    pairs[-1][0]["metadata_json"],
+                    f"Response event {pairs[-1][0]['event_id']} metadata",
+                )["learner_model_version"]
+                if pairs
+                else DEFAULT_LEARNER_MODEL_VERSION
+            ),
         }
 
     def _run_on_copy(self, copy_path: Path, learner_id: str) -> dict[str, Any]:
@@ -1359,12 +2050,30 @@ class ProjectionReplay:
                 "SELECT 1 FROM learners WHERE id=?", (learner_id,)
             ).fetchone():
                 raise NotFoundError(f"Unknown learner: {learner_id}")
-            source_projection_hash = work_database.learner_projection_hash(
-                learner_id, connection
-            )
-            committed_projection_hash = self._projection_commitment(
+            (
+                committed_projection_hash,
+                committed_hash_version,
+            ) = self._projection_commitment(
                 connection, learner_id
             )
+            source_projection_hash_error: str | None = None
+            try:
+                source_projection_hash = work_database.learner_projection_hash(
+                    learner_id,
+                    connection,
+                    hash_version=committed_hash_version,
+                )
+            except (
+                ValidationError,
+                sqlite3.DatabaseError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                # A damaged mutable projection is precisely what replay can
+                # diagnose and repair from immutable events.  Preserve the
+                # failure in the report while allowing reconstruction to run.
+                source_projection_hash = None
+                source_projection_hash_error = str(exc)
             source_action_snapshot = self._action_projection_snapshot(connection)
             source_action_projection_hash = _projection_digest(
                 source_action_snapshot
@@ -1389,6 +2098,11 @@ class ProjectionReplay:
         errors = [*blocking, *replay["replay_errors"]]
         if not source_matches:
             errors.append("stored learner projection differs from deterministic replay")
+        if source_projection_hash_error is not None:
+            errors.append(
+                "stored learner projection cannot be hashed: "
+                + source_projection_hash_error
+            )
         if not commitment_matches:
             errors.append("latest projection commitment differs from deterministic replay")
         if not action_source_matches:
@@ -1408,11 +2122,12 @@ class ProjectionReplay:
         return {
             "format_version": REPLAY_FORMAT_VERSION,
             "learner_id": learner_id,
-            "learner_model_version": MODEL_VERSION,
+            "learner_model_version": replay["learner_model_version"],
             "source_schema_version": source_schema_version,
             "replay_schema_version": SCHEMA_VERSION,
             "response_count": len(replay["checkpoints"]),
             "source_projection_hash": source_projection_hash,
+            "source_projection_hash_error": source_projection_hash_error,
             "committed_projection_hash": committed_projection_hash,
             "reconstructed_projection_hash": replay[
                 "reconstructed_projection_hash"

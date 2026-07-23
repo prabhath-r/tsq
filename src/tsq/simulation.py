@@ -26,12 +26,20 @@ from typing import Any, Iterable, Mapping
 
 from .engine import AdaptiveEngine, MAX_REMEDIATION_DEPTH
 from .errors import ConflictError, ExhaustedError, ValidationError
+from .inference import ResponseClass, classify_response_for_model
 from .models import Option, Presentation, Question, SessionPhase, logit, sigmoid
 
 
 DEFAULT_SIMULATION_START = datetime(2100, 1, 1, 9, 0, tzinfo=timezone.utc)
 _MAIN_PHASES = frozenset(
     {SessionPhase.LEARN, SessionPhase.DIAGNOSE, SessionPhase.REVIEW}
+)
+SYNTHETIC_RESPONSE_MODELS = frozenset(
+    {
+        "four_parameter_logistic",
+        "discontinuous_threshold",
+        "ability_only",
+    }
 )
 
 
@@ -54,6 +62,20 @@ def _validate_probability(name: str, value: float) -> None:
         raise ValidationError(f"{name} must be a finite probability.")
     if not math.isfinite(value) or not 0.0 <= value <= 1.0:
         raise ValidationError(f"{name} must be between 0 and 1.")
+
+
+def evidence_anchor_concept_id(question: Question) -> str:
+    """Return the concept whose latent actually receives this response.
+
+    Objective-aware questions may deliberately use a broad or contrasting
+    surface primary concept.  Production scores those questions against the
+    release-pinned objective's canonical owner, while legacy questions retain
+    their authored primary concept.
+    """
+
+    if question.objective is not None:
+        return question.objective.primary_concept_id
+    return question.primary_concept_id
 
 
 @dataclass(slots=True)
@@ -89,7 +111,7 @@ class SyntheticAnswer:
     selected_option_id: str | None
     correct: bool
     ground_truth_probability: float
-    confidence: float
+    confidence: float | None
     response_ms: int
     hint_count: int
 
@@ -99,9 +121,13 @@ class SyntheticLearner:
     """Ground-truth response model, separate from the engine's inferred state.
 
     Abilities and misconception strengths use the intuitive ``[0, 1]`` scale.
-    Abilities are combined on a log-odds scale, then passed through the item's
-    difficulty, discrimination, guessing, and slipping parameters.  The profile
-    slip and guess probabilities model person-level lapses and lucky recovery.
+    Objective-aware items use one objective ability, falling back to that
+    objective's canonical owner concept; legacy items retain the weighted
+    concept behavior.  The default response model then applies item difficulty,
+    discrimination, guessing, and slipping.  Explicit misspecified generators
+    are available so evaluation is not circularly limited to the engine's own
+    smooth item-response assumptions.  Profile slip and guess probabilities
+    model person-level lapses and lucky recovery.
 
     All draws are keyed by the question and encounter number.  Adding logging or
     changing option display order therefore cannot silently perturb later answers.
@@ -109,10 +135,13 @@ class SyntheticLearner:
 
     name: str
     concept_abilities: Mapping[str, float] = field(default_factory=dict)
+    objective_abilities: Mapping[str, float] = field(default_factory=dict)
     misconception_strengths: Mapping[str, float] = field(default_factory=dict)
     default_ability: float = 0.50
+    default_objective_ability: float | None = None
     slip_probability: float = 0.04
     guess_probability: float = 0.02
+    response_model: str = "four_parameter_logistic"
     seed: int = 0
     base_response_ms: int = 4_000
     abstain_probability: float = 0.0
@@ -124,6 +153,10 @@ class SyntheticLearner:
         if not self.name.strip():
             raise ValidationError("A synthetic learner needs a non-empty name.")
         _validate_probability("default_ability", self.default_ability)
+        if self.default_objective_ability is not None:
+            _validate_probability(
+                "default_objective_ability", self.default_objective_ability
+            )
         _validate_probability("slip_probability", self.slip_probability)
         _validate_probability("guess_probability", self.guess_probability)
         _validate_probability("abstain_probability", self.abstain_probability)
@@ -131,6 +164,12 @@ class SyntheticLearner:
             if not isinstance(concept_id, str) or not concept_id:
                 raise ValidationError("Synthetic ability keys must be concept IDs.")
             _validate_probability(f"ability[{concept_id}]", value)
+        for objective_id, value in self.objective_abilities.items():
+            if not isinstance(objective_id, str) or not objective_id:
+                raise ValidationError(
+                    "Synthetic objective ability keys must be objective IDs."
+                )
+            _validate_probability(f"objective_ability[{objective_id}]", value)
         for misconception_id, value in self.misconception_strengths.items():
             if not isinstance(misconception_id, str) or not misconception_id:
                 raise ValidationError(
@@ -151,6 +190,12 @@ class SyntheticLearner:
             raise ValidationError("forced_correctness must be true, false, or null.")
         if type(self.hint_count) is not int or self.hint_count < 0:
             raise ValidationError("hint_count must be a non-negative integer.")
+        if self.response_model not in SYNTHETIC_RESPONSE_MODELS:
+            supported = ", ".join(sorted(SYNTHETIC_RESPONSE_MODELS))
+            raise ValidationError(
+                f"Unknown synthetic response model {self.response_model!r}; "
+                f"expected one of: {supported}."
+            )
 
         # Detach the profile from caller-owned mutable dictionaries.  Sorted
         # insertion order also makes diagnostic serialization stable.
@@ -161,11 +206,26 @@ class SyntheticLearner:
         )
         object.__setattr__(
             self,
+            "objective_abilities",
+            MappingProxyType(dict(sorted(self.objective_abilities.items()))),
+        )
+        object.__setattr__(
+            self,
             "misconception_strengths",
             MappingProxyType(dict(sorted(self.misconception_strengths.items()))),
         )
 
-    def probability_correct(self, question: Question) -> float:
+    def _ability_for_question(self, question: Question) -> float:
+        if question.objective is not None:
+            objective_id = question.objective.id
+            if objective_id in self.objective_abilities:
+                return self.objective_abilities[objective_id]
+            if self.default_objective_ability is not None:
+                return self.default_objective_ability
+            return self.concept_abilities.get(
+                question.objective.primary_concept_id, self.default_ability
+            )
+
         scored_mappings = tuple(
             mapping
             for mapping in question.concepts
@@ -174,7 +234,7 @@ class SyntheticLearner:
         total_weight = sum(abs(mapping.weight) for mapping in scored_mappings)
         if total_weight <= 0:
             raise ValidationError(f"Question {question.id} has no positive skill weight.")
-        latent_ability = sum(
+        latent_log_odds = sum(
             abs(mapping.weight)
             * logit(
                 _clamp_probability(
@@ -183,12 +243,27 @@ class SyntheticLearner:
             )
             for mapping in scored_mappings
         ) / total_weight
-        item_success = sigmoid(
-            question.discrimination * (latent_ability - question.difficulty)
-        )
-        item_success = question.guess_rate + (
-            1.0 - question.guess_rate - question.slip_rate
-        ) * item_success
+        return sigmoid(latent_log_odds)
+
+    def probability_correct(self, question: Question) -> float:
+        ability = _clamp_probability(self._ability_for_question(question))
+        latent_ability = logit(ability)
+        if self.response_model == "four_parameter_logistic":
+            item_success = sigmoid(
+                question.discrimination * (latent_ability - question.difficulty)
+            )
+            item_success = question.guess_rate + (
+                1.0 - question.guess_rate - question.slip_rate
+            ) * item_success
+        elif self.response_model == "discontinuous_threshold":
+            # Deliberately violates the engine's smooth item-response
+            # assumption.  It is useful for detecting an evaluator that merely
+            # confirms the same model it uses to generate answers.
+            item_success = 0.92 if latent_ability >= question.difficulty else 0.08
+        else:
+            # A difficulty-blind learner is another explicit misspecification:
+            # performance follows the latent ability but not authored item b/a.
+            item_success = ability
 
         relevant_misconceptions = [
             self.misconception_strengths.get(option.misconception_id, 0.0)
@@ -303,7 +378,11 @@ class SimulationStep:
     phase_after: SessionPhase
     question_id: str
     family_id: str
+    surface_primary_concept_id: str
+    evidence_anchor_concept_id: str
+    # Backwards-compatible alias for the authored surface primary.
     primary_concept_id: str
+    learning_objective_id: str | None
     question_kind: str
     pedagogical_role: str
     topic_ids: tuple[str, ...]
@@ -314,12 +393,14 @@ class SimulationStep:
     selected_option_id: str | None
     focus_concept_before: str | None
     focus_concept_after: str | None
+    focus_objective_before: str | None
+    focus_objective_after: str | None
     focus_misconception_before: str | None
     focus_misconception_after: str | None
     exact_repeat: bool
     family_repeat: bool
     response_ms: int
-    confidence: float
+    confidence: float | None
     hint_count: int
     selected_at: datetime
     answered_at: datetime
@@ -330,6 +411,7 @@ class SimulationGap:
     step_index: int
     phase: SessionPhase
     focus_concept_id: str | None
+    focus_objective_id: str | None
     focus_misconception_id: str | None
     category: str
     message: str
@@ -342,8 +424,10 @@ class FocusEpisode:
     trigger_question_id: str
     trigger_family_id: str
     initial_focus_concept_id: str | None
+    initial_focus_objective_id: str | None
     initial_focus_misconception_id: str | None
     focus_path: tuple[str, ...]
+    objective_focus_path: tuple[str, ...]
     question_ids: tuple[str, ...]
     family_ids: tuple[str, ...]
     outcome: str
@@ -360,12 +444,20 @@ class FocusEpisode:
 @dataclass(frozen=True, slots=True)
 class CoverageMetrics:
     scope_concepts: int
+    scope_objectives: int
     eligible_concepts: int
+    eligible_objectives: int
     eligible_questions: int
     eligible_families: int
+    eligible_evidence_families: int
+    eligible_objective_families: int
     observed_concepts: tuple[str, ...]
+    observed_surface_concepts: tuple[str, ...]
+    observed_objectives: tuple[str, ...]
     observed_questions: tuple[str, ...]
     observed_families: tuple[str, ...]
+    observed_evidence_families: tuple[str, ...]
+    observed_objective_families: tuple[str, ...]
 
     @property
     def concept_fraction(self) -> float:
@@ -379,10 +471,27 @@ class CoverageMetrics:
     def family_fraction(self) -> float:
         return len(self.observed_families) / max(1, self.eligible_families)
 
+    @property
+    def evidence_family_fraction(self) -> float:
+        return len(self.observed_evidence_families) / max(
+            1, self.eligible_evidence_families
+        )
+
+    @property
+    def objective_fraction(self) -> float:
+        return len(self.observed_objectives) / max(1, self.eligible_objectives)
+
+    @property
+    def objective_family_fraction(self) -> float:
+        return len(self.observed_objective_families) / max(
+            1, self.eligible_objective_families
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class SimulationReport:
     profile_name: str
+    generator_model: str
     learner_id: str
     root_concept_id: str
     mode: str
@@ -401,6 +510,7 @@ class SimulationReport:
     family_repeat_count: int
     remediation_exact_repeat_count: int
     remediation_family_repeat_count: int
+    idempotent_retries_verified: int = 0
 
     @property
     def attempted(self) -> int:
@@ -423,6 +533,7 @@ class SimulationReport:
 
         payload = {
             "profile": self.profile_name,
+            "generator_model": self.generator_model,
             "root": self.root_concept_id,
             "mode": self.mode,
             "policy_seed": self.policy_seed,
@@ -434,6 +545,13 @@ class SimulationReport:
                     "phase_after": step.phase_after.value,
                     "question_id": step.question_id,
                     "family_id": step.family_id,
+                    "surface_primary_concept_id": (
+                        step.surface_primary_concept_id
+                    ),
+                    "evidence_anchor_concept_id": (
+                        step.evidence_anchor_concept_id
+                    ),
+                    "learning_objective_id": step.learning_objective_id,
                     "pedagogical_role": step.pedagogical_role,
                     "topic_ids": step.topic_ids,
                     "continuity": round(step.continuity, 12),
@@ -443,14 +561,20 @@ class SimulationReport:
                     ),
                     "actual_correct": step.actual_correct,
                     "selected_option_id": step.selected_option_id,
-                    "confidence": round(step.confidence, 12),
+                    "confidence": (
+                        round(step.confidence, 12)
+                        if step.confidence is not None
+                        else None
+                    ),
                     "hint_count": step.hint_count,
                     "focus_before": [
                         step.focus_concept_before,
+                        step.focus_objective_before,
                         step.focus_misconception_before,
                     ],
                     "focus_after": [
                         step.focus_concept_after,
+                        step.focus_objective_after,
                         step.focus_misconception_after,
                     ],
                     "selected_at": step.selected_at.isoformat(),
@@ -462,7 +586,11 @@ class SimulationReport:
                 {
                     "step": gap.step_index,
                     "phase": gap.phase.value,
-                    "focus": [gap.focus_concept_id, gap.focus_misconception_id],
+                    "focus": [
+                        gap.focus_concept_id,
+                        gap.focus_objective_id,
+                        gap.focus_misconception_id,
+                    ],
                     "category": gap.category,
                     "message": gap.message,
                 }
@@ -477,6 +605,7 @@ class SimulationReport:
                         episode.trigger_family_id,
                     ],
                     "focus_path": episode.focus_path,
+                    "objective_focus_path": episode.objective_focus_path,
                     "questions": episode.question_ids,
                     "families": episode.family_ids,
                     "outcome": episode.outcome,
@@ -494,6 +623,7 @@ class SimulationReport:
 
         return {
             "profile": self.profile_name,
+            "generator_model": self.generator_model,
             "learner_id": self.learner_id,
             "root_concept_id": self.root_concept_id,
             "mode": self.mode,
@@ -503,15 +633,46 @@ class SimulationReport:
             "accuracy": self.accuracy,
             "coverage": {
                 "scope_concepts": self.coverage.scope_concepts,
+                "scope_objectives": self.coverage.scope_objectives,
                 "eligible_concepts": self.coverage.eligible_concepts,
+                "eligible_objectives": self.coverage.eligible_objectives,
                 "eligible_questions": self.coverage.eligible_questions,
                 "eligible_families": self.coverage.eligible_families,
+                "eligible_evidence_families": (
+                    self.coverage.eligible_evidence_families
+                ),
+                "eligible_objective_families": (
+                    self.coverage.eligible_objective_families
+                ),
                 "observed_concepts": len(self.coverage.observed_concepts),
+                "observed_surface_concepts": len(
+                    self.coverage.observed_surface_concepts
+                ),
+                "observed_objectives": len(self.coverage.observed_objectives),
                 "observed_questions": len(self.coverage.observed_questions),
                 "observed_families": len(self.coverage.observed_families),
+                "observed_evidence_families": len(
+                    self.coverage.observed_evidence_families
+                ),
+                "observed_objective_families": len(
+                    self.coverage.observed_objective_families
+                ),
                 "concept_fraction": self.coverage.concept_fraction,
                 "question_fraction": self.coverage.question_fraction,
                 "family_fraction": self.coverage.family_fraction,
+                "evidence_family_fraction": (
+                    self.coverage.evidence_family_fraction
+                ),
+                "objective_fraction": self.coverage.objective_fraction,
+                "objective_family_fraction": (
+                    self.coverage.objective_family_fraction
+                ),
+                "denominator_contract": (
+                    "Questions are in scope by the objective's canonical owner "
+                    "when objective-aware, otherwise by the authored primary. "
+                    "Evidence-family counts use objective/family or legacy "
+                    "concept/family pairs."
+                ),
             },
             "focus_episodes": len(self.focus_episodes),
             "focus_outcomes": dict(
@@ -528,7 +689,11 @@ class SimulationReport:
                     step.selected_option_id is None for step in self.steps
                 ),
                 "low_confidence": sum(
-                    step.confidence < 0.50 for step in self.steps
+                    step.confidence is not None and step.confidence < 0.50
+                    for step in self.steps
+                ),
+                "missing_confidence": sum(
+                    step.confidence is None for step in self.steps
                 ),
                 "fast_under_250ms": sum(
                     step.response_ms < 250 for step in self.steps
@@ -551,17 +716,23 @@ class SimulationReport:
             },
             "phase_counts": dict(self.phase_counts),
             "phase_transitions": dict(self.phase_transitions),
+            "idempotent_retries_verified": self.idempotent_retries_verified,
             "calibration": {
                 "count": self.calibration.count,
                 "brier_score": self.calibration.brier_score,
                 "log_loss": self.calibration.log_loss,
                 "expected_calibration_error": self.calibration.expected_calibration_error,
+                "interpretation": (
+                    "Predictive fit against a declared synthetic generator; "
+                    "this is not empirical human calibration."
+                ),
             },
             "blockers": [
                 {
                     "step": gap.step_index,
                     "phase": gap.phase.value,
                     "focus_concept_id": gap.focus_concept_id,
+                    "focus_objective_id": gap.focus_objective_id,
                     "focus_misconception_id": gap.focus_misconception_id,
                     "category": gap.category,
                     "message": gap.message,
@@ -614,8 +785,10 @@ class _EpisodeBuilder:
     trigger_question_id: str
     trigger_family_id: str
     initial_focus_concept_id: str | None
+    initial_focus_objective_id: str | None
     initial_focus_misconception_id: str | None
     focus_path: list[str] = field(default_factory=list)
+    objective_focus_path: list[str] = field(default_factory=list)
     question_ids: list[str] = field(default_factory=list)
     family_ids: list[str] = field(default_factory=list)
     exact_repeat_count: int = 0
@@ -627,11 +800,17 @@ class _EpisodeBuilder:
         question_id: str,
         family_id: str,
         focus_concept_id: str | None,
+        focus_objective_id: str | None,
     ) -> None:
         if focus_concept_id and (
             not self.focus_path or self.focus_path[-1] != focus_concept_id
         ):
             self.focus_path.append(focus_concept_id)
+        if focus_objective_id and (
+            not self.objective_focus_path
+            or self.objective_focus_path[-1] != focus_objective_id
+        ):
+            self.objective_focus_path.append(focus_objective_id)
         if question_id == self.trigger_question_id or question_id in self.question_ids:
             self.exact_repeat_count += 1
         if family_id == self.trigger_family_id or family_id in self.family_ids:
@@ -646,8 +825,10 @@ class _EpisodeBuilder:
             trigger_question_id=self.trigger_question_id,
             trigger_family_id=self.trigger_family_id,
             initial_focus_concept_id=self.initial_focus_concept_id,
+            initial_focus_objective_id=self.initial_focus_objective_id,
             initial_focus_misconception_id=self.initial_focus_misconception_id,
             focus_path=tuple(self.focus_path),
+            objective_focus_path=tuple(self.objective_focus_path),
             question_ids=tuple(self.question_ids),
             family_ids=tuple(self.family_ids),
             outcome=outcome,
@@ -656,11 +837,77 @@ class _EpisodeBuilder:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class _CoverageDenominator:
+    scope_concepts: int
+    scope_objectives: int
+    eligible_concepts: int
+    eligible_objectives: int
+    eligible_questions: int
+    eligible_families: int
+    eligible_evidence_families: int
+    eligible_objective_families: int
+
+
 class BehavioralSimulator:
     """Drive real adaptive sessions and retain behaviorally relevant traces."""
 
     def __init__(self, engine: AdaptiveEngine):
         self.engine = engine
+
+    def _immutable_response_class(self, interaction_id: str) -> ResponseClass:
+        """Classify one durable answer under its event-declared model contract."""
+
+        with self.engine.database.read() as connection:
+            row = connection.execute(
+                """SELECT attempt.is_correct, attempt.selected_option_id,
+                          attempt.confidence, attempt.response_ms,
+                          attempt.hint_count, event.event_type,
+                          event.metadata_json,
+                          selected_option.misconception_id
+                              AS selected_misconception_id
+                   FROM attempts attempt
+                   JOIN events event ON event.event_id = attempt.event_id
+                   LEFT JOIN options selected_option
+                     ON selected_option.question_id = attempt.question_id
+                    AND selected_option.option_id =
+                        attempt.selected_option_id
+                   WHERE attempt.id = ?""",
+                (interaction_id,),
+            ).fetchone()
+        if row is None or row["event_type"] != "ResponseSubmitted":
+            raise ConflictError(
+                "A simulated answer is missing its immutable response event."
+            )
+        try:
+            metadata = json.loads(row["metadata_json"])
+        except (TypeError, ValueError) as exc:
+            raise ConflictError(
+                "A simulated answer has invalid immutable response metadata."
+            ) from exc
+        if type(metadata) is not dict:
+            raise ConflictError(
+                "A simulated answer has invalid immutable response metadata."
+            )
+        return classify_response_for_model(
+            model_version=metadata.get("learner_model_version"),
+            correct=bool(row["is_correct"]),
+            selected_option_id=row["selected_option_id"],
+            selected_misconception_id=row[
+                "selected_misconception_id"
+            ],
+            confidence=(
+                float(row["confidence"])
+                if row["confidence"] is not None
+                else None
+            ),
+            response_ms=(
+                int(row["response_ms"])
+                if row["response_ms"] is not None
+                else None
+            ),
+            hint_count=int(row["hint_count"]),
+        )
 
     def run(
         self,
@@ -675,6 +922,7 @@ class BehavioralSimulator:
         inter_item_delay: timedelta = timedelta(minutes=5),
         trial_index: int = 0,
         require_fresh_learner: bool = True,
+        verify_idempotency: bool = False,
     ) -> SimulationReport:
         if not learner_id:
             raise ValidationError("learner_id cannot be empty.")
@@ -684,6 +932,8 @@ class BehavioralSimulator:
             raise ValidationError("max_steps must be a positive integer.")
         if inter_item_delay.total_seconds() < 0:
             raise ValidationError("inter_item_delay cannot be negative.")
+        if type(verify_idempotency) is not bool:
+            raise ValidationError("verify_idempotency must be true or false.")
 
         self.engine.create_learner(learner_id, f"simulation:{profile.name}")
         if require_fresh_learner:
@@ -705,6 +955,7 @@ class BehavioralSimulator:
             root_concept_id,
             mode=mode,
             seed=policy_seed,
+            now=clock.current,
         )
         coverage_denominator = self._coverage_denominator(session)
 
@@ -717,6 +968,7 @@ class BehavioralSimulator:
         seen_families: set[str] = set()
         phase_counts: Counter[str] = Counter()
         transitions: Counter[str] = Counter()
+        idempotent_retries_verified = 0
 
         for step_index in range(max_steps):
             current_session = self.engine.database.get_session(session["id"])
@@ -732,6 +984,9 @@ class BehavioralSimulator:
                         step_index=step_index,
                         phase=phase,
                         focus_concept_id=current_session["focus_concept_id"],
+                        focus_objective_id=current_session[
+                            "focus_objective_id"
+                        ],
                         focus_misconception_id=current_session[
                             "focus_misconception_id"
                         ],
@@ -760,10 +1015,17 @@ class BehavioralSimulator:
             )
             phase_before = presentation.phase
             focus_concept_before = current_session["focus_concept_id"]
+            focus_objective_before = current_session[
+                "focus_objective_id"
+            ]
             focus_misconception_before = current_session["focus_misconception_id"]
             selected_at = clock.current
             clock.advance(timedelta(milliseconds=answer.response_ms))
 
+            idempotency_key = (
+                f"simulation-answer:{learner_id}:{policy_seed}:"
+                f"{trial_index}:{step_index}"
+            )
             result = self.engine.submit_answer(
                 presentation.decision_id,
                 answer.selected_option_id,
@@ -771,17 +1033,77 @@ class BehavioralSimulator:
                 response_ms=answer.response_ms,
                 hint_count=answer.hint_count,
                 feedback_shown=True,
-                idempotency_key=(
-                    f"simulation-answer:{learner_id}:{policy_seed}:"
-                    f"{trial_index}:{step_index}"
-                ),
+                idempotency_key=idempotency_key,
                 now=clock.current,
             )
+            if verify_idempotency:
+                with self.engine.database.read() as connection:
+                    before_retry = {
+                        "events": connection.execute(
+                            "SELECT COUNT(*) AS n FROM events WHERE learner_id = ?",
+                            (learner_id,),
+                        ).fetchone()["n"],
+                        "attempts": connection.execute(
+                            "SELECT COUNT(*) AS n FROM attempts WHERE learner_id = ?",
+                            (learner_id,),
+                        ).fetchone()["n"],
+                        "revision": connection.execute(
+                            "SELECT revision FROM learners WHERE id = ?",
+                            (learner_id,),
+                        ).fetchone()["revision"],
+                        "projection_hash": (
+                            self.engine.database.learner_projection_hash(
+                                learner_id, connection
+                            )
+                        ),
+                    }
+                retried = self.engine.submit_answer(
+                    presentation.decision_id,
+                    answer.selected_option_id,
+                    confidence=answer.confidence,
+                    response_ms=answer.response_ms,
+                    hint_count=answer.hint_count,
+                    feedback_shown=True,
+                    idempotency_key=idempotency_key,
+                    now=clock.current,
+                )
+                with self.engine.database.read() as connection:
+                    after_retry = {
+                        "events": connection.execute(
+                            "SELECT COUNT(*) AS n FROM events WHERE learner_id = ?",
+                            (learner_id,),
+                        ).fetchone()["n"],
+                        "attempts": connection.execute(
+                            "SELECT COUNT(*) AS n FROM attempts WHERE learner_id = ?",
+                            (learner_id,),
+                        ).fetchone()["n"],
+                        "revision": connection.execute(
+                            "SELECT revision FROM learners WHERE id = ?",
+                            (learner_id,),
+                        ).fetchone()["revision"],
+                        "projection_hash": (
+                            self.engine.database.learner_projection_hash(
+                                learner_id, connection
+                            )
+                        ),
+                    }
+                if (
+                    not retried.idempotent_replay
+                    or retried.interaction_id != result.interaction_id
+                    or after_retry != before_retry
+                ):
+                    raise ConflictError(
+                        "An idempotent simulation retry changed durable learner state."
+                    )
+                idempotent_retries_verified += 1
             if result.correct != answer.correct:
                 raise ConflictError(
                     "Synthetic outcome disagreed with the corpus answer key for "
                     f"{question.id}; the corpus or simulator is inconsistent."
                 )
+            response_class = self._immutable_response_class(
+                result.interaction_id
+            )
             answered_at = clock.current
 
             exact_repeat = question.id in seen_questions
@@ -798,12 +1120,14 @@ class BehavioralSimulator:
                         trigger_question_id="",
                         trigger_family_id="",
                         initial_focus_concept_id=focus_concept_before,
+                        initial_focus_objective_id=focus_objective_before,
                         initial_focus_misconception_id=focus_misconception_before,
                     )
                 active_episode.observe(
                     question_id=question.id,
                     family_id=question.family_id,
                     focus_concept_id=focus_concept_before,
+                    focus_objective_id=focus_objective_before,
                 )
 
             step = SimulationStep(
@@ -812,7 +1136,10 @@ class BehavioralSimulator:
                 phase_after=result.next_phase,
                 question_id=question.id,
                 family_id=question.family_id,
+                surface_primary_concept_id=question.primary_concept_id,
+                evidence_anchor_concept_id=evidence_anchor_concept_id(question),
                 primary_concept_id=question.primary_concept_id,
+                learning_objective_id=question.objective_id,
                 question_kind=question.kind.value,
                 pedagogical_role=presentation.pedagogical_role,
                 topic_ids=tuple(
@@ -828,6 +1155,8 @@ class BehavioralSimulator:
                 selected_option_id=answer.selected_option_id,
                 focus_concept_before=focus_concept_before,
                 focus_concept_after=result.focus_concept_id,
+                focus_objective_before=focus_objective_before,
+                focus_objective_after=result.focus_objective_id,
                 focus_misconception_before=focus_misconception_before,
                 focus_misconception_after=result.focus_misconception_id,
                 exact_repeat=exact_repeat,
@@ -849,9 +1178,15 @@ class BehavioralSimulator:
                     trigger_question_id=question.id,
                     trigger_family_id=question.family_id,
                     initial_focus_concept_id=result.focus_concept_id,
+                    initial_focus_objective_id=result.focus_objective_id,
                     initial_focus_misconception_id=result.focus_misconception_id,
                     focus_path=(
                         [result.focus_concept_id] if result.focus_concept_id else []
+                    ),
+                    objective_focus_path=(
+                        [result.focus_objective_id]
+                        if result.focus_objective_id
+                        else []
                     ),
                 )
             elif (
@@ -859,15 +1194,9 @@ class BehavioralSimulator:
                 and result.next_phase in _MAIN_PHASES
                 and active_episode is not None
             ):
-                credible_retrieval = (
-                    answer.hint_count == 0
-                    and answer.confidence >= 0.50
-                    and answer.response_ms >= 250
-                )
                 if (
                     phase_before == SessionPhase.VERIFY
-                    and result.correct
-                    and credible_retrieval
+                    and response_class.certifies_retrieval
                 ):
                     outcome = "resolved"
                 elif result.correct:
@@ -890,17 +1219,64 @@ class BehavioralSimulator:
             )
 
         calibration = calibration_metrics(steps)
+        observed_evidence_families = {
+            (
+                f"objective:{step.learning_objective_id}|family:{step.family_id}"
+                if step.learning_objective_id is not None
+                else (
+                    f"concept:{step.evidence_anchor_concept_id}|"
+                    f"family:{step.family_id}"
+                )
+            )
+            for step in steps
+        }
+        observed_objective_families = {
+            f"objective:{step.learning_objective_id}|family:{step.family_id}"
+            for step in steps
+            if step.learning_objective_id is not None
+        }
         coverage = CoverageMetrics(
-            scope_concepts=coverage_denominator[0],
-            eligible_concepts=coverage_denominator[1],
-            eligible_questions=coverage_denominator[2],
-            eligible_families=coverage_denominator[3],
-            observed_concepts=tuple(sorted({step.primary_concept_id for step in steps})),
+            scope_concepts=coverage_denominator.scope_concepts,
+            scope_objectives=coverage_denominator.scope_objectives,
+            eligible_concepts=coverage_denominator.eligible_concepts,
+            eligible_objectives=coverage_denominator.eligible_objectives,
+            eligible_questions=coverage_denominator.eligible_questions,
+            eligible_families=coverage_denominator.eligible_families,
+            eligible_evidence_families=(
+                coverage_denominator.eligible_evidence_families
+            ),
+            eligible_objective_families=(
+                coverage_denominator.eligible_objective_families
+            ),
+            observed_concepts=tuple(
+                sorted({step.evidence_anchor_concept_id for step in steps})
+            ),
+            observed_surface_concepts=tuple(
+                sorted({step.surface_primary_concept_id for step in steps})
+            ),
+            observed_objectives=tuple(
+                sorted(
+                    {
+                        step.learning_objective_id
+                        for step in steps
+                        if step.learning_objective_id is not None
+                    }
+                )
+            ),
             observed_questions=tuple(sorted({step.question_id for step in steps})),
             observed_families=tuple(sorted({step.family_id for step in steps})),
+            observed_evidence_families=tuple(sorted(observed_evidence_families)),
+            observed_objective_families=tuple(
+                sorted(observed_objective_families)
+            ),
         )
         return SimulationReport(
             profile_name=profile.name,
+            generator_model=getattr(
+                profile,
+                "response_model",
+                f"pattern:{getattr(profile, 'rule', 'custom')}",
+            ),
             learner_id=learner_id,
             root_concept_id=root_concept_id,
             mode=mode,
@@ -923,6 +1299,7 @@ class BehavioralSimulator:
             remediation_family_repeat_count=sum(
                 episode.family_repeat_count for episode in episodes
             ),
+            idempotent_retries_verified=idempotent_retries_verified,
         )
 
     def evaluate(
@@ -966,7 +1343,7 @@ class BehavioralSimulator:
 
     def _coverage_denominator(
         self, session: Mapping[str, Any]
-    ) -> tuple[int, int, int, int]:
+    ) -> _CoverageDenominator:
         graph = self.engine.database.get_graph(session["corpus_release_id"])
         scope = (
             self.engine.database.topic_scope(
@@ -975,28 +1352,73 @@ class BehavioralSimulator:
             if session.get("topic_id")
             else graph.learning_scope(session["root_concept_id"])
         )
+        release_id = session["corpus_release_id"]
+        objectives = self.engine.database.get_learning_objectives(release_id)
+        scope_objectives = {
+            objective.id
+            for objective in objectives
+            if objective.primary_concept_id in scope
+        }
         with self.engine.database.read() as connection:
-            connection.execute(
-                "CREATE TEMP TABLE simulation_scope(id TEXT PRIMARY KEY)"
+            rows = connection.execute(
+                """SELECT q.id AS question_id, q.family_id,
+                          surface.concept_id AS surface_concept_id,
+                          direct.objective_id,
+                          objective.primary_concept_id
+                              AS objective_owner_concept_id
+                   FROM release_questions membership
+                   JOIN questions q ON q.id = membership.question_id
+                   JOIN question_concepts surface
+                     ON surface.question_id = q.id AND surface.role = 'primary'
+                   LEFT JOIN release_question_objectives direct
+                     ON direct.release_id = membership.release_id
+                    AND direct.question_id = q.id
+                   LEFT JOIN learning_objectives objective
+                     ON objective.id = direct.objective_id
+                   WHERE membership.release_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                   ORDER BY q.id""",
+                (release_id,),
+            ).fetchall()
+
+        eligible = []
+        for row in rows:
+            anchor = (
+                row["objective_owner_concept_id"]
+                if row["objective_id"] is not None
+                else row["surface_concept_id"]
             )
-            connection.executemany(
-                "INSERT INTO simulation_scope(id) VALUES (?)",
-                ((concept_id,) for concept_id in sorted(scope)),
+            if anchor in scope:
+                eligible.append((row, anchor))
+        evidence_families = {
+            (
+                f"objective:{row['objective_id']}|family:{row['family_id']}"
+                if row["objective_id"] is not None
+                else f"concept:{anchor}|family:{row['family_id']}"
             )
-            row = connection.execute(
-                """SELECT COUNT(DISTINCT qc.concept_id) AS concepts,
-                          COUNT(DISTINCT q.id) AS questions,
-                          COUNT(DISTINCT q.family_id) AS families
-                   FROM release_questions rq
-                   JOIN questions q ON q.id = rq.question_id
-                   JOIN question_concepts qc ON qc.question_id = q.id
-                   JOIN simulation_scope scope ON scope.id = qc.concept_id
-                   WHERE rq.release_id = ?
-                     AND rq.status IN ('approved', 'calibrated')
-                     AND qc.role = 'primary'""",
-                (session["corpus_release_id"],),
-            ).fetchone()
-        return len(scope), row["concepts"], row["questions"], row["families"]
+            for row, anchor in eligible
+        }
+        objective_families = {
+            f"objective:{row['objective_id']}|family:{row['family_id']}"
+            for row, _anchor in eligible
+            if row["objective_id"] is not None
+        }
+        return _CoverageDenominator(
+            scope_concepts=len(scope),
+            scope_objectives=len(scope_objectives),
+            eligible_concepts=len({anchor for _row, anchor in eligible}),
+            eligible_objectives=len(
+                {
+                    row["objective_id"]
+                    for row, _anchor in eligible
+                    if row["objective_id"] is not None
+                }
+            ),
+            eligible_questions=len({row["question_id"] for row, _ in eligible}),
+            eligible_families=len({row["family_id"] for row, _ in eligible}),
+            eligible_evidence_families=len(evidence_families),
+            eligible_objective_families=len(objective_families),
+        )
 
 
 def calibration_metrics(

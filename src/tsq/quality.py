@@ -324,6 +324,129 @@ def audit_corpus(
                 minimum_primary_families=minimum_primary_families,
             )
         )
+    if any(question.objective_id is not None for question in items):
+        issues.extend(
+            _audit_objective_serviceability(
+                items,
+                minimum_families=minimum_primary_families,
+            )
+        )
+    return issues
+
+
+def _audit_objective_serviceability(
+    questions: list[Question],
+    *,
+    minimum_families: int,
+) -> list[QualityIssue]:
+    """Require every objective diagnosis to retain repair and transfer paths.
+
+    A question's correct option supplies direct evidence for its declared
+    objective.  Each distractor can diagnose a different objective, but a live
+    route is useful only when another family in that diagnostic objective
+    carries the same named misconception and a third family can verify transfer.
+    This mirrors the live policy's exact-objective constraints and prevents a
+    broad concept label from disguising a remediation dead end.
+    """
+
+    objective_questions = [
+        question for question in questions if question.objective_id is not None
+    ]
+    families_by_objective: dict[str, set[str]] = defaultdict(set)
+    verification_by_objective: dict[str, set[str]] = defaultdict(set)
+    repair_families: dict[tuple[str, str], set[str]] = defaultdict(set)
+    verification_by_objective_misconception: dict[
+        tuple[str, str], set[str]
+    ] = defaultdict(set)
+    for question in objective_questions:
+        objective_id = question.objective_id
+        assert objective_id is not None
+        families_by_objective[objective_id].add(question.family_id)
+        if question.kind in VERIFICATION_KINDS:
+            verification_by_objective[objective_id].add(question.family_id)
+        for option in question.options:
+            if option.correct or option.misconception_id is None:
+                continue
+            diagnostic_objective_id = (
+                option.diagnostic_objective_id or objective_id
+            )
+            # A focused repair must both assess the target objective and expose
+            # the named misconception in that same objective context.
+            if diagnostic_objective_id == objective_id:
+                repair_families[
+                    (objective_id, option.misconception_id)
+                ].add(question.family_id)
+                if question.kind in VERIFICATION_KINDS:
+                    verification_by_objective_misconception[
+                        (objective_id, option.misconception_id)
+                    ].add(question.family_id)
+
+    issues: list[QualityIssue] = []
+    for objective_id in sorted(families_by_objective):
+        family_count = len(families_by_objective[objective_id])
+        if family_count < minimum_families:
+            issues.append(
+                QualityIssue(
+                    "insufficient_objective_family_coverage",
+                    "warning",
+                    f"Learning objective {objective_id} has {family_count} "
+                    f"independent families; {minimum_families} are required.",
+                    path="questions[].learning_objective_id",
+                )
+            )
+
+    blocked_by_objective: dict[str, list[str]] = defaultdict(list)
+    for question in objective_questions:
+        trigger_family = question.family_id
+        direct_objective_id = question.objective_id
+        assert direct_objective_id is not None
+        direct_repairs = families_by_objective[direct_objective_id] - {
+            trigger_family
+        }
+        direct_verifications = verification_by_objective[
+            direct_objective_id
+        ] - {trigger_family}
+        if not any(
+            direct_verifications - {repair_family}
+            for repair_family in direct_repairs
+        ):
+            blocked_by_objective[direct_objective_id].append(
+                f"{question.id}(generic)"
+            )
+
+        for option in question.options:
+            if option.correct or option.misconception_id is None:
+                continue
+            diagnostic_objective_id = (
+                option.diagnostic_objective_id or direct_objective_id
+            )
+            repairs = repair_families[
+                (diagnostic_objective_id, option.misconception_id)
+            ] - {trigger_family}
+            verifications = verification_by_objective_misconception[
+                (diagnostic_objective_id, option.misconception_id)
+            ] - {trigger_family}
+            if not any(
+                verifications - {repair_family}
+                for repair_family in repairs
+            ):
+                blocked_by_objective[diagnostic_objective_id].append(
+                    f"{question.id}/{option.id}({option.misconception_id})"
+                )
+
+    for objective_id, blocked in sorted(blocked_by_objective.items()):
+        details = "; ".join(blocked[:6])
+        suffix = f" (+{len(blocked) - 6} more)" if len(blocked) > 6 else ""
+        issues.append(
+            QualityIssue(
+                "unserviceable_objective_path",
+                "warning",
+                f"Learning objective {objective_id} has diagnosis paths without "
+                f"a distinct same-misconception repair and verification family: "
+                f"{details}{suffix}",
+                path="questions[].options[].diagnostic_objective_id",
+            )
+        )
     return issues
 
 

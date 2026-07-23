@@ -22,7 +22,9 @@ from tsq.models import (
     Concept,
     ConceptEdge,
     ConceptWeight,
+    LearningObjective,
     Misconception,
+    ObjectiveOperation,
     Option,
     Question,
     QuestionKind,
@@ -79,6 +81,45 @@ def make_question(
     )
 
 
+def make_objective_question(
+    family_id: str,
+    primary_concept_id: str,
+    misconception_id: str,
+    objective: LearningObjective,
+    *,
+    diagnostic_objective_id: str | None = None,
+) -> Question:
+    return Question(
+        id=f"q_{family_id}",
+        version=1,
+        family_id=family_id,
+        status=QuestionStatus.APPROVED,
+        stem="A precise synthetic objective question for deterministic capacity analysis.",
+        kind=QuestionKind.TRANSFER,
+        difficulty=0.0,
+        discrimination=1.0,
+        guess_rate=0.25,
+        slip_rate=0.05,
+        concepts=(ConceptWeight(primary_concept_id, 1.0),),
+        options=(
+            Option("correct", "The supported conclusion.", True, "Correct."),
+            *(
+                Option(
+                    f"wrong_{index}",
+                    f"Named misconception response {index}.",
+                    False,
+                    "This response instantiates the named misconception.",
+                    misconception_id,
+                    diagnostic_objective_id or objective.id,
+                )
+                for index in range(1, 4)
+            ),
+        ),
+        source_ids=("source",),
+        objective=objective,
+    )
+
+
 def interchangeable_bank(
     concept_id: str, prefix: str, count: int
 ) -> tuple[list[Question], list[Misconception]]:
@@ -98,6 +139,130 @@ def interchangeable_bank(
 
 
 class SustainedCapacityTestCase(unittest.TestCase):
+    def test_objective_reserves_may_use_a_supporting_primary_concept(self) -> None:
+        root = Concept("root", "Root", "Description")
+        support = Concept("support", "Support", "Description")
+        misconception = Misconception("m", "root", "Named gap", "Description")
+        objective = LearningObjective(
+            "lo",
+            "Trace the operation",
+            "Trace the operation across its supported representations.",
+            "root",
+            ("support",),
+            ObjectiveOperation.TRACE,
+        )
+        main = make_objective_question("main", "root", "m", objective)
+        reserve_a = make_objective_question("reserve_a", "support", "m", objective)
+        reserve_b = make_objective_question("reserve_b", "support", "m", objective)
+        graph = KnowledgeGraph([root, support], [])
+
+        blocked = analyze_sustained_capacity(
+            [main, reserve_a], graph, [misconception], [concept_target("root")]
+        ).targets[0]
+        unlocked = analyze_sustained_capacity(
+            [main, reserve_a, reserve_b],
+            graph,
+            [misconception],
+            [concept_target("root")],
+        ).targets[0]
+
+        self.assertEqual(blocked.initial_safe_family_ids, ())
+        self.assertEqual(unlocked.initial_safe_family_ids, ("main",))
+        self.assertEqual(unlocked.achievable_main_capacity, 1)
+        self.assertNotIn(
+            "reserve_a", unlocked.maximum_capacity.consumed_family_ids
+        )
+
+    def test_cross_diagnosis_does_not_substitute_for_direct_objective_service(self) -> None:
+        root = Concept("root", "Root", "Description")
+        other = Concept("other", "Other", "Description")
+        misconception = Misconception("m", "root", "Named gap", "Description")
+        target_objective = LearningObjective(
+            "lo_target",
+            "Trace the target",
+            "Trace the target operation.",
+            "root",
+            (),
+            ObjectiveOperation.TRACE,
+        )
+        other_objective = LearningObjective(
+            "lo_other",
+            "Trace another target",
+            "Trace another target operation.",
+            "other",
+            (),
+            ObjectiveOperation.TRACE,
+        )
+        main = make_objective_question(
+            "main", "root", "m", target_objective
+        )
+        cross_diagnostics = [
+            make_objective_question(
+                family_id,
+                "other",
+                "m",
+                other_objective,
+                diagnostic_objective_id=target_objective.id,
+            )
+            for family_id in ("cross_a", "cross_b")
+        ]
+        graph = KnowledgeGraph([root, other], [])
+
+        blocked = analyze_sustained_capacity(
+            [main, *cross_diagnostics],
+            graph,
+            [misconception],
+            [concept_target("root")],
+        ).targets[0]
+        unlocked = analyze_sustained_capacity(
+            [
+                main,
+                *cross_diagnostics,
+                make_objective_question(
+                    "direct_a", "root", "m", target_objective
+                ),
+                make_objective_question(
+                    "direct_b", "root", "m", target_objective
+                ),
+            ],
+            graph,
+            [misconception],
+            [concept_target("root")],
+        ).targets[0]
+
+        self.assertEqual(blocked.initial_safe_family_ids, ())
+        self.assertIn("main", unlocked.initial_safe_family_ids)
+
+    def test_objective_blockers_identify_the_exact_evidence_path(self) -> None:
+        concept = Concept("c", "Concept", "Description")
+        misconception = Misconception("m", "c", "Named gap", "Description")
+        objective = LearningObjective(
+            "lo",
+            "Distinguish cases",
+            "Distinguish the relevant cases.",
+            "c",
+            (),
+            ObjectiveOperation.DISTINGUISH,
+        )
+        questions = [
+            make_objective_question(family_id, "c", "m", objective)
+            for family_id in ("a", "b")
+        ]
+
+        result = analyze_sustained_capacity(
+            questions,
+            KnowledgeGraph([concept], []),
+            [misconception],
+            [concept_target("c")],
+        ).targets[0]
+
+        self.assertEqual(result.achievable_main_capacity, 0)
+        self.assertTrue(result.maximum_capacity.blockers)
+        self.assertEqual(
+            {blocker.objective_id for blocker in result.maximum_capacity.blockers},
+            {"lo"},
+        )
+
     def test_initial_serviceability_does_not_imply_sustained_capacity(self) -> None:
         concept = Concept("c", "Concept", "Description")
         questions, misconceptions = interchangeable_bank("c", "x", 3)
@@ -430,7 +595,7 @@ class CapacityCliTestCase(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(code, 0, errors)
         self.assertTrue(payload["exact"])
-        self.assertEqual(payload["algorithm"], "sustained-serviceability-v1")
+        self.assertEqual(payload["algorithm"], "sustained-serviceability-v2")
         self.assertEqual(payload["summary"]["target_count"], 1)
         result = payload["targets"][0]
         self.assertEqual(result["target_id"], "t_transformers")

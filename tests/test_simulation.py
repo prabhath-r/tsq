@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tsq.corpus import read_and_parse
 from tsq.engine import MAX_REMEDIATION_DEPTH, AdaptiveEngine
-from tsq.simulation import BehavioralSimulator, SyntheticLearner
+from tsq.errors import ValidationError
+from tsq.learner import CONCEPT_MODEL_VERSION, LearnerModel
+from tsq.simulation import (
+    BehavioralSimulator,
+    SyntheticAnswer,
+    SyntheticLearner,
+    evidence_anchor_concept_id,
+)
 from tsq.store import Database
 
 
@@ -84,6 +93,233 @@ class BehavioralSimulationTests(unittest.TestCase):
         self.assertGreater(first.attempted, 0)
         self.assertEqual(first.behavior_signature(), second.behavior_signature())
         self.assertEqual(first.summary()["calibration"], second.summary()["calibration"])
+        with self.simulator.engine.database.read() as connection:
+            stored_session = connection.execute(
+                "SELECT created_at FROM sessions WHERE learner_id='replay-a'"
+            ).fetchone()
+            started_event = connection.execute(
+                """SELECT occurred_at FROM events
+                   WHERE learner_id='replay-a' AND event_type='SessionStarted'"""
+            ).fetchone()
+        self.assertEqual(stored_session["created_at"], START.isoformat())
+        self.assertEqual(started_event["occurred_at"], START.isoformat())
+
+        objective_tamper = replace(
+            first,
+            steps=(
+                replace(
+                    first.steps[0],
+                    learning_objective_id="lo_signature_tamper",
+                    focus_objective_after="lo_focus_tamper",
+                ),
+                *first.steps[1:],
+            ),
+        )
+        self.assertNotEqual(
+            first.behavior_signature(), objective_tamper.behavior_signature()
+        )
+
+        missing_confidence = replace(
+            first,
+            steps=(
+                replace(first.steps[0], confidence=None),
+                *first.steps[1:],
+            ),
+        )
+        self.assertNotEqual(
+            first.behavior_signature(), missing_confidence.behavior_signature()
+        )
+        self.assertEqual(
+            missing_confidence.summary()["answer_patterns"][
+                "missing_confidence"
+            ],
+            1,
+        )
+
+    def test_objective_ability_replaces_surface_concept_for_objective_items(self) -> None:
+        database = self.simulator.engine.database
+        release_id = database.get_active_release_id()
+        question = database.get_question(
+            "q_transformer_mask_direction_001", release_id=release_id
+        )
+        self.assertEqual(question.primary_concept_id, "c_transformers")
+        self.assertEqual(
+            evidence_anchor_concept_id(question), "c_causal_masking"
+        )
+
+        weak_objective = SyntheticLearner(
+            "weak-objective",
+            concept_abilities={"c_transformers": 0.99},
+            objective_abilities={"lo_causal_visibility": 0.01},
+            slip_probability=0.0,
+            guess_probability=0.0,
+        )
+        strong_objective = SyntheticLearner(
+            "strong-objective",
+            concept_abilities={"c_transformers": 0.01},
+            objective_abilities={"lo_causal_visibility": 0.99},
+            slip_probability=0.0,
+            guess_probability=0.0,
+        )
+
+        self.assertLess(
+            weak_objective.probability_correct(question),
+            strong_objective.probability_correct(question) - 0.50,
+        )
+
+        with database.read() as connection:
+            legacy_id = connection.execute(
+                """SELECT question.id
+                   FROM release_questions membership
+                   JOIN questions question ON question.id = membership.question_id
+                   LEFT JOIN release_question_objectives objective
+                     ON objective.release_id = membership.release_id
+                    AND objective.question_id = question.id
+                   WHERE membership.release_id = ?
+                     AND objective.objective_id IS NULL
+                   ORDER BY question.id LIMIT 1""",
+                (release_id,),
+            ).fetchone()["id"]
+        legacy = database.get_question(legacy_id, release_id=release_id)
+        baseline = SyntheticLearner(
+            "legacy-baseline",
+            default_ability=0.61,
+            slip_probability=0.0,
+            guess_probability=0.0,
+        )
+        irrelevant_objective = SyntheticLearner(
+            "legacy-objective-map",
+            default_ability=0.61,
+            objective_abilities={"lo_causal_visibility": 0.01},
+            slip_probability=0.0,
+            guess_probability=0.0,
+        )
+        self.assertEqual(
+            baseline.probability_correct(legacy),
+            irrelevant_objective.probability_correct(legacy),
+        )
+
+    def test_misspecified_generators_are_explicit_and_distinct(self) -> None:
+        database = self.simulator.engine.database
+        question = database.get_question(
+            "q_transformer_mask_direction_001",
+            release_id=database.get_active_release_id(),
+        )
+        common = {
+            "default_objective_ability": 0.50,
+            "slip_probability": 0.0,
+            "guess_probability": 0.0,
+        }
+        smooth = SyntheticLearner("smooth", **common)
+        threshold = SyntheticLearner(
+            "threshold", **common, response_model="discontinuous_threshold"
+        )
+        ability_only = SyntheticLearner(
+            "ability-only", **common, response_model="ability_only"
+        )
+
+        self.assertNotEqual(
+            smooth.probability_correct(question),
+            threshold.probability_correct(question),
+        )
+        self.assertEqual(ability_only.probability_correct(question), 0.50)
+        with self.assertRaisesRegex(ValidationError, "response model"):
+            SyntheticLearner("invalid", response_model="engine_clone_v99")
+
+    def test_objective_coverage_uses_evidence_anchors_and_family_pairs(self) -> None:
+        report = self.simulator.run(
+            SyntheticLearner(
+                "coverage",
+                default_objective_ability=0.70,
+                forced_correctness=True,
+                confidence_override=0.90,
+                seed=18,
+            ),
+            learner_id="objective-coverage",
+            root_concept_id="t_transformers",
+            policy_seed=18,
+            max_steps=4,
+            start_at=START,
+        )
+
+        self.assertEqual(report.coverage.scope_objectives, 8)
+        self.assertEqual(report.coverage.eligible_objectives, 8)
+        self.assertGreater(
+            report.coverage.eligible_evidence_families, 0
+        )
+        self.assertEqual(
+            set(report.coverage.observed_objectives),
+            {
+                step.learning_objective_id
+                for step in report.steps
+                if step.learning_objective_id is not None
+            },
+        )
+        release_id = self.simulator.engine.database.get_active_release_id()
+        for step in report.steps:
+            question = self.simulator.engine.database.get_question(
+                step.question_id, release_id=release_id
+            )
+            self.assertEqual(
+                step.surface_primary_concept_id, question.primary_concept_id
+            )
+            self.assertEqual(
+                step.evidence_anchor_concept_id,
+                evidence_anchor_concept_id(question),
+            )
+
+    def test_idempotent_retries_across_two_sessions_do_not_duplicate_state(self) -> None:
+        profile = SyntheticLearner(
+            "longitudinal",
+            default_objective_ability=0.85,
+            forced_correctness=True,
+            confidence_override=0.90,
+            base_response_ms=2_000,
+            seed=303,
+        )
+        first = self.simulator.run(
+            profile,
+            learner_id="longitudinal",
+            root_concept_id="t_transformers",
+            policy_seed=303,
+            max_steps=2,
+            start_at=START,
+            verify_idempotency=True,
+        )
+        second = self.simulator.run(
+            profile,
+            learner_id="longitudinal",
+            root_concept_id="t_transformers",
+            policy_seed=304,
+            max_steps=2,
+            start_at=first.ended_at + timedelta(days=7),
+            trial_index=1,
+            require_fresh_learner=False,
+            verify_idempotency=True,
+        )
+
+        self.assertEqual(first.idempotent_retries_verified, first.attempted)
+        self.assertEqual(second.idempotent_retries_verified, second.attempted)
+        expected = first.attempted + second.attempted
+        with self.simulator.engine.database.read() as connection:
+            counts = connection.execute(
+                """SELECT learner.revision,
+                          (SELECT COUNT(*) FROM sessions
+                           WHERE learner_id=learner.id) AS sessions,
+                          (SELECT COUNT(*) FROM attempts
+                           WHERE learner_id=learner.id) AS attempts,
+                          (SELECT COUNT(*) FROM events
+                           WHERE learner_id=learner.id
+                             AND event_type='ResponseSubmitted') AS responses
+                   FROM learners learner WHERE learner.id='longitudinal'"""
+            ).fetchone()
+        self.assertEqual(counts["sessions"], 2)
+        self.assertEqual(counts["attempts"], expected)
+        self.assertEqual(counts["responses"], expected)
+        self.assertEqual(counts["revision"], expected)
+        self.assertTrue(
+            self.simulator.engine.database.verify_integrity()["ok"]
+        )
 
     def test_remediation_episode_never_reuses_trigger_item_or_family(self) -> None:
         report = self.simulator.run(
@@ -254,6 +490,93 @@ class BehavioralSimulationTests(unittest.TestCase):
         self.assertEqual(fast_families, 0)
         self.assertEqual(slow_families, 1)
 
+    def test_legacy_event_contract_resolves_focus_without_confidence(self) -> None:
+        class LegacyScriptedLearner:
+            name = "legacy-scripted"
+            response_model = "scripted"
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def answer(self, presentation, **_context) -> SyntheticAnswer:
+                self.calls += 1
+                correct = self.calls != 1
+                selected = (
+                    presentation.question.correct_option
+                    if correct
+                    else next(
+                        option
+                        for option in presentation.question.options
+                        if not option.correct
+                    )
+                )
+                return SyntheticAnswer(
+                    selected_option_id=selected.id,
+                    correct=correct,
+                    ground_truth_probability=1.0 if correct else 0.0,
+                    confidence=None,
+                    response_ms=4_000,
+                    hint_count=0,
+                )
+
+        database = Database(Path(self.tempdir.name) / "legacy-simulation.db")
+        database.initialize()
+        database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )
+        simulator = BehavioralSimulator(
+            AdaptiveEngine(
+                database,
+                LearnerModel(CONCEPT_MODEL_VERSION),
+            )
+        )
+
+        report = simulator.run(
+            LegacyScriptedLearner(),
+            learner_id="legacy-focus-resolution",
+            root_concept_id="c_clustering",
+            policy_seed=11,
+            max_steps=3,
+            start_at=START,
+        )
+
+        self.assertEqual(
+            [
+                (
+                    step.phase_before.value,
+                    step.phase_after.value,
+                    step.actual_correct,
+                )
+                for step in report.steps
+            ],
+            [
+                ("learn", "remediate", False),
+                ("remediate", "verify", True),
+                ("verify", "learn", True),
+            ],
+        )
+        self.assertEqual(
+            [episode.outcome for episode in report.focus_episodes],
+            ["resolved"],
+        )
+        with database.read() as connection:
+            model_versions = [
+                json.loads(row["metadata_json"])[
+                    "learner_model_version"
+                ]
+                for row in connection.execute(
+                    """SELECT metadata_json FROM events
+                       WHERE learner_id = ?
+                         AND event_type = 'ResponseSubmitted'
+                       ORDER BY stream_version""",
+                    ("legacy-focus-resolution",),
+                ).fetchall()
+            ]
+        self.assertEqual(
+            model_versions,
+            [CONCEPT_MODEL_VERSION] * 3,
+        )
+
     def test_verified_prerequisite_returns_to_an_independent_parent_check(self) -> None:
         report = self.simulator.run(
             SyntheticLearner(
@@ -286,7 +609,9 @@ class BehavioralSimulationTests(unittest.TestCase):
         self.assertIn("descend_to_evidence_boundary", reasons)
         self.assertIn("prerequisite_verified_resume_parent", reasons)
         path = session_report["adaptive_path"]
-        resume_index = reasons.index("prerequisite_verified_resume_parent")
+        resume_index = reasons.index(
+            "prerequisite_verified_resume_parent"
+        )
         self.assertEqual(path[resume_index]["to_phase"], "verify")
         self.assertEqual(
             path[resume_index + 1]["primary_concept_id"],
@@ -303,7 +628,7 @@ class BehavioralSimulationTests(unittest.TestCase):
                 default_ability=0.55,
                 slip_probability=0.04,
                 guess_probability=0.02,
-                seed=17,
+                seed=15,
             ),
             learner_id="four-family-boundary",
             root_concept_id="t_large_language_models",
@@ -324,11 +649,13 @@ class BehavioralSimulationTests(unittest.TestCase):
             step["transition_reason"]
             for step in session_report["adaptive_path"]
         ]
-        self.assertIn("prerequisite_verified_resume_parent", reasons)
+        self.assertIn("descend_to_evidence_boundary", reasons)
         self.assertTrue(
             {
                 "no_serviceable_prerequisite_boundary",
+                "prerequisite_verified_parent_deferred",
                 "verified_prerequisite_not_reopened",
+                "persistent_prerequisite_verified_parent_deferred",
             }
             & set(reasons),
             reasons,

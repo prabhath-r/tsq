@@ -198,7 +198,7 @@ class ActionLedgerTestCase(unittest.TestCase):
             )
         return {"id": action_id, "event_id": event["event_id"]}
 
-    def test_v7_to_v8_migration_preserves_release_and_event_history(self) -> None:
+    def test_v7_to_current_migration_preserves_release_and_event_history(self) -> None:
         with self.database.transaction() as connection:
             for name in (
                 "learning_artifacts_no_update",
@@ -252,11 +252,13 @@ class ActionLedgerTestCase(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        self.assertEqual(schema_version, "8")
+        self.assertEqual(schema_version, "13")
         self.assertEqual(after_events, before_events)
         self.assertEqual(after_releases, before_releases)
         self.assertIn("learning_actions", tables)
         self.assertIn("learning_artifacts", tables)
+        self.assertIn("learning_objectives", tables)
+        self.assertIn("objective_states", tables)
         self.assertTrue(self.database.verify_integrity()["ok"])
 
     def test_fresh_schema_records_and_lists_a_canonical_action(self) -> None:

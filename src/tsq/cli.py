@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import sqlite3
 import sys
 import time
 from contextlib import contextmanager
@@ -33,6 +35,21 @@ from .store import Database, new_id
 
 BUNDLED_CORPUS_PACKAGE = "tsq.data"
 BUNDLED_CORPUS_NAME = "ai_curriculum.json"
+BUNDLED_RELEASE_MARKER = "bundled_corpus_release"
+# Releases shipped before the marker existed.  This narrow, immutable lineage
+# lets `start` upgrade TSQ's own seed without silently replacing a user's
+# explicitly imported active corpus.
+LEGACY_BUNDLED_RELEASE_HASHES = frozenset(
+    {
+        "74d0f933a60dbaf3f58be5cdb571f7ea9df78277100363c6dce66257094fd4b7",
+        "c0b297a2d3892d2ec9e98da3e2245cde3b5279615f1732f02e2b83bd795dce68",
+        "eaa9973afee33293ed0294616bc234e30d0b4f4c609ac8a5e5542c252e518666",
+        "4dbe4dc9a34e993554cbee7db90c074d23c2fb993081b077ec716ef8f50ee045",
+        "0b140a5b8907c5523b89947815f51765231f7f5568c46585d22e881ffc6d2b9b",
+        "871e96c45280bfa2f5400496b1ce60277fe5b376b30c39a816a665857fabbb1f",
+        "7cc5b3507906ae3cb2216f2185144be3fbcd0fc6ad3ca4e411e39ca91e726637",
+    }
+)
 BUNDLED_CORPUS_LABEL = f"{BUNDLED_CORPUS_PACKAGE}:{BUNDLED_CORPUS_NAME}"
 
 
@@ -67,6 +84,29 @@ def _database(args: argparse.Namespace, *, require_corpus: bool = True) -> Datab
             ).fetchone()
         if not active:
             raise TSQError("The database has no active corpus. Run `tsq init` first.")
+    return database
+
+
+def _inspection_database(
+    args: argparse.Namespace, *, require_corpus: bool = True
+) -> Database:
+    """Open a current database without migrating or changing learner state."""
+
+    database = Database(args.db, read_only=True)
+    database.validate_current_schema()
+    if require_corpus:
+        with database.read() as connection:
+            active = connection.execute(
+                """SELECT release.id
+                   FROM meta
+                   JOIN corpus_releases release
+                     ON release.id = meta.value
+                   WHERE meta.key = 'active_corpus_release'"""
+            ).fetchone()
+        if not active:
+            raise TSQError(
+                "The database has no valid active corpus. Run `tsq init` first."
+            )
     return database
 
 
@@ -105,11 +145,12 @@ def command_init(args: argparse.Namespace) -> None:
 
 
 def _ensure_starter_corpus(database: Database) -> bool:
-    """Install the bundled catalog for a new or legacy catalog-less database."""
+    """Install or safely advance TSQ's own bundled corpus lineage."""
     with database.read() as connection:
         active = connection.execute(
             "SELECT value FROM meta WHERE key = 'active_corpus_release'"
         ).fetchone()
+        active_release_id = active["value"] if active else None
         catalog_count = (
             connection.execute(
                 """SELECT COUNT(*) AS n FROM release_topics
@@ -119,13 +160,42 @@ def _ensure_starter_corpus(database: Database) -> bool:
             if active
             else 0
         )
-    if active and catalog_count:
+        release = (
+            connection.execute(
+                "SELECT bundle_hash FROM corpus_releases WHERE id = ?",
+                (active_release_id,),
+            ).fetchone()
+            if active_release_id
+            else None
+        )
+        marker = connection.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (BUNDLED_RELEASE_MARKER,),
+        ).fetchone()
+    trusted_lineage = bool(
+        active_release_id
+        and (
+            (marker and marker["value"] == active_release_id)
+            or (
+                release
+                and release["bundle_hash"] in LEGACY_BUNDLED_RELEASE_HASHES
+            )
+        )
+    )
+    if active and catalog_count and not trusted_lineage:
         return False
     with _corpus_path(None) as (corpus_path, _):
-        database.import_corpus(
+        imported = database.import_corpus(
             *read_and_parse(corpus_path, include_catalog=True)
         )
-    return True
+    installed_release_id = str(imported["release_id"])
+    with database.transaction() as connection:
+        connection.execute(
+            """INSERT INTO meta(key, value) VALUES (?, ?)
+               ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
+            (BUNDLED_RELEASE_MARKER, installed_release_id),
+        )
+    return installed_release_id != active_release_id
 
 
 def _starter_topic(database: Database, requested: str | None) -> str:
@@ -363,10 +433,14 @@ def command_capacity(args: argparse.Namespace) -> int:
 
 
 def command_topics(args: argparse.Namespace) -> None:
-    database = _database(args)
+    database = _inspection_database(args)
     catalog = database.get_catalog()
     if catalog["topics"] and not getattr(args, "concepts", False):
-        topic_by_id = {topic["id"]: topic for topic in catalog["topics"]}
+        objective_count_by_concept: dict[str, int] = {}
+        for objective in database.get_learning_objectives(catalog["release_id"]):
+            objective_count_by_concept[objective.primary_concept_id] = (
+                objective_count_by_concept.get(objective.primary_concept_id, 0) + 1
+            )
         children: dict[str | None, list[dict[str, Any]]] = {}
         for topic in catalog["topics"]:
             children.setdefault(topic["parent_id"], []).append(topic)
@@ -375,25 +449,43 @@ def command_topics(args: argparse.Namespace) -> None:
 
         rows: list[dict[str, Any]] = []
 
-        def append_topic(topic: dict[str, Any], depth: int, path: list[str]) -> tuple[int, int]:
+        def append_topic(
+            topic: dict[str, Any], depth: int, path: list[str]
+        ) -> tuple[int, int, int]:
             child_rows = children.get(topic["id"], [])
             descendant_questions = topic["direct_primary_questions"]
-            descendant_objectives = len(topic["concepts"])
+            descendant_concepts = len(topic["concepts"])
+            descendant_learning_objectives = sum(
+                objective_count_by_concept.get(concept["id"], 0)
+                for concept in topic["concepts"]
+            )
             row = {
                 **topic,
                 "depth": depth,
                 "path": [*path, topic["name"]],
+                "direct_concepts": len(topic["concepts"]),
+                "direct_learning_objectives": descendant_learning_objectives,
             }
             rows.append(row)
             for child in child_rows:
-                child_questions, child_objectives = append_topic(
+                (
+                    child_questions,
+                    child_concepts,
+                    child_learning_objectives,
+                ) = append_topic(
                     child, depth + 1, row["path"]
                 )
                 descendant_questions += child_questions
-                descendant_objectives += child_objectives
+                descendant_concepts += child_concepts
+                descendant_learning_objectives += child_learning_objectives
             row["scope_primary_questions"] = descendant_questions
-            row["scope_objectives"] = descendant_objectives
-            return descendant_questions, descendant_objectives
+            row["scope_concepts"] = descendant_concepts
+            row["scope_learning_objectives"] = descendant_learning_objectives
+            return (
+                descendant_questions,
+                descendant_concepts,
+                descendant_learning_objectives,
+            )
 
         for domain in catalog["domains"]:
             for topic in children.get(None, []):
@@ -413,10 +505,19 @@ def command_topics(args: argparse.Namespace) -> None:
                 if row["domain_id"] != domain["id"]:
                     continue
                 indent = "  " * (row["depth"] + 1)
+                concept_label = (
+                    "concept" if row["scope_concepts"] == 1 else "concepts"
+                )
+                objective_label = (
+                    "learning objective"
+                    if row["scope_learning_objectives"] == 1
+                    else "learning objectives"
+                )
                 print(
                     f"{indent}{row['name']} ({row['id']}) — "
                     f"{row['scope_primary_questions']} questions, "
-                    f"{row['scope_objectives']} objectives"
+                    f"{row['scope_concepts']} {concept_label}, "
+                    f"{row['scope_learning_objectives']} {objective_label}"
                 )
         return
 
@@ -461,7 +562,7 @@ def command_topics(args: argparse.Namespace) -> None:
 
 
 def command_graph(args: argparse.Namespace) -> None:
-    database = _database(args)
+    database = _inspection_database(args)
     graph = database.get_graph()
     try:
         topic = database.resolve_topic(args.topic)
@@ -471,12 +572,17 @@ def command_graph(args: argparse.Namespace) -> None:
         root = topic["id"]
         root_name = topic["name"]
         target_type = "topic"
-        scope = database.topic_scope(root, topic["release_id"])
+        release_id = topic["release_id"]
+        scope = database.topic_scope(root, release_id)
     else:
         root = args.topic
         root_name = graph.concepts[root].name if root in graph.concepts else root
         target_type = "concept"
+        release_id = None
         scope = graph.learning_scope(root)
+    learning_objectives = database.get_learning_objectives(
+        release_id, primary_concept_ids=scope
+    )
     edges = [
         {
             "source": edge.source_id,
@@ -495,12 +601,30 @@ def command_graph(args: argparse.Namespace) -> None:
             {"id": concept_id, "name": graph.concepts[concept_id].name}
             for concept_id in sorted(scope)
         ],
+        "learning_objectives": [
+            {
+                "id": objective.id,
+                "name": objective.name,
+                "primary_concept_id": objective.primary_concept_id,
+                "operation": objective.operation.value,
+                "evidence_type": objective.evidence_type,
+            }
+            for objective in learning_objectives
+        ],
         "edges": edges,
     }
     if args.json:
         _emit(result, as_json=True)
     else:
-        print(f"Learning scope for {root_name} ({root}): {len(scope)} objectives")
+        print(
+            f"Learning scope for {root_name} ({root}): {len(scope)} graph concepts, "
+            f"{len(learning_objectives)} learning objectives"
+        )
+        for objective in learning_objectives:
+            print(
+                f"  objective {objective.id}: {objective.name} "
+                f"({objective.operation.value}; {objective.primary_concept_id})"
+            )
         for edge in edges:
             print(f"  {edge['source']} --{edge['relation']}--> {edge['target']}")
 
@@ -536,8 +660,110 @@ def command_session_end(args: argparse.Namespace) -> None:
     _emit(session, as_json=args.json)
 
 
+def command_session_list(args: argparse.Namespace) -> None:
+    if type(args.limit) is not int or not 1 <= args.limit <= 200:
+        raise ValidationError("Session history limit must be from 1 to 200.")
+    if args.learner is not None and not args.learner.strip():
+        raise ValidationError("Session history learner filter must not be blank.")
+
+    database = _inspection_database(args)
+    filters: list[str] = []
+    parameters: list[Any] = []
+    if args.learner is not None:
+        filters.append("session_row.learner_id = ?")
+        parameters.append(args.learner)
+    if args.status is not None:
+        filters.append("session_row.status = ?")
+        parameters.append(args.status)
+    where = "WHERE " + " AND ".join(filters) if filters else ""
+    parameters.append(args.limit)
+    with database.read() as connection:
+        rows = connection.execute(
+            f"""WITH selected_sessions AS MATERIALIZED (
+                    SELECT session_row.*
+                    FROM sessions session_row
+                    {where}
+                    ORDER BY session_row.updated_at DESC, session_row.id DESC
+                    LIMIT ?
+                ), attempt_stats AS (
+                    SELECT attempt.session_id,
+                           COUNT(*) AS questions_answered,
+                           SUM(attempt.is_correct) AS correct,
+                           SUM(CASE WHEN attempt.selected_option_id IS NULL
+                                    THEN 1 ELSE 0 END) AS abstained
+                    FROM attempts attempt
+                    JOIN selected_sessions selected
+                      ON selected.id = attempt.session_id
+                    GROUP BY attempt.session_id
+                )
+                SELECT session_row.id, session_row.learner_id,
+                       learner.display_name,
+                       session_row.corpus_release_id, session_row.topic_id,
+                       session_row.root_concept_id,
+                       COALESCE(topic.name, concept.name) AS target_name,
+                       session_row.mode, session_row.phase, session_row.status,
+                       session_row.step, session_row.created_at,
+                       session_row.updated_at,
+                       COALESCE(stats.questions_answered, 0) AS questions_answered,
+                       COALESCE(stats.correct, 0) AS correct,
+                       COALESCE(stats.abstained, 0) AS abstained
+                FROM selected_sessions session_row
+                JOIN learners learner ON learner.id = session_row.learner_id
+                JOIN concepts concept ON concept.id = session_row.root_concept_id
+                LEFT JOIN release_topics topic
+                  ON topic.release_id = session_row.corpus_release_id
+                 AND topic.topic_id = session_row.topic_id
+                LEFT JOIN attempt_stats stats ON stats.session_id = session_row.id
+                ORDER BY session_row.updated_at DESC, session_row.id DESC""",
+            tuple(parameters),
+        ).fetchall()
+    sessions = []
+    for row in rows:
+        answered = int(row["questions_answered"])
+        correct = int(row["correct"])
+        sessions.append(
+            {
+                "id": row["id"],
+                "learner_id": row["learner_id"],
+                "learner_name": row["display_name"],
+                "corpus_release_id": row["corpus_release_id"],
+                "topic_id": row["topic_id"],
+                "root_concept_id": row["root_concept_id"],
+                "target_name": row["target_name"],
+                "mode": row["mode"],
+                "phase": row["phase"],
+                "status": row["status"],
+                "step": int(row["step"]),
+                "questions_answered": answered,
+                "correct": correct,
+                "abstained": int(row["abstained"]),
+                "accuracy": correct / answered if answered else None,
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+            }
+        )
+    if args.json:
+        _emit(sessions, as_json=True)
+        return
+    if not sessions:
+        print("No sessions matched.")
+        return
+    for session in sessions:
+        accuracy = (
+            f"{session['accuracy'] * 100:.1f}%"
+            if session["accuracy"] is not None
+            else "n/a"
+        )
+        print(
+            f"{session['id']} [{session['status']}] {session['learner_id']} · "
+            f"{session['target_name']} · {session['mode']} · "
+            f"{session['questions_answered']} answered ({accuracy}) · "
+            f"updated {session['updated_at']}"
+        )
+
+
 def command_session_report(args: argparse.Namespace) -> None:
-    report = AdaptiveEngine(_database(args)).session_report(args.session)
+    report = AdaptiveEngine(_inspection_database(args)).session_report(args.session)
     if args.json:
         _emit(report, as_json=True)
         return
@@ -563,6 +789,11 @@ def command_session_report(args: argparse.Namespace) -> None:
             f"{response['selection_window_inconsistencies']} submitted value(s) "
             "exceeded their selection-to-answer window"
         )
+    if response["missing_values"]:
+        print(
+            f"  timing incomplete: {response['missing_values']} answer(s) had no "
+            "submitted response duration"
+        )
     if difficulty["average"] is not None:
         print(
             f"  authored difficulty {difficulty['average']:+.2f} average "
@@ -580,6 +811,26 @@ def command_session_report(args: argparse.Namespace) -> None:
             f"{row['name']} {row['n']}" for row in report["topic_distribution"]
         )
         print(f"  topic mix: {rendered}")
+    if report["objective_performance"]:
+        print("  fine-grained objective evidence:")
+        for objective in report["objective_performance"]:
+            observed = objective["session"]
+            projection = objective["current_projection"]
+            flags = (
+                ", ".join(
+                    reason.replace("_", " ")
+                    for reason in objective["attention_reasons"]
+                )
+                or "no current warning"
+            )
+            print(
+                f"    {objective['name']} ({objective['operation']}): "
+                f"{observed['correct']}/{observed['attempted']} correct · "
+                f"mastery {projection['mastery_probability'] * 100:.1f}% · "
+                f"uncertainty {projection['uncertainty']:.2f} · "
+                f"{projection['independent_families']} independent family/families"
+            )
+            print(f"      evidence note: {flags}")
     routing = report["adaptive_routing"]
     if routing["prerequisite_descents"] or routing["bounded_exits"]:
         print(
@@ -606,7 +857,7 @@ def command_session_report(args: argparse.Namespace) -> None:
 
 
 def _presentation_dict(presentation) -> dict[str, Any]:
-    return {
+    result = {
         "decision_id": presentation.decision_id,
         "session_id": presentation.session_id,
         "phase": presentation.phase.value,
@@ -624,6 +875,16 @@ def _presentation_dict(presentation) -> dict[str, Any]:
             "score": presentation.score.terms(),
         },
     }
+    if presentation.question.objective is not None:
+        objective = presentation.question.objective
+        result["learning_objective"] = {
+            "id": objective.id,
+            "name": objective.name,
+            "description": objective.description,
+            "operation": objective.operation.value,
+            "evidence_type": objective.evidence_type,
+        }
+    return result
 
 
 def command_next(args: argparse.Namespace) -> None:
@@ -634,6 +895,12 @@ def command_next(args: argparse.Namespace) -> None:
         _emit(result, as_json=True)
     else:
         print(f"[{result['phase']}] {result['stem']}")
+        if "learning_objective" in result:
+            objective = result["learning_objective"]
+            print(
+                f"Objective: {objective['name']} ({objective['id']}) · "
+                f"{objective['operation']} / {objective['evidence_type']}"
+            )
         for index, option in enumerate(result["options"], start=1):
             print(f"  {index}. {option['text']}  (id: {option['id']})")
         if args.explain:
@@ -641,8 +908,10 @@ def command_next(args: argparse.Namespace) -> None:
         print(f"Decision: {result['decision_id']}")
 
 
-def _submission_dict(result) -> dict[str, Any]:
-    return {
+def _submission_dict(
+    result, objective_names: dict[str, str] | None = None
+) -> dict[str, Any]:
+    payload = {
         "interaction_id": result.interaction_id,
         "correct": result.correct,
         "selected_option_id": result.selected_option.id if result.selected_option else None,
@@ -657,20 +926,106 @@ def _submission_dict(result) -> dict[str, Any]:
         "state_changes": list(result.state_changes),
         "idempotent_replay": result.idempotent_replay,
     }
+    objective_names = objective_names or {}
+    assessed_objective_ids = tuple(
+        dict.fromkeys(
+            change["objective_id"]
+            for change in result.state_changes
+            if "objective_id" in change
+        )
+    )
+    if assessed_objective_ids:
+        objective_id = assessed_objective_ids[0]
+        state_change = next(
+            change
+            for change in result.state_changes
+            if change.get("objective_id") == objective_id
+        )
+        payload["learning_objective"] = {
+            "id": objective_id,
+            "name": objective_names.get(objective_id, objective_id),
+            "state_change": dict(state_change),
+        }
+    if result.focus_objective_id is not None:
+        payload["focus_objective_id"] = result.focus_objective_id
+        payload["focus_learning_objective"] = {
+            "id": result.focus_objective_id,
+            "name": objective_names.get(
+                result.focus_objective_id, result.focus_objective_id
+            ),
+        }
+    return payload
+
+
+def _decision_objective_names(
+    database: Database, decision_id: str
+) -> dict[str, str]:
+    with database.read() as connection:
+        row = connection.execute(
+            "SELECT corpus_release_id FROM decisions WHERE id = ?",
+            (decision_id,),
+        ).fetchone()
+    if row is None:
+        return {}
+    return {
+        objective.id: objective.name
+        for objective in database.get_learning_objectives(
+            row["corpus_release_id"]
+        )
+    }
+
+
+def _record_cli_feedback(
+    engine: AdaptiveEngine,
+    *,
+    decision_id: str,
+    selected_option_id: str | None,
+    correct_option_id: str,
+    selected_rationale: str | None,
+    correct_rationale: str,
+) -> None:
+    """Durably record feedback only after it reaches the CLI output boundary."""
+
+    material = json.dumps(
+        {
+            "decision_id": decision_id,
+            "selected_option_id": selected_option_id,
+            "correct_option_id": correct_option_id,
+            "selected_rationale": selected_rationale,
+            "correct_rationale": correct_rationale,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    feedback_digest = hashlib.sha256(material).hexdigest()
+    idempotency_digest = hashlib.sha256(
+        f"{decision_id}:{feedback_digest}".encode("utf-8")
+    ).hexdigest()
+    engine.record_action(
+        decision_id,
+        "feedback_shown",
+        {"feedback_digest": feedback_digest},
+        stage="post_feedback",
+        idempotency_key=f"cli-feedback:{idempotency_digest}",
+    )
 
 
 def command_answer(args: argparse.Namespace) -> None:
     database = _database(args)
+    engine = AdaptiveEngine(database)
     option_id = None if args.option in {"?", "unknown", "none"} else args.option
-    result = AdaptiveEngine(database).submit_answer(
+    result = engine.submit_answer(
         args.decision,
         option_id,
         confidence=args.confidence,
         response_ms=args.response_ms,
         hint_count=args.hints,
+        feedback_shown=False,
         idempotency_key=args.idempotency_key,
     )
-    payload = _submission_dict(result)
+    objective_names = _decision_objective_names(database, args.decision)
+    payload = _submission_dict(result, objective_names)
     if args.json:
         _emit(payload, as_json=True)
     else:
@@ -679,10 +1034,49 @@ def command_answer(args: argparse.Namespace) -> None:
             print(f"Your choice: {result.selected_option.rationale}")
         print(f"Answer: {result.correct_option.text}")
         print(result.correct_option.rationale)
+        assessed = payload.get("learning_objective")
+        if assessed:
+            change = next(
+                (
+                    item
+                    for item in result.state_changes
+                    if item.get("objective_id") == assessed["id"]
+                ),
+                None,
+            )
+            movement = ""
+            if change is not None:
+                movement = (
+                    f" · evidence projection "
+                    f"{change['prior_mastery'] * 100:.1f}% → "
+                    f"{change['posterior_mastery'] * 100:.1f}%"
+                )
+            print(
+                f"Assessed objective: {assessed['name']} ({assessed['id']})"
+                f"{movement}"
+            )
         print(f"Next phase: {result.next_phase.value}")
         if result.focus_misconception_id:
             print(f"Current hypothesis: {result.focus_misconception_id}")
+        focus_objective = payload.get("focus_learning_objective")
+        if focus_objective:
+            print(
+                "Next probe objective: "
+                f"{focus_objective['name']} ({focus_objective['id']})"
+            )
         print(f"Adaptive path: {result.transition_reason}")
+    _record_cli_feedback(
+        engine,
+        decision_id=args.decision,
+        selected_option_id=(
+            result.selected_option.id if result.selected_option else None
+        ),
+        correct_option_id=result.correct_option.id,
+        selected_rationale=(
+            result.selected_option.rationale if result.selected_option else None
+        ),
+        correct_rationale=result.correct_option.rationale,
+    )
 
 
 def _action_payload(args: argparse.Namespace) -> dict[str, Any]:
@@ -754,7 +1148,7 @@ def command_action_record(args: argparse.Namespace) -> None:
 
 
 def command_action_list(args: argparse.Namespace) -> None:
-    database = _database(args)
+    database = _inspection_database(args)
     actions = AdaptiveEngine(database).list_actions(args.decision)
     if args.json:
         _emit(actions, as_json=True)
@@ -789,18 +1183,54 @@ def command_action_kinds(args: argparse.Namespace) -> None:
 
 
 def command_profile(args: argparse.Namespace) -> None:
-    database = _database(args)
+    database = _inspection_database(args)
     profile = AdaptiveEngine(database).profile(args.learner, root_concept_id=args.topic)
     if args.json:
         _emit(profile, as_json=True)
         return
     print(f"Learner: {profile['learner_id']}")
+    objectives = profile.get("learning_objectives", [])
+    assessed_objectives = [
+        objective
+        for objective in objectives
+        if objective["evidence_mass"] > 0
+    ]
     assessed = [skill for skill in profile["skills"] if skill["evidence_mass"] > 0]
-    if not assessed:
+    if not assessed and not assessed_objectives:
         print("No response evidence yet.")
-    for skill in sorted(assessed, key=lambda row: (row["mastery"], row["name"])):
+    if assessed_objectives:
+        print("Assessed selected-response objectives:")
+        for objective in sorted(
+            assessed_objectives,
+            key=lambda row: (row["mastery"], row["name"]),
+        ):
+            print(
+                f"  P(competence≥65%)={objective['mastery'] * 100:5.1f}%  "
+                f"expected={objective['expected_competence'] * 100:5.1f}%  "
+                f"latent-σ={objective['uncertainty']:.2f}  "
+                f"{objective['state']:<10}  {objective['name']} "
+                f"({objective['objective_id']}; {objective['operation']}; "
+                f"{objective['independent_families']} independent families, "
+                f"{objective['delayed_retrievals']} delayed)"
+            )
+            if objective["mastery_probability_error_bound"] > 0.0:
+                print(
+                    "      exact-grid estimate "
+                    f"{objective['estimated_mastery_probability'] * 100:.2f}% · "
+                    "conservative numerical guard "
+                    f"{objective['mastery_probability_error_bound'] * 100:.3f}% · "
+                    f"model {objective['inference_model_version']}"
+                )
+        print(f"  Scope: {profile['objective_evidence_scope']}")
+    if assessed and objectives:
         print(
-            f"  P(mastered)={skill['mastery'] * 100:5.1f}%  "
+            "Graph concept context (supporting projection, not productive-skill "
+            "certification):"
+        )
+    for skill in sorted(assessed, key=lambda row: (row["mastery"], row["name"])):
+        mastery_label = "P(derived floor)" if objectives else "P(mastered)"
+        print(
+            f"  {mastery_label}={skill['mastery'] * 100:5.1f}%  "
             f"expected={skill['expected_competence'] * 100:5.1f}%  "
             f"latent-σ={skill['uncertainty']:.2f}  "
             f"graph-ready={skill['effective_readiness'] * 100:5.1f}%  "
@@ -817,10 +1247,19 @@ def command_profile(args: argparse.Namespace) -> None:
         print("Active misconception hypotheses:")
         for item in profile["active_misconceptions"]:
             print(f"  {item['probability'] * 100:5.1f}%  {item['name']}")
+    monitored = [
+        item
+        for item in profile.get("misconception_hypotheses", ())
+        if item.get("status") == "monitoring"
+    ]
+    if monitored:
+        print("Monitored misconception hypotheses (below routing threshold):")
+        for item in monitored:
+            print(f"  {item['probability'] * 100:5.1f}%  {item['name']}")
 
 
 def command_trace(args: argparse.Namespace) -> None:
-    database = _database(args)
+    database = _inspection_database(args)
     decisions = AdaptiveEngine(database).trace(args.session)
     if args.json:
         _emit(decisions, as_json=True)
@@ -836,7 +1275,9 @@ def command_trace(args: argparse.Namespace) -> None:
 
 
 def command_coverage(args: argparse.Namespace) -> None:
-    database = _database(args)
+    database = (
+        _database(args) if args.enqueue else _inspection_database(args)
+    )
     planner = CoveragePlanner(database)
     gaps = planner.gaps(limit=args.limit)
     job_ids = planner.enqueue(gaps) if args.enqueue else []
@@ -859,8 +1300,11 @@ def command_coverage(args: argparse.Namespace) -> None:
     print(f"Top {len(gaps)} corpus coverage gaps")
     for gap in gaps:
         blueprint = gap.blueprint
+        target = blueprint.learning_objective_id or blueprint.concept_id
+        if blueprint.target_misconception_id:
+            target = f"{target} / {blueprint.target_misconception_id}"
         print(
-            f"  {blueprint.concept_id:<32} {blueprint.kind:<16} "
+            f"  {target:<48} {blueprint.kind:<16} "
             f"{gap.current_count}/{gap.target_count}  difficulty={blueprint.target_difficulty:+.2f}"
         )
     if job_ids:
@@ -868,7 +1312,9 @@ def command_coverage(args: argparse.Namespace) -> None:
 
 
 def command_jobs_list(args: argparse.Namespace) -> None:
-    jobs = AuthoringJobs(_database(args)).list(status=args.status, limit=args.limit)
+    jobs = AuthoringJobs(_inspection_database(args)).list(
+        status=args.status, limit=args.limit
+    )
     if args.json:
         _emit(jobs, as_json=True)
         return
@@ -877,14 +1323,17 @@ def command_jobs_list(args: argparse.Namespace) -> None:
         return
     for job in jobs:
         blueprint = job["blueprint"]
+        target = blueprint.get("learning_objective_id") or blueprint["concept_id"]
+        if blueprint.get("target_misconception_id"):
+            target = f"{target} / {blueprint['target_misconception_id']}"
         print(
-            f"{job['id']} [{job['status']}] {blueprint['concept_id']} / "
+            f"{job['id']} [{job['status']}] {target} / "
             f"{blueprint['kind']}  attempts={job['run_count']}"
         )
 
 
 def command_jobs_show(args: argparse.Namespace) -> None:
-    job = AuthoringJobs(_database(args)).show(args.job)
+    job = AuthoringJobs(_inspection_database(args)).show(args.job)
     if args.json:
         _emit(job, as_json=True)
         return
@@ -894,6 +1343,21 @@ def command_jobs_show(args: argparse.Namespace) -> None:
         f"  target: {blueprint['concept_id']} / {blueprint['kind']} "
         f"at difficulty {blueprint['target_difficulty']:+.2f}"
     )
+    if blueprint.get("learning_objective_id"):
+        print(
+            "  objective: "
+            f"{blueprint['learning_objective_name']} "
+            f"({blueprint['learning_objective_id']}; "
+            f"{blueprint['learning_objective_operation']})"
+        )
+    if blueprint.get("target_misconception_id"):
+        print(
+            "  exact misconception: "
+            f"{blueprint['target_misconception_id']}"
+        )
+    if blueprint.get("corpus_release_id"):
+        print(f"  pinned release: {blueprint['corpus_release_id']}")
+    print(f"  coverage goal: {blueprint.get('coverage_goal', 'concept_kind')}")
     print(f"  sources: {', '.join(blueprint['source_ids'])}")
     print(f"  attempts: {job['run_count']}")
     for run in job["runs"]:
@@ -902,6 +1366,11 @@ def command_jobs_show(args: argparse.Namespace) -> None:
             f"    {run['attempt']}: {run['status']} via "
             f"{run['provider']}/{run['model']} ({finished})"
         )
+        if run.get("error"):
+            error = run["error"]
+            error_type = error.get("error_type", "provider_error")
+            message = error.get("error", "No provider error message was recorded.")
+            print(f"      error [{error_type}]: {message}")
     if job["raw_output"] is not None:
         print(
             f"  artifact: {job['raw_output'].get('id', '<unknown>')} "
@@ -909,9 +1378,19 @@ def command_jobs_show(args: argparse.Namespace) -> None:
         )
         print("  activation: none (reviewed artifacts remain quarantined)")
     if job["validation"] is not None:
-        issue_count = len(job["validation"].get("deterministic_issues", ()))
+        issues = job["validation"].get("deterministic_issues", ())
+        error_count = sum(issue.get("severity") == "error" for issue in issues)
+        warning_count = sum(issue.get("severity") == "warning" for issue in issues)
         review_count = len(job["validation"].get("reviews", ()))
-        print(f"  validation: {issue_count} issues; {review_count} independent reviews")
+        print(
+            f"  validation: {error_count} error(s), {warning_count} warning(s); "
+            f"{review_count} independent review(s)"
+        )
+        for issue in issues:
+            severity = issue.get("severity", "unknown")
+            code = issue.get("code", "unspecified")
+            message = issue.get("message", "No validation detail was recorded.")
+            print(f"    [{severity}] {code}: {message}")
 
 
 def _read_source_context(path: Path) -> str:
@@ -964,7 +1443,7 @@ def command_jobs_retry(args: argparse.Namespace) -> None:
 
 
 def command_reviews_show(args: argparse.Namespace) -> None:
-    result = AuthoringJobs(_database(args)).reviews(args.job)
+    result = AuthoringJobs(_inspection_database(args)).reviews(args.job)
     if args.json:
         _emit(result, as_json=True)
         return
@@ -1012,7 +1491,7 @@ def command_replay(args: argparse.Namespace) -> None:
 
 
 def command_verify(args: argparse.Namespace) -> None:
-    database = _database(args, require_corpus=False)
+    database = _inspection_database(args, require_corpus=False)
     report = database.verify_integrity(args.stream)
     if args.json:
         _emit(report, as_json=True)
@@ -1057,6 +1536,12 @@ def command_study(args: argparse.Namespace) -> None:
             print(f"Session complete: {exc}\n")
             break
         print(f"[{presentation.phase.value.upper()}] {presentation.question.kind.value.replace('_', ' ')}")
+        if presentation.question.objective is not None:
+            objective = presentation.question.objective
+            print(
+                f"Objective: {objective.name} ({objective.id}) · "
+                f"{objective.operation.value} / {objective.evidence_type}"
+            )
         print(presentation.question.stem)
         ordered = presentation.ordered_options
         for index, option in enumerate(ordered, start=1):
@@ -1126,6 +1611,7 @@ def command_study(args: argparse.Namespace) -> None:
             selected_id,
             confidence=confidence,
             response_ms=elapsed_ms,
+            feedback_shown=False,
             idempotency_key=new_id("cli"),
         )
         print("\n✓ Correct" if result.correct else "\n✗ Not correct")
@@ -1135,6 +1621,35 @@ def command_study(args: argparse.Namespace) -> None:
         print(f"Why: {result.correct_option.rationale}")
         if result.focus_misconception_id:
             print(f"Next probe targets hypothesis: {result.focus_misconception_id}")
+        objective_names = {
+            objective.id: objective.name
+            for objective in database.get_learning_objectives(
+                session["corpus_release_id"]
+            )
+        }
+        assessed_change = next(
+            (
+                change
+                for change in result.state_changes
+                if "objective_id" in change
+            ),
+            None,
+        )
+        if assessed_change is not None:
+            objective_id = assessed_change["objective_id"]
+            print(
+                "Objective evidence: "
+                f"{objective_names.get(objective_id, objective_id)} "
+                f"({objective_id}) · "
+                f"{assessed_change['prior_mastery'] * 100:.1f}% → "
+                f"{assessed_change['posterior_mastery'] * 100:.1f}%"
+            )
+        if result.focus_objective_id:
+            print(
+                "Next probe objective: "
+                f"{objective_names.get(result.focus_objective_id, result.focus_objective_id)} "
+                f"({result.focus_objective_id})"
+            )
         if result.transition_reason == "descend_to_evidence_boundary":
             focus_name = (
                 database.get_graph(session["corpus_release_id"])
@@ -1147,6 +1662,20 @@ def command_study(args: argparse.Namespace) -> None:
                 "The next probe steps down to the strongest evidence boundary: "
                 f"{focus_name}."
             )
+        _record_cli_feedback(
+            engine,
+            decision_id=presentation.decision_id,
+            selected_option_id=(
+                result.selected_option.id if result.selected_option else None
+            ),
+            correct_option_id=result.correct_option.id,
+            selected_rationale=(
+                result.selected_option.rationale
+                if result.selected_option
+                else None
+            ),
+            correct_rationale=result.correct_option.rationale,
+        )
         print()
         completed += 1
 
@@ -1189,7 +1718,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     start.add_argument("--limit", type=int, default=5)
     start.add_argument("--seed", type=int)
-    start.add_argument("--ask-confidence", action="store_true")
+    start_confidence = start.add_mutually_exclusive_group()
+    start_confidence.add_argument(
+        "--ask-confidence",
+        dest="ask_confidence",
+        action="store_true",
+        default=True,
+        help="collect confidence after each answer (the default)",
+    )
+    start_confidence.add_argument(
+        "--no-confidence",
+        dest="ask_confidence",
+        action="store_false",
+        help="skip confidence collection; answers remain lower-certainty evidence",
+    )
     start.add_argument("--explain-policy", action="store_true")
     start.set_defaults(func=command_start)
 
@@ -1281,8 +1823,21 @@ def build_parser() -> argparse.ArgumentParser:
     learner_add.add_argument("--json", action="store_true")
     learner_add.set_defaults(func=command_learner_add)
 
-    session = subparsers.add_parser("session", help="Create an adaptive session")
+    session = subparsers.add_parser(
+        "session", help="Create, inspect, or close adaptive sessions"
+    )
     session_sub = session.add_subparsers(dest="session_command", required=True)
+    session_list = session_sub.add_parser(
+        "list", help="List recoverable session history"
+    )
+    session_list.add_argument("--learner", help="Filter by exact learner ID")
+    session_list.add_argument(
+        "--status", choices=["active", "completed", "abandoned"]
+    )
+    session_list.add_argument("--limit", type=int, default=20)
+    session_list.add_argument("--json", action="store_true")
+    session_list.set_defaults(func=command_session_list)
+
     session_start = session_sub.add_parser("start")
     session_start.add_argument("--learner", required=True)
     session_start.add_argument("--name")
@@ -1377,7 +1932,20 @@ def build_parser() -> argparse.ArgumentParser:
     study.add_argument("--mode", choices=["learn", "diagnose", "review"], default="learn")
     study.add_argument("--limit", type=int, default=10)
     study.add_argument("--seed", type=int)
-    study.add_argument("--ask-confidence", action="store_true")
+    study_confidence = study.add_mutually_exclusive_group()
+    study_confidence.add_argument(
+        "--ask-confidence",
+        dest="ask_confidence",
+        action="store_true",
+        default=True,
+        help="collect confidence after each answer (the default)",
+    )
+    study_confidence.add_argument(
+        "--no-confidence",
+        dest="ask_confidence",
+        action="store_false",
+        help="skip confidence collection; answers remain lower-certainty evidence",
+    )
     study.add_argument("--explain-policy", action="store_true")
     study.set_defaults(func=command_study)
 
@@ -1492,6 +2060,10 @@ def main(argv: list[str] | None = None) -> int:
     except (TSQError, KeyboardInterrupt) as exc:
         message = str(exc) if str(exc) else "Interrupted."
         print(f"error: {message}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        message = str(exc) if str(exc) else "SQLite database operation failed."
+        print(f"error: Database operation failed: {message}", file=sys.stderr)
         return 2
 
 
