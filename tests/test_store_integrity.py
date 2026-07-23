@@ -8,7 +8,7 @@ import sqlite3
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from tsq.corpus import read_and_parse
@@ -644,6 +644,18 @@ class StoreIntegrityTests(unittest.TestCase):
                 payload={"value": 2},
                 metadata={"source": "test"},
             )
+            self.database.append_event(
+                connection,
+                stream_id="duplicate-key-corruption",
+                event_type="Probe",
+                payload={"value": 3},
+            )
+            self.database.append_event(
+                connection,
+                stream_id="overflow-number-corruption",
+                event_type="Probe",
+                payload={"value": 4},
+            )
             connection.execute("DROP TRIGGER events_no_update")
             connection.execute(
                 "UPDATE events SET payload_json = ? WHERE stream_id = ?",
@@ -652,6 +664,14 @@ class StoreIntegrityTests(unittest.TestCase):
             connection.execute(
                 "UPDATE events SET metadata_json = ? WHERE stream_id = ?",
                 ('{"value":Infinity}', "metadata-corruption"),
+            )
+            connection.execute(
+                "UPDATE events SET payload_json = ? WHERE stream_id = ?",
+                ('{"value":1,"value":2}', "duplicate-key-corruption"),
+            )
+            connection.execute(
+                "UPDATE events SET payload_json = ? WHERE stream_id = ?",
+                ('{"value":1e999}', "overflow-number-corruption"),
             )
 
         corrupted = self.database.verify_integrity()
@@ -667,8 +687,65 @@ class StoreIntegrityTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
+                "invalid payload JSON" in error
+                and "non-finite JSON number 1e999" in error
+                for error in corrupted["errors"]
+            ),
+            corrupted["errors"],
+        )
+        self.assertTrue(
+            any(
                 "invalid metadata JSON" in error
                 and "non-finite JSON constant Infinity" in error
+                for error in corrupted["errors"]
+            ),
+            corrupted["errors"],
+        )
+        self.assertTrue(
+            any(
+                "invalid payload JSON" in error
+                and "duplicate JSON object key 'value'" in error
+                for error in corrupted["errors"]
+            ),
+            corrupted["errors"],
+        )
+
+    def test_integrity_rejects_non_finite_attempt_confidence_without_crashing(
+        self,
+    ) -> None:
+        self.database.import_corpus(
+            *read_and_parse(CORPUS, include_catalog=True)
+        )
+        engine = AdaptiveEngine(self.database)
+        engine.create_learner("non-finite-confidence")
+        started_at = datetime(2100, 1, 1, tzinfo=timezone.utc)
+        session = engine.start_session(
+            "non-finite-confidence",
+            "t_machine_learning",
+            seed=11,
+            now=started_at,
+        )
+        presentation = engine.next_question(session["id"], now=started_at)
+        engine.submit_answer(
+            presentation.decision_id,
+            presentation.question.correct_option.id,
+            confidence=0.7,
+            response_ms=800,
+            now=started_at + timedelta(milliseconds=800),
+        )
+
+        with self.database.transaction() as connection:
+            connection.execute("DROP TRIGGER attempts_no_update")
+            connection.execute(
+                "UPDATE attempts SET confidence=?",
+                (float("inf"),),
+            )
+
+        corrupted = self.database.verify_integrity()
+        self.assertFalse(corrupted["ok"])
+        self.assertTrue(
+            any(
+                "confidence is out of bounds" in error
                 for error in corrupted["errors"]
             ),
             corrupted["errors"],
@@ -680,16 +757,18 @@ class StoreIntegrityTests(unittest.TestCase):
         )
         engine = AdaptiveEngine(self.database)
         engine.create_learner("learner")
+        started_at = datetime(2100, 1, 1, tzinfo=timezone.utc)
         session = engine.start_session(
-            "learner", "t_machine_learning", seed=11
+            "learner", "t_machine_learning", seed=11, now=started_at
         )
-        presentation = engine.next_question(session["id"])
+        presentation = engine.next_question(session["id"], now=started_at)
         engine.submit_answer(
             presentation.decision_id,
             presentation.question.correct_option.id,
             confidence=0.7,
             response_ms=800,
             idempotency_key="answer",
+            now=started_at + timedelta(milliseconds=800),
         )
         clean = self.database.verify_integrity()
         self.assertTrue(clean["ok"], clean["errors"])

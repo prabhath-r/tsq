@@ -16,7 +16,20 @@ from .adaptive import BOUNDARY_ALGORITHM_VERSION, RecursiveEvidenceBoundary
 from .capacity import VERIFICATION_KINDS
 from .evidence import ActionKind, ActionPhase, LearningAction, summarize_actions
 from .errors import ConflictError, ExhaustedError, NotFoundError, ValidationError
-from .learner import LearnerModel, MODEL_VERSION
+from .inference import (
+    LEGACY_MISCONCEPTION_ALGORITHM,
+    MISCONCEPTION_ALGORITHM_METADATA_KEY,
+    MISCONCEPTION_ALGORITHM_VERSION,
+    ResponseClass,
+    SUPPORTED_MISCONCEPTION_ALGORITHMS,
+    classify_response_for_model,
+    credible_response_sql,
+    response_window,
+)
+from .learner import (
+    INITIAL_STABILITY_HOURS,
+    LearnerModel,
+)
 from .models import (
     MAX_HINT_COUNT,
     MAX_RESPONSE_MS,
@@ -26,8 +39,46 @@ from .models import (
     SessionPhase,
     SubmissionResult,
 )
-from .policy import AdaptivePolicy, MAX_REMEDIATION_DEPTH, POLICY_VERSION
+from .policy import (
+    MAX_REMEDIATION_DEPTH,
+    POLICY_VERSION,
+    AdaptivePolicy,
+    _selection_version_boundary,
+)
 from .store import Database, new_id
+from .versions import (
+    AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
+    COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS,
+    OBJECTIVE_MODEL_VERSIONS,
+    projection_format_for,
+)
+
+
+OBJECTIVE_PREREQUISITE_MASTERY_FLOOR = 0.40
+MISCONCEPTION_MONITORING_THRESHOLD = 0.12
+MISCONCEPTION_ACTIVE_THRESHOLD = 0.35
+_RESPONSE_MODEL_SQL = (
+    "json_extract(response_event.metadata_json, '$.learner_model_version')"
+)
+_RESPONSE_CREDIBILITY_SQL = credible_response_sql(
+    model_expression=_RESPONSE_MODEL_SQL,
+)
+_CREDIBLE_ROUTING_ATTEMPT_SQL = (
+    f"AND ({_RESPONSE_CREDIBILITY_SQL})"
+)
+
+
+def _certificate_observability_sql() -> str:
+    """Return the event-versioned immutable telemetry contract for certificates.
+
+    v5 and earlier permitted omitted confidence and timing. v6 made timing
+    mandatory while retaining optional confidence. Spacing-aware v7+ models
+    share the fully fail-closed response classifier and require both fields. The
+    response event, rather than the currently running engine, owns that
+    interpretation so a mixed-version session remains historically honest.
+    """
+
+    return f" AND ({_RESPONSE_CREDIBILITY_SQL})"
 
 
 def _canonical_hash(payload: dict[str, Any]) -> str:
@@ -147,13 +198,18 @@ def _validated_learning_action(
 def _option_payload(option: Option | None) -> dict[str, Any] | None:
     if option is None:
         return None
-    return {
+    payload = {
         "id": option.id,
         "text": option.text,
         "correct": option.correct,
         "rationale": option.rationale,
         "misconception_id": option.misconception_id,
     }
+    if option.diagnostic_objective_id is not None:
+        payload["diagnostic_objective_id"] = (
+            option.diagnostic_objective_id
+        )
+    return payload
 
 
 def _option_from_payload(payload: dict[str, Any] | None) -> Option | None:
@@ -165,6 +221,7 @@ def _option_from_payload(payload: dict[str, Any] | None) -> Option | None:
         correct=bool(payload["correct"]),
         rationale=payload["rationale"],
         misconception_id=payload.get("misconception_id"),
+        diagnostic_objective_id=payload.get("diagnostic_objective_id"),
     )
 
 
@@ -175,6 +232,17 @@ def _main_phase(mode: str) -> SessionPhase:
     }.get(mode, SessionPhase.LEARN)
 
 
+def _family_diversity_label(family_count: int) -> str:
+    """Render a compact label without obscuring what the count represents."""
+    if family_count <= 0:
+        return "none"
+    if family_count == 1:
+        return "single_family"
+    if family_count == 2:
+        return "developing"
+    return "diverse"
+
+
 class AdaptiveEngine:
     """Application service coordinating sessions, policy, evidence, and projections."""
 
@@ -182,9 +250,17 @@ class AdaptiveEngine:
         self,
         database: Database,
         learner_model: LearnerModel | None = None,
+        *,
+        misconception_algorithm: str = MISCONCEPTION_ALGORITHM_VERSION,
     ):
+        if misconception_algorithm not in SUPPORTED_MISCONCEPTION_ALGORITHMS:
+            raise ValueError(
+                "Unsupported misconception inference algorithm: "
+                f"{misconception_algorithm}"
+            )
         self.database = database
         self.learner_model = learner_model or LearnerModel()
+        self.misconception_algorithm = misconception_algorithm
         self.boundary_planner = RecursiveEvidenceBoundary(self.learner_model)
         self.policy = AdaptivePolicy(database, self.learner_model)
 
@@ -201,6 +277,7 @@ class AdaptiveEngine:
         mode: str = "learn",
         seed: int | None = None,
         idempotency_key: str | None = None,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         if mode not in {"learn", "diagnose", "review"}:
             raise ValidationError("Mode must be learn, diagnose, or review.")
@@ -229,6 +306,7 @@ class AdaptiveEngine:
             mode=mode,
             seed=seed,
             idempotency_key=idempotency_key,
+            now=now,
         )
 
     def next_question(self, session_id: str, *, now: datetime | None = None) -> Presentation:
@@ -255,6 +333,12 @@ class AdaptiveEngine:
 
         session = self.database.get_session(session_id)
         graph = self.database.get_graph(session["corpus_release_id"])
+        release_objectives = self.database.get_learning_objectives(
+            session["corpus_release_id"]
+        )
+        objective_by_id = {
+            objective.id: objective for objective in release_objectives
+        }
         focus_concept_id = session["focus_concept_id"]
         if focus_concept_id is None:
             containers = {
@@ -291,6 +375,47 @@ class AdaptiveEngine:
         concept = graph.concepts.get(focus_concept_id)
         if concept is None:
             return
+        focus_objective = objective_by_id.get(session["focus_objective_id"])
+        if session["focus_objective_id"] is not None and focus_objective is None:
+            raise ValidationError(
+                "Live corpus gap references an objective outside its pinned release."
+            )
+        if focus_objective is None:
+            objective_candidates = [
+                objective
+                for objective in release_objectives
+                if focus_concept_id in objective.concept_ids
+            ]
+            canonically_owned = [
+                objective
+                for objective in objective_candidates
+                if objective.primary_concept_id == focus_concept_id
+            ]
+            if canonically_owned:
+                objective_candidates = canonically_owned
+            if objective_candidates:
+                objective_states = self.database.get_objective_states(
+                    session["learner_id"]
+                )
+
+                def objective_need(objective):
+                    state = objective_states.get(
+                        objective.id
+                    ) or self.learner_model.initial_objective_state(
+                        session["learner_id"], objective
+                    )
+                    projected = self.learner_model.project_objective_state(
+                        state, objective, now
+                    )
+                    return (
+                        0.55 * projected.mastery_probability
+                        + 0.45 * projected.expected_competence,
+                        objective.id,
+                    )
+
+                focus_objective = min(
+                    objective_candidates, key=objective_need
+                )
         with self.database.transaction() as connection:
             current = connection.execute(
                 "SELECT * FROM sessions WHERE id = ?", (session_id,)
@@ -301,6 +426,9 @@ class AdaptiveEngine:
                 or current["revision"] != session["revision"]
             ):
                 return
+            self.database.validate_session_focus(
+                current, connection=connection
+            )
             demand_key = _canonical_hash(
                 {
                     "session_id": session_id,
@@ -308,6 +436,9 @@ class AdaptiveEngine:
                     "phase": current["phase"],
                     "focus_concept_id": focus_concept_id,
                     "focus_misconception_id": current["focus_misconception_id"],
+                    "focus_objective_id": (
+                        focus_objective.id if focus_objective else None
+                    ),
                     "corpus_release_id": current["corpus_release_id"],
                     "message": message,
                 }
@@ -319,18 +450,38 @@ class AdaptiveEngine:
             ).fetchone():
                 return
 
-            source_ids = tuple(
-                row["source_id"]
-                for row in connection.execute(
-                    """SELECT DISTINCT qs.source_id
-                       FROM question_sources qs
-                       JOIN question_concepts qc ON qc.question_id = qs.question_id
-                       JOIN release_questions rq ON rq.question_id = qs.question_id
-                       WHERE qc.concept_id = ? AND rq.release_id = ?
-                       ORDER BY qs.source_id LIMIT 8""",
-                    (focus_concept_id, current["corpus_release_id"]),
+            if focus_objective is not None:
+                source_ids = tuple(
+                    row["source_id"]
+                    for row in connection.execute(
+                        """SELECT DISTINCT source.source_id
+                           FROM release_question_objectives direct
+                           JOIN question_sources source
+                             ON source.question_id = direct.question_id
+                           WHERE direct.release_id = ?
+                             AND direct.objective_id = ?
+                           ORDER BY source.source_id LIMIT 8""",
+                        (
+                            current["corpus_release_id"],
+                            focus_objective.id,
+                        ),
+                    )
                 )
-            )
+            else:
+                source_ids = tuple(
+                    row["source_id"]
+                    for row in connection.execute(
+                        """SELECT DISTINCT qs.source_id
+                           FROM question_sources qs
+                           JOIN question_concepts qc
+                             ON qc.question_id = qs.question_id
+                           JOIN release_questions rq
+                             ON rq.question_id = qs.question_id
+                           WHERE qc.concept_id = ? AND rq.release_id = ?
+                           ORDER BY qs.source_id LIMIT 8""",
+                        (focus_concept_id, current["corpus_release_id"]),
+                    )
+                )
             if not source_ids:
                 source_ids = tuple(
                     row["source_id"]
@@ -343,6 +494,25 @@ class AdaptiveEngine:
             focus_misconception_id = current["focus_misconception_id"]
             if focus_misconception_id:
                 misconception_ids = (focus_misconception_id,)
+            elif focus_objective is not None:
+                misconception_ids = tuple(
+                    row["misconception_id"]
+                    for row in connection.execute(
+                        """SELECT DISTINCT option.misconception_id
+                           FROM release_option_objectives diagnostic
+                           JOIN options option
+                             ON option.question_id = diagnostic.question_id
+                            AND option.option_id = diagnostic.option_id
+                           WHERE diagnostic.release_id = ?
+                             AND diagnostic.objective_id = ?
+                             AND option.misconception_id IS NOT NULL
+                           ORDER BY option.misconception_id LIMIT 3""",
+                        (
+                            current["corpus_release_id"],
+                            focus_objective.id,
+                        ),
+                    )
+                )
             else:
                 misconception_ids = tuple(
                     row["misconception_id"]
@@ -358,14 +528,36 @@ class AdaptiveEngine:
                     )
                 )
             state = connection.execute(
-                """SELECT mean FROM skill_states
-                   WHERE learner_id = ? AND concept_id = ?""",
-                (current["learner_id"], focus_concept_id),
+                (
+                    """SELECT mean FROM objective_states
+                       WHERE learner_id = ? AND objective_id = ?"""
+                    if focus_objective is not None
+                    else """SELECT mean FROM skill_states
+                       WHERE learner_id = ? AND concept_id = ?"""
+                ),
+                (
+                    current["learner_id"],
+                    (
+                        focus_objective.id
+                        if focus_objective is not None
+                        else focus_concept_id
+                    ),
+                ),
             ).fetchone()
             if state:
                 target_difficulty = max(-2.5, min(2.5, float(state["mean"])))
             else:
-                prior = max(0.02, min(0.98, concept.prior_mastery))
+                prior = max(
+                    0.02,
+                    min(
+                        0.98,
+                        (
+                            focus_objective.prior_mastery
+                            if focus_objective is not None
+                            else concept.prior_mastery
+                        ),
+                    ),
+                )
                 target_difficulty = max(-2.5, min(2.5, log(prior / (1.0 - prior))))
 
             if current["phase"] == SessionPhase.VERIFY.value:
@@ -391,6 +583,38 @@ class AdaptiveEngine:
                                 "Create a new independent family for this observed live "
                                 "corpus gap; do not paraphrase any presented family."
                             ),
+                            corpus_release_id=current["corpus_release_id"],
+                            learning_objective_id=(
+                                focus_objective.id
+                                if focus_objective is not None
+                                else None
+                            ),
+                            learning_objective_name=(
+                                focus_objective.name
+                                if focus_objective is not None
+                                else None
+                            ),
+                            learning_objective_description=(
+                                focus_objective.description
+                                if focus_objective is not None
+                                else None
+                            ),
+                            learning_objective_operation=(
+                                focus_objective.operation.value
+                                if focus_objective is not None
+                                else None
+                            ),
+                            learning_objective_evidence_type=(
+                                focus_objective.evidence_type
+                                if focus_objective is not None
+                                else None
+                            ),
+                            target_misconception_id=(
+                                focus_misconception_id
+                                if focus_objective is not None
+                                else None
+                            ),
+                            coverage_goal="live_corpus_gap",
                         )
                     )
                 )
@@ -441,6 +665,9 @@ class AdaptiveEngine:
                     "phase": current["phase"],
                     "focus_concept_id": focus_concept_id,
                     "focus_misconception_id": focus_misconception_id,
+                    "focus_objective_id": (
+                        focus_objective.id if focus_objective else None
+                    ),
                     "corpus_release_id": current["corpus_release_id"],
                     "message": message,
                     "job_id": job_ids[0],
@@ -448,7 +675,7 @@ class AdaptiveEngine:
                 },
                 metadata={
                     "policy_version": POLICY_VERSION,
-                    "learner_model_version": MODEL_VERSION,
+                    "learner_model_version": self.learner_model.model_version,
                     "corpus_release_id": current["corpus_release_id"],
                 },
                 learner_id=current["learner_id"],
@@ -576,6 +803,14 @@ class AdaptiveEngine:
             if not decision:
                 raise NotFoundError(f"Unknown decision: {decision_id}")
             session = self.database.get_session(decision["session_id"], connection)
+            self.database.validate_release_focus_tuple(
+                decision["corpus_release_id"],
+                decision["focus_concept_id"],
+                decision["focus_misconception_id"],
+                decision["focus_objective_id"],
+                connection=connection,
+                label=f"decision {decision_id} focus",
+            )
             selected_at = datetime.fromisoformat(decision["created_at"])
 
             # Validate the closed payload before looking for an idempotent
@@ -675,6 +910,9 @@ class AdaptiveEngine:
                 )
 
             if preliminary.phase is ActionPhase.POST_FEEDBACK:
+                self.database.validate_session_focus(
+                    session, connection=connection
+                )
                 attempt = connection.execute(
                     "SELECT answered_at FROM attempts WHERE decision_id = ?",
                     (decision_id,),
@@ -704,6 +942,8 @@ class AdaptiveEngine:
                     or session["focus_concept_id"] != decision["focus_concept_id"]
                     or session["focus_misconception_id"]
                     != decision["focus_misconception_id"]
+                    or session["focus_objective_id"]
+                    != decision["focus_objective_id"]
                     or session["corpus_release_id"]
                     != decision["corpus_release_id"]
                     or session["revision"] != decision["session_revision"] + 1
@@ -712,6 +952,9 @@ class AdaptiveEngine:
                     raise ConflictError(
                         "This decision is stale; request a new question before recording actions."
                     )
+                self.database.validate_session_focus(
+                    session, connection=connection
+                )
 
             prior_rows = connection.execute(
                 """SELECT sequence, occurred_at, action_type, stage, payload_json
@@ -908,7 +1151,7 @@ class AdaptiveEngine:
                     },
                     metadata={
                         "policy_version": decision["policy_version"],
-                        "learner_model_version": MODEL_VERSION,
+                        "learner_model_version": self.learner_model.model_version,
                         "corpus_release_id": decision["corpus_release_id"],
                     },
                     learner_id=session["learner_id"],
@@ -943,6 +1186,126 @@ class AdaptiveEngine:
             ).fetchall()
         return [self._action_projection(row) for row in rows]
 
+    def _invalidate_pending_decision_for_version_change(
+        self,
+        decision_id: str,
+        *,
+        idempotency_key: str | None,
+        now: datetime,
+    ) -> str | None:
+        """Close a promise selected by a different model or adaptive policy.
+
+        The invalidation is committed in its own transaction so callers can be
+        told to request a replacement without rolling back the durable safety
+        boundary.  Already-consumed decisions remain available for exact
+        idempotent replay across a process upgrade.
+        """
+
+        def stale_pending(
+            connection: sqlite3.Connection,
+        ) -> tuple[sqlite3.Row, str] | None:
+            decision = connection.execute(
+                "SELECT * FROM decisions WHERE id = ?", (decision_id,)
+            ).fetchone()
+            if (
+                decision is None
+                or decision["consumed_at"] is not None
+                or decision["invalidated_at"] is not None
+            ):
+                return None
+            # Let the ordinary command boundary diagnose any reused key.  In a
+            # healthy database a pending decision cannot already have a durable
+            # ResponseSubmitted event, so no valid replay is skipped here.
+            if idempotency_key and connection.execute(
+                "SELECT 1 FROM events WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone():
+                return None
+            (
+                selection_model_version,
+                selection_policy_version,
+                _,
+            ) = _selection_version_boundary(
+                connection,
+                decision_id=decision_id,
+                session_id=decision["session_id"],
+            )
+            if selection_policy_version != decision["policy_version"]:
+                raise ValidationError(
+                    f"Pending decision {decision_id} policy does not match "
+                    "its QuestionSelected boundary."
+                )
+            if selection_model_version != self.learner_model.model_version:
+                invalidation_reason = "learner_model_changed"
+            elif selection_policy_version != POLICY_VERSION:
+                invalidation_reason = "policy_changed"
+            else:
+                return None
+            selected_at = datetime.fromisoformat(decision["created_at"])
+            if now < selected_at:
+                raise ValidationError(
+                    "An answer cannot occur before its question was selected."
+                )
+            return decision, invalidation_reason
+
+        # The overwhelmingly common same-model path needs only an immutable
+        # event lookup; do not take a second write lock for every answer.
+        with self.database.read() as connection:
+            if stale_pending(connection) is None:
+                return None
+
+        # Recheck under the write lock before projecting the invalidation.  A
+        # concurrent answer or idempotent replay may have closed the decision
+        # after the read-only inspection.
+        with self.database.transaction() as connection:
+            stale = stale_pending(connection)
+            if stale is None:
+                return None
+            decision, invalidation_reason = stale
+            learner = connection.execute(
+                "SELECT revision FROM learners WHERE id = ?",
+                (decision["learner_id"],),
+            ).fetchone()
+            if learner is None:
+                raise ConflictError("Decision learner no longer exists.")
+            if learner["revision"] < decision["learner_revision"]:
+                raise ConflictError(
+                    "Pending decision is ahead of the learner projection."
+                )
+            invalidated = connection.execute(
+                """UPDATE decisions
+                   SET invalidated_at = ?, invalidation_reason = ?
+                   WHERE id = ? AND consumed_at IS NULL
+                     AND invalidated_at IS NULL""",
+                (now.isoformat(), invalidation_reason, decision_id),
+            )
+            if invalidated.rowcount != 1:
+                return None
+            self.database.append_event(
+                connection,
+                stream_id=f"learner:{decision['learner_id']}",
+                event_type="DecisionInvalidated",
+                schema_version=1,
+                payload={
+                    "decision_id": decision_id,
+                    "reason": invalidation_reason,
+                    "selection_learner_revision": decision[
+                        "learner_revision"
+                    ],
+                    "current_learner_revision": learner["revision"],
+                },
+                metadata={
+                    "policy_version": POLICY_VERSION,
+                    "learner_model_version": self.learner_model.model_version,
+                    "corpus_release_id": decision["corpus_release_id"],
+                },
+                learner_id=decision["learner_id"],
+                session_id=decision["session_id"],
+                causation_id=decision_id,
+                occurred_at=now,
+            )
+            return invalidation_reason
+
     def submit_answer(
         self,
         decision_id: str,
@@ -951,7 +1314,7 @@ class AdaptiveEngine:
         confidence: float | None = None,
         response_ms: int | None = None,
         hint_count: int = 0,
-        feedback_shown: bool = True,
+        feedback_shown: bool = False,
         idempotency_key: str | None = None,
         now: datetime | None = None,
     ) -> SubmissionResult:
@@ -974,6 +1337,10 @@ class AdaptiveEngine:
             # event, command hash, learner update, and stored attempt all use
             # the same numeric representation.
             confidence = float(confidence)
+            if confidence == 0.0:
+                # SQLite normalizes REAL negative zero on round-trip. Keep the
+                # immutable event, command hash, and projection canonical too.
+                confidence = 0.0
         if response_ms is not None and (
             type(response_ms) is not int
             or not 0 <= response_ms <= MAX_RESPONSE_MS
@@ -1000,14 +1367,55 @@ class AdaptiveEngine:
             raise ValidationError("now must be timezone-aware.")
         now = now.astimezone(timezone.utc)
 
+        invalidation_reason = self._invalidate_pending_decision_for_version_change(
+            decision_id,
+            idempotency_key=idempotency_key,
+            now=now,
+        )
+        if invalidation_reason is not None:
+            boundary = (
+                "learner model"
+                if invalidation_reason == "learner_model_changed"
+                else "adaptive policy"
+            )
+            raise ConflictError(
+                f"The {boundary} changed after this question was selected; "
+                "the stale decision was invalidated. Request a new question."
+            )
+
         with self.database.transaction() as connection:
             decision = connection.execute(
                 "SELECT * FROM decisions WHERE id = ?", (decision_id,)
             ).fetchone()
             if not decision:
                 raise NotFoundError(f"Unknown decision: {decision_id}")
+            (
+                selection_model_version,
+                selection_policy_version,
+                selection_occurred_at,
+            ) = _selection_version_boundary(
+                connection,
+                decision_id=decision_id,
+                session_id=decision["session_id"],
+            )
             session = self.database.get_session(decision["session_id"], connection)
-            question = self.database.get_question(decision["question_id"], connection)
+            self.database.validate_release_focus_tuple(
+                decision["corpus_release_id"],
+                decision["focus_concept_id"],
+                decision["focus_misconception_id"],
+                decision["focus_objective_id"],
+                connection=connection,
+                label=f"decision {decision_id} focus",
+            )
+            question = self.database.get_question(
+                decision["question_id"],
+                connection,
+                release_id=decision["corpus_release_id"],
+            )
+            if question.objective_id != decision["question_objective_id"]:
+                raise ConflictError(
+                    "The selected question no longer matches its pinned learning objective."
+                )
             with_hash = connection.execute(
                 "SELECT version, content_hash FROM questions WHERE id = ?",
                 (decision["question_id"],),
@@ -1093,6 +1501,25 @@ class AdaptiveEngine:
                         idempotent=True,
                     )
 
+            if (
+                selection_model_version != self.learner_model.model_version
+                or selection_policy_version != decision["policy_version"]
+                or selection_policy_version != POLICY_VERSION
+            ):
+                raise ConflictError(
+                    "The selected question no longer matches the active model "
+                    "and policy boundary; request a new question."
+                )
+            if (
+                question.objective_id is not None
+                and self.learner_model.model_version
+                not in OBJECTIVE_MODEL_VERSIONS
+            ):
+                raise ValidationError(
+                    f"Learner model {self.learner_model.model_version} cannot "
+                    "apply objective-aware evidence; use the current learner model."
+                )
+
             if decision["consumed_at"]:
                 raise ConflictError("This question decision has already been answered.")
             if decision["invalidated_at"]:
@@ -1115,12 +1542,16 @@ class AdaptiveEngine:
                 session["phase"] != decision["phase"]
                 or session["focus_concept_id"] != decision["focus_concept_id"]
                 or session["focus_misconception_id"] != decision["focus_misconception_id"]
+                or session["focus_objective_id"] != decision["focus_objective_id"]
                 or session["corpus_release_id"] != decision["corpus_release_id"]
                 or session["revision"] != decision["session_revision"] + 1
             ):
                 raise ConflictError(
                     "Session state changed after this question was selected; request a new question."
                 )
+            self.database.validate_session_focus(
+                session, connection=connection
+            )
             learner = connection.execute(
                 "SELECT revision FROM learners WHERE id = ?", (session["learner_id"],)
             ).fetchone()
@@ -1131,9 +1562,23 @@ class AdaptiveEngine:
                     "The learner model changed after this question was selected; "
                     "request a new question."
                 )
-            selected_at = datetime.fromisoformat(decision["created_at"])
-            if now < selected_at:
-                raise ValidationError("An answer cannot occur before its question was selected.")
+            if (
+                self.learner_model.model_version
+                in AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS
+            ):
+                try:
+                    authoritative_window = response_window(
+                        selected_at=selection_occurred_at,
+                        answered_at=now,
+                        response_ms=response_ms,
+                    )
+                except ValueError as exc:
+                    raise ValidationError(str(exc)) from exc
+                if not authoritative_window.consistent:
+                    raise ValidationError(
+                        "response_ms cannot exceed the authoritative time between "
+                        "question selection and answer submission."
+                    )
             last_answer = connection.execute(
                 "SELECT MAX(answered_at) AS answered_at FROM attempts WHERE learner_id = ?",
                 (session["learner_id"],),
@@ -1142,21 +1587,49 @@ class AdaptiveEngine:
                 raise ValidationError(
                     "Out-of-order answer time would invalidate the online learner projection."
                 )
+            if (
+                self.misconception_algorithm
+                == LEGACY_MISCONCEPTION_ALGORITHM
+            ):
+                explicitly_versioned = connection.execute(
+                    """SELECT 1 FROM events
+                       WHERE stream_id=?
+                         AND event_type='ResponseSubmitted'
+                         AND schema_version >= 2
+                       LIMIT 1""",
+                    (f"learner:{session['learner_id']}",),
+                ).fetchone()
+                if explicitly_versioned is not None:
+                    raise ConflictError(
+                        "Misconception inference cannot regress to legacy "
+                        "semantics after an explicitly versioned response."
+                    )
+            response_metadata = {
+                "policy_version": decision["policy_version"],
+                "learner_model_version": self.learner_model.model_version,
+                "corpus_release_id": decision["corpus_release_id"],
+                "question_content_hash": decision["question_content_hash"],
+                "question_status": decision["question_status"],
+                "evidence_weight": decision["evidence_weight"],
+                "selection_learner_revision": decision["learner_revision"],
+                "application_learner_revision": learner["revision"],
+            }
+            response_schema_version = 1
+            if (
+                self.misconception_algorithm
+                != LEGACY_MISCONCEPTION_ALGORITHM
+            ):
+                response_schema_version = 2
+                response_metadata[MISCONCEPTION_ALGORITHM_METADATA_KEY] = (
+                    self.misconception_algorithm
+                )
             event = self.database.append_event(
                 connection,
                 stream_id=f"learner:{session['learner_id']}",
                 event_type="ResponseSubmitted",
+                schema_version=response_schema_version,
                 payload=command_payload,
-                metadata={
-                    "policy_version": decision["policy_version"],
-                    "learner_model_version": MODEL_VERSION,
-                    "corpus_release_id": decision["corpus_release_id"],
-                    "question_content_hash": decision["question_content_hash"],
-                    "question_status": decision["question_status"],
-                    "evidence_weight": decision["evidence_weight"],
-                    "selection_learner_revision": decision["learner_revision"],
-                    "application_learner_revision": learner["revision"],
-                },
+                metadata=response_metadata,
                 learner_id=session["learner_id"],
                 session_id=session["id"],
                 idempotency_key=idempotency_key,
@@ -1205,6 +1678,7 @@ class AdaptiveEngine:
                 event_id=event["event_id"],
                 now=now,
                 response_ms=response_ms,
+                misconception_algorithm=self.misconception_algorithm,
             )
             transition = self._transition(
                 connection,
@@ -1220,7 +1694,8 @@ class AdaptiveEngine:
             recent_families = (session["recent_families"] + [question.family_id])[-6:]
             updated_session = connection.execute(
                 """UPDATE sessions SET phase = ?, focus_concept_id = ?,
-                       focus_misconception_id = ?, remediation_depth = ?,
+                       focus_misconception_id = ?, focus_objective_id = ?,
+                       remediation_depth = ?,
                        remediation_path_json = ?, recent_families_json = ?,
                        revision = revision + 1, updated_at = ?
                    WHERE id = ? AND revision = ? AND status = 'active'""",
@@ -1228,6 +1703,7 @@ class AdaptiveEngine:
                     transition["phase"].value,
                     transition["focus_concept_id"],
                     transition["focus_misconception_id"],
+                    transition["focus_objective_id"],
                     transition["remediation_depth"],
                     json.dumps(
                         transition["remediation_path"],
@@ -1263,33 +1739,87 @@ class AdaptiveEngine:
                    WHERE question_id = ?""",
                 (int(correct), response_ms or 0, question.id),
             )
-            projection_hash = self.database.learner_projection_hash(
-                session["learner_id"], connection
+            prior_objective_projection = connection.execute(
+                """SELECT 1 FROM objective_states WHERE learner_id = ?
+                   UNION ALL
+                   SELECT 1 FROM learner_objective_families WHERE learner_id = ?
+                   LIMIT 1""",
+                (session["learner_id"], session["learner_id"]),
+            ).fetchone()
+            objective_aware = bool(
+                question.objective_id
+                or session.get("focus_objective_id")
+                or transition.get("focus_objective_id")
+                or prior_objective_projection
             )
+            if (
+                objective_aware
+                and self.learner_model.model_version
+                not in OBJECTIVE_MODEL_VERSIONS
+            ):
+                raise ValidationError(
+                    f"Learner model {self.learner_model.model_version} cannot "
+                    "advance an objective-aware projection."
+                )
+            try:
+                projection_format = projection_format_for(
+                    self.learner_model.model_version,
+                    objective_aware=objective_aware,
+                )
+            except ValueError as exc:
+                raise ValidationError(str(exc)) from exc
+            projection_hash_version = projection_format.hash_version
+            projection_schema_version = (
+                projection_format.event_schema_version
+            )
+            projection_hash = self.database.learner_projection_hash(
+                session["learner_id"],
+                connection,
+                hash_version=projection_hash_version,
+            )
+            projection_payload = {
+                "response_event_id": event["event_id"],
+                "state_changes": changes,
+                "phase": transition["phase"].value,
+                "focus_concept_id": transition["focus_concept_id"],
+                "focus_misconception_id": transition["focus_misconception_id"],
+                "remediation_depth": transition["remediation_depth"],
+                "remediation_path": transition["remediation_path"],
+                "transition_reason": transition["transition_reason"],
+                "boundary_decision": transition["boundary_decision"],
+                "corpus_release_id": decision["corpus_release_id"],
+                "learner_revision": learner["revision"] + 1,
+                "projection_hash": projection_hash,
+            }
+            if objective_aware:
+                projection_payload.update(
+                    {
+                        "question_objective_id": question.objective_id,
+                        "focus_objective_id": transition[
+                            "focus_objective_id"
+                        ],
+                        "projection_hash_version": projection_hash_version,
+                    }
+                )
+            projection_metadata = {
+                "learner_model_version": self.learner_model.model_version,
+                "corpus_release_id": decision["corpus_release_id"],
+                "evidence_weight": decision["evidence_weight"],
+            }
+            if (
+                self.misconception_algorithm
+                != LEGACY_MISCONCEPTION_ALGORITHM
+            ):
+                projection_metadata[MISCONCEPTION_ALGORITHM_METADATA_KEY] = (
+                    self.misconception_algorithm
+                )
             projection_event = self.database.append_event(
                 connection,
                 stream_id=f"learner:{session['learner_id']}",
                 event_type="LearnerProjectionAdvanced",
-                schema_version=2,
-                payload={
-                    "response_event_id": event["event_id"],
-                    "state_changes": changes,
-                    "phase": transition["phase"].value,
-                    "focus_concept_id": transition["focus_concept_id"],
-                    "focus_misconception_id": transition["focus_misconception_id"],
-                    "remediation_depth": transition["remediation_depth"],
-                    "remediation_path": transition["remediation_path"],
-                    "transition_reason": transition["transition_reason"],
-                    "boundary_decision": transition["boundary_decision"],
-                    "corpus_release_id": decision["corpus_release_id"],
-                    "learner_revision": learner["revision"] + 1,
-                    "projection_hash": projection_hash,
-                },
-                metadata={
-                    "learner_model_version": MODEL_VERSION,
-                    "corpus_release_id": decision["corpus_release_id"],
-                    "evidence_weight": decision["evidence_weight"],
-                },
+                schema_version=projection_schema_version,
+                payload=projection_payload,
+                metadata=projection_metadata,
                 learner_id=session["learner_id"],
                 session_id=session["id"],
                 causation_id=event["event_id"],
@@ -1300,28 +1830,37 @@ class AdaptiveEngine:
                 or transition["focus_concept_id"] != session["focus_concept_id"]
                 or transition["focus_misconception_id"]
                 != session["focus_misconception_id"]
+                or transition["focus_objective_id"]
+                != session["focus_objective_id"]
                 or transition["remediation_depth"] != session["remediation_depth"]
                 or transition["remediation_path"] != session["remediation_path"]
             )
             if transition_changed:
+                transition_payload = {
+                    "from_phase": session["phase"],
+                    "to_phase": transition["phase"].value,
+                    "focus_concept_id": transition["focus_concept_id"],
+                    "focus_misconception_id": transition[
+                        "focus_misconception_id"
+                    ],
+                    "remediation_depth": transition["remediation_depth"],
+                    "remediation_path": transition["remediation_path"],
+                    "transition_reason": transition["transition_reason"],
+                    "boundary_decision": transition["boundary_decision"],
+                    "pedagogical_role": decision["pedagogical_role"],
+                    "focus_valid": bool(decision["focus_valid"]),
+                    "unguided": hint_count == 0,
+                }
+                if objective_aware:
+                    transition_payload["focus_objective_id"] = transition[
+                        "focus_objective_id"
+                    ]
                 self.database.append_event(
                     connection,
                     stream_id=f"learner:{session['learner_id']}",
                     event_type="RemediationTransitioned",
-                    schema_version=2,
-                    payload={
-                        "from_phase": session["phase"],
-                        "to_phase": transition["phase"].value,
-                        "focus_concept_id": transition["focus_concept_id"],
-                        "focus_misconception_id": transition["focus_misconception_id"],
-                        "remediation_depth": transition["remediation_depth"],
-                        "remediation_path": transition["remediation_path"],
-                        "transition_reason": transition["transition_reason"],
-                        "boundary_decision": transition["boundary_decision"],
-                        "pedagogical_role": decision["pedagogical_role"],
-                        "focus_valid": bool(decision["focus_valid"]),
-                        "unguided": hint_count == 0,
-                    },
+                    schema_version=3 if objective_aware else 2,
+                    payload=transition_payload,
                     metadata={
                         "policy_version": POLICY_VERSION,
                         "corpus_release_id": decision["corpus_release_id"],
@@ -1339,11 +1878,29 @@ class AdaptiveEngine:
                 next_phase=transition["phase"],
                 focus_concept_id=transition["focus_concept_id"],
                 focus_misconception_id=transition["focus_misconception_id"],
+                focus_objective_id=transition["focus_objective_id"],
                 state_changes=tuple(changes),
                 transition_reason=transition["transition_reason"],
                 boundary_decision=transition["boundary_decision"],
             )
             outcome = self._outcome_payload(result)
+            if (
+                self.learner_model.model_version
+                in COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS
+            ):
+                # v8 closes the transition commitment: every duplicated field
+                # in the projection event is also pinned in the immutable
+                # attempt outcome used by exact idempotent retries.
+                outcome.update(
+                    {
+                        "remediation_depth": transition[
+                            "remediation_depth"
+                        ],
+                        "remediation_path": transition[
+                            "remediation_path"
+                        ],
+                    }
+                )
             stored_outcome = connection.execute(
                 """UPDATE attempts SET outcome_json = ?
                    WHERE id = ? AND outcome_json IS NULL""",
@@ -1369,20 +1926,36 @@ class AdaptiveEngine:
         current = SessionPhase(session["phase"])
         correct = bool(selected_option and selected_option.correct)
         remediation_path = [dict(frame) for frame in session["remediation_path"]]
+        response_class = classify_response_for_model(
+            model_version=self.learner_model.model_version,
+            correct=correct,
+            selected_option_id=(
+                selected_option.id if selected_option is not None else None
+            ),
+            selected_misconception_id=(
+                selected_option.misconception_id
+                if selected_option is not None
+                else None
+            ),
+            confidence=confidence,
+            response_ms=response_ms,
+            hint_count=hint_count,
+        )
         focus_snapshot_matches = (
             decision["phase"] == session["phase"]
             and decision["focus_concept_id"] == session["focus_concept_id"]
             and decision["focus_misconception_id"] == session["focus_misconception_id"]
+            and decision["focus_objective_id"] == session["focus_objective_id"]
         )
-        credible_retrieval = (
-            hint_count == 0
-            and (confidence is None or confidence >= 0.50)
-            and (response_ms is None or response_ms >= 250)
+        direct_objective_anchor = (
+            question.objective.primary_concept_id
+            if question.objective is not None
+            else question.primary_concept_id
         )
         valid_unguided_focus_evidence = (
             bool(decision["focus_valid"])
             and focus_snapshot_matches
-            and credible_retrieval
+            and response_class.certifies_retrieval
             and (
                 (current == SessionPhase.REMEDIATE and decision["pedagogical_role"] == "remediation_probe")
                 or (current == SessionPhase.VERIFY and decision["pedagogical_role"] == "verification")
@@ -1393,24 +1966,57 @@ class AdaptiveEngine:
                 SessionPhase.LEARN,
                 SessionPhase.DIAGNOSE,
                 SessionPhase.REVIEW,
-            } and not credible_retrieval:
+            } and not response_class.certifies_retrieval:
                 # A guessed, hinted, low-confidence, or implausibly fast success
                 # is useful evidence but not certification. Route to an
                 # independent transfer check instead of silently moving on.
                 return {
                     "phase": SessionPhase.VERIFY,
-                    "focus_concept_id": question.primary_concept_id,
+                    "focus_concept_id": direct_objective_anchor,
                     "focus_misconception_id": None,
+                    "focus_objective_id": question.objective_id,
                     "remediation_depth": 1,
                     "remediation_path": remediation_path,
                     "transition_reason": "noncredible_success_requires_verification",
                     "boundary_decision": None,
                 }
             if current == SessionPhase.REMEDIATE and valid_unguided_focus_evidence:
+                if remediation_path and session["focus_objective_id"] is not None:
+                    objectives = {
+                        objective.id: objective
+                        for objective in self.database.get_learning_objectives(
+                            decision["corpus_release_id"]
+                        )
+                    }
+                    persistently_verified = (
+                        self._persistently_verified_objectives(
+                            connection,
+                            learner_id=session["learner_id"],
+                            release_id=decision["corpus_release_id"],
+                            objective_ids={session["focus_objective_id"]},
+                            objectives=objectives,
+                            now=now,
+                        )
+                    )
+                    if session["focus_objective_id"] in persistently_verified:
+                        return self._resume_verified_prerequisite(
+                            connection,
+                            session=session,
+                            decision=decision,
+                            remediation_path=remediation_path,
+                            now=now,
+                            transition_reason=(
+                                "persistent_prerequisite_verification_resume_parent"
+                            ),
+                            deferred_reason=(
+                                "persistent_prerequisite_verified_parent_deferred"
+                            ),
+                        )
                 return {
                     "phase": SessionPhase.VERIFY,
                     "focus_concept_id": session["focus_concept_id"] or question.primary_concept_id,
                     "focus_misconception_id": session["focus_misconception_id"],
+                    "focus_objective_id": session["focus_objective_id"],
                     "remediation_depth": session["remediation_depth"],
                     "remediation_path": remediation_path,
                     "transition_reason": "focused_repair_requires_independent_verification",
@@ -1418,43 +2024,19 @@ class AdaptiveEngine:
                 }
             if current == SessionPhase.VERIFY and valid_unguided_focus_evidence:
                 if remediation_path:
-                    parent = remediation_path.pop()
-                    parent_capacity = self._fresh_focus_capacity(
+                    return self._resume_verified_prerequisite(
                         connection,
-                        session_id=session["id"],
-                        release_id=decision["corpus_release_id"],
-                        concept_ids={parent["concept_id"]},
-                    ).get(parent["concept_id"], {})
-                    if not parent_capacity.get("verification_families"):
-                        # The prerequisite gain remains in the projection, but
-                        # a same-session transfer claim would be unverifiable.
-                        # Defer the parent instead of selecting into a known
-                        # corpus dead end.
-                        return {
-                            "phase": _main_phase(session["mode"]),
-                            "focus_concept_id": None,
-                            "focus_misconception_id": None,
-                            "remediation_depth": 0,
-                            "remediation_path": [],
-                            "transition_reason": "prerequisite_verified_parent_deferred",
-                            "boundary_decision": None,
-                        }
-                    # Repairing and independently verifying the prerequisite is
-                    # itself the instructional intervention. Recheck transfer at
-                    # the unresolved parent directly; routing through another
-                    # parent repair first would consume two more families and can
-                    # strand an otherwise serviceable four-family objective.
-                    return {
-                        "phase": SessionPhase.VERIFY,
-                        "focus_concept_id": parent["concept_id"],
-                        "focus_misconception_id": parent.get("misconception_id"),
-                        "remediation_depth": max(
-                            1, session["remediation_depth"] - 1
+                        session=session,
+                        decision=decision,
+                        remediation_path=remediation_path,
+                        now=now,
+                        transition_reason=(
+                            "prerequisite_verified_resume_parent"
                         ),
-                        "remediation_path": remediation_path,
-                        "transition_reason": "prerequisite_verified_resume_parent",
-                        "boundary_decision": None,
-                    }
+                        deferred_reason=(
+                            "prerequisite_verified_parent_deferred"
+                        ),
+                    )
                 focus_misconception = session["focus_misconception_id"]
                 residual_hypothesis = False
                 if focus_misconception:
@@ -1465,7 +2047,8 @@ class AdaptiveEngine:
                     ).fetchone()
                     residual_hypothesis = bool(
                         belief
-                        and 1.0 / (1.0 + exp(-belief["log_odds"])) >= 0.35
+                        and 1.0 / (1.0 + exp(-belief["log_odds"]))
+                        >= MISCONCEPTION_ACTIVE_THRESHOLD
                     )
                 # One credible independent verification closes the bounded
                 # teaching episode. A still-active posterior is deliberately
@@ -1475,6 +2058,7 @@ class AdaptiveEngine:
                     "phase": _main_phase(session["mode"]),
                     "focus_concept_id": None,
                     "focus_misconception_id": None,
+                    "focus_objective_id": None,
                     "remediation_depth": 0,
                     "remediation_path": [],
                     "transition_reason": (
@@ -1495,6 +2079,7 @@ class AdaptiveEngine:
                     "phase": _main_phase(session["mode"]),
                     "focus_concept_id": None,
                     "focus_misconception_id": None,
+                    "focus_objective_id": None,
                     "remediation_depth": 0,
                     "remediation_path": [],
                     "transition_reason": "noncredible_verification_bounded_exit",
@@ -1509,6 +2094,7 @@ class AdaptiveEngine:
                     "phase": current,
                     "focus_concept_id": None,
                     "focus_misconception_id": None,
+                    "focus_objective_id": None,
                     "remediation_depth": 0,
                     "remediation_path": [],
                     "transition_reason": "credible_main_success",
@@ -1525,6 +2111,7 @@ class AdaptiveEngine:
                         "phase": _main_phase(session["mode"]),
                         "focus_concept_id": None,
                         "focus_misconception_id": None,
+                        "focus_objective_id": None,
                         "remediation_depth": 0,
                         "remediation_path": [],
                         "transition_reason": "noncredible_repair_bounded_exit",
@@ -1534,9 +2121,80 @@ class AdaptiveEngine:
                 "phase": current,
                 "focus_concept_id": session["focus_concept_id"],
                 "focus_misconception_id": session["focus_misconception_id"],
+                "focus_objective_id": session["focus_objective_id"],
                 "remediation_depth": next_depth,
                 "remediation_path": remediation_path,
                 "transition_reason": "noncredible_repair_requires_another_probe",
+                "boundary_decision": None,
+            }
+
+        if response_class is ResponseClass.UNCERTAIN_OR_ABSTAINED:
+            if current in {
+                SessionPhase.LEARN,
+                SessionPhase.DIAGNOSE,
+                SessionPhase.REVIEW,
+            }:
+                # An abstention or weakly observed error says that another
+                # measurement is needed; it does not identify a misconception
+                # or justify descending the prerequisite graph.
+                return {
+                    "phase": SessionPhase.VERIFY,
+                    "focus_concept_id": direct_objective_anchor,
+                    "focus_misconception_id": None,
+                    "focus_objective_id": question.objective_id,
+                    "remediation_depth": 1,
+                    "remediation_path": remediation_path,
+                    "transition_reason": (
+                        "uncertain_main_requires_independent_diagnostic"
+                    ),
+                    "boundary_decision": None,
+                }
+            if current == SessionPhase.VERIFY:
+                if self._fresh_focus_has_repair_and_verification(
+                    connection,
+                    session=session,
+                    decision=decision,
+                    remediation_path=remediation_path,
+                    now=now,
+                ):
+                    return {
+                        "phase": SessionPhase.REMEDIATE,
+                        "focus_concept_id": session["focus_concept_id"],
+                        "focus_misconception_id": session[
+                            "focus_misconception_id"
+                        ],
+                        "focus_objective_id": session["focus_objective_id"],
+                        "remediation_depth": min(
+                            MAX_REMEDIATION_DEPTH - 1,
+                            max(1, session["remediation_depth"] + 1),
+                        ),
+                        "remediation_path": remediation_path,
+                        "transition_reason": (
+                            "repeated_uncertainty_requires_bounded_remediation"
+                        ),
+                        "boundary_decision": None,
+                    }
+                return {
+                    "phase": _main_phase(session["mode"]),
+                    "focus_concept_id": None,
+                    "focus_misconception_id": None,
+                    "focus_objective_id": None,
+                    "remediation_depth": 0,
+                    "remediation_path": [],
+                    "transition_reason": "repeated_uncertainty_bounded_exit",
+                    "boundary_decision": None,
+                }
+            # A diagnostic and one bounded remediation probe have both remained
+            # inconclusive. Preserve their uncertain projection, but do not turn
+            # missing evidence into a prerequisite failure or an unbounded loop.
+            return {
+                "phase": _main_phase(session["mode"]),
+                "focus_concept_id": None,
+                "focus_misconception_id": None,
+                "focus_objective_id": None,
+                "remediation_depth": 0,
+                "remediation_path": [],
+                "transition_reason": "uncertain_remediation_bounded_exit",
                 "boundary_decision": None,
             }
 
@@ -1545,18 +2203,73 @@ class AdaptiveEngine:
             if current in {SessionPhase.REMEDIATE, SessionPhase.VERIFY}
             else 1
         )
-        focus_concept = session["focus_concept_id"] or question.primary_concept_id
+        focus_concept = (
+            session["focus_concept_id"] or direct_objective_anchor
+        )
         focus_misconception = session["focus_misconception_id"]
+        focus_objective = session["focus_objective_id"] or question.objective_id
+        cross_objective_diagnostic = False
+        credible_generic_error = (
+            current
+            not in {SessionPhase.REMEDIATE, SessionPhase.VERIFY}
+            and response_class is ResponseClass.CREDIBLE_GENERIC_ERROR
+        )
         if current not in {SessionPhase.REMEDIATE, SessionPhase.VERIFY}:
+            diagnostic_objective = (
+                selected_option.diagnostic_objective_id
+                if selected_option
+                and selected_option.diagnostic_objective_id
+                and response_class.supports_named_misconception
+                else question.objective_id
+            )
+            cross_objective_diagnostic = bool(
+                response_class.supports_named_misconception
+                and selected_option is not None
+                and question.objective_id is not None
+                and diagnostic_objective is not None
+                and diagnostic_objective != question.objective_id
+            )
+            if cross_objective_diagnostic:
+                # The option diagnoses a more precise repair target than the
+                # objective measured by the trigger. Preserve that measured
+                # objective as an explicit obligation: after independently
+                # repairing and verifying the diagnostic objective, the normal
+                # resume machinery must independently recheck transfer at the
+                # parent before returning to the main path. The diagnostic
+                # misconception belongs to the child and must not leak into
+                # the parent frame.
+                remediation_path.append(
+                    {
+                        "concept_id": direct_objective_anchor,
+                        "objective_id": question.objective_id,
+                        "misconception_id": None,
+                    }
+                )
+            focus_objective = diagnostic_objective
+            if diagnostic_objective is not None:
+                anchor = connection.execute(
+                    """SELECT objective.primary_concept_id
+                       FROM release_learning_objectives release_objective
+                       JOIN learning_objectives objective
+                         ON objective.id = release_objective.objective_id
+                       WHERE release_objective.release_id = ?
+                         AND release_objective.objective_id = ?""",
+                    (decision["corpus_release_id"], diagnostic_objective),
+                ).fetchone()
+                if anchor is None:
+                    raise ValidationError(
+                        f"Diagnostic learning objective {diagnostic_objective} "
+                        "is outside the pinned corpus release."
+                    )
+                focus_concept = anchor["primary_concept_id"]
             focus_misconception = (
                 selected_option.misconception_id
                 if selected_option
                 and selected_option.misconception_id
-                and (confidence is None or confidence >= 0.35)
-                and (response_ms is None or response_ms >= 250)
+                and response_class.supports_named_misconception
                 else None
             )
-            if focus_misconception:
+            if focus_misconception and diagnostic_objective is None:
                 owner = connection.execute(
                     "SELECT concept_id FROM misconceptions WHERE id = ?",
                     (focus_misconception,),
@@ -1566,64 +2279,270 @@ class AdaptiveEngine:
                 }
                 if owner and owner["concept_id"] in mapped_concepts:
                     focus_concept = owner["concept_id"]
-        elif not focus_misconception and selected_option:
-            focus_misconception = selected_option.misconception_id
+        elif (
+            not focus_misconception
+            and selected_option
+            and selected_option.misconception_id
+            and response_class.supports_named_misconception
+        ):
+            # A bounded repair episode keeps its original objective. A wrong
+            # distractor can refine the named hypothesis only when that option
+            # diagnoses the same objective; cross-objective errors are retained
+            # in the misconception posterior for later planning without
+            # silently retargeting the active tunnel.
+            selected_target = (
+                selected_option.diagnostic_objective_id
+                or question.objective_id
+            )
+            if focus_objective is None or selected_target == focus_objective:
+                focus_misconception = selected_option.misconception_id
         descended_to_prerequisite = False
         boundary_decision_payload: dict[str, Any] | None = None
         verified_prerequisites: set[str] = set()
         unserviceable_prerequisites: set[str] = set()
-        if next_depth == 2 and focus_concept:
+        prerequisite_objectives: dict[str, str] = {}
+        if 2 <= next_depth <= MAX_REMEDIATION_DEPTH and focus_concept:
+            if focus_objective is not None:
+                declared_boundary = self._declared_objective_boundary(
+                    connection,
+                    session_id=session["id"],
+                    learner_id=session["learner_id"],
+                    release_id=decision["corpus_release_id"],
+                    focus_objective_id=focus_objective,
+                    now=now,
+                )
+                if declared_boundary is not None:
+                    selected_objective_id = declared_boundary[
+                        "selected_objective_id"
+                    ]
+                    if selected_objective_id is None:
+                        return {
+                            "phase": _main_phase(session["mode"]),
+                            "focus_concept_id": None,
+                            "focus_misconception_id": None,
+                            "focus_objective_id": None,
+                            "remediation_depth": 0,
+                            "remediation_path": [],
+                            "transition_reason": (
+                                "no_serviceable_prerequisite_boundary"
+                                if declared_boundary["unserviceable"]
+                                else (
+                                    "verified_prerequisite_not_reopened"
+                                    if declared_boundary["verified"]
+                                    else "bounded_failure_exit"
+                                )
+                            ),
+                            "boundary_decision": None,
+                        }
+                    parent_focus = {
+                        "concept_id": focus_concept,
+                        "objective_id": focus_objective,
+                        "misconception_id": focus_misconception,
+                    }
+                    remediation_path.append(parent_focus)
+                    return {
+                        "phase": SessionPhase.REMEDIATE,
+                        "focus_concept_id": declared_boundary[
+                            "selected_concept_id"
+                        ],
+                        "focus_misconception_id": None,
+                        "focus_objective_id": selected_objective_id,
+                        "remediation_depth": next_depth,
+                        "remediation_path": remediation_path,
+                        "transition_reason": "descend_to_evidence_boundary",
+                        "boundary_decision": declared_boundary[
+                            "boundary_decision"
+                        ],
+                    }
+            if next_depth > 2:
+                # Recursive descent beyond the first hop is safe only when the
+                # pinned release declares the exact objective edge. Legacy
+                # concept inference remains deliberately one-hop bounded.
+                return {
+                    "phase": _main_phase(session["mode"]),
+                    "focus_concept_id": None,
+                    "focus_misconception_id": None,
+                    "focus_objective_id": None,
+                    "remediation_depth": 0,
+                    "remediation_path": [],
+                    "transition_reason": "bounded_failure_exit",
+                    "boundary_decision": None,
+                }
             graph = self.database.get_graph(decision["corpus_release_id"])
             direct_prerequisite_ids = {
                 concept_id
                 for concept_id, _ in graph.direct_prerequisites(focus_concept)
             }
+            boundary_states = self.database.get_skill_states(
+                session["learner_id"], connection
+            )
+            boundary_objective_states = self.database.get_objective_states(
+                session["learner_id"], connection
+            )
+            release_objectives = self.database.get_learning_objectives(
+                decision["corpus_release_id"]
+            )
+            boundary_states = (
+                self.learner_model.concept_states_with_objective_floor(
+                    learner_id=session["learner_id"],
+                    concepts=graph.concepts,
+                    stored_states=boundary_states,
+                    objectives=release_objectives,
+                    stored_objective_states=boundary_objective_states,
+                    now=now,
+                )
+            )
             if direct_prerequisite_ids:
-                placeholders = ",".join("?" for _ in direct_prerequisite_ids)
-                verified_rows = connection.execute(
-                    f"""SELECT mapping.concept_id,
-                               COUNT(DISTINCT CASE
-                                   WHEN choice.pedagogical_role='remediation_probe'
-                                    AND attempt.is_correct=1
-                                    AND attempt.hint_count=0
-                                    AND (attempt.confidence IS NULL
-                                         OR attempt.confidence >= 0.50)
-                                    AND (attempt.response_ms IS NULL
-                                         OR attempt.response_ms >= 250)
-                                   THEN attempt.family_id END) AS repair_families,
-                               COUNT(DISTINCT CASE
-                                   WHEN choice.pedagogical_role='verification'
-                                    AND attempt.is_correct=1
-                                    AND attempt.hint_count=0
-                                    AND (attempt.confidence IS NULL
-                                         OR attempt.confidence >= 0.50)
-                                    AND (attempt.response_ms IS NULL
-                                         OR attempt.response_ms >= 250)
-                                   THEN attempt.family_id END) AS verification_families
-                        FROM attempts attempt
-                        JOIN decisions choice ON choice.id=attempt.decision_id
-                        JOIN question_concepts mapping
-                          ON mapping.question_id=attempt.question_id
-                         AND mapping.role='primary'
-                        WHERE attempt.session_id=?
-                          AND mapping.concept_id IN ({placeholders})
-                        GROUP BY mapping.concept_id""",
-                    (session["id"], *sorted(direct_prerequisite_ids)),
-                ).fetchall()
-                verified_prerequisites = {
-                    row["concept_id"]
-                    for row in verified_rows
-                    if int(row["repair_families"]) >= 1
-                    and int(row["verification_families"]) >= 1
+                objectives_by_owner: dict[str, list[Any]] = {}
+                objective_enabled_concepts: set[str] = set()
+                ranked_objectives_by_concept: dict[str, list[str]] = {}
+                for objective in release_objectives:
+                    objectives_by_owner.setdefault(
+                        objective.primary_concept_id, []
+                    ).append(objective)
+                    objective_enabled_concepts.update(objective.concept_ids)
+                for concept_id in direct_prerequisite_ids:
+                    owned_objectives = objectives_by_owner.get(concept_id, [])
+                    if not owned_objectives:
+                        if concept_id in objective_enabled_concepts:
+                            # A broad fallback here could mix questions from
+                            # objectives owned elsewhere. Require a canonical
+                            # owned objective before claiming a fine boundary.
+                            unserviceable_prerequisites.add(concept_id)
+                        continue
+                    projected_candidates: list[tuple[float, str]] = []
+                    for objective in owned_objectives:
+                        objective_state = boundary_objective_states.get(
+                            objective.id
+                        ) or self.learner_model.initial_objective_state(
+                            session["learner_id"], objective
+                        )
+                        projected_objective = (
+                            self.learner_model.project_objective_state(
+                                objective_state, objective, now
+                            )
+                        )
+                        projected_candidates.append(
+                            (
+                                0.55
+                                * projected_objective.mastery_probability
+                                + 0.45
+                                * projected_objective.expected_competence,
+                                objective.id,
+                            )
+                        )
+                    projected_candidates.sort()
+                    ranked_objectives_by_concept[concept_id] = [
+                        objective_id
+                        for _, objective_id in projected_candidates
+                    ]
+
+                certificate_observability = _certificate_observability_sql()
+                verified_objective_focuses = (
+                    self._same_session_verified_objective_focuses(
+                        connection,
+                        session_id=session["id"],
+                        release_id=decision["corpus_release_id"],
+                        objective_ids={
+                            objective_id
+                            for objective_ids in (
+                                ranked_objectives_by_concept.values()
+                            )
+                            for objective_id in objective_ids
+                        },
+                    )
+                )
+                for concept_id, ranked_objective_ids in (
+                    ranked_objectives_by_concept.items()
+                ):
+                    unresolved = [
+                        objective_id
+                        for objective_id in ranked_objective_ids
+                        if (objective_id, None)
+                        not in verified_objective_focuses
+                    ]
+                    if unresolved:
+                        prerequisite_objectives[concept_id] = unresolved[0]
+                    else:
+                        verified_prerequisites.add(concept_id)
+
+                legacy_concept_ids = (
+                    direct_prerequisite_ids
+                    - set(ranked_objectives_by_concept)
+                    - unserviceable_prerequisites
+                )
+                if legacy_concept_ids:
+                    legacy_placeholders = ",".join(
+                        "?" for _ in legacy_concept_ids
+                    )
+                    verified_legacy_rows = connection.execute(
+                        f"""SELECT mapping.concept_id,
+                                   COUNT(DISTINCT CASE
+                                       WHEN choice.pedagogical_role='remediation_probe'
+                                        AND attempt.is_correct=1
+                                        AND attempt.hint_count=0
+                                        {certificate_observability}
+                                       THEN attempt.family_id END)
+                                           AS repair_families,
+                                   COUNT(DISTINCT CASE
+                                       WHEN choice.pedagogical_role='verification'
+                                        AND attempt.is_correct=1
+                                        AND attempt.hint_count=0
+                                        {certificate_observability}
+                                       THEN attempt.family_id END)
+                                           AS verification_families
+                            FROM attempts attempt
+                            JOIN decisions choice
+                              ON choice.id=attempt.decision_id
+                            JOIN events response_event
+                              ON response_event.event_id=attempt.event_id
+                            JOIN question_concepts mapping
+                              ON mapping.question_id=attempt.question_id
+                             AND mapping.role='primary'
+                            WHERE attempt.session_id=?
+                              AND choice.focus_valid=1
+                              AND choice.focus_objective_id IS NULL
+                              AND choice.question_objective_id IS NULL
+                              AND mapping.concept_id IN ({legacy_placeholders})
+                            GROUP BY mapping.concept_id""",
+                        (session["id"], *sorted(legacy_concept_ids)),
+                    ).fetchall()
+                    verified_prerequisites.update(
+                        row["concept_id"]
+                        for row in verified_legacy_rows
+                        if int(row["repair_families"]) >= 1
+                        and int(row["verification_families"]) >= 1
+                    )
+                objective_focuses = {
+                    (objective_id, None)
+                    for objective_id in prerequisite_objectives.values()
                 }
-                focus_capacity = self._fresh_focus_capacity(
+                objective_capacity = self._fresh_objective_focus_capacity(
                     connection,
                     session_id=session["id"],
+                    learner_id=session["learner_id"],
                     release_id=decision["corpus_release_id"],
-                    concept_ids=direct_prerequisite_ids,
+                    focuses=objective_focuses,
+                    now=now,
                 )
                 for concept_id in direct_prerequisite_ids:
-                    capacity = focus_capacity.get(concept_id, {})
+                    objective_id = prerequisite_objectives.get(concept_id)
+                    if objective_id is not None:
+                        objective_focus = (objective_id, None)
+                        capacity = objective_capacity.get(
+                            objective_focus, {}
+                        )
+                    elif concept_id in unserviceable_prerequisites:
+                        continue
+                    else:
+                        capacity = self._fresh_focus_capacity(
+                            connection,
+                            session_id=session["id"],
+                            learner_id=session["learner_id"],
+                            release_id=decision["corpus_release_id"],
+                            concept_ids={concept_id},
+                            now=now,
+                        ).get(concept_id, {})
                     families = set(capacity.get("families", set()))
                     verification_families = set(
                         capacity.get("verification_families", set())
@@ -1633,16 +2552,26 @@ class AdaptiveEngine:
                         for repair_family in families
                     ):
                         unserviceable_prerequisites.add(concept_id)
+            credible_attempt_clause = _CREDIBLE_ROUTING_ATTEMPT_SQL
             performance_rows = connection.execute(
-                """SELECT mapping.concept_id, COUNT(*) AS attempted,
+                f"""SELECT COALESCE(objective.primary_concept_id,
+                                    mapping.concept_id) AS concept_id,
+                          COUNT(*) AS attempted,
                           SUM(CASE WHEN attempt.is_correct = 0 THEN 1 ELSE 0 END)
                               AS incorrect
                    FROM attempts attempt
                    JOIN question_concepts mapping
                      ON mapping.question_id = attempt.question_id
                     AND mapping.role = 'primary'
+                   JOIN decisions choice ON choice.id = attempt.decision_id
+                   JOIN events response_event
+                     ON response_event.event_id=attempt.event_id
+                   LEFT JOIN learning_objectives objective
+                     ON objective.id = choice.question_objective_id
                    WHERE attempt.session_id = ?
-                   GROUP BY mapping.concept_id""",
+                   {credible_attempt_clause}
+                   GROUP BY COALESCE(objective.primary_concept_id,
+                                     mapping.concept_id)""",
                 (session["id"],),
             ).fetchall()
             performance = {
@@ -1656,9 +2585,7 @@ class AdaptiveEngine:
                 learner_id=session["learner_id"],
                 focus_concept_id=focus_concept,
                 graph=graph,
-                stored_states=self.database.get_skill_states(
-                    session["learner_id"], connection
-                ),
+                stored_states=boundary_states,
                 now=now,
                 recent_performance=performance,
                 excluded_concept_ids=(
@@ -1669,13 +2596,17 @@ class AdaptiveEngine:
                 prerequisite = boundary.selected_concept_id
                 boundary_decision_payload = boundary.terms()
                 if prerequisite != focus_concept:
-                    remediation_path.append(
-                        {
-                            "concept_id": focus_concept,
-                            "misconception_id": focus_misconception,
-                        }
-                    )
+                    parent_focus = {
+                        "concept_id": focus_concept,
+                        "misconception_id": focus_misconception,
+                    }
+                    if focus_objective is not None:
+                        parent_focus["objective_id"] = focus_objective
+                    remediation_path.append(parent_focus)
                     focus_concept = prerequisite
+                    focus_objective = prerequisite_objectives.get(
+                        prerequisite
+                    )
                     descended_to_prerequisite = True
                 # The original misconception is evidence about its owning
                 # concept, not automatically about the prerequisite we step to.
@@ -1691,6 +2622,7 @@ class AdaptiveEngine:
                 "phase": _main_phase(session["mode"]),
                 "focus_concept_id": None,
                 "focus_misconception_id": None,
+                "focus_objective_id": None,
                 "remediation_depth": 0,
                 "remediation_path": [],
                 "transition_reason": (
@@ -1708,14 +2640,561 @@ class AdaptiveEngine:
             "phase": SessionPhase.REMEDIATE,
             "focus_concept_id": focus_concept,
             "focus_misconception_id": focus_misconception,
+            "focus_objective_id": focus_objective,
             "remediation_depth": next_depth,
             "remediation_path": remediation_path,
             "transition_reason": (
                 "descend_to_evidence_boundary"
                 if descended_to_prerequisite
-                else "incorrect_answer_focus"
+                else (
+                    "cross_objective_diagnostic_focus"
+                    if cross_objective_diagnostic
+                    else (
+                        "credible_generic_error_focus"
+                        if credible_generic_error
+                        else "incorrect_answer_focus"
+                    )
+                )
             ),
             "boundary_decision": boundary_decision_payload,
+        }
+
+    def _fresh_focus_has_repair_and_verification(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session: dict[str, Any],
+        decision: sqlite3.Row | dict[str, Any],
+        remediation_path: list[dict[str, Any]],
+        now: datetime,
+    ) -> bool:
+        """Prove an uncertainty escalation can finish without a corpus gap."""
+
+        focus_objective_id = session["focus_objective_id"]
+        if focus_objective_id is not None:
+            focus = (
+                focus_objective_id,
+                session["focus_misconception_id"],
+            )
+            capacity = self._fresh_objective_focus_capacity(
+                connection,
+                session_id=session["id"],
+                learner_id=session["learner_id"],
+                release_id=decision["corpus_release_id"],
+                focuses={focus},
+                now=now,
+            ).get(focus, {})
+        else:
+            focus_concept_id = session["focus_concept_id"]
+            if focus_concept_id is None:
+                return False
+            capacity = self._fresh_focus_capacity(
+                connection,
+                session_id=session["id"],
+                learner_id=session["learner_id"],
+                release_id=decision["corpus_release_id"],
+                concept_ids={focus_concept_id},
+                now=now,
+            ).get(focus_concept_id, {})
+        repair_families = set(capacity.get("families", set()))
+        verification_families = set(
+            capacity.get("verification_families", set())
+        )
+        if not remediation_path:
+            return any(
+                verification_families - {repair_family}
+                for repair_family in repair_families
+            )
+
+        parent = remediation_path[-1]
+        parent_objective_id = parent.get("objective_id")
+        if parent_objective_id is not None:
+            parent_focus = (
+                parent_objective_id,
+                parent.get("misconception_id"),
+            )
+            parent_capacity = self._fresh_objective_focus_capacity(
+                connection,
+                session_id=session["id"],
+                learner_id=session["learner_id"],
+                release_id=decision["corpus_release_id"],
+                focuses={parent_focus},
+                now=now,
+            ).get(parent_focus, {})
+        else:
+            parent_concept_id = parent["concept_id"]
+            parent_capacity = self._fresh_focus_capacity(
+                connection,
+                session_id=session["id"],
+                learner_id=session["learner_id"],
+                release_id=decision["corpus_release_id"],
+                concept_ids={parent_concept_id},
+                now=now,
+            ).get(parent_concept_id, {})
+        parent_verifications = set(
+            parent_capacity.get("verification_families", set())
+        )
+        return any(
+            parent_verifications
+            - {repair_family, verification_family}
+            for repair_family in repair_families
+            for verification_family in (
+                verification_families - {repair_family}
+            )
+        )
+
+    def _resume_verified_prerequisite(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session: dict[str, Any],
+        decision: dict[str, Any],
+        remediation_path: list[dict[str, Any]],
+        now: datetime,
+        transition_reason: str,
+        deferred_reason: str,
+    ) -> dict[str, Any]:
+        """Pop one exact remediation frame after prerequisite verification."""
+
+        if not remediation_path:
+            raise ValidationError(
+                "Cannot resume a verified prerequisite without a parent frame."
+            )
+        parent = remediation_path.pop()
+        parent_objective_id = parent.get("objective_id")
+        if parent_objective_id is not None:
+            parent_focus = (
+                parent_objective_id,
+                parent.get("misconception_id"),
+            )
+            parent_capacity = self._fresh_objective_focus_capacity(
+                connection,
+                session_id=session["id"],
+                learner_id=session["learner_id"],
+                release_id=decision["corpus_release_id"],
+                focuses={parent_focus},
+                now=now,
+            ).get(parent_focus, {})
+        else:
+            parent_capacity = self._fresh_focus_capacity(
+                connection,
+                session_id=session["id"],
+                learner_id=session["learner_id"],
+                release_id=decision["corpus_release_id"],
+                concept_ids={parent["concept_id"]},
+                now=now,
+            ).get(parent["concept_id"], {})
+        if not parent_capacity.get("verification_families"):
+            # The prerequisite gain remains in the projection, but a
+            # same-session transfer claim would be unverifiable. Defer the
+            # parent instead of selecting into a known corpus dead end.
+            return {
+                "phase": _main_phase(session["mode"]),
+                "focus_concept_id": None,
+                "focus_misconception_id": None,
+                "focus_objective_id": None,
+                "remediation_depth": 0,
+                "remediation_path": [],
+                "transition_reason": deferred_reason,
+                "boundary_decision": None,
+            }
+        # The independently verified prerequisite is the intervention. Recheck
+        # transfer at its unresolved parent directly; another parent repair
+        # would consume two more families and can strand a serviceable target.
+        return {
+            "phase": SessionPhase.VERIFY,
+            "focus_concept_id": parent["concept_id"],
+            "focus_misconception_id": parent.get("misconception_id"),
+            "focus_objective_id": parent_objective_id,
+            "remediation_depth": max(
+                1, session["remediation_depth"] - 1
+            ),
+            "remediation_path": remediation_path,
+            "transition_reason": transition_reason,
+            "boundary_decision": None,
+        }
+
+    def _persistently_verified_objectives(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        learner_id: str,
+        release_id: str,
+        objective_ids: set[str],
+        objectives: dict[str, Any],
+        now: datetime,
+    ) -> set[str]:
+        """Return prerequisites supported by durable independent retrieval.
+
+        A certificate needs two distinct successful-retrieval families that
+        remain present and eligible in the pinned release, with at least one
+        transfer-capable family. The conservative mastery projection must also
+        stay above the reporting readiness floor, so evidence persists across
+        sessions but is not immune to modeled forgetting.
+        """
+
+        if not objective_ids:
+            return set()
+        if not objective_ids <= set(objectives):
+            raise ValidationError(
+                "Objective verification references an objective outside the "
+                "pinned release."
+            )
+        placeholders = ",".join("?" for _ in objective_ids)
+        rows = connection.execute(
+            f"""SELECT evidence.objective_id, evidence.family_id, evidence.kind
+                FROM learner_objective_families evidence
+                WHERE evidence.learner_id = ?
+                  AND evidence.objective_id IN ({placeholders})
+                  AND EXISTS (
+                      SELECT 1
+                      FROM release_question_objectives direct
+                      JOIN questions question
+                        ON question.id = direct.question_id
+                      JOIN release_questions release_question
+                        ON release_question.release_id = direct.release_id
+                       AND release_question.question_id = direct.question_id
+                      WHERE direct.release_id = ?
+                        AND direct.objective_id = evidence.objective_id
+                        AND question.family_id = evidence.family_id
+                        AND release_question.status IN (?, ?)
+                        AND NOT EXISTS (
+                            SELECT 1 FROM question_revocations revoked
+                            WHERE revoked.question_id = question.id
+                        )
+                  )""",
+            (
+                learner_id,
+                *sorted(objective_ids),
+                release_id,
+                QuestionStatus.APPROVED.value,
+                QuestionStatus.CALIBRATED.value,
+            ),
+        ).fetchall()
+        families: dict[str, set[str]] = {
+            objective_id: set() for objective_id in objective_ids
+        }
+        verification_families: dict[str, set[str]] = {
+            objective_id: set() for objective_id in objective_ids
+        }
+        verification_kinds = {kind.value for kind in VERIFICATION_KINDS}
+        for row in rows:
+            objective_id = row["objective_id"]
+            families[objective_id].add(row["family_id"])
+            if row["kind"] in verification_kinds:
+                verification_families[objective_id].add(row["family_id"])
+
+        states = self.database.get_objective_states(learner_id, connection)
+        verified: set[str] = set()
+        for objective_id in sorted(objective_ids):
+            has_independent_transfer = any(
+                families[objective_id] - {verification_family}
+                for verification_family in verification_families[objective_id]
+            )
+            if not has_independent_transfer:
+                continue
+            objective = objectives[objective_id]
+            state = states.get(
+                objective_id
+            ) or self.learner_model.initial_objective_state(
+                learner_id, objective
+            )
+            projected = self.learner_model.project_objective_state(
+                state, objective, now
+            )
+            if (
+                projected.mastery_probability
+                >= OBJECTIVE_PREREQUISITE_MASTERY_FLOOR
+            ):
+                verified.add(objective_id)
+        return verified
+
+    def _same_session_verified_objective_focuses(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        release_id: str,
+        objective_ids: set[str] | None = None,
+    ) -> set[tuple[str, str | None]]:
+        """Return objective focuses certified by independent retrieval families.
+
+        Certificates are derived from the immutable response event's learner
+        model version, rather than the model currently running the engine.
+        This keeps mixed-version sessions historically honest.  A repair and a
+        transfer check must both be credible, focus-valid, directly mapped to
+        the objective, and come from distinct independence families.
+        """
+
+        if objective_ids is not None and not objective_ids:
+            return set()
+        objective_clause = ""
+        parameters: list[Any] = [session_id, release_id]
+        if objective_ids is not None:
+            placeholders = ",".join("?" for _ in objective_ids)
+            objective_clause = (
+                f"AND choice.focus_objective_id IN ({placeholders})"
+            )
+            parameters.extend(sorted(objective_ids))
+        certificate_observability = _certificate_observability_sql()
+        rows = connection.execute(
+            f"""SELECT choice.focus_objective_id,
+                       choice.focus_misconception_id,
+                       choice.pedagogical_role,
+                       attempt.family_id
+                FROM attempts attempt
+                JOIN decisions choice ON choice.id=attempt.decision_id
+                JOIN events response_event
+                  ON response_event.event_id=attempt.event_id
+                WHERE attempt.session_id=?
+                  AND choice.corpus_release_id=?
+                  AND choice.focus_valid=1
+                  AND choice.focus_objective_id IS NOT NULL
+                  AND choice.question_objective_id
+                      = choice.focus_objective_id
+                  AND choice.pedagogical_role IN (
+                      'remediation_probe', 'verification'
+                  )
+                  AND attempt.is_correct=1
+                  AND attempt.hint_count=0
+                  {certificate_observability}
+                  {objective_clause}
+                GROUP BY choice.focus_objective_id,
+                         choice.focus_misconception_id,
+                         choice.pedagogical_role,
+                         attempt.family_id""",
+            parameters,
+        ).fetchall()
+        repair_families: dict[tuple[str, str | None], set[str]] = {}
+        verification_families: dict[
+            tuple[str, str | None], set[str]
+        ] = {}
+        for row in rows:
+            focus = (
+                row["focus_objective_id"],
+                row["focus_misconception_id"],
+            )
+            target = (
+                repair_families
+                if row["pedagogical_role"] == "remediation_probe"
+                else verification_families
+            )
+            target.setdefault(focus, set()).add(row["family_id"])
+        return {
+            focus
+            for focus, repairs in repair_families.items()
+            if any(
+                verification_family != repair_family
+                for repair_family in repairs
+                for verification_family in verification_families.get(
+                    focus, set()
+                )
+            )
+        }
+
+    def _declared_objective_boundary(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        learner_id: str,
+        release_id: str,
+        focus_objective_id: str,
+        now: datetime,
+    ) -> dict[str, Any] | None:
+        """Choose one direct prerequisite from a declared objective graph.
+
+        ``None`` means the pinned release predates objective graphs.  A mapping
+        with no selected objective means the graph is declared but every
+        direct prerequisite is absent, already verified, or currently lacks an
+        independent repair/verification pair.  That distinction prevents an
+        intentionally empty graph from falling through to broad concept
+        heuristics.
+        """
+
+        graph_version, edges = self.database.get_objective_graph(release_id)
+        if graph_version is None:
+            return None
+        if graph_version != 1:
+            raise ValidationError(
+                f"Unsupported objective graph version {graph_version}."
+            )
+        direct_edges = sorted(
+            (
+                edge
+                for edge in edges
+                if edge.target_id == focus_objective_id
+                and edge.relation.is_strict_prerequisite
+            ),
+            key=lambda edge: edge.id,
+        )
+        direct_ids = {edge.source_id for edge in direct_edges}
+        if len(direct_ids) != len(direct_edges):
+            raise ValidationError(
+                f"Objective {focus_objective_id} has ambiguous direct "
+                "prerequisite fanout."
+            )
+        if not direct_edges:
+            return {
+                "selected_objective_id": None,
+                "selected_concept_id": None,
+                "boundary_decision": None,
+                "verified": set(),
+                "unserviceable": set(),
+            }
+
+        objectives = {
+            objective.id: objective
+            for objective in self.database.get_learning_objectives(release_id)
+        }
+        if focus_objective_id not in objectives or not direct_ids <= set(objectives):
+            raise ValidationError(
+                "Objective prerequisite graph references an objective outside "
+                "the pinned release."
+            )
+
+        verified = self._persistently_verified_objectives(
+            connection,
+            learner_id=learner_id,
+            release_id=release_id,
+            objective_ids=direct_ids,
+            objectives=objectives,
+            now=now,
+        )
+        verified.update(
+            objective_id
+            for objective_id, _ in (
+                self._same_session_verified_objective_focuses(
+                    connection,
+                    session_id=session_id,
+                    release_id=release_id,
+                    objective_ids=direct_ids,
+                )
+            )
+        )
+        unresolved = direct_ids - verified
+        if not unresolved:
+            return {
+                "selected_objective_id": None,
+                "selected_concept_id": None,
+                "boundary_decision": None,
+                "verified": verified,
+                "unserviceable": set(),
+            }
+
+        capacity = self._fresh_objective_focus_capacity(
+            connection,
+            session_id=session_id,
+            learner_id=learner_id,
+            release_id=release_id,
+            focuses={(objective_id, None) for objective_id in unresolved},
+            now=now,
+        )
+        serviceable: set[str] = set()
+        for objective_id in unresolved:
+            objective_capacity = capacity.get((objective_id, None), {})
+            families = set(objective_capacity.get("families", set()))
+            verification_families = set(
+                objective_capacity.get("verification_families", set())
+            )
+            if any(
+                verification_families - {repair_family}
+                for repair_family in families
+            ):
+                serviceable.add(objective_id)
+        unserviceable = unresolved - serviceable
+        if not serviceable:
+            return {
+                "selected_objective_id": None,
+                "selected_concept_id": None,
+                "boundary_decision": None,
+                "verified": verified,
+                "unserviceable": unserviceable,
+            }
+
+        placeholders = ",".join("?" for _ in serviceable)
+        credible_attempt_clause = _CREDIBLE_ROUTING_ATTEMPT_SQL
+        performance_rows = connection.execute(
+            f"""SELECT choice.question_objective_id AS objective_id,
+                       COUNT(*) AS attempted,
+                       SUM(CASE WHEN attempt.is_correct=0 THEN 1 ELSE 0 END)
+                           AS incorrect
+                FROM attempts attempt
+                JOIN decisions choice ON choice.id=attempt.decision_id
+                JOIN events response_event
+                  ON response_event.event_id=attempt.event_id
+                WHERE attempt.session_id=?
+                  AND choice.question_objective_id IN ({placeholders})
+                  {credible_attempt_clause}
+                GROUP BY choice.question_objective_id""",
+            (session_id, *sorted(serviceable)),
+        ).fetchall()
+        performance = {
+            row["objective_id"]: (int(row["attempted"]), int(row["incorrect"]))
+            for row in performance_rows
+        }
+        states = self.database.get_objective_states(learner_id, connection)
+        candidates: list[dict[str, Any]] = []
+        edge_by_source = {edge.source_id: edge for edge in direct_edges}
+        for objective_id in sorted(serviceable):
+            objective = objectives[objective_id]
+            state = states.get(
+                objective_id
+            ) or self.learner_model.initial_objective_state(
+                learner_id, objective
+            )
+            projected = self.learner_model.project_objective_state(
+                state, objective, now
+            )
+            readiness = (
+                0.55 * projected.mastery_probability
+                + 0.45 * projected.expected_competence
+            )
+            need = 1.0 - readiness
+            uncertainty_value = 1.0 - exp(-(projected.variance**0.5))
+            evidence_gap = 1.0 / (1.0 + projected.evidence_mass)
+            attempted, incorrect = performance.get(objective_id, (0, 0))
+            failure_rate = incorrect / attempted if attempted else 0.0
+            edge = edge_by_source[objective_id]
+            score = (
+                0.34 * need
+                + 0.18 * (1.0 - projected.mastery_probability)
+                + 0.14 * uncertainty_value
+                + 0.12 * evidence_gap
+                + 0.12 * failure_rate
+                + 0.10 * edge.weight
+            )
+            candidates.append(
+                {
+                    "edge_id": edge.id,
+                    "objective_id": objective_id,
+                    "concept_id": objective.primary_concept_id,
+                    "relation": edge.relation.value,
+                    "rationale": edge.rationale,
+                    "edge_weight": edge.weight,
+                    "score": score,
+                    "need": need,
+                    "mastery_probability": projected.mastery_probability,
+                    "expected_competence": projected.expected_competence,
+                    "uncertainty_value": uncertainty_value,
+                    "evidence_gap": evidence_gap,
+                    "recent_failure_rate": failure_rate,
+                }
+            )
+        candidates.sort(key=lambda item: (-item["score"], item["objective_id"]))
+        selected = candidates[0]
+        return {
+            "selected_objective_id": selected["objective_id"],
+            "selected_concept_id": selected["concept_id"],
+            "boundary_decision": {
+                "focus_objective_id": focus_objective_id,
+                "selected_objective_id": selected["objective_id"],
+                "algorithm_version": BOUNDARY_ALGORITHM_VERSION,
+                "selected": selected,
+                "candidates": candidates,
+            },
+            "verified": verified,
+            "unserviceable": unserviceable,
         }
 
     def _fresh_focus_capacity(
@@ -1723,8 +3202,10 @@ class AdaptiveEngine:
         connection: sqlite3.Connection,
         *,
         session_id: str,
+        learner_id: str,
         release_id: str,
         concept_ids: set[str],
+        now: datetime,
     ) -> dict[str, dict[str, set[str]]]:
         """Return unseen family capacity for bounded repair and verification.
 
@@ -1744,8 +3225,12 @@ class AdaptiveEngine:
                 JOIN release_questions release_question
                   ON release_question.question_id = question.id
                  AND release_question.release_id = ?
+                LEFT JOIN release_question_objectives objective_mapping
+                  ON objective_mapping.release_id = release_question.release_id
+                 AND objective_mapping.question_id = question.id
                 WHERE mapping.role = 'primary'
                   AND mapping.concept_id IN ({placeholders})
+                  AND objective_mapping.objective_id IS NULL
                   AND release_question.status IN (?, ?)
                   AND NOT EXISTS (
                       SELECT 1 FROM question_revocations revoked
@@ -1774,13 +3259,206 @@ class AdaptiveEngine:
             concept_id: {"families": set(), "verification_families": set()}
             for concept_id in concept_ids
         }
+        family_ids = {row["family_id"] for row in rows}
+        last_presented = self._family_last_presented(
+            connection, learner_id=learner_id, family_ids=family_ids
+        )
+        skill_states = self.database.get_skill_states(
+            learner_id, connection
+        )
         verification_kinds = {kind.value for kind in VERIFICATION_KINDS}
         for row in rows:
+            state = skill_states.get(row["concept_id"])
+            stability_hours = (
+                state.stability_hours
+                if state is not None
+                else INITIAL_STABILITY_HOURS
+            )
+            family_last_at = last_presented.get(row["family_id"])
+            if family_last_at is not None and (
+                now - family_last_at
+            ).total_seconds() / 3600.0 < max(
+                24.0, min(24.0 * 30.0, stability_hours * 0.50)
+            ):
+                continue
             result[row["concept_id"]]["families"].add(row["family_id"])
             if row["kind"] in verification_kinds:
                 result[row["concept_id"]]["verification_families"].add(
                     row["family_id"]
                 )
+        return result
+
+    def _fresh_objective_focus_capacity(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        session_id: str,
+        learner_id: str,
+        release_id: str,
+        focuses: set[tuple[str, str | None]],
+        now: datetime,
+    ) -> dict[tuple[str, str | None], dict[str, set[str]]]:
+        """Return exact unseen capacity for objective/hypothesis focuses.
+
+        A question contributes only when it directly assesses the focused
+        objective. If a named misconception is active, the same option must be
+        release-mapped back to that objective. This mirrors focused policy
+        eligibility without relying on a bounded candidate query.
+        """
+
+        if not focuses:
+            return {}
+        objective_ids = sorted({objective_id for objective_id, _ in focuses})
+        placeholders = ",".join("?" for _ in objective_ids)
+        rows = connection.execute(
+            f"""SELECT direct.objective_id, question.id AS question_id,
+                       question.family_id, question.kind,
+                       option.misconception_id,
+                       diagnostic.objective_id AS diagnostic_objective_id
+                FROM release_question_objectives direct
+                JOIN questions question ON question.id = direct.question_id
+                JOIN release_questions release_question
+                  ON release_question.release_id = direct.release_id
+                 AND release_question.question_id = direct.question_id
+                LEFT JOIN options option
+                  ON option.question_id = question.id
+                 AND option.misconception_id IS NOT NULL
+                LEFT JOIN release_option_objectives diagnostic
+                  ON diagnostic.release_id = direct.release_id
+                 AND diagnostic.question_id = option.question_id
+                 AND diagnostic.option_id = option.option_id
+                WHERE direct.release_id = ?
+                  AND direct.objective_id IN ({placeholders})
+                  AND release_question.status IN (?, ?)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM question_revocations revoked
+                      WHERE revoked.question_id = question.id
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM decisions seen
+                      JOIN questions seen_question
+                        ON seen_question.id = seen.question_id
+                      WHERE seen.session_id = ?
+                        AND (
+                            seen.question_id = question.id
+                            OR seen_question.family_id = question.family_id
+                        )
+                  )""",
+            (
+                release_id,
+                *objective_ids,
+                QuestionStatus.APPROVED.value,
+                QuestionStatus.CALIBRATED.value,
+                session_id,
+            ),
+        ).fetchall()
+        questions: dict[
+            tuple[str, str], dict[str, Any]
+        ] = {}
+        for row in rows:
+            key = (row["objective_id"], row["question_id"])
+            summary = questions.setdefault(
+                key,
+                {
+                    "family_id": row["family_id"],
+                    "kind": row["kind"],
+                    "diagnoses": set(),
+                },
+            )
+            if (
+                row["misconception_id"] is not None
+                and row["diagnostic_objective_id"] is not None
+            ):
+                summary["diagnoses"].add(
+                    (
+                        row["diagnostic_objective_id"],
+                        row["misconception_id"],
+                    )
+                )
+        result = {
+            focus: {"families": set(), "verification_families": set()}
+            for focus in focuses
+        }
+        family_ids = {
+            summary["family_id"] for summary in questions.values()
+        }
+        last_presented = self._family_last_presented(
+            connection, learner_id=learner_id, family_ids=family_ids
+        )
+        objective_states = self.database.get_objective_states(
+            learner_id, connection
+        )
+        verification_kinds = {kind.value for kind in VERIFICATION_KINDS}
+        for (objective_id, _question_id), summary in questions.items():
+            for focus in focuses:
+                focus_objective_id, misconception_id = focus
+                if focus_objective_id != objective_id:
+                    continue
+                if (
+                    misconception_id is not None
+                    and (objective_id, misconception_id)
+                    not in summary["diagnoses"]
+                ):
+                    continue
+                family_id = summary["family_id"]
+                state = objective_states.get(objective_id)
+                stability_hours = (
+                    state.stability_hours
+                    if state is not None
+                    else INITIAL_STABILITY_HOURS
+                )
+                family_last_at = last_presented.get(family_id)
+                if family_last_at is not None and (
+                    now - family_last_at
+                ).total_seconds() / 3600.0 < max(
+                    24.0,
+                    min(
+                        24.0 * 30.0,
+                        stability_hours * 0.50,
+                    ),
+                ):
+                    continue
+                result[focus]["families"].add(family_id)
+                if summary["kind"] in verification_kinds:
+                    result[focus]["verification_families"].add(
+                        family_id
+                    )
+        return result
+
+    @staticmethod
+    def _family_last_presented(
+        connection: sqlite3.Connection,
+        *,
+        learner_id: str,
+        family_ids: set[str],
+    ) -> dict[str, datetime]:
+        if not family_ids:
+            return {}
+        placeholders = ",".join("?" for _ in family_ids)
+        rows = connection.execute(
+            f"""SELECT question.family_id,
+                       MAX(decision.created_at) AS last_at
+                FROM decisions decision
+                JOIN questions question ON question.id = decision.question_id
+                WHERE decision.learner_id = ?
+                  AND question.family_id IN ({placeholders})
+                GROUP BY question.family_id""",
+            (learner_id, *sorted(family_ids)),
+        ).fetchall()
+        result: dict[str, datetime] = {}
+        for row in rows:
+            try:
+                parsed = datetime.fromisoformat(row["last_at"])
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"Family {row['family_id']} has an invalid exposure timestamp."
+                ) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ValidationError(
+                    f"Family {row['family_id']} has a timezone-naive exposure timestamp."
+                )
+            result[row["family_id"]] = parsed.astimezone(timezone.utc)
         return result
 
     def profile(
@@ -1820,17 +3498,62 @@ class AdaptiveEngine:
                 }
         else:
             scope = set(graph.concepts)
-        stored = self.database.get_skill_states(learner_id)
-        readiness = self.boundary_planner.readiness_map(
+        active_release = self.database.get_active_release_id()
+        release_objectives = self.database.get_learning_objectives(active_release)
+        objectives = [
+            objective
+            for objective in release_objectives
+            if set(objective.concept_ids) & scope
+        ]
+        persisted_concept_states = self.database.get_skill_states(learner_id)
+        stored_objectives = self.database.get_objective_states(learner_id)
+        stored = self.learner_model.concept_states_with_objective_floor(
+            learner_id=learner_id,
+            concepts=graph.concepts,
+            stored_states=persisted_concept_states,
+            objectives=release_objectives,
+            stored_objective_states=stored_objectives,
+            now=now,
+        )
+        all_readiness = self.boundary_planner.readiness_map(
             learner_id=learner_id,
             graph=graph,
             stored_states=stored,
             now=now,
-            concept_ids=scope,
+            concept_ids=set(graph.concepts),
         )
-        evidence_summaries = self.database.independent_evidence_summaries(learner_id, scope)
+        readiness = {
+            concept_id: all_readiness[concept_id] for concept_id in scope
+        }
+        evidence_summaries = self.database.independent_evidence_summaries(
+            learner_id, set(graph.concepts)
+        )
+        objective_ids_by_primary_concept: dict[str, list[str]] = {}
+        for objective in release_objectives:
+            objective_ids_by_primary_concept.setdefault(
+                objective.primary_concept_id, []
+            ).append(objective.id)
+        observed_concept_families = {concept_id: 0 for concept_id in scope}
+        if scope:
+            placeholders = ",".join("?" for _ in scope)
+            with self.database.read() as connection:
+                observed_rows = connection.execute(
+                    f"""SELECT mapping.concept_id,
+                               COUNT(DISTINCT attempt.family_id) AS families
+                        FROM attempts attempt
+                        JOIN question_concepts mapping
+                          ON mapping.question_id = attempt.question_id
+                         AND mapping.role = 'primary'
+                        WHERE attempt.learner_id = ?
+                          AND mapping.concept_id IN ({placeholders})
+                        GROUP BY mapping.concept_id""",
+                    (learner_id, *sorted(scope)),
+                ).fetchall()
+            for row in observed_rows:
+                observed_concept_families[row["concept_id"]] = int(
+                    row["families"] or 0
+                )
         beliefs = self.database.get_misconception_beliefs(learner_id)
-        active_release = self.database.get_active_release_id()
         definitions = {
             m.id: m
             for m in self.database.get_misconceptions(
@@ -1846,7 +3569,7 @@ class AdaptiveEngine:
                     belief.probability,
                 )
         projected_states = {}
-        for concept_id in scope:
+        for concept_id in graph.concepts:
             concept = graph.concepts[concept_id]
             state = stored.get(concept_id) or self.learner_model.initial_state(
                 learner_id, concept
@@ -1871,7 +3594,11 @@ class AdaptiveEngine:
                 prerequisite_id in projected_states
                 and projected_states[prerequisite_id].exposures > 0
                 and projected_states[prerequisite_id].mastery_probability >= 0.40
+                and evidence_summaries[prerequisite_id]["families"] >= 1
                 for prerequisite_id in direct_prerequisites
+            )
+            derived_objective_ids = sorted(
+                objective_ids_by_primary_concept.get(concept_id, [])
             )
             skills.append(
                 {
@@ -1882,7 +3609,17 @@ class AdaptiveEngine:
                     "uncertainty": projected.variance**0.5,
                     "stability_hours": projected.stability_hours,
                     "evidence_mass": projected.evidence_mass,
+                    "projection_kind": (
+                        "derived_objective_readiness_floor"
+                        if derived_objective_ids
+                        else "concept_posterior"
+                    ),
+                    "derived_from_objective_ids": derived_objective_ids,
                     "independent_families": family_count,
+                    "successful_retrieval_families": family_count,
+                    "observed_response_families": observed_concept_families[
+                        concept_id
+                    ],
                     "delayed_retrievals": delayed_retrievals,
                     "operation_kinds": operation_kinds,
                     "prerequisites_ready": prerequisites_ready,
@@ -1906,24 +3643,295 @@ class AdaptiveEngine:
                     "next_review_at": projected.next_review_at.isoformat() if projected.next_review_at else None,
                 }
             )
-        misconceptions = [
+        misconception_hypotheses = [
             {
                 "misconception_id": misconception_id,
                 "name": definitions[misconception_id].name if misconception_id in definitions else misconception_id,
                 "probability": belief.probability,
                 "evidence_count": belief.evidence_count,
+                "status": (
+                    "active"
+                    if belief.probability
+                    >= MISCONCEPTION_ACTIVE_THRESHOLD
+                    else "monitoring"
+                ),
             }
             for misconception_id, belief in beliefs.items()
-            if belief.probability >= 0.12 and misconception_id in definitions
+            if belief.probability >= MISCONCEPTION_MONITORING_THRESHOLD
+            and misconception_id in definitions
         ]
-        misconceptions.sort(key=lambda item: (-item["probability"], item["misconception_id"]))
-        return {
+        misconception_hypotheses.sort(
+            key=lambda item: (-item["probability"], item["misconception_id"])
+        )
+        active_misconceptions = [
+            item
+            for item in misconception_hypotheses
+            if item["status"] == "active"
+        ]
+        profile = {
             "learner_id": learner_id,
             "target": resolved_target,
             "boundary_algorithm_version": BOUNDARY_ALGORITHM_VERSION,
             "skills": skills,
-            "active_misconceptions": misconceptions,
+            "misconception_thresholds": {
+                "monitoring": MISCONCEPTION_MONITORING_THRESHOLD,
+                "active_routing": MISCONCEPTION_ACTIVE_THRESHOLD,
+            },
+            "misconception_hypotheses": misconception_hypotheses,
+            "active_misconceptions": active_misconceptions,
         }
+        if objectives:
+            objective_ids = {objective.id for objective in objectives}
+            release_objective_ids = {
+                objective.id for objective in release_objectives
+            }
+            objective_evidence = {
+                objective_id: {
+                    "families": 0,
+                    "delayed": 0,
+                    "operation_kinds": 0,
+                }
+                for objective_id in release_objective_ids
+            }
+            observed_objective_families = {
+                objective_id: 0 for objective_id in objective_ids
+            }
+            diagnostic_misconceptions: dict[str, set[str]] = {
+                objective_id: set() for objective_id in objective_ids
+            }
+            with self.database.read() as connection:
+                evidence_rows = connection.execute(
+                    """SELECT objective_id, COUNT(*) AS families,
+                              COUNT(DISTINCT kind) AS operation_kinds,
+                              SUM(CASE WHEN delayed_unguided_correct_at IS NOT NULL
+                                       THEN 1 ELSE 0 END) AS delayed
+                       FROM learner_objective_families
+                       WHERE learner_id = ?
+                       GROUP BY objective_id""",
+                    (learner_id,),
+                ).fetchall()
+                observed_rows = connection.execute(
+                    """SELECT decision.question_objective_id AS objective_id,
+                              COUNT(DISTINCT attempt.family_id) AS families
+                       FROM attempts attempt
+                       JOIN decisions decision
+                         ON decision.id = attempt.decision_id
+                       WHERE attempt.learner_id = ?
+                         AND decision.question_objective_id IS NOT NULL
+                       GROUP BY decision.question_objective_id""",
+                    (learner_id,),
+                ).fetchall()
+                diagnostic_rows = connection.execute(
+                    """SELECT DISTINCT mapping.objective_id,
+                                      option.misconception_id
+                       FROM release_option_objectives mapping
+                       JOIN options option
+                         ON option.question_id = mapping.question_id
+                        AND option.option_id = mapping.option_id
+                       WHERE mapping.release_id = ?
+                         AND option.misconception_id IS NOT NULL""",
+                    (active_release,),
+                ).fetchall()
+            for row in evidence_rows:
+                if row["objective_id"] in objective_evidence:
+                    objective_evidence[row["objective_id"]] = {
+                        "families": int(row["families"] or 0),
+                        "delayed": int(row["delayed"] or 0),
+                        "operation_kinds": int(row["operation_kinds"] or 0),
+                    }
+            for row in observed_rows:
+                if row["objective_id"] in observed_objective_families:
+                    observed_objective_families[row["objective_id"]] = int(
+                        row["families"] or 0
+                    )
+            for row in diagnostic_rows:
+                if row["objective_id"] in diagnostic_misconceptions:
+                    diagnostic_misconceptions[row["objective_id"]].add(
+                        row["misconception_id"]
+                    )
+
+            projected_objectives = {}
+            for release_objective in release_objectives:
+                release_state = stored_objectives.get(
+                    release_objective.id
+                ) or self.learner_model.initial_objective_state(
+                    learner_id, release_objective
+                )
+                projected_objectives[release_objective.id] = (
+                    self.learner_model.project_objective_state(
+                        release_state, release_objective, now
+                    )
+                )
+            objective_rows = []
+            for objective in objectives:
+                projected = projected_objectives[objective.id]
+                evidence = objective_evidence[objective.id]
+                if objective.objective_graph_version is not None:
+                    prerequisite_objective_ids = [
+                        edge.source_id for edge in objective.prerequisites
+                    ]
+                    objective_prerequisites_ready = all(
+                        projected_objectives[prerequisite_id].exposures > 0
+                        and projected_objectives[
+                            prerequisite_id
+                        ].mastery_probability
+                        >= 0.40
+                        and objective_evidence[prerequisite_id]["families"] >= 1
+                        for prerequisite_id in prerequisite_objective_ids
+                    )
+                    prerequisite_support = min(
+                        (
+                            1.0
+                            - edge.weight
+                            * (
+                                1.0
+                                - (
+                                    0.55
+                                    * projected_objectives[
+                                        edge.source_id
+                                    ].mastery_probability
+                                    + 0.45
+                                    * projected_objectives[
+                                        edge.source_id
+                                    ].expected_competence
+                                )
+                            )
+                            for edge in objective.prerequisites
+                        ),
+                        default=1.0,
+                    )
+                    prerequisite_mode = "objective"
+                else:
+                    prerequisite_objective_ids = []
+                    concept_prerequisites = [
+                        prerequisite_id
+                        for prerequisite_id, _ in graph.direct_prerequisites(
+                            objective.primary_concept_id
+                        )
+                    ]
+                    objective_prerequisites_ready = all(
+                        all_readiness[prerequisite_id].exposures > 0
+                        and all_readiness[
+                            prerequisite_id
+                        ].mastery_probability
+                        >= 0.40
+                        and evidence_summaries[prerequisite_id]["families"] >= 1
+                        for prerequisite_id in concept_prerequisites
+                    )
+                    prerequisite_support = all_readiness[
+                        objective.primary_concept_id
+                    ].prerequisite_support
+                    prerequisite_mode = "legacy_concept"
+                active_probability = max(
+                    (
+                        beliefs[misconception_id].probability
+                        for misconception_id in diagnostic_misconceptions[
+                            objective.id
+                        ]
+                        if misconception_id in beliefs
+                    ),
+                    default=0.0,
+                )
+                objective_rows.append(
+                    {
+                        "objective_id": objective.id,
+                        "name": objective.name,
+                        "description": objective.description,
+                        "operation": objective.operation.value,
+                        "evidence_type": objective.evidence_type,
+                        "primary_concept_id": objective.primary_concept_id,
+                        "supporting_concept_ids": list(
+                            objective.supporting_concept_ids
+                        ),
+                        "mastery": projected.mastery_probability,
+                        "mastery_probability": projected.mastery_probability,
+                        "estimated_mastery_probability": (
+                            projected.estimated_mastery_probability
+                        ),
+                        "mastery_probability_error_bound": (
+                            projected.mastery_probability_error_bound
+                        ),
+                        "expected_competence": projected.expected_competence,
+                        "uncertainty": projected.variance**0.5,
+                        "stability_hours": projected.stability_hours,
+                        "evidence_mass": projected.evidence_mass,
+                        "acquisition_mass": projected.acquisition_mass,
+                        "inference_model_version": projected.model_version,
+                        "posterior_representation": (
+                            "exact_grid"
+                            if projected.posterior is not None
+                            else "gaussian_moments"
+                        ),
+                        "posterior_digest": (
+                            projected.posterior.digest
+                            if projected.posterior is not None
+                            else None
+                        ),
+                        "independent_families": evidence["families"],
+                        "successful_retrieval_families": evidence[
+                            "families"
+                        ],
+                        "observed_response_families": (
+                            observed_objective_families[objective.id]
+                        ),
+                        "delayed_retrievals": evidence["delayed"],
+                        "operation_kinds": evidence["operation_kinds"],
+                        "active_misconception_probability": active_probability,
+                        "prerequisite_mode": prerequisite_mode,
+                        "prerequisite_objective_ids": prerequisite_objective_ids,
+                        "prerequisites_ready": objective_prerequisites_ready,
+                        "prerequisite_support": prerequisite_support,
+                        "state": self.learner_model.mastery_label(
+                            projected,
+                            evidence["families"],
+                            evidence["delayed"],
+                            evidence["operation_kinds"],
+                            active_probability,
+                            objective_prerequisites_ready,
+                        ),
+                        "next_review_at": (
+                            projected.next_review_at.isoformat()
+                            if projected.next_review_at
+                            else None
+                        ),
+                    }
+                )
+            profile["learning_objectives"] = objective_rows
+            profile["objective_evidence_scope"] = (
+                "Selected-response evidence for each named objective; it is not "
+                "evidence of implementation, explanation, design, or project skill."
+            )
+        profile["family_evidence_definitions"] = {
+            "observed_response_families": (
+                "Distinct independence families attempted, including incorrect, "
+                "abstained, hinted, fast, and low-confidence responses."
+            ),
+            "successful_retrieval_families": (
+                "Distinct families with at least one correct, unhinted, "
+                "credible retrieval; this is the count used for certification."
+            ),
+        }
+        profile["projection_definitions"] = {
+            "concept_posterior": (
+                "A directly maintained broad-concept projection for legacy "
+                "concept-scored evidence."
+            ),
+            "derived_objective_readiness_floor": (
+                "A non-persisted routing floor derived from the weakest named "
+                "objective owned by the concept; it is not a second posterior "
+                "or independent evidence."
+            ),
+            "mastery_probability": (
+                "The conservative probability used for decisions; exact-grid "
+                "estimates subtract their numerical error bound."
+            ),
+            "prerequisites_ready": (
+                "Every direct prerequisite has at least one certified independent "
+                "family and a current retention-adjusted mastery probability of "
+                "at least 0.40."
+            ),
+        }
+        return profile
 
     def session_report(
         self, session_id: str, *, now: datetime | None = None
@@ -1937,19 +3945,29 @@ class AdaptiveEngine:
         with self.database.read() as connection:
             rows = connection.execute(
                 """SELECT decision.id AS decision_id, decision.question_id,
+                          decision.question_objective_id,
                           decision.phase, decision.pedagogical_role,
                           decision.focus_concept_id AS focus_concept_before,
                           decision.focus_misconception_id
                               AS focus_misconception_before,
+                          decision.focus_objective_id AS focus_objective_before,
                           decision.selected_score_json, decision.created_at,
+                          selection_event.occurred_at
+                              AS selection_occurred_at,
                           question.family_id, question.difficulty, question.kind,
                           primary_mapping.concept_id AS primary_concept_id,
                           attempt.id AS attempt_id, attempt.is_correct,
                           attempt.selected_option_id, attempt.confidence,
                           attempt.response_ms, attempt.hint_count,
                           attempt.answered_at, attempt.outcome_json,
+                          json_extract(
+                              response_event.metadata_json,
+                              '$.learner_model_version'
+                          ) AS response_model_version,
                           selected_option.misconception_id
                               AS selected_misconception_id,
+                          selected_diagnostic.objective_id
+                              AS selected_diagnostic_objective_id,
                           (SELECT topic_map.topic_id
                            FROM release_question_topics topic_map
                            WHERE topic_map.release_id = decision.corpus_release_id
@@ -1966,11 +3984,24 @@ class AdaptiveEngine:
                    JOIN question_concepts primary_mapping
                      ON primary_mapping.question_id = decision.question_id
                     AND primary_mapping.role = 'primary'
+                   LEFT JOIN events selection_event
+                     ON selection_event.event_type = 'QuestionSelected'
+                    AND selection_event.session_id = decision.session_id
+                    AND json_extract(
+                        selection_event.payload_json, '$.decision_id'
+                    ) = decision.id
                    LEFT JOIN attempts attempt
                      ON attempt.decision_id = decision.id
+                   LEFT JOIN events response_event
+                     ON response_event.event_id = attempt.event_id
+                    AND response_event.event_type = 'ResponseSubmitted'
                    LEFT JOIN options selected_option
                      ON selected_option.question_id = attempt.question_id
                     AND selected_option.option_id = attempt.selected_option_id
+                   LEFT JOIN release_option_objectives selected_diagnostic
+                     ON selected_diagnostic.release_id = decision.corpus_release_id
+                    AND selected_diagnostic.question_id = attempt.question_id
+                    AND selected_diagnostic.option_id = attempt.selected_option_id
                    WHERE decision.session_id = ?
                      AND decision.invalidated_at IS NULL
                    ORDER BY decision.created_at, decision.id""",
@@ -2012,15 +4043,26 @@ class AdaptiveEngine:
         ]
         timing_inconsistencies = 0
         for row in answered:
-            if row["response_ms"] is None:
+            if (
+                row["response_ms"] is None
+                or row["response_model_version"]
+                not in AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS
+            ):
                 continue
-            selected_at = datetime.fromisoformat(row["created_at"])
-            answered_at = datetime.fromisoformat(row["answered_at"])
-            available_ms = max(
-                0,
-                int((answered_at - selected_at).total_seconds() * 1000),
-            )
-            if int(row["response_ms"]) > available_ms:
+            try:
+                selected_at = datetime.fromisoformat(
+                    row["selection_occurred_at"]
+                )
+                answered_at = datetime.fromisoformat(row["answered_at"])
+                authoritative_window = response_window(
+                    selected_at=selected_at,
+                    answered_at=answered_at,
+                    response_ms=int(row["response_ms"]),
+                )
+            except (TypeError, ValueError, OverflowError):
+                timing_inconsistencies += 1
+                continue
+            if not authoritative_window.consistent:
                 timing_inconsistencies += 1
         predicted = []
         continuity = []
@@ -2031,20 +4073,69 @@ class AdaptiveEngine:
             if isinstance(score.get("continuity"), (int, float)):
                 continuity.append(float(score["continuity"]))
 
+        outcome_by_attempt: dict[str, dict[str, Any]] = {}
+        retrieval_certified_by_attempt: dict[str, bool] = {}
+        response_class_by_attempt: dict[str, ResponseClass] = {}
+        for row in answered:
+            response_class_by_attempt[row["attempt_id"]] = (
+                classify_response_for_model(
+                    model_version=row["response_model_version"],
+                    correct=bool(row["is_correct"]),
+                    selected_option_id=row["selected_option_id"],
+                    selected_misconception_id=(
+                        row["selected_misconception_id"]
+                    ),
+                    confidence=(
+                        float(row["confidence"])
+                        if row["confidence"] is not None
+                        else None
+                    ),
+                    response_ms=(
+                        int(row["response_ms"])
+                        if row["response_ms"] is not None
+                        else None
+                    ),
+                    hint_count=int(row["hint_count"]),
+                )
+            )
+            if not row["outcome_json"]:
+                outcome_by_attempt[row["attempt_id"]] = {}
+                retrieval_certified_by_attempt[row["attempt_id"]] = False
+                continue
+            outcome = json.loads(row["outcome_json"])
+            if type(outcome) is not dict:
+                raise ValidationError(
+                    f"Attempt {row['attempt_id']} has a non-object outcome."
+                )
+            outcome_by_attempt[row["attempt_id"]] = outcome
+            retrieval_certified_by_attempt[row["attempt_id"]] = any(
+                change.get("retrieval_certified") is True
+                for change in outcome.get("state_changes", [])
+                if type(change) is dict
+            )
+
         state_by_concept: dict[str, dict[str, float]] = {}
+        state_by_objective: dict[str, dict[str, float]] = {}
         total_evidence_delta = 0.0
         for row in answered:
             if not row["outcome_json"]:
                 continue
-            outcome = json.loads(row["outcome_json"])
+            outcome = outcome_by_attempt[row["attempt_id"]]
             for change in outcome.get("state_changes", []):
-                concept_id = change.get("concept_id")
-                if not isinstance(concept_id, str):
-                    continue
                 evidence_delta = float(change.get("evidence_delta", 0.0))
                 total_evidence_delta += evidence_delta
-                summary = state_by_concept.setdefault(
-                    concept_id,
+                concept_id = change.get("concept_id")
+                objective_id = change.get("objective_id")
+                if isinstance(concept_id, str):
+                    state_key = concept_id
+                    state_summaries = state_by_concept
+                elif isinstance(objective_id, str):
+                    state_key = objective_id
+                    state_summaries = state_by_objective
+                else:
+                    continue
+                summary = state_summaries.setdefault(
+                    state_key,
                     {
                         "prior_mastery": float(
                             change.get("prior_mastery", 0.0)
@@ -2083,6 +4174,22 @@ class AdaptiveEngine:
             if session.get("topic_id")
             else None
         )
+        requested_topic_ids: set[str] = set()
+        if topic is not None:
+            requested_topic_ids.add(topic["id"])
+            catalog_topics = self.database.get_catalog(
+                session["corpus_release_id"]
+            )["topics"]
+            changed = True
+            while changed:
+                changed = False
+                for candidate in catalog_topics:
+                    if (
+                        candidate["parent_id"] in requested_topic_ids
+                        and candidate["id"] not in requested_topic_ids
+                    ):
+                        requested_topic_ids.add(candidate["id"])
+                        changed = True
         difficulty_bands = Counter(
             "introductory"
             if value < -0.5
@@ -2103,8 +4210,29 @@ class AdaptiveEngine:
         concept_changes.sort(
             key=lambda item: (-abs(item["evidence_delta"]), item["concept_id"])
         )
+        objective_changes = [
+            {
+                "objective_id": objective_id,
+                **values,
+                "mastery_change": values["posterior_mastery"]
+                - values["prior_mastery"],
+            }
+            for objective_id, values in state_by_objective.items()
+        ]
+        objective_changes.sort(
+            key=lambda item: (
+                -abs(item["evidence_delta"]),
+                item["objective_id"],
+            )
+        )
 
         graph = self.database.get_graph(session["corpus_release_id"])
+        release_objectives = self.database.get_learning_objectives(
+            session["corpus_release_id"]
+        )
+        objective_by_id = {
+            objective.id: objective for objective in release_objectives
+        }
         catalog = self.database.get_catalog(session["corpus_release_id"])
         topic_by_concept = {
             concept["id"]: {"id": topic_row["id"], "name": topic_row["name"]}
@@ -2131,6 +4259,7 @@ class AdaptiveEngine:
         for index, row in enumerate(answered, start=1):
             outcome = json.loads(row["outcome_json"]) if row["outcome_json"] else {}
             after_focus = outcome.get("focus_concept_id")
+            after_focus_objective = outcome.get("focus_objective_id")
             boundary_decision = outcome.get("boundary_decision")
             if isinstance(boundary_decision, dict):
                 selected_boundary = boundary_decision.get("selected_concept_id")
@@ -2154,6 +4283,12 @@ class AdaptiveEngine:
                     "primary_concept_name": graph.concepts[
                         row["primary_concept_id"]
                     ].name,
+                    "question_objective_id": row["question_objective_id"],
+                    "question_objective_name": (
+                        objective_by_id[row["question_objective_id"]].name
+                        if row["question_objective_id"] in objective_by_id
+                        else None
+                    ),
                     "focus_before": row["focus_concept_before"],
                     "focus_before_name": (
                         graph.concepts[row["focus_concept_before"]].name
@@ -2166,10 +4301,35 @@ class AdaptiveEngine:
                         if isinstance(after_focus, str) and after_focus in graph.concepts
                         else None
                     ),
+                    "focus_objective_before": row[
+                        "focus_objective_before"
+                    ],
+                    "focus_objective_before_name": (
+                        objective_by_id[row["focus_objective_before"]].name
+                        if row["focus_objective_before"] in objective_by_id
+                        else None
+                    ),
+                    "focus_objective_after": after_focus_objective,
+                    "focus_objective_after_name": (
+                        objective_by_id[after_focus_objective].name
+                        if after_focus_objective in objective_by_id
+                        else None
+                    ),
                     "selected_misconception_id": selected_misconception_id,
                     "selected_misconception_name": (
                         definitions[selected_misconception_id].name
                         if selected_misconception_id in definitions
+                        else None
+                    ),
+                    "selected_diagnostic_objective_id": row[
+                        "selected_diagnostic_objective_id"
+                    ],
+                    "selected_diagnostic_objective_name": (
+                        objective_by_id[
+                            row["selected_diagnostic_objective_id"]
+                        ].name
+                        if row["selected_diagnostic_objective_id"]
+                        in objective_by_id
                         else None
                     ),
                     "transition_reason": transition_reason,
@@ -2226,6 +4386,17 @@ class AdaptiveEngine:
             row["primary_concept_id"] for row in answered
         } | boundary_concepts
         stored_states = self.database.get_skill_states(session["learner_id"])
+        stored_objective_states = self.database.get_objective_states(
+            session["learner_id"]
+        )
+        stored_states = self.learner_model.concept_states_with_objective_floor(
+            learner_id=session["learner_id"],
+            concepts=graph.concepts,
+            stored_states=stored_states,
+            objectives=release_objectives,
+            stored_objective_states=stored_objective_states,
+            now=now,
+        )
         current_readiness = self.boundary_planner.readiness_map(
             learner_id=session["learner_id"],
             graph=graph,
@@ -2248,24 +4419,23 @@ class AdaptiveEngine:
                     "uncertain_responses": 0,
                     "remediation_questions": 0,
                     "verification_failures": 0,
+                    "missing_response_time": 0,
                     "difficulties": [],
                     "misconception_signals": Counter(),
+                    "observed_families": set(),
+                    "correct_response_families": set(),
+                    "successful_retrieval_families": set(),
                 },
             )
             summary["attempted"] += 1
             summary["correct"] += int(bool(row["is_correct"]))
             summary["abstained"] += int(row["selected_option_id"] is None)
             summary["uncertain_responses"] += int(
-                row["selected_option_id"] is None
-                or row["hint_count"] > 0
-                or (
-                    row["confidence"] is not None
-                    and row["confidence"] < 0.50
-                )
-                or (
-                    row["response_ms"] is not None
-                    and row["response_ms"] < 250
-                )
+                response_class_by_attempt[row["attempt_id"]]
+                in {
+                    ResponseClass.NONCREDIBLE_SUCCESS,
+                    ResponseClass.UNCERTAIN_OR_ABSTAINED,
+                }
             )
             summary["remediation_questions"] += int(
                 row["pedagogical_role"]
@@ -2275,7 +4445,19 @@ class AdaptiveEngine:
                 row["pedagogical_role"] == "verification"
                 and not bool(row["is_correct"])
             )
+            summary["missing_response_time"] += int(
+                row["response_ms"] is None
+            )
             summary["difficulties"].append(float(row["difficulty"]))
+            summary["observed_families"].add(row["family_id"])
+            if bool(row["is_correct"]):
+                summary["correct_response_families"].add(
+                    row["family_id"]
+                )
+                if retrieval_certified_by_attempt[row["attempt_id"]]:
+                    summary["successful_retrieval_families"].add(
+                        row["family_id"]
+                    )
             if row["selected_misconception_id"]:
                 summary["misconception_signals"][
                     row["selected_misconception_id"]
@@ -2294,8 +4476,12 @@ class AdaptiveEngine:
                     "uncertain_responses": 0,
                     "remediation_questions": 0,
                     "verification_failures": 0,
+                    "missing_response_time": 0,
                     "difficulties": [],
                     "misconception_signals": Counter(),
+                    "observed_families": set(),
+                    "correct_response_families": set(),
+                    "successful_retrieval_families": set(),
                 },
             )
             readiness = current_readiness[concept_id]
@@ -2310,7 +4496,9 @@ class AdaptiveEngine:
                     )
                 )
                 if signals == 0 and (
-                    belief is None or belief.probability < 0.12
+                    belief is None
+                    or belief.probability
+                    < MISCONCEPTION_MONITORING_THRESHOLD
                 ):
                     continue
                 active_hypotheses.append(
@@ -2344,7 +4532,8 @@ class AdaptiveEngine:
             if concept_id in boundary_concepts:
                 attention_reasons.append("selected_prerequisite_boundary")
             if any(
-                (item["posterior_probability"] or 0.0) >= 0.35
+                (item["posterior_probability"] or 0.0)
+                >= MISCONCEPTION_ACTIVE_THRESHOLD
                 for item in active_hypotheses
             ):
                 attention_reasons.append("active_misconception_hypothesis")
@@ -2352,6 +4541,11 @@ class AdaptiveEngine:
                 attention_reasons.append("low_current_mastery_probability")
             difficulties_for_concept = observed["difficulties"]
             family_count = evidence[concept_id]["families"]
+            derived_objective_ids = sorted(
+                objective.id
+                for objective in release_objectives
+                if objective.primary_concept_id == concept_id
+            )
             concept_performance.append(
                 {
                     "concept_id": concept_id,
@@ -2371,10 +4565,22 @@ class AdaptiveEngine:
                         "verification_failures": observed[
                             "verification_failures"
                         ],
+                        "missing_response_time": observed[
+                            "missing_response_time"
+                        ],
                         "average_difficulty": (
                             mean(difficulties_for_concept)
                             if difficulties_for_concept
                             else None
+                        ),
+                        "observed_families": len(
+                            observed["observed_families"]
+                        ),
+                        "correct_response_families": len(
+                            observed["correct_response_families"]
+                        ),
+                        "successful_retrieval_families": len(
+                            observed["successful_retrieval_families"]
                         ),
                     },
                     "current_projection": {
@@ -2382,15 +4588,19 @@ class AdaptiveEngine:
                         "expected_competence": readiness.expected_competence,
                         "uncertainty": readiness.uncertainty,
                         "evidence_mass": readiness.evidence_mass,
+                        "projection_kind": (
+                            "derived_objective_readiness_floor"
+                            if derived_objective_ids
+                            else "concept_posterior"
+                        ),
+                        "derived_from_objective_ids": derived_objective_ids,
                         "independent_families": family_count,
-                        "evidence_diversity": (
-                            "none"
-                            if family_count == 0
-                            else "single_family"
-                            if family_count == 1
-                            else "developing"
-                            if family_count == 2
-                            else "diverse"
+                        "successful_retrieval_families": family_count,
+                        "successful_retrieval_diversity": (
+                            _family_diversity_label(family_count)
+                        ),
+                        "evidence_diversity": _family_diversity_label(
+                            family_count
                         ),
                         "prerequisite_support": readiness.prerequisite_support,
                         "effective_readiness": readiness.effective_readiness,
@@ -2399,6 +4609,208 @@ class AdaptiveEngine:
                         ),
                     },
                     "misconception_hypotheses": active_hypotheses,
+                    "attention_reasons": attention_reasons,
+                }
+            )
+
+        seen_objective_ids = {
+            row["question_objective_id"]
+            for row in answered
+            if row["question_objective_id"] in objective_by_id
+        }
+        objective_family_counts = {
+            objective_id: 0 for objective_id in seen_objective_ids
+        }
+        if seen_objective_ids:
+            placeholders = ",".join("?" for _ in seen_objective_ids)
+            with self.database.read() as connection:
+                family_rows = connection.execute(
+                    f"""SELECT objective_id, COUNT(*) AS families
+                         FROM learner_objective_families
+                         WHERE learner_id = ?
+                           AND objective_id IN ({placeholders})
+                         GROUP BY objective_id""",
+                    (session["learner_id"], *sorted(seen_objective_ids)),
+                ).fetchall()
+            for row in family_rows:
+                objective_family_counts[row["objective_id"]] = int(
+                    row["families"] or 0
+                )
+
+        session_by_objective: dict[str, dict[str, Any]] = {}
+        for row in answered:
+            objective_id = row["question_objective_id"]
+            if objective_id not in seen_objective_ids:
+                continue
+            observed = session_by_objective.setdefault(
+                objective_id,
+                {
+                    "attempted": 0,
+                    "correct": 0,
+                    "abstained": 0,
+                    "uncertain_responses": 0,
+                    "remediation_questions": 0,
+                    "verification_failures": 0,
+                    "missing_response_time": 0,
+                    "difficulties": [],
+                    "observed_families": set(),
+                    "correct_response_families": set(),
+                    "successful_retrieval_families": set(),
+                },
+            )
+            observed["attempted"] += 1
+            observed["correct"] += int(bool(row["is_correct"]))
+            observed["abstained"] += int(
+                row["selected_option_id"] is None
+            )
+            observed["uncertain_responses"] += int(
+                response_class_by_attempt[row["attempt_id"]]
+                in {
+                    ResponseClass.NONCREDIBLE_SUCCESS,
+                    ResponseClass.UNCERTAIN_OR_ABSTAINED,
+                }
+            )
+            observed["remediation_questions"] += int(
+                row["pedagogical_role"]
+                in {"remediation_probe", "verification"}
+            )
+            observed["verification_failures"] += int(
+                row["pedagogical_role"] == "verification"
+                and not bool(row["is_correct"])
+            )
+            observed["missing_response_time"] += int(
+                row["response_ms"] is None
+            )
+            observed["difficulties"].append(float(row["difficulty"]))
+            observed["observed_families"].add(row["family_id"])
+            if bool(row["is_correct"]):
+                observed["correct_response_families"].add(
+                    row["family_id"]
+                )
+                if retrieval_certified_by_attempt[row["attempt_id"]]:
+                    observed["successful_retrieval_families"].add(
+                        row["family_id"]
+                    )
+
+        objective_performance: list[dict[str, Any]] = []
+        for objective_id in sorted(
+            seen_objective_ids,
+            key=lambda item: objective_by_id[item].name,
+        ):
+            objective = objective_by_id[objective_id]
+            observed = session_by_objective[objective_id]
+            state = stored_objective_states.get(
+                objective_id
+            ) or self.learner_model.initial_objective_state(
+                session["learner_id"], objective
+            )
+            projected = self.learner_model.project_objective_state(
+                state, objective, now
+            )
+            family_count = objective_family_counts[objective_id]
+            incorrect = observed["attempted"] - observed["correct"]
+            attention_reasons: list[str] = []
+            if incorrect:
+                attention_reasons.append("incorrect_responses")
+            if observed["uncertain_responses"]:
+                attention_reasons.append(
+                    "uncertain_or_noncredible_evidence"
+                )
+            if observed["verification_failures"]:
+                attention_reasons.append(
+                    "failed_independent_verification"
+                )
+            if (
+                projected.evidence_mass > 0
+                and projected.mastery_probability < 0.50
+            ):
+                attention_reasons.append(
+                    "low_current_mastery_probability"
+                )
+            objective_performance.append(
+                {
+                    "objective_id": objective_id,
+                    "name": objective.name,
+                    "description": objective.description,
+                    "operation": objective.operation.value,
+                    "evidence_type": objective.evidence_type,
+                    "primary_concept_id": objective.primary_concept_id,
+                    "supporting_concept_ids": list(
+                        objective.supporting_concept_ids
+                    ),
+                    "session": {
+                        "attempted": observed["attempted"],
+                        "correct": observed["correct"],
+                        "incorrect": incorrect,
+                        "abstained": observed["abstained"],
+                        "uncertain_responses": observed[
+                            "uncertain_responses"
+                        ],
+                        "remediation_questions": observed[
+                            "remediation_questions"
+                        ],
+                        "verification_failures": observed[
+                            "verification_failures"
+                        ],
+                        "missing_response_time": observed[
+                            "missing_response_time"
+                        ],
+                        "average_difficulty": (
+                            mean(observed["difficulties"])
+                            if observed["difficulties"]
+                            else None
+                        ),
+                        "observed_families": len(
+                            observed["observed_families"]
+                        ),
+                        "correct_response_families": len(
+                            observed["correct_response_families"]
+                        ),
+                        "successful_retrieval_families": len(
+                            observed["successful_retrieval_families"]
+                        ),
+                    },
+                    "current_projection": {
+                        "mastery_probability": (
+                            projected.mastery_probability
+                        ),
+                        "estimated_mastery_probability": (
+                            projected.estimated_mastery_probability
+                        ),
+                        "mastery_probability_error_bound": (
+                            projected.mastery_probability_error_bound
+                        ),
+                        "expected_competence": (
+                            projected.expected_competence
+                        ),
+                        "uncertainty": projected.variance**0.5,
+                        "evidence_mass": projected.evidence_mass,
+                        "acquisition_mass": projected.acquisition_mass,
+                        "inference_model_version": projected.model_version,
+                        "posterior_representation": (
+                            "exact_grid"
+                            if projected.posterior is not None
+                            else "gaussian_moments"
+                        ),
+                        "posterior_digest": (
+                            projected.posterior.digest
+                            if projected.posterior is not None
+                            else None
+                        ),
+                        "independent_families": family_count,
+                        "successful_retrieval_families": family_count,
+                        "successful_retrieval_diversity": (
+                            _family_diversity_label(family_count)
+                        ),
+                        "evidence_diversity": _family_diversity_label(
+                            family_count
+                        ),
+                        "next_review_at": (
+                            projected.next_review_at.isoformat()
+                            if projected.next_review_at
+                            else None
+                        ),
+                    },
                     "attention_reasons": attention_reasons,
                 }
             )
@@ -2472,6 +4884,7 @@ class AdaptiveEngine:
             "unique_concepts": len(
                 {row["primary_concept_id"] for row in answered}
             ),
+            "unique_objectives": len(seen_objective_ids),
             "phase_counts": dict(Counter(row["phase"] for row in answered)),
             "response_time": {
                 "active_seconds": sum(response_times) / 1000.0,
@@ -2483,14 +4896,16 @@ class AdaptiveEngine:
                 ),
                 "wall_seconds": wall_seconds,
                 "submitted_values": len(response_times),
+                "missing_values": len(answered) - len(response_times),
                 "selection_window_inconsistencies": timing_inconsistencies,
                 "active_exceeds_session_wall": (
                     sum(response_times) / 1000.0 > wall_seconds
                 ),
                 "evidence_contract": (
-                    "Elapsed values are submitted telemetry. Values longer than "
-                    "the server-side selection-to-answer window are flagged and "
-                    "must not be interpreted as trusted human timing."
+                    "Submitted active-time values are checked against the "
+                    "authoritative selection-event window only for learner-model "
+                    "versions that define that contract; legacy telemetry is not "
+                    "retrospectively judged."
                 ),
             },
             "difficulty": {
@@ -2527,13 +4942,55 @@ class AdaptiveEngine:
                 "different from an adaptive excursion outside the requested topic."
             ),
             "outside_requested_topic_questions": sum(
-                bool(session.get("topic_id"))
-                and row["primary_topic_id"] != session["topic_id"]
+                bool(requested_topic_ids)
+                and row["primary_topic_id"] not in requested_topic_ids
                 for row in answered
+            ),
+            "requested_topic_scope_definition": (
+                "The requested curriculum topic and all of its descendants; "
+                "a question is outside only when its primary topic is outside "
+                "that hierarchy."
             ),
             "topic_distribution": [dict(row) for row in topic_counts],
             "evidence_delta": total_evidence_delta,
             "concept_changes": concept_changes,
+            "objective_changes": objective_changes,
+            "objective_performance": objective_performance,
+            "objective_evidence_scope": (
+                "Selected-response evidence is attributed only to each "
+                "release-pinned objective; it does not establish productive "
+                "implementation, explanation, design, or project skill."
+            ),
+            "family_evidence_definitions": {
+                "observed_families": (
+                    "Distinct independence families attempted in this session, "
+                    "regardless of outcome or credibility."
+                ),
+                "correct_response_families": (
+                    "Distinct families answered correctly in this session, "
+                    "including assisted or noncredible responses."
+                ),
+                "successful_retrieval_families": (
+                    "Distinct families whose immutable answer outcome records a "
+                    "certified retrieval under that answer's learner-model "
+                    "version; lifetime projection counts use the same evidence."
+                ),
+            },
+            "projection_definitions": {
+                "concept_posterior": (
+                    "A directly maintained broad-concept projection for legacy "
+                    "concept-scored evidence."
+                ),
+                "derived_objective_readiness_floor": (
+                    "A non-persisted routing floor derived from the weakest named "
+                    "objective owned by the concept; it is not a second posterior "
+                    "or independent evidence."
+                ),
+                "mastery_probability": (
+                    "The conservative probability used for decisions; exact-grid "
+                    "estimates subtract their numerical error bound."
+                ),
+            },
             "boundary_algorithm_version": BOUNDARY_ALGORITHM_VERSION,
             "adaptive_routing": adaptive_routing,
             "adaptive_path": adaptive_path,
@@ -2584,7 +5041,7 @@ class AdaptiveEngine:
 
     @staticmethod
     def _outcome_payload(result: SubmissionResult) -> dict[str, Any]:
-        return {
+        payload = {
             "interaction_id": result.interaction_id,
             "correct": result.correct,
             "selected_option": _option_payload(result.selected_option),
@@ -2596,6 +5053,11 @@ class AdaptiveEngine:
             "transition_reason": result.transition_reason,
             "boundary_decision": result.boundary_decision,
         }
+        if result.focus_objective_id is not None or any(
+            "objective_id" in change for change in result.state_changes
+        ):
+            payload["focus_objective_id"] = result.focus_objective_id
+        return payload
 
     def _result_for_attempt(
         self,
@@ -2627,6 +5089,7 @@ class AdaptiveEngine:
             next_phase=SessionPhase(outcome["next_phase"]),
             focus_concept_id=outcome["focus_concept_id"],
             focus_misconception_id=outcome["focus_misconception_id"],
+            focus_objective_id=outcome.get("focus_objective_id"),
             state_changes=tuple(outcome["state_changes"]),
             transition_reason=outcome.get(
                 "transition_reason", "legacy_transition"

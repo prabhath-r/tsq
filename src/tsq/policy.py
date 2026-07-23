@@ -9,22 +9,184 @@ import random
 import sqlite3
 from datetime import datetime, timezone
 from statistics import median
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from .adaptive import RecursiveEvidenceBoundary
 from .capacity import VERIFICATION_KINDS
 from .errors import ExhaustedError, ValidationError
-from .learner import MODEL_VERSION, LearnerModel
-from .models import CandidateScore, Presentation, Question, SessionPhase
+from .inference import classify_response_for_model
+from .learner import (
+    OBJECTIVE_MODEL_VERSIONS,
+    SPACING_AWARE_FAMILY_MODEL_VERSIONS,
+    LearnerModel,
+)
+from .models import (
+    MAX_REMEDIATION_DEPTH,
+    CandidateScore,
+    ObjectiveState,
+    Presentation,
+    Question,
+    SessionPhase,
+)
 from .store import Database, new_id
+from .versions import (
+    SUPPORTED_MODEL_VERSIONS,
+    question_selected_schema_for,
+)
 
 
-POLICY_VERSION = "recursive-evidence-graph-v6"
-MAX_REMEDIATION_DEPTH = 3
+PERSISTENT_GAP_EPISODE_POLICY_VERSION = "recursive-evidence-graph-v13"
+ACTIVE_MISCONCEPTION_REVISIT_POLICY_VERSION = "recursive-evidence-graph-v14"
+POLICY_VERSION = ACTIVE_MISCONCEPTION_REVISIT_POLICY_VERSION
+PERSISTENT_GAP_EPISODE_POLICY_VERSIONS = frozenset(
+    {
+        PERSISTENT_GAP_EPISODE_POLICY_VERSION,
+        ACTIVE_MISCONCEPTION_REVISIT_POLICY_VERSION,
+    }
+)
+PERSISTENT_GAP_MIN_OBSERVED_FAMILIES = 2
+PERSISTENT_GAP_COMPARISON_EPSILON = 1e-12
+PERSISTENT_GAP_EPISODE_BUDGET = 2
+ACTIVE_MISCONCEPTION_REVISIT_THRESHOLD = 0.35
+_PERSISTENT_GAP_BASE_MARKERS = frozenset(
+    {
+        "persistent_gap_revisit",
+        "persistent_gap_observed_families",
+        "persistent_gap_mastery",
+        "persistent_gap_cold_prior",
+        "persistent_gap_due_at",
+    }
+)
+_PERSISTENT_GAP_EPISODE_MARKERS = frozenset(
+    {
+        "persistent_gap_episode_spend",
+        "persistent_gap_episode_budget",
+    }
+)
 
 
 class _RetrySelection(Exception):
     pass
+
+
+def _selection_version_boundary(
+    connection: sqlite3.Connection,
+    *,
+    decision_id: str,
+    session_id: str,
+) -> tuple[str, str, datetime]:
+    """Return and validate the immutable selection boundary.
+
+    Decisions deliberately do not duplicate this event metadata.  A pending
+    promise is safe to reuse only when it has one unambiguous selection anchor.
+    """
+    rows = connection.execute(
+        """SELECT selection.schema_version, selection.occurred_at,
+                  selection.metadata_json, decision.created_at,
+                  decision.policy_version, decision.corpus_release_id,
+                  decision.question_objective_id,
+                  decision.focus_objective_id
+           FROM events selection
+           JOIN decisions decision ON decision.id = ?
+           WHERE selection.event_type = 'QuestionSelected'
+             AND selection.session_id = ?
+             AND json_extract(
+                 selection.payload_json, '$.decision_id'
+             ) = decision.id
+           ORDER BY selection.stream_version""",
+        (decision_id, session_id),
+    ).fetchall()
+    if len(rows) != 1:
+        raise ValidationError(
+            f"Pending decision {decision_id} lacks a unique QuestionSelected "
+            "model boundary."
+        )
+    try:
+        metadata = json.loads(rows[0]["metadata_json"])
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"Pending decision {decision_id} has invalid QuestionSelected metadata."
+        ) from exc
+    if type(metadata) is not dict or set(metadata) != {
+        "policy_version",
+        "learner_model_version",
+        "corpus_release_id",
+    }:
+        raise ValidationError(
+            f"Pending decision {decision_id} has invalid QuestionSelected metadata."
+        )
+    model_version = (
+        metadata.get("learner_model_version")
+    )
+    if (
+        not isinstance(model_version, str)
+        or not model_version
+        or model_version not in SUPPORTED_MODEL_VERSIONS
+    ):
+        raise ValidationError(
+            f"Pending decision {decision_id} has no supported selection learner "
+            "model."
+        )
+    policy_version = metadata.get("policy_version")
+    if not isinstance(policy_version, str) or not policy_version:
+        raise ValidationError(
+            f"Pending decision {decision_id} has no valid selection policy."
+        )
+    row = rows[0]
+    if (
+        policy_version != row["policy_version"]
+        or metadata.get("corpus_release_id") != row["corpus_release_id"]
+    ):
+        raise ValidationError(
+            f"Pending decision {decision_id} QuestionSelected metadata does "
+            "not match its decision."
+        )
+    objective_aware = bool(
+        row["question_objective_id"] is not None
+        or row["focus_objective_id"] is not None
+    )
+    expected_schema = question_selected_schema_for(
+        model_version, objective_aware=objective_aware
+    )
+    if row["schema_version"] != expected_schema:
+        raise ValidationError(
+            f"Pending decision {decision_id} QuestionSelected schema does not "
+            f"match learner model {model_version}."
+        )
+    try:
+        selected_at = datetime.fromisoformat(row["occurred_at"])
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValidationError(
+            f"Pending decision {decision_id} has an invalid selection time."
+        ) from exc
+    if selected_at.tzinfo is None or selected_at.utcoffset() is None:
+        raise ValidationError(
+            f"Pending decision {decision_id} has a timezone-naive selection time."
+        )
+    if (
+        expected_schema == 3
+        and row["occurred_at"] != row["created_at"]
+    ):
+        raise ValidationError(
+            f"Pending decision {decision_id} selection time is not bound to "
+            "its decision."
+        )
+    return model_version, policy_version, selected_at
+
+
+def _selection_learner_model_version(
+    connection: sqlite3.Connection,
+    *,
+    decision_id: str,
+    session_id: str,
+) -> str:
+    """Compatibility wrapper for older internal callers."""
+
+    return _selection_version_boundary(
+        connection,
+        decision_id=decision_id,
+        session_id=session_id,
+    )[0]
 
 
 _PHASE_WEIGHTS: dict[SessionPhase, dict[str, float]] = {
@@ -135,6 +297,413 @@ class AdaptivePolicy:
         self.learner_model = learner_model or LearnerModel()
         self.boundary_planner = RecursiveEvidenceBoundary(self.learner_model)
 
+    @staticmethod
+    def _is_due_persistent_gap(
+        projected: ObjectiveState,
+        cold_start: ObjectiveState,
+        *,
+        observed_response_families: int,
+        now: datetime,
+    ) -> bool:
+        """Recognize a durable evidence gap without mistaking counts for skill."""
+
+        if not AdaptivePolicy._has_persistent_gap(
+            projected,
+            cold_start,
+            observed_response_families=observed_response_families,
+        ):
+            return False
+        due_at = projected.next_review_at
+        if due_at is None:
+            return False
+        if (
+            now.tzinfo is None
+            or now.utcoffset() is None
+            or due_at.tzinfo is None
+            or due_at.utcoffset() is None
+        ):
+            raise ValidationError(
+                "Persistent-gap review timestamps must be timezone-aware."
+            )
+        return due_at.astimezone(timezone.utc) <= now.astimezone(timezone.utc)
+
+    @staticmethod
+    def _has_persistent_gap(
+        projected: ObjectiveState,
+        cold_start: ObjectiveState,
+        *,
+        observed_response_families: int,
+    ) -> bool:
+        """Whether exact mastery remains meaningfully below its cold prior."""
+
+        if (
+            type(observed_response_families) is not int
+            or observed_response_families < 0
+        ):
+            raise ValidationError(
+                "Observed objective-family count must be a non-negative integer."
+            )
+        if observed_response_families < PERSISTENT_GAP_MIN_OBSERVED_FAMILIES:
+            return False
+        if projected.objective_id != cold_start.objective_id:
+            raise ValidationError(
+                "Persistent-gap comparison crossed learning objectives."
+            )
+
+        current_mastery = projected.mastery_probability
+        cold_mastery = cold_start.mastery_probability
+        numerical_error = (
+            projected.mastery_probability_error_bound
+            + cold_start.mastery_probability_error_bound
+            + PERSISTENT_GAP_COMPARISON_EPSILON
+        )
+        if not all(
+            math.isfinite(value) and value >= 0.0
+            for value in (current_mastery, cold_mastery, numerical_error)
+        ):
+            raise ValidationError(
+                "Persistent-gap mastery comparison must be finite and non-negative."
+            )
+        return cold_mastery - current_mastery > numerical_error
+
+    def _observed_objective_response_families(
+        self,
+        learner_id: str,
+        objective_ids: set[str],
+    ) -> dict[str, int]:
+        """Count distinct attempted families, not repeated raw responses."""
+
+        counts = {objective_id: 0 for objective_id in objective_ids}
+        if not objective_ids:
+            return counts
+        placeholders = ",".join("?" for _ in objective_ids)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                f"""SELECT decision.question_objective_id AS objective_id,
+                           COUNT(DISTINCT attempt.family_id) AS families
+                    FROM attempts attempt
+                    JOIN decisions decision ON decision.id = attempt.decision_id
+                    WHERE attempt.learner_id = ?
+                      AND decision.question_objective_id IN ({placeholders})
+                    GROUP BY decision.question_objective_id""",
+                (learner_id, *sorted(objective_ids)),
+            ).fetchall()
+        for row in rows:
+            objective_id = row["objective_id"]
+            family_count = row["families"]
+            if objective_id not in counts or type(family_count) is not int:
+                raise ValidationError(
+                    "Observed objective-family projection is inconsistent."
+                )
+            counts[objective_id] = family_count
+        return counts
+
+    @staticmethod
+    def _persistent_gap_marker(
+        *,
+        rationale: str,
+        policy_version: str,
+        decision_objective_id: str | None,
+    ) -> dict[str, object] | None:
+        """Parse one durable episode spend marker, failing closed on drift."""
+
+        if type(rationale) is not str:
+            raise ValidationError(
+                "Persistent-gap episode rationale must be a string."
+            )
+        terms: dict[str, str] = {}
+        for raw_term in rationale.split(";"):
+            term = raw_term.strip()
+            if not term.startswith("persistent_gap_"):
+                continue
+            if "=" not in term:
+                raise ValidationError(
+                    "Malformed persistent-gap episode rationale marker."
+                )
+            key, value = term.split("=", 1)
+            if (
+                key in terms
+                or key
+                not in _PERSISTENT_GAP_BASE_MARKERS
+                | _PERSISTENT_GAP_EPISODE_MARKERS
+            ):
+                raise ValidationError(
+                    "Malformed persistent-gap episode rationale marker."
+                )
+            terms[key] = value
+        if not terms:
+            return None
+        if not _PERSISTENT_GAP_BASE_MARKERS <= set(terms):
+            raise ValidationError(
+                "Persistent-gap episode rationale is missing required markers."
+            )
+        objective_id = terms["persistent_gap_revisit"]
+        if (
+            type(decision_objective_id) is not str
+            or not decision_objective_id
+            or objective_id != decision_objective_id
+        ):
+            raise ValidationError(
+                "Persistent-gap episode marker crossed learning objectives."
+            )
+
+        try:
+            observed_families = int(
+                terms["persistent_gap_observed_families"]
+            )
+            mastery = float(terms["persistent_gap_mastery"])
+            cold_prior = float(terms["persistent_gap_cold_prior"])
+            due_at = datetime.fromisoformat(
+                terms["persistent_gap_due_at"]
+            )
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValidationError(
+                "Persistent-gap episode rationale has invalid values."
+            ) from exc
+        if (
+            str(observed_families)
+            != terms["persistent_gap_observed_families"]
+            or observed_families < PERSISTENT_GAP_MIN_OBSERVED_FAMILIES
+            or not math.isfinite(mastery)
+            or not math.isfinite(cold_prior)
+            or not 0.0 <= mastery <= 1.0
+            or not 0.0 <= cold_prior <= 1.0
+            or cold_prior <= mastery
+            or due_at.tzinfo is None
+            or due_at.utcoffset() is None
+        ):
+            raise ValidationError(
+                "Persistent-gap episode rationale has invalid values."
+            )
+
+        episode_terms = set(terms) & _PERSISTENT_GAP_EPISODE_MARKERS
+        if episode_terms:
+            if (
+                policy_version
+                not in PERSISTENT_GAP_EPISODE_POLICY_VERSIONS
+            ):
+                raise ValidationError(
+                    "Unsupported persistent-gap episode policy version."
+                )
+            if episode_terms != _PERSISTENT_GAP_EPISODE_MARKERS:
+                raise ValidationError(
+                    "Persistent-gap episode rationale is missing its budget marker."
+                )
+            try:
+                spend = int(terms["persistent_gap_episode_spend"])
+                budget = int(terms["persistent_gap_episode_budget"])
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValidationError(
+                    "Persistent-gap episode rationale has invalid budget values."
+                ) from exc
+            if (
+                str(spend) != terms["persistent_gap_episode_spend"]
+                or str(budget) != terms["persistent_gap_episode_budget"]
+                or budget != PERSISTENT_GAP_EPISODE_BUDGET
+                or not 1 <= spend <= budget
+            ):
+                raise ValidationError(
+                    "Persistent-gap episode rationale has invalid budget values."
+                )
+        else:
+            if policy_version == POLICY_VERSION:
+                raise ValidationError(
+                    "Current persistent-gap rationale lacks episode markers."
+                )
+            # v12 introduced the complete base marker before bounded episodes.
+            # It can safely seed spend one when an active session crosses the
+            # policy upgrade boundary.
+            if policy_version != "recursive-evidence-graph-v12":
+                raise ValidationError(
+                    "Unsupported legacy persistent-gap rationale version."
+                )
+            spend = 1
+            budget = PERSISTENT_GAP_EPISODE_BUDGET
+        return {
+            "objective_id": objective_id,
+            "observed_response_families": observed_families,
+            "mastery_probability": mastery,
+            "cold_start_mastery_probability": cold_prior,
+            "opened_due_at": due_at,
+            "spend": spend,
+            "budget": budget,
+        }
+
+    def _persistent_gap_episode_history(
+        self,
+        *,
+        session_id: str,
+        learner_id: str,
+    ) -> dict[str, dict[str, object]]:
+        """Reconstruct bounded episode spends from immutable response order."""
+
+        expected_stream_id = f"learner:{learner_id}"
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """SELECT decision.question_objective_id,
+                          decision.rationale, decision.policy_version,
+                          attempt.family_id, event.stream_id,
+                          event.stream_version
+                   FROM attempts attempt
+                   JOIN decisions decision
+                     ON decision.id = attempt.decision_id
+                   JOIN events event ON event.event_id = attempt.event_id
+                   WHERE attempt.session_id = ?
+                     AND attempt.learner_id = ?
+                     AND event.event_type = 'ResponseSubmitted'
+                   ORDER BY event.stream_version""",
+                (session_id, learner_id),
+            ).fetchall()
+
+        histories: dict[str, dict[str, object]] = {}
+        processed: list[tuple[int, str | None]] = []
+        for row in rows:
+            if row["stream_id"] != expected_stream_id:
+                raise ValidationError(
+                    "Persistent-gap episode history crossed learner streams."
+                )
+            marker = self._persistent_gap_marker(
+                rationale=row["rationale"],
+                policy_version=row["policy_version"],
+                decision_objective_id=row["question_objective_id"],
+            )
+            if marker is not None:
+                objective_id = marker["objective_id"]
+                history = histories.setdefault(
+                    objective_id,
+                    {
+                        "spends": 0,
+                        "family_ids": set(),
+                        "opened_due_at": marker["opened_due_at"],
+                        "last_spend_stream_version": None,
+                    },
+                )
+                if (
+                    history["opened_due_at"].astimezone(timezone.utc)
+                    != marker["opened_due_at"].astimezone(timezone.utc)
+                ):
+                    raise ValidationError(
+                        "Persistent-gap episode changed its opening due timestamp."
+                    )
+                expected_spend = int(history["spends"]) + 1
+                spend = int(marker["spend"])
+                if spend != expected_spend:
+                    raise ValidationError(
+                        "Persistent-gap episode spend sequence is malformed."
+                    )
+                family_ids = history["family_ids"]
+                if row["family_id"] in family_ids:
+                    raise ValidationError(
+                        "Persistent-gap episode reused a response family."
+                    )
+                if spend > 1:
+                    previous_version = history[
+                        "last_spend_stream_version"
+                    ]
+                    if not any(
+                        stream_version > previous_version
+                        and response_objective_id != objective_id
+                        for stream_version, response_objective_id in processed
+                    ):
+                        raise ValidationError(
+                            "Persistent-gap episode spends were not interleaved."
+                        )
+                family_ids.add(row["family_id"])
+                history["spends"] = spend
+                history["last_spend_stream_version"] = row[
+                    "stream_version"
+                ]
+            processed.append(
+                (row["stream_version"], row["question_objective_id"])
+            )
+
+        for objective_id, history in histories.items():
+            last_spend = history["last_spend_stream_version"]
+            history["interleaved_since_last_spend"] = any(
+                stream_version > last_spend
+                and response_objective_id != objective_id
+                for stream_version, response_objective_id in processed
+            )
+            history["family_ids"] = frozenset(history["family_ids"])
+        return histories
+
+    @staticmethod
+    def _next_persistent_gap_episode_spend(
+        *,
+        prior_spends: int,
+        gap_open: bool,
+        due: bool,
+        interleaved: bool,
+        distinct_capacity: bool,
+    ) -> int | None:
+        """Return the next bounded spend number, or close/block the episode."""
+
+        if (
+            type(prior_spends) is not int
+            or not 0 <= prior_spends <= PERSISTENT_GAP_EPISODE_BUDGET
+            or any(
+                type(value) is not bool
+                for value in (
+                    gap_open,
+                    due,
+                    interleaved,
+                    distinct_capacity,
+                )
+            )
+        ):
+            raise ValidationError(
+                "Persistent-gap episode state is malformed."
+            )
+        if (
+            not gap_open
+            or not distinct_capacity
+            or prior_spends >= PERSISTENT_GAP_EPISODE_BUDGET
+        ):
+            return None
+        if prior_spends == 0:
+            return 1 if due else None
+        return 2 if interleaved else None
+
+    @staticmethod
+    def _fair_coverage_candidates(
+        questions: Iterable[Question],
+        *,
+        target_exposures: Mapping[str, int],
+        persistent_gap_objective_ids: set[str],
+    ) -> tuple[list[Question], int, set[str]]:
+        """Keep the breadth frontier while admitting qualified due gaps."""
+
+        candidates = list(questions)
+        if not candidates:
+            raise ValidationError(
+                "Fair-coverage selection requires at least one candidate."
+            )
+        if any(
+            question.id not in target_exposures
+            or type(target_exposures[question.id]) is not int
+            or target_exposures[question.id] < 0
+            for question in candidates
+        ):
+            raise ValidationError(
+                "Fair-coverage target exposures are incomplete or invalid."
+            )
+        minimum = min(target_exposures[question.id] for question in candidates)
+        selected = [
+            question
+            for question in candidates
+            if target_exposures[question.id] == minimum
+            or question.objective_id in persistent_gap_objective_ids
+        ]
+        bypassed = {
+            question.objective_id
+            for question in selected
+            if question.objective_id in persistent_gap_objective_ids
+            and target_exposures[question.id] > minimum
+        }
+        return selected, minimum, {
+            objective_id for objective_id in bypassed if objective_id is not None
+        }
+
     def choose(self, session_id: str, *, now: datetime | None = None) -> Presentation:
         now = now or datetime.now(timezone.utc)
         if now.tzinfo is None or now.utcoffset() is None:
@@ -151,6 +720,7 @@ class AdaptivePolicy:
         session = self.database.get_session(session_id)
         if session["status"] != "active":
             raise ExhaustedError(f"Session {session_id} is {session['status']}.")
+        self.database.validate_session_focus(session)
         # A choice is valid only for the learner projection against which it was
         # selected.  Another active session may advance that projection before
         # this session answers, so reconcile the pending choice under the write
@@ -182,17 +752,52 @@ class AdaptivePolicy:
                    ORDER BY decision.created_at DESC LIMIT 1""",
                 (session_id,),
             ).fetchone()
+            selection_boundary = (
+                _selection_version_boundary(
+                    connection,
+                    decision_id=pending_row["id"],
+                    session_id=session_id,
+                )
+                if pending_row
+                else None
+            )
+            selection_model_version = (
+                selection_boundary[0] if selection_boundary else None
+            )
+            selection_policy_version = (
+                selection_boundary[1] if selection_boundary else None
+            )
+            if (
+                pending_row
+                and selection_policy_version
+                != pending_row["policy_version"]
+            ):
+                raise ValidationError(
+                    f"Pending decision {pending_row['id']} policy does not "
+                    "match its QuestionSelected boundary."
+                )
             if (
                 pending_row
                 and pending_row["emergency_revoked_at"] is None
                 and pending_row["learner_revision"] == learner_revision
+                and selection_model_version == self.learner_model.model_version
+                and selection_policy_version == POLICY_VERSION
             ):
                 current_pending = True
             elif pending_row:
                 reason = (
                     "question_emergency_revoked"
                     if pending_row["emergency_revoked_at"] is not None
-                    else "learner_projection_advanced"
+                    else (
+                        "learner_model_changed"
+                        if selection_model_version
+                        != self.learner_model.model_version
+                        else (
+                            "policy_changed"
+                            if selection_policy_version != POLICY_VERSION
+                            else "learner_projection_advanced"
+                        )
+                    )
                 )
                 invalidated = connection.execute(
                     """UPDATE decisions
@@ -214,8 +819,8 @@ class AdaptivePolicy:
                         "current_learner_revision": learner_revision,
                     },
                     metadata={
-                        "policy_version": pending_row["policy_version"],
-                        "learner_model_version": MODEL_VERSION,
+                        "policy_version": POLICY_VERSION,
+                        "learner_model_version": self.learner_model.model_version,
                         "corpus_release_id": pending_row["corpus_release_id"],
                     },
                     learner_id=session["learner_id"],
@@ -226,6 +831,16 @@ class AdaptivePolicy:
         if current_pending:
             pending = self.database.pending_presentation(session_id)
             if pending:
+                if (
+                    pending.question.objective_id is not None
+                    and self.learner_model.model_version
+                    not in OBJECTIVE_MODEL_VERSIONS
+                ):
+                    raise ValidationError(
+                        f"Learner model {self.learner_model.model_version} cannot "
+                        "serve an objective-aware pending question; use the "
+                        "current learner model."
+                    )
                 return pending
             raise _RetrySelection()
         release_id = session["corpus_release_id"]
@@ -270,9 +885,62 @@ class AdaptivePolicy:
                     scope = exploration_scope
                     exploring = True
         concepts = graph.concepts
-        stored_states = self.database.get_skill_states(session["learner_id"])
+        persisted_concept_states = self.database.get_skill_states(
+            session["learner_id"]
+        )
+        objective_states = self.database.get_objective_states(
+            session["learner_id"]
+        )
+        release_objectives = self.database.get_learning_objectives(release_id)
+        stored_states = self.learner_model.concept_states_with_objective_floor(
+            learner_id=session["learner_id"],
+            concepts=concepts,
+            stored_states=persisted_concept_states,
+            objectives=release_objectives,
+            stored_objective_states=objective_states,
+            now=now,
+        )
+        # Objective projection is substantially more expensive than looking up
+        # a Gaussian concept state: v6 applies retention to a full fixed-grid
+        # density and derives its metrics.  Every projection in this selection
+        # shares one learner snapshot and one clock, so materialize it once per
+        # release objective and reuse the immutable result below.
+        projected_objective_states = {}
+        for objective in release_objectives:
+            objective_state = objective_states.get(objective.id)
+            if objective_state is None:
+                objective_state = self.learner_model.initial_objective_state(
+                    session["learner_id"], objective
+                )
+            projected_objective_states[objective.id] = (
+                self.learner_model.project_objective_state(
+                    objective_state, objective, now
+                )
+            )
+        focus_objective_id = session.get("focus_objective_id")
         target_ids = [session["focus_concept_id"]] if session["focus_concept_id"] else list(scope)
         target_means = []
+        if focus_objective_id:
+            focus_objective = next(
+                (
+                    objective
+                    for objective in release_objectives
+                    if objective.id == focus_objective_id
+                ),
+                None,
+            )
+            if focus_objective is None:
+                raise ValidationError(
+                    f"Focused learning objective {focus_objective_id} is not in "
+                    f"release {release_id}."
+                )
+            # Objective items may use any declared supporting concept as their
+            # primary retrieval mapping. Keep the complete immutable objective
+            # scope reachable during its repair/verification episode.
+            scope.update(focus_objective.concept_ids)
+            target_means.append(
+                projected_objective_states[focus_objective_id].mean
+            )
         for concept_id in target_ids:
             if not concept_id or concept_id not in concepts:
                 continue
@@ -280,20 +948,95 @@ class AdaptivePolicy:
             state = stored_states.get(concept_id) or self.learner_model.initial_state(
                 session["learner_id"], concept
             )
-            target_means.append(self.learner_model.project_state(state, concept, now).mean)
+            if not focus_objective_id:
+                target_means.append(
+                    self.learner_model.project_state(state, concept, now).mean
+                )
         target_difficulty = median(target_means) if target_means else 0.0
         questions = self.database.questions_for_scope(
             scope,
             learner_id=session["learner_id"],
             focus_concept_id=session["focus_concept_id"],
             focus_misconception_id=session["focus_misconception_id"],
+            focus_objective_id=focus_objective_id,
             release_id=release_id,
             target_difficulty=target_difficulty,
             limit=600,
         )
+        main_candidate_ids = {question.id for question in questions}
+        remediation_path = session.get("remediation_path") or []
+        parent_obligation = (
+            remediation_path[-1] if remediation_path else None
+        )
+        parent_objective_id = (
+            parent_obligation.get("objective_id")
+            if parent_obligation is not None
+            else None
+        )
+        if (
+            questions
+            and focus_objective_id is not None
+            and parent_objective_id is not None
+        ):
+            # Focused retrieval is normally exact to the child objective. A
+            # pending parent obligation also needs its release-wide verification
+            # reserve in the safety pool, although those parent questions remain
+            # ineligible until the child has been repaired and verified.
+            by_id = {question.id: question for question in questions}
+            parent_reserve = self.database.questions_for_scope(
+                set(),
+                learner_id=session["learner_id"],
+                focus_misconception_id=None,
+                focus_objective_id=parent_objective_id,
+                release_id=release_id,
+                target_difficulty=target_difficulty,
+                limit=600,
+            )
+            for reserve in parent_reserve:
+                by_id.setdefault(reserve.id, reserve)
+            questions = list(by_id.values())
+        if questions and focus_objective_id is None:
+            # Main selection is scope-bounded, but its safety proof is not.
+            # Pull release-wide exact reserves for every objective a candidate
+            # or distractor can activate so cross-primary repair families
+            # cannot be hidden by the broad 600-item cutoff.
+            reserve_objective_ids = {
+                objective_id
+                for question in questions
+                for objective_id in (
+                    question.objective_id,
+                    *(
+                        option.diagnostic_objective_id
+                        for option in question.options
+                    ),
+                )
+                if objective_id is not None
+            }
+            by_id = {question.id: question for question in questions}
+            for objective_id in sorted(reserve_objective_ids):
+                reserve_questions = self.database.questions_for_scope(
+                    set(),
+                    learner_id=session["learner_id"],
+                    focus_misconception_id=None,
+                    focus_objective_id=objective_id,
+                    release_id=release_id,
+                    target_difficulty=target_difficulty,
+                    limit=600,
+                )
+                for reserve in reserve_questions:
+                    by_id.setdefault(reserve.id, reserve)
+            questions = list(by_id.values())
         if not questions:
             target = topic_id or session["root_concept_id"]
             raise ExhaustedError(f"Corpus gap: no approved questions cover {target}.")
+        if (
+            self.learner_model.model_version not in OBJECTIVE_MODEL_VERSIONS
+            and any(question.objective_id is not None for question in questions)
+        ):
+            raise ValidationError(
+                f"Learner model {self.learner_model.model_version} cannot select "
+                "objective-aware questions; use the current learner model."
+            )
 
         beliefs = self.database.get_misconception_beliefs(session["learner_id"])
         exposure = self.database.get_exposure_summary(
@@ -319,13 +1062,18 @@ class AdaptivePolicy:
                     f"Family {question.family_id} has a timezone-naive exposure "
                     "timestamp."
                 )
-            concept = concepts[question.primary_concept_id]
-            state = stored_states.get(question.primary_concept_id)
-            if state is None:
-                state = self.learner_model.initial_state(
-                    session["learner_id"], concept
+            if question.objective is not None:
+                projected = projected_objective_states[question.objective.id]
+            else:
+                concept = concepts[question.primary_concept_id]
+                state = stored_states.get(question.primary_concept_id)
+                if state is None:
+                    state = self.learner_model.initial_state(
+                        session["learner_id"], concept
+                    )
+                projected = self.learner_model.project_state(
+                    state, concept, now
                 )
-            projected = self.learner_model.project_state(state, concept, now)
             if now - family_last_at < self.learner_model.required_family_spacing(
                 projected
             ):
@@ -344,6 +1092,7 @@ class AdaptivePolicy:
         recent = list(session["recent_families"])
         focus_concept = session["focus_concept_id"]
         focus_misconception = session["focus_misconception_id"]
+        focus_objective = session.get("focus_objective_id")
 
         session_exposure = self.database.session_exposure_summary(session_id)
         independent_pool = [
@@ -358,23 +1107,87 @@ class AdaptivePolicy:
                 "Corpus gap: no unseen independent item family remains in this session."
             )
         candidate_pool = independent_pool
+        parent_verification_families: set[str] = set()
+        if parent_objective_id is not None:
+            parent_misconception_id = parent_obligation.get(
+                "misconception_id"
+            )
+            parent_verification_families = {
+                question.family_id
+                for question in independent_pool
+                if question.objective_id == parent_objective_id
+                and question.kind in VERIFICATION_KINDS
+                and (
+                    parent_misconception_id is None
+                    or any(
+                        option.misconception_id
+                        == parent_misconception_id
+                        and (
+                            option.diagnostic_objective_id
+                            or question.objective_id
+                        )
+                        == parent_objective_id
+                        for option in question.options
+                    )
+                )
+            }
 
         pedagogical_role = "exploration_probe" if exploring else "main"
         focus_valid = False
+        active_misconception_revisit: str | None = None
         eligible = candidate_pool
         if phase == SessionPhase.REMEDIATE and (focus_concept or focus_misconception):
             verification_families = {
                 question.family_id
                 for question in independent_pool
-                if focus_concept
-                and question.primary_concept_id == focus_concept
+                if (
+                    (focus_objective and question.objective_id == focus_objective)
+                    or (
+                        not focus_objective
+                        and focus_concept
+                        and question.primary_concept_id == focus_concept
+                    )
+                )
                 and question.kind in VERIFICATION_KINDS
+                and (
+                    not (focus_objective and focus_misconception)
+                    or any(
+                        option.misconception_id == focus_misconception
+                        and (
+                            option.diagnostic_objective_id
+                            or question.objective_id
+                        )
+                        == focus_objective
+                        for option in question.options
+                    )
+                )
             }
             if focus_misconception:
                 probes = [
                     question
                     for question in independent_pool
                     if focus_misconception in question.misconception_ids
+                    and (
+                        not focus_objective
+                        or (
+                            question.objective_id == focus_objective
+                            and any(
+                                option.misconception_id == focus_misconception
+                                and (
+                                    option.diagnostic_objective_id
+                                    or question.objective_id
+                                )
+                                == focus_objective
+                                for option in question.options
+                            )
+                        )
+                    )
+                ]
+            elif focus_objective:
+                probes = [
+                    question
+                    for question in independent_pool
+                    if question.objective_id == focus_objective
                 ]
             else:
                 probes = [
@@ -385,30 +1198,86 @@ class AdaptivePolicy:
                 ]
             # Do not consume the last independent transfer family as the repair
             # probe; verification must remain possible before serving anything.
-            focused = [
-                question
-                for question in probes
-                if verification_families - {question.family_id}
-            ]
+            # When this child has a parent obligation, reserve a third distinct
+            # family for the parent's eventual transfer check as well.
+            if parent_objective_id is not None:
+                focused = [
+                    question
+                    for question in probes
+                    if any(
+                        parent_verification_families
+                        - {
+                            question.family_id,
+                            child_verification_family,
+                        }
+                        for child_verification_family in (
+                            verification_families
+                            - {question.family_id}
+                        )
+                    )
+                ]
+            else:
+                focused = [
+                    question
+                    for question in probes
+                    if verification_families - {question.family_id}
+                ]
             if not focused:
+                reserve_clause = (
+                    " while preserving an independent parent verification reserve"
+                    if parent_objective_id is not None
+                    else ""
+                )
                 raise ExhaustedError(
                     "Corpus gap: no remediation-plus-verification pair exists for "
-                    f"{focus_misconception or focus_concept}. Run `tsq coverage --enqueue`."
+                    f"{focus_misconception or focus_concept}{reserve_clause}. "
+                    "Run `tsq coverage --enqueue`."
                 )
             eligible = focused
             pedagogical_role = "remediation_probe"
             focus_valid = True
-        elif phase == SessionPhase.VERIFY and focus_concept:
+        elif phase == SessionPhase.VERIFY and (focus_concept or focus_objective):
             focused = [
                 question
                 for question in independent_pool
-                if question.primary_concept_id == focus_concept
+                if (
+                    (focus_objective and question.objective_id == focus_objective)
+                    or (
+                        not focus_objective
+                        and question.primary_concept_id == focus_concept
+                    )
+                )
                 and question.kind in VERIFICATION_KINDS
+                and (
+                    not (focus_objective and focus_misconception)
+                    or any(
+                        option.misconception_id == focus_misconception
+                        and (
+                            option.diagnostic_objective_id
+                            or question.objective_id
+                        )
+                        == focus_objective
+                        for option in question.options
+                    )
+                )
             ]
+            if parent_objective_id is not None:
+                focused = [
+                    question
+                    for question in focused
+                    if parent_verification_families
+                    - {question.family_id}
+                ]
             if not focused:
+                reserve_clause = (
+                    " while preserving the parent verification reserve"
+                    if parent_objective_id is not None
+                    else ""
+                )
                 raise ExhaustedError(
                     "Corpus gap: no independent verification item exists for "
-                    f"{focus_concept}. Run `tsq coverage --enqueue`."
+                    f"{focus_objective or focus_concept}{reserve_clause}. "
+                    "Run `tsq coverage --enqueue`."
                 )
             eligible = focused
             pedagogical_role = "verification"
@@ -420,7 +1289,15 @@ class AdaptivePolicy:
         }:
             families_by_concept: dict[str, set[str]] = {}
             families_by_misconception: dict[str, set[str]] = {}
+            families_by_objective: dict[str, set[str]] = {}
+            families_by_objective_misconception: dict[
+                tuple[str, str], set[str]
+            ] = {}
             verification_by_concept: dict[str, set[str]] = {}
+            verification_by_objective: dict[str, set[str]] = {}
+            verification_by_objective_misconception: dict[
+                tuple[str, str], set[str]
+            ] = {}
             for question in independent_pool:
                 families_by_concept.setdefault(
                     question.primary_concept_id, set()
@@ -429,10 +1306,36 @@ class AdaptivePolicy:
                     verification_by_concept.setdefault(
                         question.primary_concept_id, set()
                     ).add(question.family_id)
-                for misconception_id in question.misconception_ids:
+                if question.objective_id:
+                    families_by_objective.setdefault(
+                        question.objective_id, set()
+                    ).add(question.family_id)
+                    if question.kind in VERIFICATION_KINDS:
+                        verification_by_objective.setdefault(
+                            question.objective_id, set()
+                        ).add(question.family_id)
+                for option in question.options:
+                    misconception_id = option.misconception_id
+                    if misconception_id is None:
+                        continue
                     families_by_misconception.setdefault(
                         misconception_id, set()
                     ).add(question.family_id)
+                    if (
+                        question.objective_id
+                        and (
+                            option.diagnostic_objective_id
+                            or question.objective_id
+                        )
+                        == question.objective_id
+                    ):
+                        families_by_objective_misconception.setdefault(
+                            (question.objective_id, misconception_id), set()
+                        ).add(question.family_id)
+                        if question.kind in VERIFICATION_KINDS:
+                            verification_by_objective_misconception.setdefault(
+                                (question.objective_id, misconception_id), set()
+                            ).add(question.family_id)
             misconception_owners = {
                 item.id: item.concept_id
                 for item in self.database.get_misconceptions(
@@ -448,66 +1351,335 @@ class AdaptivePolicy:
             def serviceable(question: Question) -> bool:
                 trigger_family = question.family_id
                 primary = question.primary_concept_id
+                objective_id = question.objective_id
                 # A skipped/uncategorized error still needs one repair and one
                 # independent transfer family after the trigger.
                 primary_repairs = (
-                    families_by_concept.get(primary, set()) - {trigger_family}
-                )
+                    families_by_objective.get(objective_id, set())
+                    if objective_id
+                    else families_by_concept.get(primary, set())
+                ) - {trigger_family}
                 primary_verifications = (
-                    verification_by_concept.get(primary, set()) - {trigger_family}
-                )
+                    verification_by_objective.get(objective_id, set())
+                    if objective_id
+                    else verification_by_concept.get(primary, set())
+                ) - {trigger_family}
                 if not any(
                     primary_verifications - {repair_family}
                     for repair_family in primary_repairs
                 ):
                     return False
-                for misconception_id in question.misconception_ids:
+                for option in question.options:
+                    misconception_id = option.misconception_id
+                    if misconception_id is None:
+                        continue
+                    diagnostic_objective_id = (
+                        option.diagnostic_objective_id or objective_id
+                    )
                     owner = misconception_owners.get(misconception_id, primary)
                     repair_families = (
-                        families_by_misconception.get(misconception_id, set())
-                        - {trigger_family}
-                    )
+                        families_by_objective_misconception.get(
+                            (diagnostic_objective_id, misconception_id), set()
+                        )
+                        if diagnostic_objective_id
+                        else families_by_misconception.get(
+                            misconception_id, set()
+                        )
+                    ) - {trigger_family}
                     verification_families = (
-                        verification_by_concept.get(owner, set())
-                        - {trigger_family}
-                    )
-                    if not any(
+                        verification_by_objective_misconception.get(
+                            (diagnostic_objective_id, misconception_id), set()
+                        )
+                        if diagnostic_objective_id
+                        else verification_by_concept.get(owner, set())
+                    ) - {trigger_family}
+                    if (
+                        objective_id is not None
+                        and diagnostic_objective_id is not None
+                        and diagnostic_objective_id != objective_id
+                    ):
+                        # A cross-objective diagnosis creates a four-family
+                        # obligation: trigger A, repair B/m, verify B/m, then
+                        # independently recheck transfer at A. Reserve the
+                        # entire sequence simultaneously; pairwise checks can
+                        # otherwise reuse the only A verification family as a
+                        # B probe and strand the parent after child repair.
+                        parent_verifications = (
+                            verification_by_objective.get(objective_id, set())
+                            - {trigger_family}
+                        )
+                        cross_objective_sequence_exists = any(
+                            parent_verifications
+                            - {
+                                repair_family,
+                                diagnostic_verification_family,
+                            }
+                            for repair_family in repair_families
+                            for diagnostic_verification_family in (
+                                verification_families - {repair_family}
+                            )
+                        )
+                        if not cross_objective_sequence_exists:
+                            return False
+                    elif not any(
                         verification_families - {repair_family}
                         for repair_family in repair_families
                     ):
                         return False
                 return True
 
-            safe = [question for question in independent_pool if serviceable(question)]
+            safe = [
+                question
+                for question in independent_pool
+                if question.id in main_candidate_ids
+                and serviceable(question)
+            ]
             if not safe:
                 raise ExhaustedError(
                     "Corpus gap: no safely serviceable main question remains while preserving "
                     "independent repair and verification families."
                 )
             eligible = safe
-            if topic_id and not exploring:
-                direct_topic_items = [
+            if not exploring:
+                direct_requested_items = [
                     question
                     for question in eligible
-                    if question.primary_concept_id in owned_targets
+                    if (
+                        question.objective.primary_concept_id
+                        if question.objective is not None
+                        else question.primary_concept_id
+                    )
+                    in owned_targets
                 ]
-                if not direct_topic_items:
+                if not direct_requested_items:
+                    requested_target = (
+                        f"curriculum topic {topic_id}"
+                        if topic_id
+                        else f"requested concept {session['root_concept_id']}"
+                    )
                     raise ExhaustedError(
                         "Corpus gap: no safely serviceable question remains for "
-                        f"curriculum topic {topic_id}."
+                        f"{requested_target}."
                     )
                 # Prerequisites remain in the modeled scope and can become a
                 # focused remediation target after evidence warrants descent.
-                # They are not silently substituted for the topic the learner
-                # explicitly selected.
-                eligible = direct_topic_items
+                # They are not silently substituted for the topic or concept
+                # the learner explicitly selected.
+                eligible = direct_requested_items
+
+            # Treat a named misconception as a falsifiable hypothesis, not a
+            # mastery verdict.  At most once, at the opening of a new session,
+            # prefer a safely serviceable probe for the strongest active
+            # in-scope hypothesis.  After that probe, ordinary breadth resumes
+            # unless the response itself opens explicit remediation.
+            if session["step"] == 0 and phase in {
+                SessionPhase.LEARN,
+                SessionPhase.DIAGNOSE,
+            }:
+                active_hypotheses = sorted(
+                    (
+                        (belief.probability, misconception_id)
+                        for misconception_id, belief in beliefs.items()
+                        if belief.probability
+                        >= ACTIVE_MISCONCEPTION_REVISIT_THRESHOLD
+                    ),
+                    key=lambda item: (-item[0], item[1]),
+                )
+                for _, misconception_id in active_hypotheses:
+                    probes = [
+                        question
+                        for question in eligible
+                        if misconception_id in question.misconception_ids
+                    ]
+                    if probes:
+                        eligible = probes
+                        active_misconception_revisit = misconception_id
+                        break
+
+        fair_coverage_exposure: int | None = None
+        persistent_gap_revisit_details: dict[str, dict[str, object]] = {}
+        if (
+            phase in {SessionPhase.LEARN, SessionPhase.DIAGNOSE}
+            and not exploring
+            and not focus_concept
+            and not focus_objective
+            and active_misconception_revisit is None
+        ):
+            episode_history = self._persistent_gap_episode_history(
+                session_id=session_id,
+                learner_id=session["learner_id"],
+            )
+
+            def evidence_target_exposures(question: Question) -> int:
+                if question.objective_id is not None:
+                    state = objective_states.get(question.objective_id)
+                else:
+                    state = persisted_concept_states.get(
+                        question.primary_concept_id
+                    )
+                return int(state.exposures) if state is not None else 0
+
+            target_exposures = {
+                question.id: evidence_target_exposures(question)
+                for question in eligible
+            }
+            eligible_objective_ids = {
+                question.objective_id
+                for question in eligible
+                if question.objective_id is not None
+            }
+            observed_objective_families = (
+                self._observed_objective_response_families(
+                    session["learner_id"], eligible_objective_ids
+                )
+            )
+            objective_by_id = {
+                objective.id: objective for objective in release_objectives
+            }
+            qualified_persistent_gaps: dict[str, dict[str, object]] = {}
+            blocked_episode_objective_ids: set[str] = set()
+            for objective_id in sorted(eligible_objective_ids):
+                objective = objective_by_id.get(objective_id)
+                projected = projected_objective_states.get(objective_id)
+                observed_families = observed_objective_families[objective_id]
+                if objective is None or projected is None:
+                    raise ValidationError(
+                        "A fair-coverage objective is missing from its pinned "
+                        f"release projection: {objective_id}."
+                    )
+                if (
+                    observed_families
+                    >= PERSISTENT_GAP_MIN_OBSERVED_FAMILIES
+                    and objective_id not in objective_states
+                ):
+                    raise ValidationError(
+                        "Observed objective-family evidence lacks a durable "
+                        f"objective projection: {objective_id}."
+                    )
+                cold_start = self.learner_model.initial_objective_state(
+                    session["learner_id"], objective
+                )
+                history = episode_history.get(objective_id)
+                prior_spends = (
+                    int(history["spends"]) if history is not None else 0
+                )
+                previous_families = (
+                    history["family_ids"]
+                    if history is not None
+                    else frozenset()
+                )
+                distinct_capacity = bool(
+                    {
+                        question.family_id
+                        for question in eligible
+                        if question.objective_id == objective_id
+                    }
+                    - previous_families
+                )
+                gap_open = self._has_persistent_gap(
+                    projected,
+                    cold_start,
+                    observed_response_families=observed_families,
+                )
+                due = self._is_due_persistent_gap(
+                    projected,
+                    cold_start,
+                    observed_response_families=observed_families,
+                    now=now,
+                )
+                next_spend = self._next_persistent_gap_episode_spend(
+                    prior_spends=prior_spends,
+                    gap_open=gap_open,
+                    due=due,
+                    interleaved=bool(
+                        history is not None
+                        and history["interleaved_since_last_spend"]
+                    ),
+                    distinct_capacity=distinct_capacity,
+                )
+                if history is not None and next_spend is None:
+                    # Once an episode opens, its target cannot leak back through
+                    # the ordinary minimum-exposure frontier. It must satisfy
+                    # the gap, capacity, spacing, interleaving, and budget
+                    # contract or yield to another objective.
+                    blocked_episode_objective_ids.add(objective_id)
+                if next_spend is not None:
+                    opened_due_at = (
+                        history["opened_due_at"]
+                        if history is not None
+                        else projected.next_review_at
+                    )
+                    if not isinstance(opened_due_at, datetime):
+                        raise ValidationError(
+                            "A persistent-gap episode lacks its opening due time."
+                        )
+                    qualified_persistent_gaps[objective_id] = {
+                        "observed_response_families": observed_families,
+                        "mastery_probability": projected.mastery_probability,
+                        "cold_start_mastery_probability": (
+                            cold_start.mastery_probability
+                        ),
+                        "next_review_at": opened_due_at,
+                        "episode_spend": next_spend,
+                        "episode_budget": PERSISTENT_GAP_EPISODE_BUDGET,
+                    }
+
+            eligible = [
+                question
+                for question in eligible
+                if question.objective_id
+                not in blocked_episode_objective_ids
+            ]
+            if not eligible:
+                raise ExhaustedError(
+                    "No breadth or bounded persistent-gap candidate remains "
+                    "after enforcing the session episode contract."
+                )
+
+            # Main-path adaptivity still handles a weakness immediately through
+            # focused remediation. Between such episodes, maintain a hard
+            # breadth frontier. A due objective supported by at least two
+            # independent response families opens one explicitly bounded
+            # revisit episode. Its second token survives the first response's
+            # review-clock update, but only after a non-target response and only
+            # while the exact gap and a distinct safe family remain.
+            target_exposures = {
+                question.id: target_exposures[question.id]
+                for question in eligible
+            }
+            (
+                eligible,
+                fair_coverage_exposure,
+                _,
+            ) = self._fair_coverage_candidates(
+                eligible,
+                target_exposures=target_exposures,
+                persistent_gap_objective_ids=set(qualified_persistent_gaps),
+            )
+            # Mark a qualified spend even when that objective happened to sit
+            # on the ordinary breadth frontier. Otherwise the first response
+            # would be indistinguishable from ordinary coverage and could erase
+            # the second bounded token by moving next_review_at.
+            persistent_gap_revisit_details = qualified_persistent_gaps
 
         # Across sessions, prefer genuinely independent evidence before reusing
         # a family for the same primary concept.  Review is intentionally
         # exempt: spaced retrieval sometimes needs the previously learned
         # family, and its due-date signal should remain authoritative.
         if phase != SessionPhase.REVIEW:
-            eligible = self._least_exposed_families_by_primary(eligible, exposure)
+            least_exposed = self._least_exposed_families_by_primary(
+                eligible, exposure
+            )
+            least_exposed_ids = {
+                question.id for question in least_exposed
+            }
+            eligible = [
+                question
+                for question in eligible
+                if question.id in least_exposed_ids
+                or question.objective_id
+                in persistent_gap_revisit_details
+            ]
 
         prerequisite_distances: dict[str, int] = {}
         for target_id in owned_targets:
@@ -538,6 +1710,26 @@ class AdaptivePolicy:
             now=now,
             concept_ids={question.primary_concept_id for question in eligible},
         )
+        potential_family_powers: dict[str, float] | None = None
+        if (
+            self.learner_model.model_version
+            in SPACING_AWARE_FAMILY_MODEL_VERSIONS
+        ):
+            with self.database.read() as connection:
+                potential = (
+                    self.learner_model.potential_family_evidence_powers(
+                        connection,
+                        learner_id=session["learner_id"],
+                        family_ids={
+                            question.family_id for question in eligible
+                        },
+                        now=now,
+                    )
+                )
+            potential_family_powers = {
+                family_id: result.power
+                for family_id, result in potential.items()
+            }
 
         scores = [
             self._score(
@@ -547,6 +1739,8 @@ class AdaptivePolicy:
                 prerequisite_distances=prerequisite_distances,
                 concepts=concepts,
                 stored_states=stored_states,
+                objective_states=objective_states,
+                projected_objective_states=projected_objective_states,
                 beliefs=beliefs,
                 exposure=exposure,
                 recent_families=recent,
@@ -556,6 +1750,7 @@ class AdaptivePolicy:
                 connected_pairs=connected_pairs,
                 readiness=readiness,
                 now=now,
+                potential_family_powers=potential_family_powers,
             )
             for question in eligible
         ]
@@ -582,6 +1777,13 @@ class AdaptivePolicy:
             focus_concept,
             focus_misconception,
             exploration_topic_ids=exploration_topic_ids if exploring else (),
+            fair_coverage_exposure=fair_coverage_exposure,
+            persistent_gap_revisit=(
+                persistent_gap_revisit_details.get(chosen.objective_id)
+                if chosen.objective_id is not None
+                else None
+            ),
+            active_misconception_revisit=active_misconception_revisit,
         )
         decision_id = new_id("dec")
 
@@ -621,25 +1823,33 @@ class AdaptivePolicy:
                 (session_id,),
             ).fetchone()
             if existing:
-                # Another caller won the race; return the durable pending choice.
-                pass
+                # Another caller won the race. Retry through the pending-choice
+                # reconciliation above so a cross-model winner is never served
+                # without checking its immutable selection boundary.
+                raise _RetrySelection()
             else:
+                selection_objective_aware = bool(
+                    chosen.objective_id or focus_objective
+                )
                 connection.execute(
                     """INSERT INTO decisions(
                            id, session_id, learner_id, question_id,
+                           question_objective_id,
                            question_version, question_content_hash, question_status,
                            evidence_weight, corpus_release_id, session_revision,
                            learner_revision, phase, focus_concept_id,
-                           focus_misconception_id, pedagogical_role, focus_valid,
+                           focus_misconception_id, focus_objective_id,
+                           pedagogical_role, focus_valid,
                            policy_version, candidate_count, candidate_digest,
                            top_candidates_json, selected_score_json, propensity,
                            option_order_json, rationale, created_at
-                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         decision_id,
                         session_id,
                         session["learner_id"],
                         chosen.id,
+                        chosen.objective_id,
                         release_question["version"],
                         release_question["content_hash"],
                         release_question["status"],
@@ -650,6 +1860,7 @@ class AdaptivePolicy:
                         phase.value,
                         focus_concept,
                         focus_misconception,
+                        focus_objective,
                         pedagogical_role,
                         int(focus_valid),
                         POLICY_VERSION,
@@ -669,38 +1880,51 @@ class AdaptivePolicy:
                         now.isoformat(),
                     ),
                 )
+                selection_payload = {
+                    "decision_id": decision_id,
+                    "question_id": chosen.id,
+                    "phase": phase.value,
+                    "candidate_count": len(scores),
+                    "candidate_digest": candidate_digest,
+                    "propensity": propensity,
+                    "score": chosen_score.terms(),
+                    "option_order": option_ids,
+                    "question_version": release_question["version"],
+                    "question_content_hash": release_question["content_hash"],
+                    "question_status": release_question["status"],
+                    "evidence_weight": release_question["evidence_weight"],
+                    "corpus_release_id": release_id,
+                    "session_revision": session["revision"],
+                    "learner_revision": learner_revision,
+                    "focus_concept_id": focus_concept,
+                    "focus_misconception_id": focus_misconception,
+                    "pedagogical_role": pedagogical_role,
+                    "focus_valid": focus_valid,
+                }
+                if selection_objective_aware:
+                    selection_payload.update(
+                        {
+                            "focus_objective_id": focus_objective,
+                            "question_objective_id": chosen.objective_id,
+                        }
+                    )
                 self.database.append_event(
                     connection,
                     stream_id=f"learner:{session['learner_id']}",
                     event_type="QuestionSelected",
-                    payload={
-                        "decision_id": decision_id,
-                        "question_id": chosen.id,
-                        "phase": phase.value,
-                        "candidate_count": len(scores),
-                        "candidate_digest": candidate_digest,
-                        "propensity": propensity,
-                        "score": chosen_score.terms(),
-                        "option_order": option_ids,
-                        "question_version": release_question["version"],
-                        "question_content_hash": release_question["content_hash"],
-                        "question_status": release_question["status"],
-                        "evidence_weight": release_question["evidence_weight"],
-                        "corpus_release_id": release_id,
-                        "session_revision": session["revision"],
-                        "learner_revision": learner_revision,
-                        "focus_concept_id": focus_concept,
-                        "focus_misconception_id": focus_misconception,
-                        "pedagogical_role": pedagogical_role,
-                        "focus_valid": focus_valid,
-                    },
+                    schema_version=question_selected_schema_for(
+                        self.learner_model.model_version,
+                        objective_aware=selection_objective_aware,
+                    ),
+                    payload=selection_payload,
                     metadata={
                         "policy_version": POLICY_VERSION,
-                        "learner_model_version": MODEL_VERSION,
+                        "learner_model_version": self.learner_model.model_version,
                         "corpus_release_id": release_id,
                     },
                     learner_id=session["learner_id"],
                     session_id=session_id,
+                    occurred_at=now,
                 )
                 updated = connection.execute(
                     """UPDATE sessions SET step = step + 1, revision = revision + 1,
@@ -713,10 +1937,18 @@ class AdaptivePolicy:
         durable = self.database.pending_presentation(session_id)
         if not durable:
             raise ExhaustedError("Selection was not persisted.")
+        if (
+            durable.question.objective_id is not None
+            and self.learner_model.model_version not in OBJECTIVE_MODEL_VERSIONS
+        ):
+            raise ValidationError(
+                f"Learner model {self.learner_model.model_version} cannot serve "
+                "an objective-aware question; use the current learner model."
+            )
         return durable
 
-    @staticmethod
     def _should_explore(
+        self,
         session: dict,
         phase: SessionPhase,
         recent_performance: list[dict],
@@ -732,23 +1964,38 @@ class AdaptivePolicy:
             }
             or session.get("focus_concept_id")
             or session.get("focus_misconception_id")
+            or session.get("focus_objective_id")
             or len(recent_performance) < 3
             or session["step"] < 3
             or (session["step"] - 3) % 5 != 0
         ):
             return False
+        def supports_exploration(attempt: dict) -> bool:
+            if (
+                not attempt["correct"]
+                or attempt["pedagogical_role"]
+                not in {"main", "exploration_probe"}
+            ):
+                return False
+            response_class = classify_response_for_model(
+                model_version=attempt.get("learner_model_version"),
+                correct=True,
+                selected_option_id=attempt.get("selected_option_id"),
+                selected_misconception_id=None,
+                confidence=attempt["confidence"],
+                response_ms=attempt["response_ms"],
+                hint_count=attempt["hint_count"],
+            )
+            return bool(
+                response_class.certifies_retrieval
+                and (
+                    attempt["confidence"] is None
+                    or attempt["confidence"] >= 0.65
+                )
+            )
+
         return all(
-            attempt["correct"]
-            and attempt["pedagogical_role"] in {"main", "exploration_probe"}
-            and attempt["hint_count"] == 0
-            and (
-                attempt["confidence"] is None
-                or attempt["confidence"] >= 0.65
-            )
-            and (
-                attempt["response_ms"] is None
-                or attempt["response_ms"] >= 250
-            )
+            supports_exploration(attempt)
             for attempt in recent_performance
         )
 
@@ -781,6 +2028,8 @@ class AdaptivePolicy:
         prerequisite_distances,
         concepts,
         stored_states,
+        objective_states,
+        projected_objective_states=None,
         beliefs,
         exposure,
         recent_families: list[str],
@@ -790,20 +2039,91 @@ class AdaptivePolicy:
         connected_pairs: set[frozenset[str]],
         readiness,
         now: datetime,
+        potential_family_powers: Mapping[str, float] | None = None,
     ) -> CandidateScore:
         states = self.learner_model.states_for_question(
             session["learner_id"], question, concepts, stored_states, now
         )
-        predicted = self.learner_model.predict_correct(question, states)
-        raw_ig = self.learner_model.expected_information_gain(question, states)
+        objective_state = None
+        if question.objective is not None:
+            if projected_objective_states is not None:
+                objective_state = projected_objective_states.get(
+                    question.objective.id
+                )
+                if objective_state is None:
+                    raise ValidationError(
+                        "Objective projection cache is incomplete for "
+                        f"{question.objective.id}."
+                    )
+            else:
+                objective_state = objective_states.get(question.objective.id)
+                if objective_state is None:
+                    objective_state = self.learner_model.initial_objective_state(
+                        session["learner_id"], question.objective
+                    )
+                objective_state = self.learner_model.project_objective_state(
+                    objective_state, question.objective, now
+                )
+        predicted = self.learner_model.predict_correct(
+            question, states, objective_state=objective_state
+        )
+        family_exposure = exposure["families"].get(
+            question.family_id, {}
+        ).get("count", 0)
+        if (
+            self.learner_model.model_version
+            in SPACING_AWARE_FAMILY_MODEL_VERSIONS
+        ):
+            if potential_family_powers is None:
+                # Compatibility for isolated private-score tests. Production
+                # selection always supplies the immutable history-derived map.
+                potential_family_power = (
+                    self.learner_model.family_dependence_discount(
+                        family_exposure
+                    )
+                )
+            else:
+                potential_family_power = potential_family_powers.get(
+                    question.family_id
+                )
+                if (
+                    isinstance(potential_family_power, bool)
+                    or not isinstance(
+                        potential_family_power, (int, float)
+                    )
+                    or not 0.0 <= float(potential_family_power) <= 1.0
+                ):
+                    raise ValidationError(
+                        "Planned family evidence power is missing or invalid "
+                        f"for {question.family_id}."
+                    )
+            anticipated_evidence_power = (
+                question.status.evidence_weight
+                * float(potential_family_power)
+            )
+            raw_ig = self.learner_model.expected_information_gain(
+                question,
+                states,
+                objective_state=objective_state,
+                evidence_power_override=anticipated_evidence_power,
+            )
+        else:
+            # The v5 Gaussian policy remains byte-for-byte compatible with its
+            # historical unweighted variance-reduction score.
+            raw_ig = self.learner_model.expected_information_gain(
+                question, states, objective_state=objective_state
+            )
         evidence_weights = self.learner_model.evidence_weights(question)
         information_gain = 1.0 - math.exp(-2.5 * raw_ig)
         target = _TARGET_SUCCESS[phase]
         learning_fit = math.exp(-((predicted - target) / 0.24) ** 2)
-        concept_need = sum(
-            weight * (1.0 - states[concept_id].mastery_probability)
-            for concept_id, weight in evidence_weights.items()
-        )
+        if objective_state is not None:
+            concept_need = 1.0 - objective_state.mastery_probability
+        else:
+            concept_need = sum(
+                weight * (1.0 - states[concept_id].mastery_probability)
+                for concept_id, weight in evidence_weights.items()
+            )
 
         misconception_value = 0.0
         if session["focus_misconception_id"] in question.misconception_ids:
@@ -820,12 +2140,19 @@ class AdaptivePolicy:
         else:
             prerequisite_value = min(1.0, concept_need * (0.55 + 0.45 / distance))
 
-        review_value = sum(
-            weight * self.learner_model.retention_due_value(states[concept_id], now)
-            for concept_id, weight in evidence_weights.items()
-        )
+        if objective_state is not None:
+            review_value = self.learner_model.retention_due_value(
+                objective_state, now
+            )
+        else:
+            review_value = sum(
+                weight
+                * self.learner_model.retention_due_value(
+                    states[concept_id], now
+                )
+                for concept_id, weight in evidence_weights.items()
+            )
         q_exposure = exposure["questions"].get(question.id, 0)
-        family_exposure = exposure["families"].get(question.family_id, {}).get("count", 0)
         novelty = 1.0 / (1.0 + 0.55 * q_exposure + 0.25 * family_exposure)
         if question.family_id in recent_families[-4:]:
             novelty *= 0.08
@@ -889,6 +2216,11 @@ class AdaptivePolicy:
             mapping.concept_id == session["focus_concept_id"] for mapping in question.concepts
         ):
             total += 0.12
+        if (
+            session.get("focus_objective_id")
+            and question.objective_id == session["focus_objective_id"]
+        ):
+            total += 0.18
         if question.status.value == "calibrated":
             total += 0.03
         return CandidateScore(
@@ -935,6 +2267,9 @@ class AdaptivePolicy:
         focus_misconception: str | None,
         *,
         exploration_topic_ids: tuple[str, ...] = (),
+        fair_coverage_exposure: int | None = None,
+        persistent_gap_revisit: Mapping[str, object] | None = None,
+        active_misconception_revisit: str | None = None,
     ) -> str:
         reasons = [
             f"phase={phase.value}",
@@ -944,6 +2279,8 @@ class AdaptivePolicy:
         ]
         if focus_misconception and focus_misconception in question.misconception_ids:
             reasons.append(f"discriminates_misconception={focus_misconception}")
+        if question.objective_id:
+            reasons.append(f"learning_objective={question.objective_id}")
         elif focus_concept and question.primary_concept_id == focus_concept:
             reasons.append(f"tests_focus={focus_concept}")
         if score.review_value > 0.2:
@@ -956,4 +2293,59 @@ class AdaptivePolicy:
             )
         elif score.continuity >= 0.70:
             reasons.append(f"continuity={score.continuity:.2f}")
-        return "; ".join(reasons)
+        if fair_coverage_exposure is not None:
+            reasons.append(
+                f"fair_coverage_target_exposures={fair_coverage_exposure}"
+            )
+        if persistent_gap_revisit is not None:
+            due_at = persistent_gap_revisit["next_review_at"]
+            if (
+                not isinstance(due_at, datetime)
+                or due_at.tzinfo is None
+                or due_at.utcoffset() is None
+            ):
+                raise ValidationError(
+                    "Persistent-gap rationale lacks a valid due timestamp."
+                )
+            reasons.extend(
+                (
+                    f"persistent_gap_revisit={question.objective_id}",
+                    "persistent_gap_observed_families="
+                    + str(
+                        persistent_gap_revisit[
+                            "observed_response_families"
+                        ]
+                    ),
+                    "persistent_gap_mastery="
+                    + format(
+                        persistent_gap_revisit["mastery_probability"],
+                        ".6f",
+                    ),
+                    "persistent_gap_cold_prior="
+                    + format(
+                        persistent_gap_revisit[
+                            "cold_start_mastery_probability"
+                        ],
+                        ".6f",
+                    ),
+                    "persistent_gap_due_at="
+                    + due_at.astimezone(timezone.utc).isoformat(),
+                    "persistent_gap_episode_spend="
+                    + str(persistent_gap_revisit["episode_spend"]),
+                    "persistent_gap_episode_budget="
+                    + str(persistent_gap_revisit["episode_budget"]),
+                )
+            )
+        if active_misconception_revisit is not None:
+            reasons.append(
+                "active_misconception_revisit="
+                + active_misconception_revisit
+            )
+        rationale = "; ".join(reasons)
+        if persistent_gap_revisit is not None:
+            AdaptivePolicy._persistent_gap_marker(
+                rationale=rationale,
+                policy_version=POLICY_VERSION,
+                decision_objective_id=question.objective_id,
+            )
+        return rationale

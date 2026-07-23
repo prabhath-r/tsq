@@ -11,15 +11,17 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tsq.authoring import deterministic_test_pipeline
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
-from tsq.errors import ConflictError, ExhaustedError
+from tsq.errors import ConflictError, ExhaustedError, ValidationError
 from tsq.models import SessionPhase
 from tsq.store import SCHEMA_VERSION, Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+START = datetime(2020, 6, 7, 9, 0, tzinfo=timezone.utc)
 
 
 class EngineTestCase(unittest.TestCase):
@@ -32,14 +34,81 @@ class EngineTestCase(unittest.TestCase):
         )
         self.engine = AdaptiveEngine(self.database)
         self.engine.create_learner("learner-1", "Test Learner")
+        self.test_clock = START
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
     def start(self, *, mode: str = "learn", seed: int = 17):
         return self.engine.start_session(
-            "learner-1", "t_machine_learning", mode=mode, seed=seed
+            "learner-1",
+            "t_machine_learning",
+            mode=mode,
+            seed=seed,
+            now=self.test_clock,
         )
+
+    def next_at(self, session_id: str):
+        self.test_clock += timedelta(minutes=1)
+        return self.engine.next_question(
+            session_id, now=self.test_clock
+        )
+
+    def submit_at(self, decision_id: str, selected_option_id, **kwargs):
+        self.test_clock += timedelta(minutes=1)
+        return self.engine.submit_answer(
+            decision_id,
+            selected_option_id,
+            now=self.test_clock,
+            **kwargs,
+        )
+
+    def test_session_start_accepts_an_explicit_utc_clock(self) -> None:
+        local_time = datetime(
+            2099,
+            3,
+            4,
+            12,
+            30,
+            tzinfo=timezone(timedelta(hours=5, minutes=30)),
+        )
+        expected = local_time.astimezone(timezone.utc).isoformat()
+
+        session = self.engine.start_session(
+            "learner-1",
+            "c_attention",
+            seed=91,
+            idempotency_key="explicit-session-clock",
+            now=local_time,
+        )
+
+        self.assertEqual(session["created_at"], expected)
+        self.assertEqual(session["updated_at"], expected)
+        with self.database.read() as connection:
+            event = connection.execute(
+                """SELECT occurred_at FROM events
+                   WHERE idempotency_key='explicit-session-clock'"""
+            ).fetchone()
+        self.assertEqual(event["occurred_at"], expected)
+
+        retried = self.engine.start_session(
+            "learner-1",
+            "c_attention",
+            seed=91,
+            idempotency_key="explicit-session-clock",
+            now=local_time + timedelta(days=1),
+        )
+        self.assertEqual(retried["id"], session["id"])
+        self.assertEqual(retried["created_at"], expected)
+
+    def test_session_start_rejects_a_naive_explicit_clock(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "timezone-aware"):
+            self.engine.start_session(
+                "learner-1",
+                "c_attention",
+                seed=91,
+                now=datetime(2099, 3, 4, 12, 30),
+            )
 
     def downgrade_current_database_to_v3(self) -> None:
         """Strip v4 additions while retaining populated v3 learner/event data."""
@@ -65,6 +134,13 @@ class EngineTestCase(unittest.TestCase):
             # reconstructed and must not leak into the migration fixture.
             connection.execute("DROP TABLE learning_actions")
             connection.execute("DROP TABLE learning_artifacts")
+            connection.execute("DROP TABLE learner_objective_families")
+            connection.execute("DROP TABLE objective_states")
+            connection.execute("DROP TABLE release_option_objectives")
+            connection.execute("DROP TABLE release_question_objectives")
+            connection.execute("DROP TABLE release_objective_edges")
+            connection.execute("DROP TABLE release_objective_graphs")
+            connection.execute("DROP TABLE release_learning_objectives")
 
             for column in ("command_hash", "outcome_json"):
                 connection.execute(f"ALTER TABLE attempts DROP COLUMN {column}")
@@ -78,6 +154,8 @@ class EngineTestCase(unittest.TestCase):
                 "learner_revision",
                 "focus_concept_id",
                 "focus_misconception_id",
+                "question_objective_id",
+                "focus_objective_id",
                 "pedagogical_role",
                 "focus_valid",
                 "invalidated_at",
@@ -87,6 +165,7 @@ class EngineTestCase(unittest.TestCase):
             connection.execute(
                 "ALTER TABLE sessions DROP COLUMN remediation_path_json"
             )
+            connection.execute("ALTER TABLE sessions DROP COLUMN focus_objective_id")
             connection.execute("ALTER TABLE sessions DROP COLUMN topic_id")
             connection.execute("ALTER TABLE sessions DROP COLUMN exploration_mode")
             for table, column in (
@@ -98,6 +177,8 @@ class EngineTestCase(unittest.TestCase):
                 ("sources", "content_hash"),
             ):
                 connection.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
+            connection.execute("DROP TABLE learning_objectives")
 
             connection.execute("DROP TABLE release_question_topics")
             connection.execute("DROP TABLE release_topic_concepts")
@@ -129,21 +210,6 @@ class EngineTestCase(unittest.TestCase):
                     (
                         json.dumps(payload, sort_keys=True, separators=(",", ":")),
                         json.dumps(metadata, sort_keys=True, separators=(",", ":")),
-                        event["event_id"],
-                    ),
-                )
-
-            for event in connection.execute(
-                """SELECT event_id, payload_json FROM events
-                   WHERE event_type = 'LearnerProjectionAdvanced'"""
-            ).fetchall():
-                payload = json.loads(event["payload_json"])
-                payload.pop("projection_hash", None)
-                payload.pop("learner_revision", None)
-                connection.execute(
-                    "UPDATE events SET payload_json = ? WHERE event_id = ?",
-                    (
-                        json.dumps(payload, sort_keys=True, separators=(",", ":")),
                         event["event_id"],
                     ),
                 )
@@ -181,23 +247,27 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 8)
+        self.assertEqual(SCHEMA_VERSION, 13)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:
         session = self.engine.start_session(
-            "learner-1", "Transformers", mode="learn", seed=9
+            "learner-1",
+            "Transformers",
+            mode="learn",
+            seed=9,
+            now=self.test_clock,
         )
         self.assertEqual(session["topic_id"], "t_transformers")
         self.assertEqual(session["exploration_mode"], "adaptive")
         owned = self.database.topic_owned_concepts("t_transformers")
 
         for index in range(3):
-            presentation = self.engine.next_question(session["id"])
+            presentation = self.next_at(session["id"])
             decision = self.database.recent_decisions(session["id"], 1)[0]
             self.assertEqual(decision["pedagogical_role"], "main")
             self.assertIn(presentation.question.primary_concept_id, owned)
-            self.engine.submit_answer(
+            self.submit_at(
                 presentation.decision_id,
                 presentation.question.correct_option.id,
                 confidence=0.9,
@@ -205,14 +275,14 @@ class EngineTestCase(unittest.TestCase):
                 idempotency_key=f"topic-continuity-{index}",
             )
 
-        exploration = self.engine.next_question(session["id"])
+        exploration = self.next_at(session["id"])
         decision = self.database.recent_decisions(session["id"], 1)[0]
         self.assertEqual(decision["pedagogical_role"], "exploration_probe")
         self.assertNotIn(exploration.question.primary_concept_id, owned)
         self.assertIn("deliberate_related_topic_probe", exploration.rationale)
 
         wrong = next(option for option in exploration.question.options if not option.correct)
-        result = self.engine.submit_answer(
+        result = self.submit_at(
             exploration.decision_id,
             wrong.id,
             confidence=0.9,
@@ -223,7 +293,7 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(
             result.focus_concept_id, exploration.question.primary_concept_id
         )
-        repair = self.engine.next_question(session["id"])
+        repair = self.next_at(session["id"])
         repair_decision = self.database.recent_decisions(session["id"], 1)[0]
         self.assertEqual(repair_decision["pedagogical_role"], "remediation_probe")
         self.assertNotEqual(repair.question.family_id, exploration.question.family_id)
@@ -231,18 +301,22 @@ class EngineTestCase(unittest.TestCase):
 
     def test_session_report_exposes_time_difficulty_and_uncertainty_paths(self) -> None:
         session = self.engine.start_session(
-            "learner-1", "LLM Agents", mode="learn", seed=21
+            "learner-1",
+            "LLM Agents",
+            mode="learn",
+            seed=21,
+            now=self.test_clock,
         )
-        first = self.engine.next_question(session["id"])
-        self.engine.submit_answer(
+        first = self.next_at(session["id"])
+        self.submit_at(
             first.decision_id,
             first.question.correct_option.id,
             confidence=0.85,
             response_ms=2400,
             idempotency_key="report-first",
         )
-        second = self.engine.next_question(session["id"])
-        self.engine.submit_answer(
+        second = self.next_at(session["id"])
+        self.submit_at(
             second.decision_id,
             None,
             confidence=0.2,
@@ -260,11 +334,11 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(report["abstained"], 1)
         self.assertEqual(report["response_time"]["active_seconds"], 7.5)
         self.assertEqual(
-            report["response_time"]["selection_window_inconsistencies"], 2
+            report["response_time"]["selection_window_inconsistencies"], 0
         )
-        self.assertTrue(report["response_time"]["active_exceeds_session_wall"])
+        self.assertFalse(report["response_time"]["active_exceeds_session_wall"])
         self.assertIn(
-            "submitted telemetry",
+            "authoritative selection-event window",
             report["response_time"]["evidence_contract"],
         )
         self.assertIn("cross_topic_definition", report)
@@ -272,7 +346,9 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(report["behavior_trace"]["submitted_hint_count"], 0)
         self.assertIsNotNone(report["difficulty"]["average"])
         self.assertEqual(report["unique_families"], 2)
-        self.assertTrue(report["concept_changes"])
+        self.assertTrue(
+            report["concept_changes"] or report["objective_changes"]
+        )
         self.assertIn("scale", report["difficulty"])
         self.assertEqual(len(report["adaptive_path"]), 2)
         self.assertTrue(
@@ -344,8 +420,8 @@ class EngineTestCase(unittest.TestCase):
 
     def test_populated_v3_database_is_migrated_to_v4(self) -> None:
         session = self.start(seed=29)
-        presentation = self.engine.next_question(session["id"])
-        self.engine.submit_answer(
+        presentation = self.next_at(session["id"])
+        self.submit_at(
             presentation.decision_id,
             presentation.question.correct_option.id,
             confidence=0.72,
@@ -458,9 +534,10 @@ class EngineTestCase(unittest.TestCase):
         first_session = self.start(seed=137)
         second_session = self.start(seed=139)
         presentations = (
-            self.engine.next_question(first_session["id"]),
-            self.engine.next_question(second_session["id"]),
+            self.next_at(first_session["id"]),
+            self.next_at(second_session["id"]),
         )
+        answer_time = self.test_clock + timedelta(minutes=1)
 
         def submit(index: int):
             presentation = presentations[index]
@@ -471,6 +548,7 @@ class EngineTestCase(unittest.TestCase):
                     confidence=0.9,
                     response_ms=900,
                     idempotency_key=f"concurrent-cross-session-{index}",
+                    now=answer_time,
                 )
                 return "applied", result.interaction_id
             except ConflictError as exc:
@@ -478,6 +556,7 @@ class EngineTestCase(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=2) as executor:
             outcomes = list(executor.map(submit, range(2)))
+        self.test_clock = answer_time
         self.assertEqual([outcome[0] for outcome in outcomes].count("applied"), 1)
         self.assertEqual([outcome[0] for outcome in outcomes].count("stale"), 1)
         stale_index = next(
@@ -530,10 +609,10 @@ class EngineTestCase(unittest.TestCase):
     def test_parallel_session_stale_decision_is_rejected_and_invalidated(self) -> None:
         first_session = self.start(seed=103)
         second_session = self.start(seed=107)
-        first = self.engine.next_question(first_session["id"])
-        stale = self.engine.next_question(second_session["id"])
+        first = self.next_at(first_session["id"])
+        stale = self.next_at(second_session["id"])
 
-        self.engine.submit_answer(
+        self.submit_at(
             first.decision_id,
             first.question.correct_option.id,
             confidence=0.8,
@@ -547,7 +626,7 @@ class EngineTestCase(unittest.TestCase):
                 idempotency_key="reject-stale-parallel-answer",
             )
 
-        replacement = self.engine.next_question(second_session["id"])
+        replacement = self.next_at(second_session["id"])
         repeated = self.engine.next_question(second_session["id"])
         self.assertNotEqual(replacement.decision_id, stale.decision_id)
         self.assertEqual(repeated.decision_id, replacement.decision_id)
@@ -806,6 +885,12 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(blueprint["concept_id"], "c_data_leakage")
         self.assertEqual(blueprint["kind"], "transfer")
         self.assertTrue(blueprint["source_ids"])
+        self.assertEqual(
+            blueprint["corpus_release_id"],
+            self.database.get_active_release_id(),
+        )
+        self.assertIsNone(blueprint["learning_objective_id"])
+        self.assertEqual(blueprint["coverage_goal"], "live_corpus_gap")
         self.assertEqual(jobs[0]["status"], "planned")
 
     def test_topic_corpus_gap_targets_an_owned_objective(self) -> None:
@@ -822,13 +907,94 @@ class EngineTestCase(unittest.TestCase):
         )
         with self.database.read() as connection:
             row = connection.execute(
-                "SELECT blueprint_json FROM generation_jobs"
+                "SELECT id, blueprint_json FROM generation_jobs"
             ).fetchone()
         self.assertIsNotNone(row)
         blueprint = json.loads(row["blueprint_json"])
         self.assertIn(
             blueprint["concept_id"],
             self.database.topic_owned_concepts("t_transformers"),
+        )
+        objective = next(
+            objective
+            for objective in self.database.get_learning_objectives()
+            if objective.id == blueprint["learning_objective_id"]
+        )
+        self.assertIn(blueprint["concept_id"], objective.concept_ids)
+        self.assertEqual(
+            blueprint["learning_objective_operation"],
+            objective.operation.value,
+        )
+        self.assertEqual(blueprint["coverage_goal"], "live_corpus_gap")
+
+    def test_focused_live_gap_preserves_exact_objective_and_misconception(self) -> None:
+        objective = next(
+            objective
+            for objective in self.database.get_learning_objectives()
+            if objective.id == "lo_causal_visibility"
+        )
+        with self.database.read() as connection:
+            misconception_id = connection.execute(
+                """SELECT option.misconception_id
+                   FROM release_option_objectives mapping
+                   JOIN options option
+                     ON option.question_id = mapping.question_id
+                    AND option.option_id = mapping.option_id
+                   WHERE mapping.release_id = ?
+                     AND mapping.objective_id = ?
+                     AND option.misconception_id IS NOT NULL
+                   ORDER BY option.misconception_id LIMIT 1""",
+                (
+                    self.database.get_active_release_id(connection),
+                    objective.id,
+                ),
+            ).fetchone()["misconception_id"]
+        session = self.engine.start_session(
+            "learner-1", "Transformers", mode="learn", seed=191
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE sessions
+                   SET phase = 'verify', focus_concept_id = ?,
+                       focus_misconception_id = ?, focus_objective_id = ?
+                   WHERE id = ?""",
+                (
+                    objective.primary_concept_id,
+                    misconception_id,
+                    objective.id,
+                    session["id"],
+                ),
+            )
+
+        self.engine._record_corpus_gap(
+            session["id"],
+            message="Corpus gap: exact objective regression.",
+            now=datetime.now(timezone.utc),
+        )
+
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT id, blueprint_json FROM generation_jobs"
+            ).fetchone()
+            event = connection.execute(
+                """SELECT payload_json FROM events
+                   WHERE event_type = 'CorpusGapDetected'"""
+            ).fetchone()
+        blueprint = json.loads(row["blueprint_json"])
+        payload = json.loads(event["payload_json"])
+        self.assertEqual(blueprint["learning_objective_id"], objective.id)
+        self.assertEqual(
+            blueprint["target_misconception_id"], misconception_id
+        )
+        self.assertEqual(blueprint["misconception_ids"], [misconception_id])
+        self.assertEqual(payload["focus_objective_id"], objective.id)
+        generated = deterministic_test_pipeline(self.database).run_job(
+            row["id"], "Pinned primary-source context for the exact live gap."
+        )
+        self.assertEqual(generated["status"], "reviewed")
+        self.assertEqual(generated["item"]["status"], "quarantined")
+        self.assertEqual(
+            generated["item"]["learning_objective_id"], objective.id
         )
 
     def test_session_end_is_durable_idempotent_and_blocks_pending_work(self) -> None:
@@ -886,10 +1052,14 @@ class EngineTestCase(unittest.TestCase):
             learner_id = f"all-roots-{index}"
             self.engine.create_learner(learner_id, root_id)
             session = self.engine.start_session(
-                learner_id, root_id, mode="learn", seed=700 + index
+                learner_id,
+                root_id,
+                mode="learn",
+                seed=700 + index,
+                now=self.test_clock,
             )
 
-            presentation = self.engine.next_question(session["id"])
+            presentation = self.next_at(session["id"])
 
             self.assertIn(
                 presentation.question.primary_concept_id,
@@ -899,7 +1069,7 @@ class EngineTestCase(unittest.TestCase):
             wrong = next(
                 option for option in presentation.question.options if not option.correct
             )
-            self.engine.submit_answer(
+            self.submit_at(
                 presentation.decision_id,
                 wrong.id,
                 confidence=0.9,
@@ -907,11 +1077,11 @@ class EngineTestCase(unittest.TestCase):
                 idempotency_key=f"all-roots-wrong-{index}",
             )
 
-            repair = self.engine.next_question(session["id"])
+            repair = self.next_at(session["id"])
             self.assertNotEqual(
                 repair.question.family_id, presentation.question.family_id, root_id
             )
-            self.engine.submit_answer(
+            self.submit_at(
                 repair.decision_id,
                 repair.question.correct_option.id,
                 confidence=0.9,
@@ -919,13 +1089,13 @@ class EngineTestCase(unittest.TestCase):
                 idempotency_key=f"all-roots-repair-{index}",
             )
 
-            verification = self.engine.next_question(session["id"])
+            verification = self.next_at(session["id"])
             self.assertNotIn(
                 verification.question.family_id,
                 {presentation.question.family_id, repair.question.family_id},
                 root_id,
             )
-            self.engine.submit_answer(
+            self.submit_at(
                 verification.decision_id,
                 verification.question.correct_option.id,
                 confidence=0.9,
@@ -935,9 +1105,9 @@ class EngineTestCase(unittest.TestCase):
 
     def test_wrong_answer_enters_targeted_remediation_without_repeating_item(self) -> None:
         session = self.start(mode="diagnose")
-        first = self.engine.next_question(session["id"])
+        first = self.next_at(session["id"])
         wrong = next(option for option in first.question.options if not option.correct)
-        result = self.engine.submit_answer(
+        result = self.submit_at(
             first.decision_id,
             wrong.id,
             confidence=0.8,
@@ -948,31 +1118,43 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(result.next_phase, SessionPhase.REMEDIATE)
         self.assertEqual(result.focus_misconception_id, wrong.misconception_id)
 
-        next_presentation = self.engine.next_question(session["id"])
+        next_presentation = self.next_at(session["id"])
         self.assertNotEqual(next_presentation.question.id, first.question.id)
         self.assertNotEqual(next_presentation.question.family_id, first.question.family_id)
 
     def test_remediation_success_requires_independent_verification(self) -> None:
         session = self.start()
-        first = self.engine.next_question(session["id"])
+        first = self.next_at(session["id"])
         wrong = next(option for option in first.question.options if not option.correct)
-        self.engine.submit_answer(first.decision_id, wrong.id, idempotency_key="step-1")
+        self.submit_at(
+            first.decision_id,
+            wrong.id,
+            confidence=0.9,
+            response_ms=900,
+            idempotency_key="step-1",
+        )
 
-        repair = self.engine.next_question(session["id"])
-        result = self.engine.submit_answer(
-            repair.decision_id, repair.question.correct_option.id, idempotency_key="step-2"
+        repair = self.next_at(session["id"])
+        result = self.submit_at(
+            repair.decision_id,
+            repair.question.correct_option.id,
+            confidence=0.9,
+            response_ms=900,
+            idempotency_key="step-2",
         )
         self.assertTrue(result.correct)
         self.assertEqual(result.next_phase, SessionPhase.VERIFY)
 
-        verification = self.engine.next_question(session["id"])
+        verification = self.next_at(session["id"])
         self.assertNotIn(
             verification.question.family_id,
             {first.question.family_id, repair.question.family_id},
         )
-        verified = self.engine.submit_answer(
+        verified = self.submit_at(
             verification.decision_id,
             verification.question.correct_option.id,
+            confidence=0.9,
+            response_ms=900,
             idempotency_key="step-3",
         )
         self.assertEqual(verified.next_phase, SessionPhase.LEARN)
@@ -980,13 +1162,17 @@ class EngineTestCase(unittest.TestCase):
 
     def test_prerequisite_repair_returns_to_original_unresolved_goal(self) -> None:
         session = self.engine.start_session(
-            "learner-1", "c_clustering", mode="learn", seed=13
+            "learner-1",
+            "c_clustering",
+            mode="learn",
+            seed=13,
+            now=self.test_clock,
         )
-        trigger = self.engine.next_question(session["id"])
+        trigger = self.next_at(session["id"])
         trigger_wrong = next(
             option for option in trigger.question.options if not option.correct
         )
-        first_failure = self.engine.submit_answer(
+        first_failure = self.submit_at(
             trigger.decision_id,
             trigger_wrong.id,
             confidence=0.9,
@@ -996,11 +1182,11 @@ class EngineTestCase(unittest.TestCase):
         original_concept = first_failure.focus_concept_id
         original_misconception = first_failure.focus_misconception_id
 
-        repair = self.engine.next_question(session["id"])
+        repair = self.next_at(session["id"])
         repair_wrong = next(
             option for option in repair.question.options if not option.correct
         )
-        descended = self.engine.submit_answer(
+        descended = self.submit_at(
             repair.decision_id,
             repair_wrong.id,
             confidence=0.9,
@@ -1033,16 +1219,16 @@ class EngineTestCase(unittest.TestCase):
             ],
         )
 
-        prerequisite_probe = self.engine.next_question(session["id"])
-        self.engine.submit_answer(
+        prerequisite_probe = self.next_at(session["id"])
+        self.submit_at(
             prerequisite_probe.decision_id,
             prerequisite_probe.question.correct_option.id,
             confidence=0.9,
             response_ms=900,
             idempotency_key="parent-prerequisite-repair",
         )
-        prerequisite_verify = self.engine.next_question(session["id"])
-        returned = self.engine.submit_answer(
+        prerequisite_verify = self.next_at(session["id"])
+        returned = self.submit_at(
             prerequisite_verify.decision_id,
             prerequisite_verify.question.correct_option.id,
             confidence=0.9,
@@ -1059,7 +1245,7 @@ class EngineTestCase(unittest.TestCase):
             returned.transition_reason, "prerequisite_verified_resume_parent"
         )
 
-        parent_recheck = self.engine.next_question(session["id"])
+        parent_recheck = self.next_at(session["id"])
         self.assertEqual(parent_recheck.pedagogical_role, "verification")
         self.assertEqual(
             parent_recheck.question.primary_concept_id, original_concept
@@ -1078,9 +1264,10 @@ class EngineTestCase(unittest.TestCase):
                 "t_machine_learning",
                 mode="learn",
                 seed=127 + index,
+                now=self.test_clock,
             )
-            first = self.engine.next_question(session["id"])
-            uncertain = self.engine.submit_answer(
+            first = self.next_at(session["id"])
+            uncertain = self.submit_at(
                 first.decision_id,
                 first.question.correct_option.id,
                 confidence=confidence,
@@ -1093,11 +1280,11 @@ class EngineTestCase(unittest.TestCase):
                 first.question.primary_concept_id,
                 label,
             )
-            confirmation = self.engine.next_question(session["id"])
+            confirmation = self.next_at(session["id"])
             self.assertNotEqual(
                 confirmation.question.family_id, first.question.family_id, label
             )
-            confirmed = self.engine.submit_answer(
+            confirmed = self.submit_at(
                 confirmation.decision_id,
                 confirmation.question.correct_option.id,
                 confidence=0.90,
@@ -1105,6 +1292,398 @@ class EngineTestCase(unittest.TestCase):
                 idempotency_key=f"uncertain-confirm-{index}",
             )
             self.assertEqual(confirmed.next_phase, SessionPhase.LEARN, label)
+
+    def test_impossible_response_time_is_atomic_and_retryable(self) -> None:
+        learner_id = "authoritative-response-window"
+        self.engine.create_learner(learner_id)
+        session = self.engine.start_session(
+            learner_id,
+            "t_machine_learning",
+            seed=811,
+            now=START,
+        )
+        presentation = self.engine.next_question(session["id"], now=START)
+        with self.database.read() as connection:
+            before = {
+                "events": connection.execute(
+                    "SELECT COUNT(*) AS n FROM events"
+                ).fetchone()["n"],
+                "attempts": connection.execute(
+                    "SELECT COUNT(*) AS n FROM attempts"
+                ).fetchone()["n"],
+                "learner_revision": connection.execute(
+                    "SELECT revision FROM learners WHERE id = ?",
+                    (learner_id,),
+                ).fetchone()["revision"],
+                "session": dict(
+                    connection.execute(
+                        "SELECT * FROM sessions WHERE id = ?",
+                        (session["id"],),
+                    ).fetchone()
+                ),
+            }
+
+        key = "authoritative-response-window"
+        with self.assertRaisesRegex(
+            ValidationError, "cannot exceed the authoritative time"
+        ):
+            self.engine.submit_answer(
+                presentation.decision_id,
+                presentation.question.correct_option.id,
+                confidence=0.9,
+                response_ms=1000,
+                idempotency_key=key,
+                now=START + timedelta(milliseconds=999),
+            )
+
+        with self.database.read() as connection:
+            after = {
+                "events": connection.execute(
+                    "SELECT COUNT(*) AS n FROM events"
+                ).fetchone()["n"],
+                "attempts": connection.execute(
+                    "SELECT COUNT(*) AS n FROM attempts"
+                ).fetchone()["n"],
+                "learner_revision": connection.execute(
+                    "SELECT revision FROM learners WHERE id = ?",
+                    (learner_id,),
+                ).fetchone()["revision"],
+                "session": dict(
+                    connection.execute(
+                        "SELECT * FROM sessions WHERE id = ?",
+                        (session["id"],),
+                    ).fetchone()
+                ),
+                "consumed_at": connection.execute(
+                    "SELECT consumed_at FROM decisions WHERE id = ?",
+                    (presentation.decision_id,),
+                ).fetchone()["consumed_at"],
+                "idempotency_events": connection.execute(
+                    "SELECT COUNT(*) AS n FROM events WHERE idempotency_key = ?",
+                    (key,),
+                ).fetchone()["n"],
+            }
+        self.assertEqual(after["events"], before["events"])
+        self.assertEqual(after["attempts"], before["attempts"])
+        self.assertEqual(
+            after["learner_revision"], before["learner_revision"]
+        )
+        self.assertEqual(after["session"], before["session"])
+        self.assertIsNone(after["consumed_at"])
+        self.assertEqual(after["idempotency_events"], 0)
+
+        accepted = self.engine.submit_answer(
+            presentation.decision_id,
+            presentation.question.correct_option.id,
+            confidence=0.9,
+            response_ms=1000,
+            idempotency_key=key,
+            now=START + timedelta(seconds=1),
+        )
+        # A retry returns the already validated immutable result; its arrival
+        # clock cannot retroactively make the original response impossible.
+        replayed = self.engine.submit_answer(
+            presentation.decision_id,
+            presentation.question.correct_option.id,
+            confidence=0.9,
+            response_ms=1000,
+            idempotency_key=key,
+            now=START,
+        )
+        self.assertEqual(replayed.interaction_id, accepted.interaction_id)
+        self.assertTrue(replayed.idempotent_replay)
+
+    def test_missing_and_subthreshold_confidence_do_not_localize_error(self) -> None:
+        for index, confidence in enumerate((None, 0.49)):
+            with self.subTest(confidence=confidence):
+                learner_id = f"uncertain-error-{index}"
+                self.engine.create_learner(learner_id)
+                session = self.engine.start_session(
+                    learner_id,
+                    "t_transformers",
+                    seed=2,
+                    now=START,
+                )
+                presentation = self.engine.next_question(
+                    session["id"], now=START
+                )
+                self.assertEqual(
+                    presentation.question.id,
+                    "q_transformer_mask_direction_001",
+                )
+                wrong = next(
+                    option
+                    for option in presentation.question.options
+                    if option.id == "b"
+                )
+                result = self.engine.submit_answer(
+                    presentation.decision_id,
+                    wrong.id,
+                    confidence=confidence,
+                    response_ms=1000,
+                    idempotency_key=f"uncertain-error-{index}",
+                    now=START + timedelta(seconds=1),
+                )
+
+                self.assertEqual(result.next_phase, SessionPhase.VERIFY)
+                self.assertEqual(
+                    result.transition_reason,
+                    "uncertain_main_requires_independent_diagnostic",
+                )
+                self.assertEqual(
+                    result.focus_objective_id, "lo_causal_visibility"
+                )
+                self.assertIsNone(result.focus_misconception_id)
+                self.assertEqual(
+                    self.database.get_session(session["id"])[
+                        "remediation_path"
+                    ],
+                    [],
+                )
+
+    def test_only_named_error_can_cross_objective_diagnose(self) -> None:
+        scenarios = (
+            (
+                "named",
+                0.80,
+                "lo_transformer_information_paths",
+                "m_feedforward_layers_mix_token_positions",
+                "cross_objective_diagnostic_focus",
+                1,
+            ),
+            (
+                "generic",
+                0.79,
+                "lo_causal_visibility",
+                None,
+                "credible_generic_error_focus",
+                0,
+            ),
+        )
+        for index, (
+            label,
+            confidence,
+            objective_id,
+            misconception_id,
+            reason,
+            path_depth,
+        ) in enumerate(scenarios):
+            with self.subTest(label=label):
+                learner_id = f"{label}-diagnostic-error"
+                self.engine.create_learner(learner_id)
+                session = self.engine.start_session(
+                    learner_id,
+                    "t_transformers",
+                    seed=2,
+                    now=START,
+                )
+                presentation = self.engine.next_question(
+                    session["id"], now=START
+                )
+                wrong = next(
+                    option
+                    for option in presentation.question.options
+                    if option.id == "b"
+                )
+                result = self.engine.submit_answer(
+                    presentation.decision_id,
+                    wrong.id,
+                    confidence=confidence,
+                    response_ms=1000,
+                    idempotency_key=f"{label}-diagnostic-error",
+                    now=START + timedelta(seconds=1),
+                )
+
+                self.assertEqual(result.next_phase, SessionPhase.REMEDIATE)
+                self.assertEqual(result.focus_objective_id, objective_id)
+                self.assertEqual(
+                    result.focus_misconception_id, misconception_id
+                )
+                self.assertEqual(result.transition_reason, reason)
+                self.assertEqual(
+                    len(
+                        self.database.get_session(session["id"])[
+                            "remediation_path"
+                        ]
+                    ),
+                    path_depth,
+                )
+
+    def test_repeated_uncertainty_escalates_once_then_exits_boundedly(self) -> None:
+        learner_id = "bounded-uncertainty"
+        self.engine.create_learner(learner_id)
+        session = self.engine.start_session(
+            learner_id,
+            "t_transformers",
+            seed=2,
+            now=START,
+        )
+        main = self.engine.next_question(session["id"], now=START)
+        first = self.engine.submit_answer(
+            main.decision_id,
+            None,
+            confidence=0.2,
+            response_ms=1000,
+            idempotency_key="bounded-uncertainty-main",
+            now=START + timedelta(minutes=1),
+        )
+        self.assertEqual(first.next_phase, SessionPhase.VERIFY)
+        self.assertIsNone(first.boundary_decision)
+
+        diagnostic = self.engine.next_question(
+            session["id"], now=START + timedelta(minutes=2)
+        )
+        repeated = self.engine.submit_answer(
+            diagnostic.decision_id,
+            None,
+            confidence=0.2,
+            response_ms=1000,
+            idempotency_key="bounded-uncertainty-diagnostic",
+            now=START + timedelta(minutes=3),
+        )
+        self.assertEqual(repeated.next_phase, SessionPhase.REMEDIATE)
+        self.assertEqual(
+            repeated.transition_reason,
+            "repeated_uncertainty_requires_bounded_remediation",
+        )
+        self.assertIsNone(repeated.focus_misconception_id)
+        self.assertIsNone(repeated.boundary_decision)
+
+        remediation = self.engine.next_question(
+            session["id"], now=START + timedelta(minutes=4)
+        )
+        bounded = self.engine.submit_answer(
+            remediation.decision_id,
+            None,
+            confidence=0.2,
+            response_ms=1000,
+            idempotency_key="bounded-uncertainty-remediation",
+            now=START + timedelta(minutes=5),
+        )
+        self.assertEqual(bounded.next_phase, SessionPhase.LEARN)
+        self.assertEqual(
+            bounded.transition_reason, "uncertain_remediation_bounded_exit"
+        )
+        self.assertIsNone(bounded.boundary_decision)
+        current = self.database.get_session(session["id"])
+        self.assertEqual(current["remediation_depth"], 0)
+        self.assertEqual(current["remediation_path"], [])
+
+    def test_uncertain_attempt_does_not_dilute_boundary_failure_rate(self) -> None:
+        learner_id = "boundary-response-pressure"
+        self.engine.create_learner(learner_id)
+        session = self.engine.start_session(
+            learner_id,
+            "t_transformers",
+            seed=2,
+            now=START,
+        )
+        main = self.engine.next_question(session["id"], now=START)
+        uncertain = self.engine.submit_answer(
+            main.decision_id,
+            None,
+            confidence=0.2,
+            response_ms=1000,
+            idempotency_key="boundary-uncertain",
+            now=START + timedelta(minutes=1),
+        )
+        self.assertEqual(uncertain.next_phase, SessionPhase.VERIFY)
+
+        verification = self.engine.next_question(
+            session["id"], now=START + timedelta(minutes=2)
+        )
+        wrong = next(
+            option
+            for option in verification.question.options
+            if not option.correct
+        )
+        credible_failure = self.engine.submit_answer(
+            verification.decision_id,
+            wrong.id,
+            confidence=0.60,
+            response_ms=1000,
+            idempotency_key="boundary-credible-error",
+            now=START + timedelta(minutes=3),
+        )
+        self.assertNotEqual(
+            credible_failure.transition_reason,
+            "uncertain_main_requires_independent_diagnostic",
+        )
+
+        with self.database.read() as connection:
+            boundary = self.engine._declared_objective_boundary(
+                connection,
+                session_id=session["id"],
+                learner_id=learner_id,
+                release_id=session["corpus_release_id"],
+                focus_objective_id="lo_incremental_kv_cache",
+                now=START + timedelta(minutes=4),
+            )
+        self.assertIsNotNone(boundary)
+        self.assertIsNotNone(boundary["boundary_decision"])
+        causal = next(
+            candidate
+            for candidate in boundary["boundary_decision"]["candidates"]
+            if candidate["objective_id"] == "lo_causal_visibility"
+        )
+        # One low-confidence abstention plus one credible error must exert the
+        # pressure of exactly one error, not a diluted 1/2 raw-attempt rate.
+        self.assertEqual(causal["recent_failure_rate"], 1.0)
+
+    def test_exploration_gate_rejects_uncertain_successes(self) -> None:
+        session = {
+            "topic_id": "t_transformers",
+            "exploration_mode": "adaptive",
+            "focus_concept_id": None,
+            "focus_misconception_id": None,
+            "focus_objective_id": None,
+            "step": 3,
+        }
+
+        def recent(
+            *, confidence: float | None, response_ms: int | None
+        ) -> list[dict]:
+            return [
+                {
+                    "correct": True,
+                    "pedagogical_role": "main",
+                    "hint_count": 0,
+                    "confidence": confidence,
+                    "response_ms": response_ms,
+                    "selected_option_id": "option-a",
+                    "learner_model_version": (
+                        self.engine.learner_model.model_version
+                    ),
+                    "question_id": f"question-{index}",
+                }
+                for index in range(3)
+            ]
+
+        self.assertTrue(
+            self.engine.policy._should_explore(
+                session,
+                SessionPhase.LEARN,
+                recent(confidence=0.90, response_ms=900),
+            )
+        )
+        for confidence, response_ms in (
+            (None, 900),
+            (0.49, 900),
+            (0.90, None),
+        ):
+            with self.subTest(
+                confidence=confidence, response_ms=response_ms
+            ):
+                self.assertFalse(
+                    self.engine.policy._should_explore(
+                        session,
+                        SessionPhase.LEARN,
+                        recent(
+                            confidence=confidence,
+                            response_ms=response_ms,
+                        ),
+                    )
+                )
 
     def test_repeated_instant_success_exits_inconclusive_verification_boundedly(self) -> None:
         self.engine.create_learner("instant-repeat", "Repeated instant responses")
@@ -1144,22 +1723,40 @@ class EngineTestCase(unittest.TestCase):
 
     def test_review_verify_failure_without_deeper_prerequisite_exits_bounded_tunnel(self) -> None:
         session = self.engine.start_session(
-            "learner-1", "c_probability_reasoning", mode="review", seed=17
+            "learner-1",
+            "c_probability_reasoning",
+            mode="review",
+            seed=17,
+            now=self.test_clock,
         )
-        first = self.engine.next_question(session["id"])
+        first = self.next_at(session["id"])
         wrong = next(option for option in first.question.options if not option.correct)
-        self.engine.submit_answer(first.decision_id, wrong.id, idempotency_key="review-1")
+        self.submit_at(
+            first.decision_id,
+            wrong.id,
+            confidence=0.9,
+            response_ms=900,
+            idempotency_key="review-1",
+        )
 
-        repair = self.engine.next_question(session["id"])
-        self.engine.submit_answer(
-            repair.decision_id, repair.question.correct_option.id, idempotency_key="review-2"
+        repair = self.next_at(session["id"])
+        self.submit_at(
+            repair.decision_id,
+            repair.question.correct_option.id,
+            confidence=0.9,
+            response_ms=900,
+            idempotency_key="review-2",
         )
         self.assertEqual(self.database.get_session(session["id"])["phase"], "verify")
 
-        verify = self.engine.next_question(session["id"])
+        verify = self.next_at(session["id"])
         verify_wrong = next(option for option in verify.question.options if not option.correct)
-        failed = self.engine.submit_answer(
-            verify.decision_id, verify_wrong.id, idempotency_key="review-3"
+        failed = self.submit_at(
+            verify.decision_id,
+            verify_wrong.id,
+            confidence=0.9,
+            response_ms=900,
+            idempotency_key="review-3",
         )
         self.assertEqual(failed.next_phase, SessionPhase.REVIEW)
         self.assertEqual(self.database.get_session(session["id"])["remediation_depth"], 0)
@@ -1195,10 +1792,11 @@ class EngineTestCase(unittest.TestCase):
                     "t_machine_learning",
                     mode="learn",
                     seed=211 + confidence,
+                    now=self.test_clock,
                 )
-                presentation = self.engine.next_question(session["id"])
+                presentation = self.next_at(session["id"])
                 key = f"integer-confidence-answer-{confidence}"
-                first = self.engine.submit_answer(
+                first = self.submit_at(
                     presentation.decision_id,
                     presentation.question.correct_option.id,
                     confidence=confidence,
@@ -1235,7 +1833,7 @@ class EngineTestCase(unittest.TestCase):
 
     def test_idempotency_covers_the_full_effectful_answer_payload_and_outcome(self) -> None:
         session = self.start(seed=31)
-        presentation = self.engine.next_question(session["id"])
+        presentation = self.next_at(session["id"])
         option_id = presentation.question.correct_option.id
         key = "full-answer-command"
         inputs = {
@@ -1244,7 +1842,7 @@ class EngineTestCase(unittest.TestCase):
             "hint_count": 1,
             "feedback_shown": False,
         }
-        first = self.engine.submit_answer(
+        first = self.submit_at(
             presentation.decision_id,
             option_id,
             idempotency_key=key,
@@ -1302,9 +1900,15 @@ class EngineTestCase(unittest.TestCase):
 
     def test_distractor_updates_misconception_as_hypothesis(self) -> None:
         session = self.start()
-        presentation = self.engine.next_question(session["id"])
+        presentation = self.next_at(session["id"])
         wrong = next(option for option in presentation.question.options if not option.correct)
-        self.engine.submit_answer(presentation.decision_id, wrong.id, idempotency_key="mis-1")
+        self.submit_at(
+            presentation.decision_id,
+            wrong.id,
+            confidence=0.90,
+            response_ms=1_000,
+            idempotency_key="mis-1",
+        )
         belief = self.database.get_misconception_beliefs("learner-1")[wrong.misconception_id]
         self.assertGreater(belief.probability, 0.10)
         self.assertLess(belief.probability, 0.90)
@@ -1346,7 +1950,7 @@ class EngineTestCase(unittest.TestCase):
             self.assertEqual(current["previous_hash"], previous["payload_hash"])
         response = next(row for row in events if row["event_type"] == "ResponseSubmitted")
         projection = next(row for row in events if row["event_type"] == "LearnerProjectionAdvanced")
-        self.assertEqual(response["schema_version"], 1)
+        self.assertEqual(response["schema_version"], 2)
         self.assertEqual(projection["schema_version"], 2)
         self.assertEqual(json.loads(projection["payload_json"])["response_event_id"], response["event_id"])
         self.assertTrue(self.database.verify_integrity()["ok"])
@@ -1391,8 +1995,8 @@ class EngineTestCase(unittest.TestCase):
 
     def test_integrity_verifier_detects_learner_projection_tampering(self) -> None:
         session = self.start(seed=109)
-        presentation = self.engine.next_question(session["id"])
-        self.engine.submit_answer(
+        presentation = self.next_at(session["id"])
+        self.submit_at(
             presentation.decision_id,
             presentation.question.correct_option.id,
             confidence=0.8,

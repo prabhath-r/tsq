@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from tsq.learner import (
     MAX_POSTERIOR_VARIANCE,
     MIN_POSTERIOR_VARIANCE,
+    OBJECTIVE_GRID_V6_MODEL_VERSION,
     LearnerModel,
 )
 from tsq.models import (
@@ -26,6 +27,13 @@ from tsq.models import (
 
 
 NOW = datetime(2026, 7, 20, 12, 0, tzinfo=timezone.utc)
+TEST_MODEL_VERSION = OBJECTIVE_GRID_V6_MODEL_VERSION
+
+
+def learner_model() -> LearnerModel:
+    """Use pre-spacing semantics in reducer-only fixtures without an event log."""
+
+    return LearnerModel(TEST_MODEL_VERSION)
 
 
 def make_question(
@@ -159,14 +167,14 @@ def project_response(
     feedback_shown: bool = False,
     correct: bool = True,
     confidence: float | None = 0.8,
-    response_ms: int | None = None,
+    response_ms: int | None = 1_000,
 ) -> SkillState:
     connection.execute(
         "INSERT INTO attempts VALUES (?, 'learner', ?)",
         (event_id, question.family_id),
     )
     selected = question.correct_option if correct else question.options[1]
-    states, _ = LearnerModel().update_from_response(
+    states, _ = learner_model().update_from_response(
         connection,
         learner_id="learner",
         question=question,
@@ -208,7 +216,7 @@ class LearnerMathTests(unittest.TestCase):
                         "INSERT INTO attempts VALUES (?, 'learner', ?)",
                         ("single-wrong", question.family_id),
                     )
-                    states, changes = LearnerModel().update_from_response(
+                    states, changes = learner_model().update_from_response(
                         connection,
                         learner_id="learner",
                         question=question,
@@ -319,7 +327,7 @@ class LearnerMathTests(unittest.TestCase):
             last_seen_at=NOW - timedelta(days=365),
             evidence_mass=2.0,
         )
-        projected = LearnerModel().project_state(state, concept, NOW)
+        projected = learner_model().project_state(state, concept, NOW)
         self.assertEqual(projected.mean, state.mean)
         self.assertEqual(projected.variance, state.variance)
         self.assertLessEqual(projected.mastery_probability, state.mastery_probability)
@@ -339,7 +347,7 @@ class LearnerMathTests(unittest.TestCase):
             last_seen_at=NOW - timedelta(hours=1),
             evidence_mass=7.0,
         )
-        projected = LearnerModel().project_state(state, concept, NOW)
+        projected = learner_model().project_state(state, concept, NOW)
         self.assertLess(projected.mean, state.mean)
         self.assertGreaterEqual(projected.variance, state.variance)
         self.assertLessEqual(projected.mastery_probability, state.mastery_probability + 1e-12)
@@ -354,7 +362,9 @@ class LearnerMathTests(unittest.TestCase):
             exposures=2,
             last_seen_at=NOW - timedelta(hours=1),
         )
-        projected_near_zero = LearnerModel().project_state(near_zero, concept, NOW)
+        projected_near_zero = learner_model().project_state(
+            near_zero, concept, NOW
+        )
         self.assertTrue(math.isfinite(projected_near_zero.variance))
         self.assertLessEqual(
             projected_near_zero.expected_competence,
@@ -371,7 +381,7 @@ class LearnerMathTests(unittest.TestCase):
             stability_hours=48.0,
             next_review_at=due,
         )
-        model = LearnerModel()
+        model = learner_model()
         self.assertEqual(model.retention_due_value(state, due - timedelta(hours=24)), 0.0)
         self.assertAlmostEqual(
             model.retention_due_value(state, due - timedelta(hours=12)), 0.25
@@ -391,7 +401,7 @@ class LearnerMathTests(unittest.TestCase):
                 ConceptWeight("c_context", 0.25, ConceptRole.CONTEXT),
             )
         )
-        model = LearnerModel()
+        model = learner_model()
         self.assertEqual(model.evidence_weights(question), {"c_primary": 1.0})
         self.assertFalse(ConceptRole.SUPPORTING.carries_scored_evidence)
         self.assertFalse(ConceptRole.CONTEXT.carries_scored_evidence)
@@ -463,7 +473,7 @@ class LearnerMathTests(unittest.TestCase):
             connection.close()
 
     def test_one_family_has_bounded_cumulative_influence(self) -> None:
-        model = LearnerModel()
+        model = learner_model()
         discounts = [model.family_dependence_discount(index) for index in range(100_000)]
         self.assertEqual(discounts[0], 1.0)
         self.assertEqual(discounts[1], 0.25)
@@ -572,7 +582,7 @@ class LearnerMathTests(unittest.TestCase):
             hinted_connection.close()
 
     def test_extreme_valid_items_keep_probabilities_and_variances_finite(self) -> None:
-        model = LearnerModel()
+        model = learner_model()
         cases = (
             ("easy", -4.0, 3.0, 6.0, 1e-12, True),
             ("hard", 4.0, 3.0, -6.0, MAX_POSTERIOR_VARIANCE, False),

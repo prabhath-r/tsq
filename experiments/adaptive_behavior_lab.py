@@ -19,7 +19,7 @@ import sys
 import tempfile
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping
 
@@ -44,7 +44,7 @@ from tsq.simulation import (  # noqa: E402
 from tsq.store import Database  # noqa: E402
 
 
-LAB_VERSION = "adaptive-behavior-lab-v1"
+LAB_VERSION = "adaptive-behavior-lab-v4"
 DEFAULT_START = datetime(2100, 7, 21, 9, 0, tzinfo=timezone.utc)
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "adaptive_lab.json"
 DEFAULT_ROOT = "t_transformers"
@@ -77,6 +77,11 @@ SCENARIOS = (
         "low_confidence_correct",
         "Every answer is correct and unhinted but confidence remains 0.20.",
         "Correctness paired with self-reported uncertainty should be discounted.",
+    ),
+    ScenarioSpec(
+        "missing_confidence_correct",
+        "Every answer is correct and unhinted, but confidence telemetry is omitted.",
+        "Missing confidence may update uncertainty but must never certify retrieval.",
     ),
     ScenarioSpec(
         "uncertain_abstention",
@@ -133,10 +138,11 @@ class PatternLearner:
 
     name: str
     rule: str
-    confidence: float
+    confidence: float | None
     response_ms: int
     hint_count: int = 0
     weak_concepts: frozenset[str] = field(default_factory=frozenset)
+    weak_objectives: frozenset[str] = field(default_factory=frozenset)
     calls: int = 0
 
     def answer(
@@ -206,7 +212,15 @@ class PatternLearner:
         if self.rule == "oscillate":
             return call_index % 4 in {2, 3}
         if self.rule == "targeted":
-            return presentation.question.primary_concept_id not in self.weak_concepts
+            question = presentation.question
+            if question.objective_id is not None:
+                return question.objective_id not in self.weak_objectives
+            anchor = (
+                question.objective.primary_concept_id
+                if question.objective is not None
+                else question.primary_concept_id
+            )
+            return anchor not in self.weak_concepts
         raise ValueError(f"Unknown laboratory action rule: {self.rule}")
 
     def _named_distractor(
@@ -230,6 +244,43 @@ class PatternLearner:
         return candidates[index % len(candidates)]
 
 
+@dataclass(frozen=True, slots=True)
+class MisconceptionProbeLearner:
+    """Induce one named hypothesis, or answer correctly to test recovery."""
+
+    name: str
+    target_misconception_id: str
+    induce: bool
+
+    def answer(
+        self,
+        presentation: Presentation,
+        *,
+        simulation_seed: int,
+        trial_index: int,
+        encounter: int,
+    ) -> SyntheticAnswer:
+        del simulation_seed, trial_index, encounter
+        target_options = [
+            option
+            for option in presentation.question.options
+            if option.misconception_id == self.target_misconception_id
+        ]
+        selected = (
+            target_options[0]
+            if self.induce and target_options
+            else presentation.question.correct_option
+        )
+        return SyntheticAnswer(
+            selected_option_id=selected.id,
+            correct=selected.correct,
+            ground_truth_probability=0.02 if not selected.correct else 0.98,
+            confidence=0.95,
+            response_ms=4_000,
+            hint_count=0,
+        )
+
+
 def make_learner(scenario_id: str, seed: int):
     if scenario_id == "deliberate_correct":
         return PatternLearner(scenario_id, "correct", 0.95, 8_000)
@@ -239,6 +290,8 @@ def make_learner(scenario_id: str, seed: int):
         return PatternLearner(scenario_id, "correct", 0.95, 8_000, hint_count=1)
     if scenario_id == "low_confidence_correct":
         return PatternLearner(scenario_id, "correct", 0.20, 8_000)
+    if scenario_id == "missing_confidence_correct":
+        return PatternLearner(scenario_id, "correct", None, 8_000)
     if scenario_id == "uncertain_abstention":
         return PatternLearner(scenario_id, "abstain", 0.20, 5_000)
     if scenario_id == "confident_misconception":
@@ -260,6 +313,9 @@ def make_learner(scenario_id: str, seed: int):
             weak_concepts=frozenset(
                 {"c_attention_scaling", "c_causal_masking"}
             ),
+            weak_objectives=frozenset(
+                {"lo_attention_logit_scaling", "lo_causal_visibility"}
+            ),
         )
     if scenario_id == "heterogeneous_profile":
         return SyntheticLearner(
@@ -271,6 +327,10 @@ def make_learner(scenario_id: str, seed: int):
                 "c_causal_masking": 0.08,
                 "c_transformers": 0.72,
             },
+            objective_abilities={
+                "lo_attention_logit_scaling": 0.12,
+                "lo_causal_visibility": 0.08,
+            },
             misconception_strengths={
                 "m_attention_unscaled_dimension_invariant": 0.90,
                 "m_mask_only_inference": 0.90,
@@ -278,9 +338,33 @@ def make_learner(scenario_id: str, seed: int):
             slip_probability=0.03,
             guess_probability=0.01,
             base_response_ms=6_000,
+            response_model="discontinuous_threshold",
             seed=seed,
         )
     raise ValueError(f"Unknown scenario: {scenario_id}")
+
+
+def generator_summary(learner: PatternLearner | SyntheticLearner) -> dict[str, Any]:
+    if isinstance(learner, PatternLearner):
+        return {
+            "model": f"pattern:{learner.rule}",
+            "weak_concepts": sorted(learner.weak_concepts),
+            "weak_objectives": sorted(learner.weak_objectives),
+            "forced_pattern": True,
+        }
+    return {
+        "model": learner.response_model,
+        "default_ability": learner.default_ability,
+        "default_objective_ability": learner.default_objective_ability,
+        "concept_abilities": dict(learner.concept_abilities),
+        "objective_abilities": dict(learner.objective_abilities),
+        "misconception_strengths": dict(learner.misconception_strengths),
+        "forced_correctness": learner.forced_correctness,
+        "interpretation": (
+            "A declared synthetic response generator, potentially misspecified "
+            "relative to TSQ's learner model; not a human calibration cohort."
+        ),
+    }
 
 
 def canonical_hash(value: Any) -> str:
@@ -307,15 +391,26 @@ def validate_profile_references(
     graph = database.get_graph(release_id)
     if isinstance(learner, PatternLearner):
         concept_ids = set(learner.weak_concepts)
+        objective_ids = set(learner.weak_objectives)
         misconception_ids: set[str] = set()
     else:
         concept_ids = set(learner.concept_abilities)
+        objective_ids = set(learner.objective_abilities)
         misconception_ids = set(learner.misconception_strengths)
     unknown_concepts = concept_ids - set(graph.concepts)
     if unknown_concepts:
         raise ValueError(
             "Laboratory profile references unknown concepts: "
             + ", ".join(sorted(unknown_concepts))
+        )
+    known_objectives = {
+        objective.id for objective in database.get_learning_objectives(release_id)
+    }
+    unknown_objectives = objective_ids - known_objectives
+    if unknown_objectives:
+        raise ValueError(
+            "Laboratory profile references unknown learning objectives: "
+            + ", ".join(sorted(unknown_objectives))
         )
     if misconception_ids:
         known_misconceptions = {
@@ -332,64 +427,254 @@ def validate_profile_references(
             )
 
 
-def projection_summary(profile: Mapping[str, Any]) -> dict[str, Any]:
+def _projection_commitment(database: Database, learner_id: str) -> dict[str, Any]:
+    """Bind a readable lab summary to the database's complete projection hash."""
+
+    with database.read() as connection:
+        row = connection.execute(
+            """SELECT payload_json FROM events
+               WHERE learner_id = ? AND event_type = 'LearnerProjectionAdvanced'
+               ORDER BY stream_version DESC LIMIT 1""",
+            (learner_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"]) if row is not None else None
+        hash_version = (
+            int(payload.get("projection_hash_version", 1))
+            if isinstance(payload, dict)
+            else None
+        )
+        current_hash = database.learner_projection_hash(
+            learner_id,
+            connection,
+            **(
+                {"hash_version": hash_version}
+                if hash_version is not None
+                else {}
+            ),
+        )
+    committed_hash = (
+        payload.get("projection_hash") if isinstance(payload, dict) else None
+    )
+    return {
+        "hash_version": hash_version,
+        "current_hash": current_hash,
+        "latest_event_hash": committed_hash,
+        "matches_latest_event": (
+            committed_hash == current_hash if committed_hash is not None else None
+        ),
+    }
+
+
+def projection_summary(
+    profile: Mapping[str, Any],
+    *,
+    database: Database,
+    learner_id: str,
+) -> dict[str, Any]:
+    """Summarize both legacy and objective projections without double counting.
+
+    ``engine.profile`` deliberately overlays broad concepts with derived
+    objective floors for routing.  Those derived rows are valuable to inspect,
+    but they are not additional persisted evidence.  Aggregate evidence here is
+    therefore taken from the two durable state/family tables.
+    """
+
     skills = list(profile["skills"])
-    observed = [skill for skill in skills if skill["evidence_mass"] > 0]
-    misconceptions = list(profile["active_misconceptions"])
+    objectives = list(profile.get("learning_objectives", ()))
+    active_misconceptions = list(profile["active_misconceptions"])
+    misconception_hypotheses = list(
+        profile.get("misconception_hypotheses", active_misconceptions)
+    )
+    with database.read() as connection:
+        persisted_skill_ids = {
+            row["concept_id"]
+            for row in connection.execute(
+                "SELECT concept_id FROM skill_states WHERE learner_id = ?",
+                (learner_id,),
+            )
+        }
+        legacy_state = connection.execute(
+            """SELECT COUNT(*) AS states,
+                      COALESCE(SUM(evidence_mass), 0.0) AS evidence_mass
+               FROM skill_states WHERE learner_id = ?""",
+            (learner_id,),
+        ).fetchone()
+        objective_state = connection.execute(
+            """SELECT COUNT(*) AS states,
+                      COALESCE(SUM(evidence_mass), 0.0) AS evidence_mass
+               FROM objective_states WHERE learner_id = ?""",
+            (learner_id,),
+        ).fetchone()
+        legacy_family_count = connection.execute(
+            "SELECT COUNT(*) AS n FROM learner_skill_families WHERE learner_id = ?",
+            (learner_id,),
+        ).fetchone()["n"]
+        objective_family_count = connection.execute(
+            """SELECT COUNT(*) AS n FROM learner_objective_families
+               WHERE learner_id = ?""",
+            (learner_id,),
+        ).fetchone()["n"]
+        objective_metadata = {
+            row["objective_id"]: dict(row)
+            for row in connection.execute(
+                """SELECT state.objective_id, state.exposures,
+                          state.last_seen_at, state.model_version,
+                          grid.posterior_sha256, grid.edge_mass,
+                          grid.mastery_probability_error_bound,
+                          grid.acquisition_mass
+                   FROM objective_states state
+                   LEFT JOIN objective_grid_states grid
+                     ON grid.learner_id = state.learner_id
+                    AND grid.objective_id = state.objective_id
+                   WHERE state.learner_id = ?
+                   ORDER BY state.objective_id""",
+                (learner_id,),
+            )
+        }
+
+    skill_fields = (
+        "name",
+        "mastery",
+        "expected_competence",
+        "uncertainty",
+        "stability_hours",
+        "evidence_mass",
+        "independent_families",
+        "successful_retrieval_families",
+        "observed_response_families",
+        "delayed_retrievals",
+        "operation_kinds",
+        "prerequisites_ready",
+        "intrinsic_readiness",
+        "prerequisite_support",
+        "effective_readiness",
+        "bottleneck_concept_id",
+        "state",
+        "next_review_at",
+    )
     by_concept = {
         skill["concept_id"]: {
-            key: skill[key]
-            for key in (
-                "name",
-                "mastery",
-                "expected_competence",
-                "uncertainty",
-                "stability_hours",
-                "evidence_mass",
-                "independent_families",
-                "delayed_retrievals",
-                "operation_kinds",
-                "prerequisites_ready",
-                "intrinsic_readiness",
-                "prerequisite_support",
-                "effective_readiness",
-                "bottleneck_concept_id",
-                "state",
-                "next_review_at",
-            )
+            **{key: skill.get(key) for key in skill_fields},
+            "projection_kind": (
+                "persisted_legacy"
+                if skill["concept_id"] in persisted_skill_ids
+                else "derived_objective_floor"
+            ),
         }
         for skill in skills
     }
+    objective_fields = (
+        "name",
+        "description",
+        "operation",
+        "evidence_type",
+        "primary_concept_id",
+        "supporting_concept_ids",
+        "mastery",
+        "expected_competence",
+        "uncertainty",
+        "stability_hours",
+        "evidence_mass",
+        "independent_families",
+        "successful_retrieval_families",
+        "observed_response_families",
+        "delayed_retrievals",
+        "operation_kinds",
+        "active_misconception_probability",
+        "prerequisite_mode",
+        "prerequisite_objective_ids",
+        "prerequisites_ready",
+        "prerequisite_support",
+        "state",
+        "next_review_at",
+    )
+    by_objective: dict[str, dict[str, Any]] = {}
+    for objective in objectives:
+        objective_id = objective["objective_id"]
+        metadata = objective_metadata.get(objective_id, {})
+        exact_posterior = None
+        if metadata.get("posterior_sha256") is not None:
+            exact_posterior = {
+                "sha256": metadata["posterior_sha256"],
+                "edge_mass": metadata["edge_mass"],
+                "mastery_probability_error_bound": metadata[
+                    "mastery_probability_error_bound"
+                ],
+                "acquisition_mass": metadata["acquisition_mass"],
+            }
+        by_objective[objective_id] = {
+            **{key: objective.get(key) for key in objective_fields},
+            "persisted": objective_id in objective_metadata,
+            "exposures": metadata.get("exposures", 0),
+            "last_seen_at": metadata.get("last_seen_at"),
+            "model_version": metadata.get("model_version"),
+            "exact_posterior": exact_posterior,
+        }
+
+    assessed_units = [
+        {"id": concept_id, **by_concept[concept_id]}
+        for concept_id in sorted(persisted_skill_ids & set(by_concept))
+    ] + [
+        {"id": objective_id, **by_objective[objective_id]}
+        for objective_id in sorted(by_objective)
+    ]
+    observed_units = [
+        unit for unit in assessed_units if float(unit["evidence_mass"] or 0.0) > 0
+    ]
+    commitment = _projection_commitment(database, learner_id)
     stable_payload = {
         "skills": by_concept,
-        "active_misconceptions": misconceptions,
+        "learning_objectives": by_objective,
+        "misconception_hypotheses": misconception_hypotheses,
+        "active_misconceptions": active_misconceptions,
     }
+    legacy_evidence_mass = float(legacy_state["evidence_mass"])
+    objective_evidence_mass = float(objective_state["evidence_mass"])
     return {
         "skill_count": len(skills),
-        "observed_skill_count": len(observed),
-        "total_evidence_mass": sum(skill["evidence_mass"] for skill in skills),
-        "total_independent_families": sum(
-            skill["independent_families"] for skill in skills
+        "persisted_legacy_skill_count": int(legacy_state["states"]),
+        "objective_count": len(objectives),
+        "persisted_objective_count": int(objective_state["states"]),
+        "observed_assessment_unit_count": len(observed_units),
+        "legacy_evidence_mass": legacy_evidence_mass,
+        "objective_evidence_mass": objective_evidence_mass,
+        "total_evidence_mass": legacy_evidence_mass + objective_evidence_mass,
+        "legacy_independent_families": int(legacy_family_count),
+        "objective_independent_families": int(objective_family_count),
+        "total_independent_families": int(
+            legacy_family_count + objective_family_count
         ),
         "mean_mastery": (
-            sum(skill["mastery"] for skill in skills) / len(skills)
-            if skills
+            sum(float(unit["mastery"]) for unit in assessed_units)
+            / len(assessed_units)
+            if assessed_units
             else None
         ),
         "mean_observed_mastery": (
-            sum(skill["mastery"] for skill in observed) / len(observed)
-            if observed
+            sum(float(unit["mastery"]) for unit in observed_units)
+            / len(observed_units)
+            if observed_units
             else None
         ),
-        "state_counts": dict(Counter(skill["state"] for skill in skills)),
-        "active_misconception_count": len(misconceptions),
+        "state_counts": dict(
+            Counter(str(unit["state"]) for unit in assessed_units)
+        ),
+        "monitored_misconception_count": len(misconception_hypotheses),
+        "active_misconception_count": len(active_misconceptions),
         "maximum_misconception_probability": max(
-            (item["probability"] for item in misconceptions),
+            (item["probability"] for item in misconception_hypotheses),
             default=None,
         ),
         "skills": by_concept,
-        "active_misconceptions": misconceptions,
+        "learning_objectives": by_objective,
+        "misconception_hypotheses": misconception_hypotheses,
+        "active_misconceptions": active_misconceptions,
         "stable_hash": canonical_hash(stable_payload),
+        "database_projection_commitment": commitment,
+        "aggregate_contract": (
+            "Totals combine durable legacy skill rows with durable objective rows; "
+            "derived broad objective floors are shown but never counted twice."
+        ),
     }
 
 
@@ -502,12 +787,27 @@ def serialize_trace(
                     "family_id": step.family_id,
                     "kind": step.question_kind,
                     "pedagogical_role": step.pedagogical_role,
+                    "surface_primary_concept_id": (
+                        step.surface_primary_concept_id
+                    ),
+                    "surface_primary_concept_name": graph.concepts[
+                        step.surface_primary_concept_id
+                    ].name,
+                    "evidence_anchor_concept_id": (
+                        step.evidence_anchor_concept_id
+                    ),
+                    "evidence_anchor_concept_name": graph.concepts[
+                        step.evidence_anchor_concept_id
+                    ].name,
+                    # Retained for old artifact readers; this is the surface
+                    # primary and must not be treated as the evidence latent.
                     "primary_concept_id": step.primary_concept_id,
+                    "learning_objective_id": step.learning_objective_id,
                     "primary_concept_name": graph.concepts[
                         step.primary_concept_id
                     ].name,
                     "learning_distance_to_root": distances.get(
-                        step.primary_concept_id
+                        step.evidence_anchor_concept_id
                     ),
                     "topics": [
                         {"id": topic_id, "name": topic_names.get(topic_id)}
@@ -543,6 +843,8 @@ def serialize_trace(
                     "after_name": (
                         graph.concepts[focus_after].name if focus_after else None
                     ),
+                    "objective_before": step.focus_objective_before,
+                    "objective_after": step.focus_objective_after,
                 },
                 "routing": {
                     "transition_reason": persisted.get("transition_reason"),
@@ -568,6 +870,7 @@ def serialize_episodes(
             "trigger_question_id": episode.trigger_question_id,
             "trigger_family_id": episode.trigger_family_id,
             "initial_focus_concept_id": episode.initial_focus_concept_id,
+            "initial_focus_objective_id": episode.initial_focus_objective_id,
             "initial_focus_concept_name": (
                 graph.concepts[episode.initial_focus_concept_id].name
                 if episode.initial_focus_concept_id
@@ -580,6 +883,7 @@ def serialize_episodes(
                 {"concept_id": concept_id, "name": graph.concepts[concept_id].name}
                 for concept_id in episode.focus_path
             ],
+            "objective_focus_path": list(episode.objective_focus_path),
             "question_ids": list(episode.question_ids),
             "family_ids": list(episode.family_ids),
             "length": episode.length,
@@ -600,18 +904,28 @@ def compact_session_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "abstained",
         "unique_families",
         "unique_concepts",
+        "unique_objectives",
         "phase_counts",
+        "response_time",
         "difficulty",
         "average_predicted_success",
         "continuity",
         "exploration",
         "remediation_questions",
         "cross_topic_questions",
+        "cross_topic_definition",
+        "outside_requested_topic_questions",
+        "requested_topic_scope_definition",
         "topic_distribution",
         "evidence_delta",
         "concept_changes",
+        "objective_changes",
         "adaptive_routing",
         "concept_performance",
+        "objective_performance",
+        "objective_evidence_scope",
+        "family_evidence_definitions",
+        "behavior_trace",
         "diagnostic_findings",
         "diagnostic_contract",
     )
@@ -621,7 +935,12 @@ def compact_session_report(report: Mapping[str, Any]) -> dict[str, Any]:
 def capacity_and_demand_snapshot(
     database: Database, session: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Expose unused family capacity and authoring work created by a live gap."""
+    """Expose unused evidence-family capacity and live authoring demand.
+
+    Objective questions are anchored to their canonical objective owner rather
+    than their surface primary concept.  Capacity keys also include the
+    objective, matching the learner's actual independence bucket.
+    """
 
     release_id = session["corpus_release_id"]
     if session.get("topic_id"):
@@ -630,23 +949,54 @@ def capacity_and_demand_snapshot(
         )
     else:
         owned = {session["root_concept_id"]}
-    placeholders = ",".join("?" for _ in owned)
     with database.read() as connection:
         rows = connection.execute(
-            f"""SELECT mapping.concept_id, question.id AS question_id,
-                       question.family_id, question.kind
+            """SELECT surface.concept_id AS surface_concept_id,
+                       question.id AS question_id, question.family_id,
+                       question.kind, direct.objective_id,
+                       objective.primary_concept_id AS objective_owner_concept_id
                 FROM release_questions membership
                 JOIN questions question ON question.id = membership.question_id
-                JOIN question_concepts mapping
-                  ON mapping.question_id = question.id
-                 AND mapping.role = 'primary'
+                JOIN question_concepts surface
+                  ON surface.question_id = question.id
+                 AND surface.role = 'primary'
+                LEFT JOIN release_question_objectives direct
+                  ON direct.release_id = membership.release_id
+                 AND direct.question_id = question.id
+                LEFT JOIN learning_objectives objective
+                  ON objective.id = direct.objective_id
                 WHERE membership.release_id = ?
                   AND membership.status IN ('approved', 'calibrated')
-                  AND mapping.concept_id IN ({placeholders})
-                ORDER BY mapping.concept_id, question.family_id, question.id""",
-            (release_id, *sorted(owned)),
+                ORDER BY question.id""",
+            (release_id,),
         ).fetchall()
-        used_families = {
+        used_rows = connection.execute(
+            """SELECT question.family_id, decision.question_objective_id,
+                      surface.concept_id AS surface_concept_id,
+                      objective.primary_concept_id AS objective_owner_concept_id
+               FROM decisions decision
+               JOIN questions question ON question.id = decision.question_id
+               JOIN question_concepts surface
+                 ON surface.question_id = question.id AND surface.role = 'primary'
+               LEFT JOIN learning_objectives objective
+                 ON objective.id = decision.question_objective_id
+               WHERE decision.session_id = ?
+                 AND decision.invalidated_at IS NULL""",
+            (session["id"],),
+        ).fetchall()
+        used_family_keys = {
+            (
+                f"objective:{row['question_objective_id']}|"
+                f"family:{row['family_id']}"
+                if row["question_objective_id"] is not None
+                else (
+                    f"concept:{row['surface_concept_id']}|"
+                    f"family:{row['family_id']}"
+                )
+            )
+            for row in used_rows
+        }
+        used_raw_families = {
             row["family_id"]
             for row in connection.execute(
                 """SELECT DISTINCT question.family_id
@@ -678,53 +1028,109 @@ def capacity_and_demand_snapshot(
         "debugging",
         "transfer",
     }
-    by_concept: dict[str, dict[str, set[str] | int]] = {
+    by_concept: dict[str, dict[str, set[str]]] = {
         concept_id: {
-            "questions": 0,
+            "questions": set(),
             "families": set(),
             "verification_families": set(),
         }
         for concept_id in owned
     }
+    by_objective: dict[str, dict[str, Any]] = {}
     for row in rows:
-        values = by_concept[row["concept_id"]]
-        values["questions"] = int(values["questions"]) + 1
-        families = values["families"]
-        assert isinstance(families, set)
-        families.add(row["family_id"])
+        objective_id = row["objective_id"]
+        anchor = (
+            row["objective_owner_concept_id"]
+            if objective_id is not None
+            else row["surface_concept_id"]
+        )
+        if anchor not in owned:
+            continue
+        family_key = (
+            f"objective:{objective_id}|family:{row['family_id']}"
+            if objective_id is not None
+            else f"concept:{anchor}|family:{row['family_id']}"
+        )
+        values = by_concept[anchor]
+        values["questions"].add(row["question_id"])
+        values["families"].add(family_key)
         if row["kind"] in verification_kinds:
-            verification = values["verification_families"]
-            assert isinstance(verification, set)
-            verification.add(row["family_id"])
+            values["verification_families"].add(family_key)
+        if objective_id is not None:
+            objective_values = by_objective.setdefault(
+                objective_id,
+                {
+                    "primary_concept_id": anchor,
+                    "questions": set(),
+                    "families": set(),
+                    "verification_families": set(),
+                },
+            )
+            objective_values["questions"].add(row["question_id"])
+            objective_values["families"].add(family_key)
+            if row["kind"] in verification_kinds:
+                objective_values["verification_families"].add(family_key)
 
     graph = database.get_graph(release_id)
+    objective_names = {
+        objective.id: objective.name
+        for objective in database.get_learning_objectives(release_id)
+    }
     concepts = []
     for concept_id in sorted(owned):
         values = by_concept[concept_id]
         families = values["families"]
         verification = values["verification_families"]
-        assert isinstance(families, set)
-        assert isinstance(verification, set)
-        used = families & used_families
+        used = families & used_family_keys
         concepts.append(
             {
                 "concept_id": concept_id,
                 "name": graph.concepts[concept_id].name,
-                "approved_questions": values["questions"],
+                "approved_questions": len(values["questions"]),
                 "independent_families": len(families),
                 "verification_families": len(verification),
                 "used_families": len(used),
-                "remaining_families": len(families - used_families),
+                "remaining_families": len(families - used_family_keys),
                 "remaining_verification_families": len(
-                    verification - used_families
+                    verification - used_family_keys
                 ),
             }
         )
+    objectives = []
+    for objective_id in sorted(by_objective):
+        values = by_objective[objective_id]
+        families = values["families"]
+        verification = values["verification_families"]
+        used = families & used_family_keys
+        objectives.append(
+            {
+                "objective_id": objective_id,
+                "name": objective_names.get(objective_id, objective_id),
+                "primary_concept_id": values["primary_concept_id"],
+                "approved_questions": len(values["questions"]),
+                "independent_families": len(families),
+                "verification_families": len(verification),
+                "used_families": len(used),
+                "remaining_families": len(families - used_family_keys),
+                "remaining_verification_families": len(
+                    verification - used_family_keys
+                ),
+            }
+        )
+    owned_family_keys = {
+        family for values in by_concept.values() for family in values["families"]
+    }
     return {
         "owned_concepts": concepts,
-        "used_session_families": len(used_families),
-        "remaining_owned_families": sum(
-            concept["remaining_families"] for concept in concepts
+        "owned_objectives": objectives,
+        "used_session_raw_families": len(used_raw_families),
+        "used_session_evidence_families": len(used_family_keys),
+        "remaining_owned_evidence_families": len(
+            owned_family_keys - used_family_keys
+        ),
+        "denominator_contract": (
+            "Objective/family pairs are distinct evidence buckets; legacy "
+            "questions use canonical concept/family pairs."
         ),
         "generation_demands_created": jobs,
     }
@@ -754,6 +1160,60 @@ def scenario_invariants(
                 f"episode at step {episode.start_step} reused its trigger family"
             )
     return failures
+
+
+def simulation_gap_records(
+    report: SimulationReport,
+    *,
+    segment: str,
+) -> list[dict[str, Any]]:
+    """Return one uniform, inspectable record for every early exhaustion."""
+
+    return [
+        {
+            "segment": segment,
+            "step": gap.step_index,
+            "phase": gap.phase.value,
+            "focus_concept_id": gap.focus_concept_id,
+            "focus_objective_id": gap.focus_objective_id,
+            "focus_misconception_id": gap.focus_misconception_id,
+            "category": gap.category,
+            "message": gap.message,
+        }
+        for gap in report.gaps
+    ]
+
+
+def planned_check_status(
+    failures: Iterable[str],
+    gap_records: Iterable[Mapping[str, Any]],
+) -> str:
+    """Classify a planned probe without hiding capacity-limited completion."""
+
+    if tuple(failures):
+        return "failed"
+    if tuple(gap_records):
+        return "partial"
+    return "passed"
+
+
+def aggregate_audit_gaps(
+    scenario_results: Iterable[Mapping[str, Any]],
+    special_checks: Iterable[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Combine ordinary scenario blockers and every planned-check gap."""
+
+    result = [
+        {"scenario": scenario["id"], **gap}
+        for scenario in scenario_results
+        for gap in scenario.get("gaps", ())
+    ]
+    result.extend(
+        {"scenario": check["id"], **gap}
+        for check in special_checks
+        for gap in check.get("gap_records", ())
+    )
+    return result
 
 
 def run_scenario(
@@ -787,7 +1247,11 @@ def run_scenario(
     session = _session_for_learner(database, learner_id)
     persisted_report = engine.session_report(session["id"], now=report.ended_at)
     profile = projection_summary(
-        engine.profile(learner_id, root_concept_id=root_reference, now=report.ended_at)
+        engine.profile(
+            learner_id, root_concept_id=root_reference, now=report.ended_at
+        ),
+        database=database,
+        learner_id=learner_id,
     )
     trace, trace_violations = serialize_trace(
         report, persisted_report, database, session
@@ -796,6 +1260,10 @@ def run_scenario(
     invariant_failures = scenario_invariants(
         report, trace_violations, integrity
     )
+    if not profile["database_projection_commitment"]["matches_latest_event"]:
+        invariant_failures.append(
+            "database projection differs from its latest event commitment"
+        )
     replay_result: dict[str, Any] | None = None
     if replay:
         replay_path = database_path.with_name(database_path.stem + "-replay.db")
@@ -818,23 +1286,36 @@ def run_scenario(
                 learner_id,
                 root_concept_id=root_reference,
                 now=replay_report.ended_at,
-            )
+            ),
+            database=replay_database,
+            learner_id=learner_id,
         )
         replay_integrity = replay_database.verify_integrity()
         signature_matches = (
             report.behavior_signature() == replay_report.behavior_signature()
         )
         projection_matches = profile["stable_hash"] == replay_profile["stable_hash"]
+        commitments_valid = bool(
+            profile["database_projection_commitment"]["matches_latest_event"]
+            and replay_profile["database_projection_commitment"][
+                "matches_latest_event"
+            ]
+        )
         if not signature_matches:
             invariant_failures.append("fresh-database behavior replay diverged")
         if not projection_matches:
             invariant_failures.append("fresh-database learner projection diverged")
+        if not commitments_valid:
+            invariant_failures.append(
+                "database projection differs from its latest event commitment"
+            )
         if not replay_integrity["ok"]:
             invariant_failures.append("replay database integrity failed")
         replay_result = {
             "checked": True,
             "behavior_signature_matches": signature_matches,
             "projection_matches": projection_matches,
+            "projection_commitments_valid": commitments_valid,
             "database_integrity_ok": replay_integrity["ok"],
         }
 
@@ -843,6 +1324,7 @@ def run_scenario(
         "id": spec.id,
         "behavior": spec.behavior,
         "hypothesis": spec.hypothesis,
+        "synthetic_generator": generator_summary(learner),
         "behavior_signature": report.behavior_signature(),
         "summary": summary,
         "projection": profile,
@@ -867,6 +1349,522 @@ def run_scenario(
         root_reference=root_reference,
         release_id=release["release_id"],
     )
+
+
+def run_longitudinal_idempotency_check(
+    *,
+    database_path: Path,
+    corpus_path: Path,
+    root_reference: str,
+    seed: int,
+) -> dict[str, Any]:
+    """Exercise two sessions and replay every answer command exactly once."""
+
+    database = Database(database_path)
+    database.initialize()
+    release = database.import_corpus(
+        *read_and_parse(corpus_path, include_catalog=True)
+    )
+    engine = AdaptiveEngine(database)
+    simulator = BehavioralSimulator(engine)
+    learner_id = "lab-longitudinal-idempotency"
+    learner = SyntheticLearner(
+        "longitudinal-idempotency",
+        default_ability=0.86,
+        default_objective_ability=0.86,
+        slip_probability=0.0,
+        guess_probability=0.0,
+        forced_correctness=True,
+        confidence_override=0.92,
+        base_response_ms=4_000,
+        response_model="ability_only",
+        seed=seed + 911,
+    )
+    validate_profile_references(learner, database, release["release_id"])
+    first = simulator.run(
+        learner,
+        learner_id=learner_id,
+        root_concept_id=root_reference,
+        policy_seed=seed + 101,
+        max_steps=3,
+        start_at=DEFAULT_START,
+        trial_index=0,
+        verify_idempotency=True,
+    )
+    second = simulator.run(
+        learner,
+        learner_id=learner_id,
+        root_concept_id=root_reference,
+        policy_seed=seed + 102,
+        max_steps=3,
+        start_at=first.ended_at + timedelta(days=7),
+        trial_index=1,
+        require_fresh_learner=False,
+        verify_idempotency=True,
+    )
+    profile = projection_summary(
+        engine.profile(
+            learner_id,
+            root_concept_id=root_reference,
+            now=second.ended_at,
+        ),
+        database=database,
+        learner_id=learner_id,
+    )
+    integrity = database.verify_integrity()
+    with database.read() as connection:
+        durable = dict(
+            connection.execute(
+                """SELECT learner.revision,
+                          (SELECT COUNT(*) FROM sessions
+                           WHERE learner_id = learner.id) AS sessions,
+                          (SELECT COUNT(*) FROM attempts
+                           WHERE learner_id = learner.id) AS attempts,
+                          (SELECT COUNT(*) FROM events
+                           WHERE learner_id = learner.id
+                             AND event_type = 'ResponseSubmitted') AS responses
+                   FROM learners learner WHERE learner.id = ?""",
+                (learner_id,),
+            ).fetchone()
+        )
+    expected_attempts = first.attempted + second.attempted
+    failures = []
+    if durable["sessions"] != 2:
+        failures.append("expected exactly two durable sessions")
+    if durable["attempts"] != expected_attempts:
+        failures.append("idempotent retries changed the durable attempt count")
+    if durable["responses"] != expected_attempts:
+        failures.append("idempotent retries appended duplicate response events")
+    if durable["revision"] != expected_attempts:
+        failures.append("learner revision does not equal committed responses")
+    if (
+        first.idempotent_retries_verified != first.attempted
+        or second.idempotent_retries_verified != second.attempted
+    ):
+        failures.append("not every answer completed an exact idempotent retry")
+    if not profile["database_projection_commitment"]["matches_latest_event"]:
+        failures.append("final projection commitment does not match the database")
+    if not integrity["ok"]:
+        failures.append("longitudinal database integrity failed")
+    gap_records = [
+        *simulation_gap_records(first, segment="first_session"),
+        *simulation_gap_records(second, segment="second_session"),
+    ]
+    status = planned_check_status(failures, gap_records)
+    return {
+        "id": "multi_session_idempotency",
+        "behavior": (
+            "One learner runs two sessions seven days apart; every answer "
+            "is immediately retried with the same command key."
+        ),
+        "first_session": first.summary(),
+        "second_session": second.summary(),
+        "durable_counts": durable,
+        "expected_attempts": expected_attempts,
+        "idempotent_retries_verified": (
+            first.idempotent_retries_verified
+            + second.idempotent_retries_verified
+        ),
+        "shared_family_count": len(
+            set(first.coverage.observed_families)
+            & set(second.coverage.observed_families)
+        ),
+        "planned_attempts": 6,
+        "completed_attempts": expected_attempts,
+        "gap_records": gap_records,
+        "final_projection": profile,
+        "integrity": {
+            "ok": integrity["ok"],
+            "event_count": integrity["event_count"],
+            "stream_count": integrity["stream_count"],
+            "errors": integrity["errors"],
+        },
+        "status": status,
+        "ok": status == "passed",
+        "failures": failures,
+    }
+
+
+def run_delayed_family_retrieval_check(
+    *,
+    database_path: Path,
+    corpus_path: Path,
+    seed: int,
+    topic_reference: str = "t_generative_modeling",
+) -> dict[str, Any]:
+    """Force a due family revisit across sessions and inspect its certificate.
+
+    A single session intentionally cannot reuse a family.  This probe creates
+    enough one-answer sessions to exhaust the topic's distinct-family pool,
+    spacing them beyond the model's maximum 30-day independence interval.  It
+    therefore observes real policy behavior on a delayed family revisit instead
+    of merely unit-testing the family ledger in isolation.
+    """
+
+    database = Database(database_path)
+    database.initialize()
+    release = database.import_corpus(
+        *read_and_parse(corpus_path, include_catalog=True)
+    )
+    engine = AdaptiveEngine(database)
+    simulator = BehavioralSimulator(engine)
+    learner_id = "lab-delayed-family-retrieval"
+    learner = SyntheticLearner(
+        "delayed-family-retrieval",
+        default_ability=0.90,
+        default_objective_ability=0.90,
+        slip_probability=0.0,
+        guess_probability=0.0,
+        forced_correctness=True,
+        confidence_override=0.95,
+        base_response_ms=4_000,
+        response_model="ability_only",
+        seed=seed + 1_701,
+    )
+    validate_profile_references(learner, database, release["release_id"])
+
+    reports: list[SimulationReport] = []
+    first = simulator.run(
+        learner,
+        learner_id=learner_id,
+        root_concept_id=topic_reference,
+        policy_seed=seed + 201,
+        max_steps=1,
+        start_at=DEFAULT_START,
+        trial_index=0,
+    )
+    reports.append(first)
+    # One more session than the declared family denominator guarantees a
+    # revisit if every family is serviceable.  If some are not serviceable, the
+    # revisit occurs earlier and exposes that difference in the artifact.
+    session_count = first.coverage.eligible_families + 1
+    for index in range(1, session_count):
+        reports.append(
+            simulator.run(
+                learner,
+                learner_id=learner_id,
+                root_concept_id=topic_reference,
+                policy_seed=seed + 201 + index,
+                max_steps=1,
+                start_at=DEFAULT_START + timedelta(days=45 * index),
+                trial_index=index,
+                require_fresh_learner=False,
+            )
+        )
+
+    observed = [
+        step.family_id
+        for report in reports
+        for step in report.steps
+    ]
+    family_counts = Counter(observed)
+    repeated_families = sorted(
+        family_id for family_id, count in family_counts.items() if count > 1
+    )
+    with database.read() as connection:
+        certificate_rows = connection.execute(
+            """SELECT family_id, delayed_unguided_correct_at,
+                      'concept' AS dimension
+                 FROM learner_skill_families WHERE learner_id = ?
+               UNION ALL
+               SELECT family_id, delayed_unguided_correct_at,
+                      'objective' AS dimension
+                 FROM learner_objective_families WHERE learner_id = ?
+               ORDER BY family_id, dimension""",
+            (learner_id, learner_id),
+        ).fetchall()
+    delayed_families = sorted(
+        {
+            row["family_id"]
+            for row in certificate_rows
+            if row["delayed_unguided_correct_at"] is not None
+        }
+    )
+    integrity = database.verify_integrity()
+    failures = []
+    if any(report.attempted != 1 for report in reports):
+        failures.append("a one-answer longitudinal session did not serve exactly once")
+    if not repeated_families:
+        failures.append("the due family pool was never revisited")
+    missing_delayed = sorted(set(repeated_families) - set(delayed_families))
+    if missing_delayed:
+        failures.append(
+            "revisited due families lacked delayed-retrieval certificates: "
+            + ", ".join(missing_delayed)
+        )
+    if not integrity["ok"]:
+        failures.append("delayed-family database integrity failed")
+    gap_records = [
+        gap
+        for index, report in enumerate(reports, start=1)
+        for gap in simulation_gap_records(
+            report, segment=f"session_{index}"
+        )
+    ]
+    status = planned_check_status(failures, gap_records)
+    return {
+        "id": "delayed_family_retrieval",
+        "behavior": (
+            "A consistently correct learner completes one answer per session; "
+            "sessions are 45 days apart and continue past the topic's declared "
+            "distinct-family denominator."
+        ),
+        "topic_reference": topic_reference,
+        "session_count": session_count,
+        "declared_eligible_families": first.coverage.eligible_families,
+        "observed_sequence": observed,
+        "family_attempt_counts": dict(sorted(family_counts.items())),
+        "repeated_families": repeated_families,
+        "delayed_certified_families": delayed_families,
+        "certificate_rows": [dict(row) for row in certificate_rows],
+        "planned_attempts": session_count,
+        "completed_attempts": sum(report.attempted for report in reports),
+        "gap_records": gap_records,
+        "integrity": {
+            "ok": integrity["ok"],
+            "event_count": integrity["event_count"],
+            "stream_count": integrity["stream_count"],
+            "errors": integrity["errors"],
+        },
+        "status": status,
+        "ok": status == "passed",
+        "failures": failures,
+    }
+
+
+def run_misconception_recovery_check(
+    *,
+    database_path: Path,
+    corpus_path: Path,
+    seed: int,
+    root_reference: str = "c_causal_masking",
+    target_misconception_id: str = "m_mask_only_inference",
+) -> dict[str, Any]:
+    """Observe a named misconception emerge and then recede under transfer.
+
+    The first session selects one specific authored distractor whenever it is
+    offered.  Later, well-spaced sessions answer correctly until the hypothesis
+    retires, with a four-session safety bound.  The engine—not this probe—chooses
+    all questions, prerequisites, and phase transitions.
+    """
+
+    database = Database(database_path)
+    database.initialize()
+    release = database.import_corpus(
+        *read_and_parse(corpus_path, include_catalog=True)
+    )
+    engine = AdaptiveEngine(database)
+    simulator = BehavioralSimulator(engine)
+    induction_steps = 8
+    recovery_steps_per_session = 1
+    learner_id = "lab-misconception-recovery"
+    actor_name = "misconception-recovery-switch"
+    inducing_actor = MisconceptionProbeLearner(
+        actor_name,
+        target_misconception_id,
+        True,
+    )
+    recovery_actor = MisconceptionProbeLearner(
+        actor_name,
+        target_misconception_id,
+        False,
+    )
+    misconception_ids = {
+        item.id
+        for item in database.get_misconceptions(
+            release_id=release["release_id"]
+        )
+    }
+    if target_misconception_id not in misconception_ids:
+        raise RuntimeError(
+            "Recovery probe target is absent from the imported release: "
+            f"{target_misconception_id}"
+        )
+
+    induction = simulator.run(
+        inducing_actor,
+        learner_id=learner_id,
+        root_concept_id=root_reference,
+        policy_seed=seed + 301,
+        max_steps=induction_steps,
+        start_at=DEFAULT_START,
+        trial_index=0,
+    )
+    induced_belief = database.get_misconception_beliefs(learner_id).get(
+        target_misconception_id
+    )
+    induced_probability = induced_belief.probability if induced_belief else 0.10
+    induced_profile = engine.profile(
+        learner_id,
+        root_concept_id=root_reference,
+        now=induction.ended_at,
+    )
+
+    recovery_reports: list[SimulationReport] = []
+    recovery_probabilities: list[float] = []
+    prior_end = induction.ended_at
+    for index in range(1, 5):
+        report = simulator.run(
+            recovery_actor,
+            learner_id=learner_id,
+            root_concept_id=root_reference,
+            policy_seed=seed + 301 + index,
+            max_steps=recovery_steps_per_session,
+            start_at=prior_end + timedelta(days=45),
+            trial_index=index,
+            require_fresh_learner=False,
+        )
+        recovery_reports.append(report)
+        prior_end = report.ended_at
+        belief = database.get_misconception_beliefs(learner_id).get(
+            target_misconception_id
+        )
+        recovery_probabilities.append(belief.probability if belief else 0.10)
+        # Observe at least two independent follow-ups, then stop once the
+        # named hypothesis falls below the routing threshold.
+        if index >= 2 and recovery_probabilities[-1] < 0.35:
+            break
+    intermediate_probability = recovery_probabilities[0]
+    final_belief = database.get_misconception_beliefs(learner_id).get(
+        target_misconception_id
+    )
+    final_probability = final_belief.probability if final_belief else 0.10
+    final_profile = engine.profile(
+        learner_id,
+        root_concept_id=root_reference,
+        now=recovery_reports[-1].ended_at,
+    )
+
+    def target_steps(report: SimulationReport) -> list[dict[str, Any]]:
+        result = []
+        for step in report.steps:
+            question = database.get_question(
+                step.question_id,
+                release_id=release["release_id"],
+            )
+            if target_misconception_id not in question.misconception_ids:
+                continue
+            result.append(
+                {
+                    "question_id": step.question_id,
+                    "family_id": step.family_id,
+                    "phase": step.phase_before.value,
+                    "correct": step.actual_correct,
+                }
+            )
+        return result
+
+    induction_targets = target_steps(induction)
+    recovery_targets = [target_steps(report) for report in recovery_reports]
+    active_after_induction = {
+        item["misconception_id"]
+        for item in induced_profile["active_misconceptions"]
+    }
+    active_after_recovery = {
+        item["misconception_id"]
+        for item in final_profile["active_misconceptions"]
+    }
+    integrity = database.verify_integrity()
+    failures = []
+    induced_wrong_families = {
+        step["family_id"]
+        for step in induction_targets
+        if not step["correct"]
+    }
+    recovered_correct_families = {
+        step["family_id"]
+        for target_group in recovery_targets
+        for step in target_group
+        if step["correct"]
+    }
+    if len(induced_wrong_families) < 2:
+        failures.append("policy did not expose enough independent target distractors")
+    if induced_probability < 0.35:
+        failures.append("repeated named errors did not create an active hypothesis")
+    if target_misconception_id not in active_after_induction:
+        failures.append("induced hypothesis was absent from the learner profile")
+    if len(recovered_correct_families) < 2:
+        failures.append(
+            "policy did not surface two independent corrective target families"
+        )
+    if intermediate_probability >= induced_probability:
+        failures.append("first corrective session did not reduce the hypothesis")
+    if final_probability >= intermediate_probability:
+        failures.append("additional delayed correction did not further reduce it")
+    if final_probability >= 0.35:
+        failures.append("corrective transfer did not retire the active hypothesis")
+    if target_misconception_id in active_after_recovery:
+        failures.append("retired hypothesis remained active in the learner profile")
+    if not integrity["ok"]:
+        failures.append("misconception-recovery database integrity failed")
+    gap_records = [
+        *simulation_gap_records(induction, segment="induction"),
+        *(
+            gap
+            for index, report in enumerate(recovery_reports, start=1)
+            for gap in simulation_gap_records(
+                report, segment=f"recovery_{index}"
+            )
+        ),
+    ]
+    status = planned_check_status(failures, gap_records)
+    completed_attempts = induction.attempted + sum(
+        report.attempted for report in recovery_reports
+    )
+    planned_attempts = induction_steps + (
+        recovery_steps_per_session * len(recovery_reports)
+    )
+    return {
+        "id": "misconception_recovery",
+        "behavior": (
+            "The learner repeatedly selects one named causal-mask distractor, "
+            "then supplies one unassisted answer per bounded session 45 days apart."
+        ),
+        "root_reference": root_reference,
+        "target_misconception_id": target_misconception_id,
+        "probability_path": {
+            "prior": 0.10,
+            "after_induction": induced_probability,
+            "after_first_recovery": intermediate_probability,
+            "after_recovery_sessions": recovery_probabilities,
+            "final": final_probability,
+        },
+        "target_evidence": {
+            "induction": induction_targets,
+            **{
+                f"recovery_{index}": targets
+                for index, targets in enumerate(recovery_targets, start=1)
+            },
+        },
+        "independent_target_families": {
+            "induction_wrong": sorted(induced_wrong_families),
+            "recovery_correct": sorted(recovered_correct_families),
+        },
+        "active_after_induction": target_misconception_id
+        in active_after_induction,
+        "active_after_recovery": target_misconception_id
+        in active_after_recovery,
+        "capacity_gaps": {
+            "induction": [gap.message for gap in induction.gaps],
+            **{
+                f"recovery_{index}": [gap.message for gap in report.gaps]
+                for index, report in enumerate(recovery_reports, start=1)
+            },
+        },
+        "planned_attempts": planned_attempts,
+        "completed_attempts": completed_attempts,
+        "attempted": completed_attempts,
+        "gap_records": gap_records,
+        "integrity": {
+            "ok": integrity["ok"],
+            "event_count": integrity["event_count"],
+            "stream_count": integrity["stream_count"],
+            "errors": integrity["errors"],
+        },
+        "status": status,
+        "ok": status == "passed",
+        "failures": failures,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -913,6 +1911,22 @@ COMPARISONS = (
         "High-confidence credible work earns more evidence than uncertain correctness.",
     ),
     ComparisonSpec(
+        "credible_over_missing_confidence_families",
+        "deliberate_correct",
+        "missing_confidence_correct",
+        "projection.total_independent_families",
+        ">",
+        "Observed confidence is required before correct work certifies a family.",
+    ),
+    ComparisonSpec(
+        "credible_over_missing_confidence_evidence",
+        "deliberate_correct",
+        "missing_confidence_correct",
+        "projection.total_evidence_mass",
+        ">",
+        "Missing confidence remains discounted uncertain evidence.",
+    ),
+    ComparisonSpec(
         "credible_over_fixed_option_mastery",
         "deliberate_correct",
         "fixed_option_bias",
@@ -937,6 +1951,14 @@ COMPARISONS = (
         "Named wrong choices create more misconception hypotheses than abstention.",
     ),
     ComparisonSpec(
+        "named_wrong_over_abstain_evidence",
+        "confident_misconception",
+        "uncertain_abstention",
+        "projection.total_evidence_mass",
+        ">",
+        "A named wrong choice carries stronger negative evidence than explicit abstention.",
+    ),
+    ComparisonSpec(
         "verification_lapse_detected",
         "verification_lapse",
         "repair_on_support",
@@ -948,9 +1970,9 @@ COMPARISONS = (
         "targeted_masking_localization",
         "deliberate_correct",
         "targeted_attention_gap",
-        "projection.skills.c_causal_masking.mastery",
+        "projection.learning_objectives.lo_causal_visibility.mastery",
         ">",
-        "Targeted causal-masking errors lower that skill relative to credible work.",
+        "Targeted causal-masking errors lower that exact objective relative to credible work.",
     ),
 )
 
@@ -1069,7 +2091,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--fail-on-hypothesis",
         action="store_true",
-        help="exit 3 when a cross-profile behavioral hypothesis is contradicted",
+        help=(
+            "exit 3 when a behavioral hypothesis is contradicted or a "
+            "planned special check is incomplete"
+        ),
     )
     result.add_argument(
         "--stdout",
@@ -1109,6 +2134,39 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
         for result in results
         for failure in result["invariant_failures"]
     ]
+    longitudinal = run_longitudinal_idempotency_check(
+        database_path=database_directory / "multi_session_idempotency.db",
+        corpus_path=arguments.corpus,
+        root_reference=arguments.root,
+        seed=arguments.seed,
+    )
+    invariant_failures.extend(
+        {"scenario": longitudinal["id"], "failure": failure}
+        for failure in longitudinal["failures"]
+    )
+    delayed_family = run_delayed_family_retrieval_check(
+        database_path=database_directory / "delayed_family_retrieval.db",
+        corpus_path=arguments.corpus,
+        seed=arguments.seed,
+    )
+    invariant_failures.extend(
+        {"scenario": delayed_family["id"], "failure": failure}
+        for failure in delayed_family["failures"]
+    )
+    misconception_recovery = run_misconception_recovery_check(
+        database_path=database_directory / "misconception_recovery.db",
+        corpus_path=arguments.corpus,
+        seed=arguments.seed,
+    )
+    invariant_failures.extend(
+        {"scenario": misconception_recovery["id"], "failure": failure}
+        for failure in misconception_recovery["failures"]
+    )
+    special_checks = (
+        longitudinal,
+        delayed_family,
+        misconception_recovery,
+    )
     contradictions = [
         comparison
         for comparison in comparisons
@@ -1119,11 +2177,10 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
         for comparison in comparisons
         if comparison["status"] != "not_applicable"
     ]
-    blockers = [
-        {"scenario": result["id"], **gap}
-        for result in results
-        for gap in result["gaps"]
-    ]
+    blockers = aggregate_audit_gaps(results, special_checks)
+    planned_check_statuses = {
+        check["id"]: check["status"] for check in special_checks
+    }
     return {
         "lab_version": LAB_VERSION,
         "engine_versions": {
@@ -1169,6 +2226,9 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
         },
         "curriculum_graph": topology,
         "scenarios": results,
+        "longitudinal_check": longitudinal,
+        "delayed_family_check": delayed_family,
+        "misconception_recovery_check": misconception_recovery,
         "comparisons": comparisons,
         "audit": {
             "hard_invariants_ok": not invariant_failures,
@@ -1181,12 +2241,36 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
             "contradicted_hypotheses": contradictions,
             "corpus_or_exhaustion_gaps": blockers,
             "scenario_count": len(results),
+            "longitudinal_idempotency_ok": longitudinal["ok"],
+            "delayed_family_retrieval_ok": delayed_family["ok"],
+            "misconception_recovery_ok": misconception_recovery["ok"],
+            "planned_check_statuses": planned_check_statuses,
+            "all_planned_checks_complete": all(
+                status == "passed"
+                for status in planned_check_statuses.values()
+            ),
+            "partial_planned_checks": sorted(
+                check_id
+                for check_id, status in planned_check_statuses.items()
+                if status == "partial"
+            ),
+            "failed_planned_checks": sorted(
+                check_id
+                for check_id, status in planned_check_statuses.items()
+                if status == "failed"
+            ),
             "total_answers": sum(
                 result["summary"]["attempted"] for result in results
-            ),
+            )
+            + longitudinal["completed_attempts"]
+            + delayed_family["completed_attempts"]
+            + misconception_recovery["completed_attempts"],
             "all_integrity_checks_ok": all(
                 result["integrity"]["ok"] for result in results
-            ),
+            )
+            and longitudinal["integrity"]["ok"]
+            and delayed_family["integrity"]["ok"]
+            and misconception_recovery["integrity"]["ok"],
             "all_replays_deterministic": all(
                 not result["deterministic_replay"].get("checked")
                 or (
@@ -1194,6 +2278,9 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
                         "behavior_signature_matches"
                     ]
                     and result["deterministic_replay"]["projection_matches"]
+                    and result["deterministic_replay"][
+                        "projection_commitments_valid"
+                    ]
                 )
                 for result in results
             ),
@@ -1240,7 +2327,10 @@ def main() -> int:
         return 2
     if (
         arguments.fail_on_hypothesis
-        and artifact["audit"]["contradicted_hypotheses"]
+        and (
+            artifact["audit"]["contradicted_hypotheses"]
+            or not artifact["audit"]["all_planned_checks_complete"]
+        )
     ):
         return 3
     return 0

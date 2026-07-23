@@ -8,6 +8,8 @@ from enum import StrEnum
 from math import erfc, exp, isfinite, log, pi, sqrt
 from typing import Any
 
+from .objective_posterior import ObjectivePosterior
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -34,6 +36,7 @@ MASTERY_THRESHOLD = 0.65
 # multiple-choice response duration.
 MAX_RESPONSE_MS = 7 * 24 * 60 * 60 * 1000
 MAX_HINT_COUNT = 10_000
+MAX_REMEDIATION_DEPTH = 3
 
 
 class RelationType(StrEnum):
@@ -85,6 +88,65 @@ class QuestionKind(StrEnum):
     PREREQUISITE_PROBE = "prerequisite_probe"
     CALCULATION = "calculation"
     COMPARISON = "comparison"
+
+
+class ObjectiveOperation(StrEnum):
+    """The observable reasoning operation named by a learning objective.
+
+    These labels describe what an item is intended to elicit.  They do not
+    upgrade selected-response evidence into productive performance evidence;
+    that distinction is carried separately by ``evidence_type``.
+    """
+
+    DISTINGUISH = "distinguish"
+    EXPLAIN = "explain"
+    PREDICT = "predict"
+    TRACE = "trace"
+    DIAGNOSE = "diagnose"
+    APPLY = "apply"
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectiveEdge:
+    """A reviewed prerequisite claim between two learning objectives.
+
+    ``source_id`` is the prerequisite and ``target_id`` is the dependent
+    objective.  Objective edges are release data rather than part of either
+    objective's global identity: curriculum authors can revise the dependency
+    claim only by publishing a new immutable release.
+    """
+
+    id: str
+    source_id: str
+    target_id: str
+    relation: RelationType
+    weight: float
+    rationale: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("id", "source_id", "target_id", "rationale"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"Objective-edge {field_name} must be a non-blank string."
+                )
+        if not isinstance(self.relation, RelationType):
+            object.__setattr__(self, "relation", RelationType(self.relation))
+        if not self.relation.is_strict_prerequisite:
+            raise ValueError(
+                "Objective edges currently support only prerequisite relations."
+            )
+        if self.source_id == self.target_id:
+            raise ValueError("A learning objective cannot require itself.")
+        if (
+            isinstance(self.weight, bool)
+            or not isinstance(self.weight, (int, float))
+            or not isfinite(float(self.weight))
+            or not 0.0 < float(self.weight) <= 1.0
+        ):
+            raise ValueError(
+                "Objective-edge weight must be finite and in the interval (0, 1]."
+            )
 
 
 class ConceptRole(StrEnum):
@@ -204,6 +266,91 @@ class Concept:
 
 
 @dataclass(frozen=True, slots=True)
+class LearningObjective:
+    """A release-pinned, assessable claim or operation within graph concepts.
+
+    Concepts remain the reusable nodes in the prerequisite graph.  Objectives
+    are deliberately finer: they state the boundary that one response can
+    actually provide evidence about and may span several closely related graph
+    concepts.  The first production slice is selected-response only, so the
+    evidence type is explicit and cannot be mistaken for implementation,
+    explanation, or design performance.
+    """
+
+    id: str
+    name: str
+    description: str
+    primary_concept_id: str
+    supporting_concept_ids: tuple[str, ...]
+    operation: ObjectiveOperation
+    evidence_type: str = "selected_response"
+    prior_mastery: float = 0.20
+    prerequisites: tuple[ObjectiveEdge, ...] = ()
+    objective_graph_version: int | None = None
+
+    def __post_init__(self) -> None:
+        for field_name in ("id", "name", "description", "evidence_type"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    f"Learning-objective {field_name} must be a non-blank string."
+                )
+        if not isinstance(self.operation, ObjectiveOperation):
+            object.__setattr__(
+                self, "operation", ObjectiveOperation(self.operation)
+            )
+        if (
+            not isinstance(self.primary_concept_id, str)
+            or not self.primary_concept_id.strip()
+        ):
+            raise ValueError(
+                "Learning objectives require a non-blank primary concept ID."
+            )
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.supporting_concept_ids
+        ):
+            raise ValueError(
+                "Learning-objective supporting concept IDs must be non-blank strings."
+            )
+        if (
+            self.primary_concept_id in self.supporting_concept_ids
+            or len(set(self.supporting_concept_ids))
+            != len(self.supporting_concept_ids)
+        ):
+            raise ValueError("Learning-objective concept IDs must be unique.")
+        if self.evidence_type != "selected_response":
+            raise ValueError(
+                "This corpus version supports only selected_response objectives."
+            )
+        if (
+            isinstance(self.prior_mastery, bool)
+            or not isinstance(self.prior_mastery, (int, float))
+            or not isfinite(float(self.prior_mastery))
+            or not 0.0 < float(self.prior_mastery) < 1.0
+        ):
+            raise ValueError(
+                "Learning-objective prior_mastery must be finite and between zero and one."
+            )
+        if self.objective_graph_version not in {None, 1}:
+            raise ValueError("Unsupported learning-objective graph version.")
+        if self.prerequisites and self.objective_graph_version is None:
+            raise ValueError(
+                "Learning-objective prerequisites require a declared graph version."
+            )
+        if any(edge.target_id != self.id for edge in self.prerequisites):
+            raise ValueError(
+                "Learning-objective prerequisite edges must target their containing objective."
+            )
+        if len({edge.id for edge in self.prerequisites}) != len(self.prerequisites):
+            raise ValueError("Learning-objective prerequisite edge IDs must be unique.")
+
+    @property
+    def concept_ids(self) -> tuple[str, ...]:
+        return (self.primary_concept_id, *self.supporting_concept_ids)
+
+
+@dataclass(frozen=True, slots=True)
 class ConceptEdge:
     source_id: str
     target_id: str
@@ -246,6 +393,7 @@ class Option:
     correct: bool
     rationale: str
     misconception_id: str | None = None
+    diagnostic_objective_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +414,7 @@ class Question:
     provenance: dict[str, Any] = field(default_factory=dict)
     tags: tuple[str, ...] = ()
     revision_of: str | None = None
+    objective: LearningObjective | None = None
 
     @property
     def correct_option(self) -> Option:
@@ -279,6 +428,10 @@ class Question:
     @property
     def misconception_ids(self) -> set[str]:
         return {o.misconception_id for o in self.options if o.misconception_id}
+
+    @property
+    def objective_id(self) -> str | None:
+        return self.objective.id if self.objective is not None else None
 
 
 @dataclass(slots=True)
@@ -325,6 +478,101 @@ class SkillState:
     def mastery_probability(self) -> float:
         """Calibrated certification belief, including posterior uncertainty."""
         return self.probability_above(MASTERY_THRESHOLD)
+
+
+@dataclass(slots=True)
+class ObjectiveState:
+    """Uncertain learner state for one fine-grained learning objective."""
+
+    learner_id: str
+    objective_id: str
+    mean: float
+    variance: float
+    stability_hours: float
+    exposures: int = 0
+    last_seen_at: datetime | None = None
+    next_review_at: datetime | None = None
+    evidence_mass: float = 0.0
+    posterior: ObjectivePosterior | None = field(default=None, repr=False)
+    model_version: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isfinite(self.mean):
+            raise ValueError("Objective-state mean must be finite.")
+        if not isfinite(self.variance) or self.variance <= 0.0:
+            raise ValueError("Objective-state variance must be finite and positive.")
+        if not isfinite(self.stability_hours) or self.stability_hours <= 0.0:
+            raise ValueError("Objective-state stability must be finite and positive.")
+        if (
+            not isinstance(self.exposures, int)
+            or isinstance(self.exposures, bool)
+            or self.exposures < 0
+        ):
+            raise ValueError("Objective-state exposures must be a non-negative integer.")
+        if not isfinite(self.evidence_mass) or self.evidence_mass < 0.0:
+            raise ValueError(
+                "Objective-state evidence mass must be finite and non-negative."
+            )
+        if self.posterior is not None:
+            if not isinstance(self.posterior, ObjectivePosterior):
+                raise ValueError(
+                    "Objective-state posterior must be an ObjectivePosterior."
+                )
+            metrics = self.posterior.metrics()
+            for label, stored, derived in (
+                ("mean", self.mean, metrics.mean),
+                ("variance", self.variance, metrics.variance),
+                ("evidence mass", self.evidence_mass, metrics.evidence_mass),
+            ):
+                if abs(stored - derived) > 1e-10 * max(
+                    1.0, abs(stored), abs(derived)
+                ):
+                    raise ValueError(
+                        f"Objective-state {label} does not match its exact posterior."
+                    )
+        if self.model_version is not None and (
+            not isinstance(self.model_version, str)
+            or not self.model_version.strip()
+        ):
+            raise ValueError(
+                "Objective-state model version must be null or a non-blank string."
+            )
+
+    @property
+    def expected_competence(self) -> float:
+        if self.posterior is not None:
+            return self.posterior.expected_competence
+        logistic_normal_scale = sqrt(1.0 + pi * self.variance / 8.0)
+        return sigmoid(self.mean / logistic_normal_scale)
+
+    def probability_above(self, threshold: float) -> float:
+        if self.posterior is not None:
+            return self.posterior.probability_above_competence(threshold)
+        boundary = logit(threshold)
+        z = (boundary - self.mean) / sqrt(2.0 * self.variance)
+        return min(1.0, max(0.0, 0.5 * erfc(z)))
+
+    @property
+    def estimated_mastery_probability(self) -> float:
+        """Represented posterior tail before the numerical safety envelope."""
+
+        return self.probability_above(MASTERY_THRESHOLD)
+
+    @property
+    def mastery_probability_error_bound(self) -> float:
+        if self.posterior is None:
+            return 0.0
+        return self.posterior.metrics().mastery_probability_error_bound
+
+    @property
+    def mastery_probability(self) -> float:
+        if self.posterior is not None:
+            return self.posterior.conservative_mastery_probability
+        return self.estimated_mastery_probability
+
+    @property
+    def acquisition_mass(self) -> float:
+        return 0.0 if self.posterior is None else self.posterior.acquisition_mass
 
 
 @dataclass(slots=True)
@@ -400,6 +648,7 @@ class SubmissionResult:
     next_phase: SessionPhase
     focus_concept_id: str | None
     focus_misconception_id: str | None
+    focus_objective_id: str | None
     state_changes: tuple[dict[str, Any], ...]
     transition_reason: str = "legacy_transition"
     boundary_decision: dict[str, Any] | None = None

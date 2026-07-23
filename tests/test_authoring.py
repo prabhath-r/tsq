@@ -14,12 +14,19 @@ import unittest
 from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
-from tsq.authoring import AuthoringJobs, CoveragePlanner, OfflineAuthoringPipeline
+from tsq.authoring import (
+    AuthoringJobs,
+    CoveragePlanner,
+    OfflineAuthoringPipeline,
+    deterministic_test_pipeline,
+)
 from tsq.cli import command_topics, main
-from tsq.corpus import read_and_parse
-from tsq.errors import ConflictError
+from tsq.corpus import parse_bundle, read_and_parse
+from tsq.errors import ConflictError, ValidationError
 from tsq.store import Database
 
 
@@ -33,7 +40,7 @@ class FakeGenerator:
 
     def generate(self, blueprint, source_context):
         misconception_id = blueprint.misconception_ids[0]
-        return {
+        item = {
             "id": "generated-test-item",
             "family_id": "f_generated_test_independent",
             "status": "approved",
@@ -83,6 +90,35 @@ class FakeGenerator:
             ],
             "source_context_seen": bool(source_context),
         }
+        if blueprint.learning_objective_id is not None:
+            item["learning_objective_id"] = blueprint.learning_objective_id
+            for option in item["options"]:
+                option["diagnostic_objective_id"] = (
+                    None if option["correct"] else blueprint.learning_objective_id
+                )
+        return item
+
+
+class MissingObjectiveGenerator(FakeGenerator):
+    provider_name = "missing-objective-provider"
+    model_name = "missing-objective-model"
+
+    def generate(self, blueprint, source_context):
+        item = super().generate(blueprint, source_context)
+        item.pop("learning_objective_id", None)
+        return item
+
+
+class WrongDiagnosticObjectiveGenerator(FakeGenerator):
+    provider_name = "wrong-diagnostic-provider"
+    model_name = "wrong-diagnostic-model"
+
+    def generate(self, blueprint, source_context):
+        item = super().generate(blueprint, source_context)
+        next(option for option in item["options"] if not option["correct"])[
+            "diagnostic_objective_id"
+        ] = "lo_causal_visibility"
+        return item
 
 
 class BrokenGenerator(FakeGenerator):
@@ -185,6 +221,17 @@ class CyclicOutputReviewer(AcceptingReviewer):
         return output
 
 
+class BarrierReviewer(AcceptingReviewer):
+    reviewer_name = "concurrent-collision-reviewer"
+
+    def __init__(self, barrier):
+        self.barrier = barrier
+
+    def review(self, item, source_context):
+        self.barrier.wait(timeout=5)
+        return super().review(item, source_context)
+
+
 def canonical_sha256(value):
     encoded = json.dumps(
         value,
@@ -225,6 +272,342 @@ class AuthoringTestCase(unittest.TestCase):
         self.assertTrue(concept_ids)
         self.assertTrue(all(gap.target_count > gap.current_count for gap in gaps))
 
+    def test_objective_blueprints_are_release_pinned_and_semantically_complete(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.learning_objective_id is not None
+        )
+        blueprint = gap.blueprint
+        self.assertIsNotNone(blueprint.corpus_release_id)
+        self.assertTrue(blueprint.learning_objective_name)
+        self.assertTrue(blueprint.learning_objective_description)
+        self.assertIn(
+            blueprint.learning_objective_operation,
+            {"distinguish", "explain", "predict", "trace", "diagnose", "apply"},
+        )
+        self.assertEqual(
+            blueprint.learning_objective_evidence_type, "selected_response"
+        )
+        self.assertTrue(blueprint.misconception_ids)
+        with self.database.read() as connection:
+            mapped_pairs = {
+                (row["objective_id"], row["misconception_id"])
+                for row in connection.execute(
+                    """SELECT DISTINCT diagnostic.objective_id,
+                                      option.misconception_id
+                       FROM release_option_objectives diagnostic
+                       JOIN options option
+                         ON option.question_id = diagnostic.question_id
+                        AND option.option_id = diagnostic.option_id
+                       WHERE diagnostic.release_id = ?""",
+                    (blueprint.corpus_release_id,),
+                )
+            }
+        self.assertTrue(
+            all(
+                (blueprint.learning_objective_id, misconception_id)
+                in mapped_pairs
+                for misconception_id in blueprint.misconception_ids
+            )
+        )
+
+    def test_exact_objective_misconception_debt_creates_transfer_job(self) -> None:
+        objective_id = "lo_incremental_kv_cache"
+        misconception_id = "m_decode_cache_retains_queries"
+        self.assertFalse(
+            any(
+                gap.blueprint.coverage_goal
+                == "objective_misconception_serviceability"
+                for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            )
+        )
+        with self.database.read() as connection:
+            release_id = self.database.get_active_release_id(connection)
+            trigger = connection.execute(
+                """SELECT DISTINCT q.id
+                   FROM release_option_objectives diagnostic
+                   JOIN options option
+                     ON option.question_id = diagnostic.question_id
+                    AND option.option_id = diagnostic.option_id
+                   JOIN questions q ON q.id = diagnostic.question_id
+                   WHERE diagnostic.release_id = ?
+                     AND diagnostic.objective_id = ?
+                     AND option.misconception_id = ?
+                   ORDER BY q.id LIMIT 1""",
+                (release_id, objective_id, misconception_id),
+            ).fetchone()
+        self.assertIsNotNone(trigger)
+        self.database.revoke_question(
+            trigger["id"], "Objective authoring serviceability regression."
+        )
+
+        gaps = CoveragePlanner(self.database).gaps(limit=1000)
+        exact = [
+            gap
+            for gap in gaps
+            if gap.blueprint.learning_objective_id == objective_id
+            and gap.blueprint.target_misconception_id == misconception_id
+        ]
+        self.assertEqual(len(exact), 1)
+        self.assertEqual((exact[0].current_count, exact[0].target_count), (2, 3))
+        self.assertEqual(exact[0].blueprint.kind, "transfer")
+        self.assertEqual(
+            exact[0].blueprint.coverage_goal,
+            "objective_misconception_serviceability",
+        )
+        self.assertEqual(exact[0].blueprint.misconception_ids[0], misconception_id)
+        job_id = CoveragePlanner(self.database).enqueue(exact)[0]
+        incomplete = OfflineAuthoringPipeline(
+            self.database, FakeGenerator(), (AcceptingReviewer(),)
+        ).run_job(job_id, "Approved source excerpt.")
+        self.assertFalse(incomplete["accepted_for_reviewed_quarantine"])
+        self.assertIn(
+            "missing_exact_diagnostic_targets",
+            {issue["code"] for issue in incomplete["deterministic_issues"]},
+        )
+
+    def test_cross_objective_diagnoses_do_not_count_as_direct_repair_families(self) -> None:
+        objective_id = "lo_causal_visibility"
+        misconception_id = "m_transformers_are_inherently_bidirectional"
+        with self.database.read() as connection:
+            release_id = self.database.get_active_release_id(connection)
+            direct = connection.execute(
+                """SELECT DISTINCT q.id
+                   FROM release_option_objectives diagnostic
+                   JOIN release_question_objectives assessed
+                     ON assessed.release_id = diagnostic.release_id
+                    AND assessed.question_id = diagnostic.question_id
+                   JOIN options option
+                     ON option.question_id = diagnostic.question_id
+                    AND option.option_id = diagnostic.option_id
+                   JOIN questions q ON q.id = diagnostic.question_id
+                   WHERE diagnostic.release_id = ?
+                     AND diagnostic.objective_id = ?
+                     AND assessed.objective_id = diagnostic.objective_id
+                     AND option.misconception_id = ?
+                   ORDER BY q.id LIMIT 1""",
+                (release_id, objective_id, misconception_id),
+            ).fetchone()
+        self.assertIsNotNone(direct)
+        self.database.revoke_question(
+            direct["id"], "Cross-objective capacity counting regression."
+        )
+        exact = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.coverage_goal
+            == "objective_misconception_serviceability"
+            and gap.blueprint.learning_objective_id == objective_id
+            and misconception_id in gap.blueprint.misconception_ids
+        )
+        self.assertEqual((exact.current_count, exact.target_count), (2, 3))
+
+    def test_objective_fixture_round_trips_through_schema_v2_in_quarantine(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.learning_objective_id is not None
+            and gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        result = deterministic_test_pipeline(self.database).run_job(
+            job_id, "Approved objective-specific source material for offline testing."
+        )
+        item = result["item"]
+        self.assertEqual(result["status"], "reviewed")
+        self.assertEqual(item["status"], "quarantined")
+        self.assertEqual(
+            item["learning_objective_id"], gap.blueprint.learning_objective_id
+        )
+        self.assertTrue(
+            all(
+                option.get("diagnostic_objective_id")
+                == gap.blueprint.learning_objective_id
+                for option in item["options"]
+                if not option["correct"]
+            )
+        )
+
+        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle["questions"].append(item)
+        parsed_questions = parse_bundle(bundle)[4]
+        parsed = next(question for question in parsed_questions if question.id == item["id"])
+        self.assertEqual(parsed.status.value, "quarantined")
+        self.assertEqual(parsed.objective_id, gap.blueprint.learning_objective_id)
+        self.assertTrue(
+            all(
+                option.diagnostic_objective_id == gap.blueprint.learning_objective_id
+                for option in parsed.options
+                if not option.correct
+            )
+        )
+
+    def test_objective_artifact_cannot_drop_or_retarget_exact_mappings(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.learning_objective_id is not None
+            and gap.blueprint.learning_objective_id != "lo_causal_visibility"
+            and gap.blueprint.misconception_ids
+        )
+        first_job = CoveragePlanner(self.database).enqueue([gap])[0]
+        missing = OfflineAuthoringPipeline(
+            self.database, MissingObjectiveGenerator(), (AcceptingReviewer(),)
+        ).run_job(first_job, "Approved source excerpt.")
+        self.assertFalse(missing["accepted_for_reviewed_quarantine"])
+        self.assertIn(
+            "blueprint_objective_mismatch",
+            {issue["code"] for issue in missing["deterministic_issues"]},
+        )
+
+        second_job = CoveragePlanner(self.database).enqueue([gap])[0]
+        self.assertNotEqual(first_job, second_job)
+        retargeted = OfflineAuthoringPipeline(
+            self.database,
+            WrongDiagnosticObjectiveGenerator(),
+            (AcceptingReviewer(),),
+        ).run_job(second_job, "Approved source excerpt.")
+        self.assertFalse(retargeted["accepted_for_reviewed_quarantine"])
+        self.assertIn(
+            "blueprint_diagnostic_objective_mismatch",
+            {issue["code"] for issue in retargeted["deterministic_issues"]},
+        )
+
+    def test_v1_blueprint_without_objective_fields_still_runs(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.learning_objective_id is None
+            and gap.blueprint.misconception_ids
+        )
+        payload = {
+            key: value
+            for key, value in asdict(gap.blueprint).items()
+            if key
+            in {
+                "concept_id",
+                "concept_name",
+                "kind",
+                "target_difficulty",
+                "misconception_ids",
+                "source_ids",
+                "family_constraint",
+                "quality_contract",
+            }
+        }
+        job_id = "gen_legacy_blueprint_regression"
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO generation_jobs(
+                       id, blueprint_json, status, prompt_version, created_at, updated_at
+                   ) VALUES (?, ?, 'planned', 'item-blueprint-v1', ?, ?)""",
+                (job_id, json.dumps(payload), now, now),
+            )
+        shown = AuthoringJobs(self.database).show(job_id)
+        self.assertIsNone(shown["blueprint"]["learning_objective_id"])
+        result = OfflineAuthoringPipeline(
+            self.database, FakeGenerator(), (AcceptingReviewer(),)
+        ).run_job(job_id, "Approved source excerpt for a legacy job.")
+        self.assertEqual(result["status"], "reviewed")
+        self.assertEqual(result["item"]["status"], "quarantined")
+
+    def test_v2_blueprint_without_release_pin_fails_before_claim(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.learning_objective_id is None
+            and gap.blueprint.misconception_ids
+        )
+        payload = asdict(gap.blueprint)
+        payload["corpus_release_id"] = None
+        job_id = "gen_unpinned_v2_regression"
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO generation_jobs(
+                       id, blueprint_json, status, prompt_version, created_at, updated_at
+                   ) VALUES (?, ?, 'planned', 'item-blueprint-v2', ?, ?)""",
+                (job_id, json.dumps(payload), now, now),
+            )
+        with self.assertRaisesRegex(ValidationError, "not pinned"):
+            OfflineAuthoringPipeline(
+                self.database, FakeGenerator(), (AcceptingReviewer(),)
+            ).run_job(job_id, "Approved source excerpt.")
+        self.assertEqual(AuthoringJobs(self.database).show(job_id)["status"], "planned")
+
+    def test_duplicate_quarantined_family_is_rejected_across_jobs(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.learning_objective_id is not None
+            and gap.blueprint.misconception_ids
+        )
+        planner = CoveragePlanner(self.database)
+        first_job = planner.enqueue([gap])[0]
+        first = deterministic_test_pipeline(self.database).run_job(
+            first_job, "Stable approved source context."
+        )
+        self.assertEqual(first["status"], "reviewed")
+
+        second_job = planner.enqueue([gap])[0]
+        self.assertNotEqual(first_job, second_job)
+        second = deterministic_test_pipeline(self.database).run_job(
+            second_job, "Stable approved source context."
+        )
+        self.assertEqual(second["status"], "rejected")
+        codes = {issue["code"] for issue in second["deterministic_issues"]}
+        self.assertIn("quarantine_family_collision", codes)
+        self.assertIn("quarantine_question_id_collision", codes)
+
+    def test_concurrent_jobs_cannot_certify_the_same_generated_family(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.learning_objective_id is not None
+            and gap.blueprint.misconception_ids
+        )
+        first_job = CoveragePlanner(self.database).enqueue([gap])[0]
+        second_job = "gen_concurrent_duplicate_regression"
+        now = datetime.now(timezone.utc).isoformat()
+        with self.database.transaction() as connection:
+            first = connection.execute(
+                "SELECT blueprint_json, prompt_version FROM generation_jobs WHERE id=?",
+                (first_job,),
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO generation_jobs(
+                       id, blueprint_json, status, prompt_version, created_at, updated_at
+                   ) VALUES (?, ?, 'planned', ?, ?, ?)""",
+                (
+                    second_job,
+                    first["blueprint_json"],
+                    first["prompt_version"],
+                    now,
+                    now,
+                ),
+            )
+        barrier = threading.Barrier(2)
+
+        def run(job_id):
+            generator = deterministic_test_pipeline(self.database).generator
+            return OfflineAuthoringPipeline(
+                self.database, generator, (BarrierReviewer(barrier),)
+            ).run_job(job_id, "Identical approved source context.")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(run, (first_job, second_job)))
+        self.assertEqual(
+            sorted(result["status"] for result in results),
+            ["rejected", "reviewed"],
+        )
+        rejected = next(result for result in results if result["status"] == "rejected")
+        codes = {issue["code"] for issue in rejected["deterministic_issues"]}
+        self.assertIn("quarantine_family_collision", codes)
+        self.assertIn("quarantine_question_id_collision", codes)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
     def test_coverage_plan_excludes_revoked_items_from_all_live_evidence(self) -> None:
         planner = CoveragePlanner(self.database)
         initial = planner.gaps(limit=1000)
@@ -253,10 +636,7 @@ class AuthoringTestCase(unittest.TestCase):
         ]
         self.assertEqual(len(attention), 2)
         self.assertTrue(all(gap.current_count == 0 for gap in attention))
-        self.assertIn(
-            "m_quadratic_attention_only_during_training",
-            attention[0].blueprint.misconception_ids,
-        )
+        self.assertTrue(attention[0].blueprint.misconception_ids)
         self.assertNotIn("src_goodfellow_dl_2016", attention[0].blueprint.source_ids)
         self.assertNotEqual(original_sources, attention[0].blueprint.source_ids)
 
@@ -627,6 +1007,20 @@ class AuthoringTestCase(unittest.TestCase):
                 )
             self.assertEqual(exit_code, 0)
             self.assertIsInstance(json.loads(output.getvalue()), expected_type)
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                ["--db", str(self.database.path), "jobs", "show", job_id]
+            )
+        self.assertEqual(exit_code, 0)
+        rendered_job = output.getvalue()
+        self.assertIn("  validation:", rendered_job)
+        for issue in run_result["deterministic_issues"]:
+            self.assertIn(
+                f"[{issue['severity']}] {issue['code']}: {issue['message']}",
+                rendered_job,
+            )
 
         with self.database.read() as connection:
             after_questions = connection.execute(

@@ -16,7 +16,13 @@ from tsq.cli import main
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError, ValidationError
-from tsq.learner import LEGACY_MODEL_VERSION, MODEL_VERSION, LearnerModel
+from tsq.inference import LEGACY_MISCONCEPTION_ALGORITHM
+from tsq.learner import (
+    LEGACY_MODEL_VERSION,
+    MODEL_VERSION,
+    OBJECTIVE_GAUSSIAN_MODEL_VERSION,
+    LearnerModel,
+)
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
@@ -39,22 +45,24 @@ class FixedIds:
 def build_golden_database(
     path: Path,
     *,
-    model_version: str = MODEL_VERSION,
+    model_version: str = OBJECTIVE_GAUSSIAN_MODEL_VERSION,
 ) -> Database:
     identifiers = FixedIds()
     with (
         patch("tsq.store.new_id", side_effect=identifiers),
         patch("tsq.engine.new_id", side_effect=identifiers),
         patch("tsq.policy.new_id", side_effect=identifiers),
-        patch("tsq.engine.MODEL_VERSION", model_version),
-        patch("tsq.policy.MODEL_VERSION", model_version),
     ):
         database = Database(path)
         database.initialize()
         database.import_corpus(
             *read_and_parse(CORPUS, include_catalog=True)
         )
-        engine = AdaptiveEngine(database, LearnerModel(model_version))
+        engine = AdaptiveEngine(
+            database,
+            LearnerModel(model_version),
+            misconception_algorithm=LEGACY_MISCONCEPTION_ALGORITHM,
+        )
         engine.create_learner("replay-golden", "Projection Replay Fixture")
         session = engine.start_session(
             "replay-golden", "c_clustering", mode="learn", seed=31
@@ -86,6 +94,7 @@ def build_golden_database(
                 confidence=confidence,
                 response_ms=response_ms,
                 hint_count=hints,
+                feedback_shown=True,
                 idempotency_key=f"golden-response-{index + 1}",
                 now=START + answered_after,
             )
@@ -253,9 +262,9 @@ class ProjectionReplayTestCase(unittest.TestCase):
                    ORDER BY stream_version LIMIT 1"""
             ).fetchone()["event_id"]
             connection.execute(
-                "UPDATE events SET schema_version=3 WHERE event_id=?", (event_id,)
+                "UPDATE events SET schema_version=99 WHERE event_id=?", (event_id,)
             )
-        with self.assertRaisesRegex(ValidationError, "unsupported schema version 3"):
+        with self.assertRaisesRegex(ValidationError, "unsupported schema version 99"):
             ProjectionReplay(self.database).check("replay-golden")
 
     def test_projection_v2_rejects_malformed_boundary_trace(self) -> None:
@@ -316,9 +325,12 @@ class ProjectionReplayTestCase(unittest.TestCase):
         self.assertTrue(report["ok"], report["errors"])
         self.assertTrue(all(item["hash_matches"] for item in report["checkpoints"]))
 
-    def test_golden_fixture_declares_current_model(self) -> None:
+    def test_golden_fixture_declares_historical_v5_model(self) -> None:
         expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
-        self.assertEqual(expected["learner_model_version"], MODEL_VERSION)
+        self.assertEqual(
+            expected["learner_model_version"],
+            OBJECTIVE_GAUSSIAN_MODEL_VERSION,
+        )
 
     def test_mixed_supported_model_history_replays_exactly(self) -> None:
         database = build_golden_database(

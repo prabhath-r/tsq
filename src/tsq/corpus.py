@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
+from collections import Counter, deque
 from math import isfinite
 from pathlib import Path
 from typing import Any
@@ -16,7 +16,10 @@ from .models import (
     ConceptRole,
     ConceptWeight,
     Domain,
+    LearningObjective,
     Misconception,
+    ObjectiveEdge,
+    ObjectiveOperation,
     Option,
     Question,
     QuestionKind,
@@ -76,9 +79,17 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
     if "schema_version" not in bundle:
         add("missing_field", "Required field 'schema_version' is missing.", "schema_version")
     elif not isinstance(schema_version, int) or isinstance(schema_version, bool):
-        add("schema_version_type", "schema_version must be the integer 1.", "schema_version")
-    elif schema_version != 1:
-        add("schema_version", "Only corpus schema_version 1 is supported.", "schema_version")
+        add(
+            "schema_version_type",
+            "schema_version must be the integer 1, 2, or 3.",
+            "schema_version",
+        )
+    elif schema_version not in {1, 2, 3}:
+        add(
+            "schema_version",
+            "Only corpus schema_version 1, 2, and 3 are supported.",
+            "schema_version",
+        )
     if "title" not in bundle:
         add("missing_field", "Required field 'title' is missing.", "title")
     elif not isinstance(bundle["title"], str):
@@ -91,6 +102,52 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
             add("missing_field", f"Required field '{field}' is missing.", field)
         elif not isinstance(bundle[field], list):
             add("field_type", f"Field '{field}' must be a list.", field)
+
+    if schema_version in {2, 3}:
+        if "learning_objectives" not in bundle:
+            add(
+                "missing_field",
+                f"Corpus schema_version {schema_version} requires 'learning_objectives'.",
+                "learning_objectives",
+            )
+        elif not isinstance(bundle["learning_objectives"], list):
+            add(
+                "field_type",
+                "Field 'learning_objectives' must be a list.",
+                "learning_objectives",
+            )
+        elif schema_version == 3 and not bundle["learning_objectives"]:
+            add(
+                "empty_objective_graph",
+                "Corpus schema_version 3 requires at least one learning objective.",
+                "learning_objectives",
+            )
+    elif "learning_objectives" in bundle:
+        add(
+            "schema_version",
+            "learning_objectives require corpus schema_version 2 or 3.",
+            "learning_objectives",
+        )
+
+    if schema_version == 3:
+        if "objective_edges" not in bundle:
+            add(
+                "missing_field",
+                "Corpus schema_version 3 requires 'objective_edges'.",
+                "objective_edges",
+            )
+        elif not isinstance(bundle["objective_edges"], list):
+            add(
+                "field_type",
+                "Field 'objective_edges' must be a list.",
+                "objective_edges",
+            )
+    elif "objective_edges" in bundle:
+        add(
+            "schema_version",
+            "objective_edges require corpus schema_version 3.",
+            "objective_edges",
+        )
 
     catalog_present = any(field in bundle for field in _CATALOG_LIST_FIELDS)
     if catalog_present:
@@ -228,6 +285,102 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
             exclusive_maximum=True,
         )
 
+    for index, value in enumerate(rows("learning_objectives")):
+        path = f"learning_objectives[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "id", path)
+        string_field(row, "name", path)
+        string_field(row, "description", path)
+        operation = string_field(row, "operation", path)
+        if operation is not None:
+            try:
+                ObjectiveOperation(operation)
+            except ValueError:
+                allowed = ", ".join(item.value for item in ObjectiveOperation)
+                add(
+                    "invalid_enum",
+                    f"Unknown objective operation '{operation}'; allowed values are {allowed}.",
+                    f"{path}.operation",
+                )
+        evidence_type = row.get("evidence_type", "selected_response")
+        if not isinstance(evidence_type, str):
+            add(
+                "field_type",
+                "Field 'evidence_type' must be a string.",
+                f"{path}.evidence_type",
+            )
+        elif evidence_type != "selected_response":
+            add(
+                "unsupported_evidence_type",
+                "Corpus schema_version 2 and 3 support only selected_response objectives.",
+                f"{path}.evidence_type",
+            )
+        string_field(row, "primary_concept_id", path)
+        concept_ids = row.get("supporting_concept_ids", [])
+        if not isinstance(concept_ids, list):
+            add(
+                "field_type",
+                "Field 'supporting_concept_ids' must be a list.",
+                f"{path}.supporting_concept_ids",
+            )
+            concept_ids = []
+        for concept_index, concept_id in enumerate(concept_ids):
+            if not isinstance(concept_id, str) or not concept_id.strip():
+                add(
+                    "field_type",
+                    "Every supporting_concept_ids entry must be a non-blank string.",
+                    f"{path}.supporting_concept_ids[{concept_index}]",
+                )
+        number_field(
+            row,
+            "prior_mastery",
+            path,
+            required=False,
+            default=0.20,
+            minimum=0.0,
+            maximum=1.0,
+            exclusive_minimum=True,
+            exclusive_maximum=True,
+        )
+
+    for index, value in enumerate(rows("objective_edges")):
+        path = f"objective_edges[{index}]"
+        row = row_object(value, path)
+        if row is None:
+            continue
+        string_field(row, "id", path)
+        source = string_field(row, "source", path)
+        target = string_field(row, "target", path)
+        relation = string_field(row, "relation", path)
+        string_field(row, "rationale", path)
+        if source is not None and target is not None and source == target:
+            add(
+                "self_objective_edge",
+                "A learning objective cannot require itself.",
+                path,
+            )
+        if relation is not None:
+            try:
+                parsed_relation = _relation(relation)
+                if not parsed_relation.is_strict_prerequisite:
+                    raise ValueError
+            except ValueError:
+                add(
+                    "invalid_enum",
+                    "Objective edges support only prerequisite or requires relations.",
+                    f"{path}.relation",
+                )
+        number_field(
+            row,
+            "weight",
+            path,
+            minimum=0.0,
+            maximum=1.0,
+            exclusive_minimum=True,
+        )
+
     for index, value in enumerate(rows("domains")):
         path = f"domains[{index}]"
         row = row_object(value, path)
@@ -330,6 +483,14 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
         string_field(row, "id", path, question_id=question_id)
         string_field(row, "family_id", path, question_id=question_id)
         string_field(row, "stem", path, question_id=question_id)
+        string_field(
+            row,
+            "learning_objective_id",
+            path,
+            question_id=question_id,
+            required=False,
+            nullable=True,
+        )
         status = string_field(row, "status", path, question_id=question_id)
         if status is not None:
             try:
@@ -437,6 +598,14 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
             string_field(
                 option,
                 "misconception_id",
+                option_path,
+                question_id=question_id,
+                required=False,
+                nullable=True,
+            )
+            string_field(
+                option,
+                "diagnostic_objective_id",
                 option_path,
                 question_id=question_id,
                 required=False,
@@ -752,6 +921,46 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
             )
             for row in bundle["concepts"]
         ]
+        objective_edges = [
+            ObjectiveEdge(
+                id=row["id"],
+                source_id=row["source"],
+                target_id=row["target"],
+                relation=_relation(row["relation"]),
+                weight=float(row["weight"]),
+                rationale=row["rationale"],
+            )
+            for row in bundle.get("objective_edges", [])
+        ]
+        prerequisites_by_target: dict[str, list[ObjectiveEdge]] = {}
+        for edge in objective_edges:
+            prerequisites_by_target.setdefault(edge.target_id, []).append(edge)
+        objective_graph_version = (
+            1 if bundle.get("schema_version") == 3 else None
+        )
+        objectives = [
+            LearningObjective(
+                id=row["id"],
+                name=row["name"],
+                description=row["description"],
+                primary_concept_id=row["primary_concept_id"],
+                supporting_concept_ids=tuple(
+                    row.get("supporting_concept_ids", [])
+                ),
+                operation=ObjectiveOperation(row["operation"]),
+                evidence_type=row.get("evidence_type", "selected_response"),
+                prior_mastery=float(row.get("prior_mastery", 0.20)),
+                prerequisites=tuple(
+                    sorted(
+                        prerequisites_by_target.get(row["id"], []),
+                        key=lambda edge: edge.id,
+                    )
+                ),
+                objective_graph_version=objective_graph_version,
+            )
+            for row in bundle.get("learning_objectives", [])
+        ]
+        objective_by_id = {objective.id: objective for objective in objectives}
         edges = [
             ConceptEdge(
                 source_id=row["source"],
@@ -809,6 +1018,14 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
                             correct=bool(option["correct"]),
                             misconception_id=option.get("misconception_id"),
                             rationale=option["rationale"],
+                            diagnostic_objective_id=(
+                                option.get("diagnostic_objective_id")
+                                or (
+                                    row.get("learning_objective_id")
+                                    if not bool(option["correct"])
+                                    else None
+                                )
+                            ),
                         )
                         for option in row["options"]
                     ),
@@ -816,6 +1033,9 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
                     provenance=dict(row.get("provenance", {})),
                     tags=tuple(row.get("tags", [])),
                     revision_of=row.get("revision_of"),
+                    objective=objective_by_id.get(
+                        row.get("learning_objective_id")
+                    ),
                 )
             )
     except (KeyError, TypeError, ValueError) as exc:
@@ -834,6 +1054,12 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
         issues.append(QualityIssue(code, severity, message, question_id, path))
 
     concept_ids = {concept.id for concept in concepts}
+    objective_id_counts = Counter(objective.id for objective in objectives)
+    objective_by_id = {
+        objective.id: objective
+        for objective in objectives
+        if objective_id_counts[objective.id] == 1
+    }
     misconception_ids = {misconception.id for misconception in misconceptions}
     source_ids = {source.id for source in sources}
     question_ids = {question.id for question in questions}
@@ -846,6 +1072,7 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
     }
     for field, values in (
         ("concepts", [concept.id for concept in concepts]),
+        ("learning_objectives", [objective.id for objective in objectives]),
         ("misconceptions", [misconception.id for misconception in misconceptions]),
         ("sources", [source.id for source in sources]),
         ("questions", [question.id for question in questions]),
@@ -857,6 +1084,185 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
                 f"{field} IDs must be unique; duplicates: {', '.join(duplicates)}.",
                 path=field,
             )
+
+    declared_objective_references = {
+        row.get("learning_objective_id")
+        for row in bundle.get("questions", [])
+        if isinstance(row, dict) and row.get("learning_objective_id") is not None
+    }
+    unknown_objective_references = sorted(
+        value
+        for value in declared_objective_references
+        if isinstance(value, str) and value not in objective_by_id
+    )
+    if unknown_objective_references:
+        add(
+            "unknown_learning_objective",
+            "Questions reference unknown learning objectives: "
+            + ", ".join(unknown_objective_references)
+            + ".",
+            path="questions[].learning_objective_id",
+        )
+    for objective in objectives:
+        unknown = sorted(set(objective.concept_ids) - concept_ids)
+        if unknown:
+            add(
+                "unknown_objective_concept",
+                f"Learning objective {objective.id} references unknown concepts: "
+                + ", ".join(unknown)
+                + ".",
+                path="learning_objectives[].concept_ids",
+            )
+    edge_id_counts = Counter(edge.id for edge in objective_edges)
+    duplicate_objective_edge_ids = sorted(
+        edge_id for edge_id, count in edge_id_counts.items() if count > 1
+    )
+    if duplicate_objective_edge_ids:
+        add(
+            "duplicate_objective_edge_id",
+            "Objective-edge IDs must be unique; duplicates: "
+            + ", ".join(duplicate_objective_edge_ids)
+            + ".",
+            path="objective_edges",
+        )
+    objective_edge_keys = [
+        (edge.source_id, edge.target_id)
+        for edge in objective_edges
+    ]
+    duplicate_objective_edges = sorted(
+        key for key, count in Counter(objective_edge_keys).items() if count > 1
+    )
+    if duplicate_objective_edges:
+        add(
+            "duplicate_objective_edge",
+            "Objective prerequisite relations must be unique; duplicates: "
+            + repr(duplicate_objective_edges)
+            + ".",
+            path="objective_edges",
+        )
+    for edge in objective_edges:
+        unknown = sorted(
+            {edge.source_id, edge.target_id} - set(objective_by_id)
+        )
+        if unknown:
+            add(
+                "unknown_objective_edge_reference",
+                f"Objective edge {edge.id} references unknown objectives: "
+                + ", ".join(unknown)
+                + ".",
+                path="objective_edges",
+            )
+    objective_adjacency: dict[str, list[str]] = {
+        objective_id: [] for objective_id in objective_by_id
+    }
+    objective_indegree = {objective_id: 0 for objective_id in objective_by_id}
+    for edge in objective_edges:
+        if (
+            edge.source_id not in objective_by_id
+            or edge.target_id not in objective_by_id
+        ):
+            continue
+        objective_adjacency[edge.source_id].append(edge.target_id)
+        objective_indegree[edge.target_id] += 1
+    objective_queue = deque(
+        objective_id
+        for objective_id, degree in objective_indegree.items()
+        if degree == 0
+    )
+    objective_visited = 0
+    while objective_queue:
+        objective_id = objective_queue.popleft()
+        objective_visited += 1
+        for dependent_id in objective_adjacency[objective_id]:
+            objective_indegree[dependent_id] -= 1
+            if objective_indegree[dependent_id] == 0:
+                objective_queue.append(dependent_id)
+    if objective_visited != len(objective_by_id):
+        cyclic = sorted(
+            objective_id
+            for objective_id, degree in objective_indegree.items()
+            if degree > 0
+        )
+        add(
+            "objective_prerequisite_cycle",
+            "Objective prerequisite edges contain a cycle: "
+            + ", ".join(cyclic)
+            + ".",
+            path="objective_edges",
+        )
+    used_objective_ids = {
+        question.objective_id for question in questions if question.objective_id
+    }
+    unused_objective_ids = sorted(set(objective_by_id) - used_objective_ids)
+    if unused_objective_ids:
+        add(
+            "unused_learning_objective",
+            "Every learning objective must map at least one question; unused: "
+            + ", ".join(unused_objective_ids)
+            + ".",
+            path="learning_objectives",
+        )
+    covered_concept_ids = {
+        concept_id
+        for objective in objectives
+        for concept_id in objective.concept_ids
+    }
+    for question in questions:
+        if question.objective is not None:
+            if question.primary_concept_id not in question.objective.concept_ids:
+                add(
+                    "objective_primary_concept_mismatch",
+                    f"Question {question.id} maps objective {question.objective.id}, "
+                    f"which does not declare question primary concept "
+                    f"{question.primary_concept_id} as owner or supporting context.",
+                    question_id=question.id,
+                    path="questions[].learning_objective_id",
+                )
+        elif (
+            question.status.eligible_for_adaptation
+            and question.primary_concept_id in covered_concept_ids
+        ):
+            add(
+                "missing_learning_objective",
+                f"Eligible question {question.id} has primary concept "
+                f"{question.primary_concept_id}, covered by the objective catalog, "
+                "but does not declare a learning objective.",
+                question_id=question.id,
+                path="questions[].learning_objective_id",
+            )
+        for option in question.options:
+            diagnostic_id = option.diagnostic_objective_id
+            if option.correct and diagnostic_id is not None:
+                add(
+                    "correct_option_diagnostic_objective",
+                    f"Correct option {option.id} on {question.id} cannot declare "
+                    "a diagnostic objective.",
+                    question_id=question.id,
+                    path="questions[].options[].diagnostic_objective_id",
+                )
+                continue
+            if diagnostic_id is None:
+                continue
+            diagnostic = objective_by_id.get(diagnostic_id)
+            if diagnostic is None:
+                add(
+                    "unknown_diagnostic_objective",
+                    f"Option {option.id} on {question.id} references unknown "
+                    f"diagnostic objective {diagnostic_id}.",
+                    question_id=question.id,
+                    path="questions[].options[].diagnostic_objective_id",
+                )
+                continue
+            owner = misconception_owners.get(option.misconception_id)
+            if owner is not None and owner not in diagnostic.concept_ids:
+                add(
+                    "diagnostic_objective_owner_mismatch",
+                    f"Option {option.id} on {question.id} maps misconception "
+                    f"{option.misconception_id}, owned by {owner}, but diagnostic "
+                    f"objective {diagnostic_id} does not include that concept.",
+                    question_id=question.id,
+                    path="questions[].options[].diagnostic_objective_id",
+                )
 
     edge_keys = [
         (edge.source_id, edge.target_id, edge.relation.value) for edge in edges

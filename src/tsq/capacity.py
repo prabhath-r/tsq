@@ -20,7 +20,7 @@ from .graph import KnowledgeGraph
 from .models import Concept, Misconception, Question, QuestionKind, Topic
 
 
-ALGORITHM_VERSION = "sustained-serviceability-v1"
+ALGORITHM_VERSION = "sustained-serviceability-v2"
 DEFAULT_STATE_LIMIT = 2_000_000
 VERIFICATION_KINDS = frozenset(
     {
@@ -91,6 +91,7 @@ class CapacityBlocker:
     family_id: str
     misconception_id: str | None
     owner_concept_id: str
+    objective_id: str | None
     remaining_repair_families: tuple[str, ...]
     remaining_verification_families: tuple[str, ...]
     reason: str
@@ -102,6 +103,7 @@ class CapacityBlocker:
             "family_id": self.family_id,
             "misconception_id": self.misconception_id,
             "owner_concept_id": self.owner_concept_id,
+            "objective_id": self.objective_id,
             "remaining_repair_families": list(
                 self.remaining_repair_families
             ),
@@ -269,6 +271,10 @@ class CapacityReport:
                 "family_reuse": "none_within_session",
                 "depletion_model": "credible_correct_main_families_only",
                 "repair_and_verification_must_be_distinct": True,
+                "objective_paths": (
+                    "direct objective and exact diagnostic objective/misconception"
+                ),
+                "legacy_paths": "primary concept and misconception owner",
                 "verification_kinds": sorted(
                     value.value for value in VERIFICATION_KINDS
                 ),
@@ -282,6 +288,7 @@ class _Requirement:
     path_kind: str
     misconception_id: str | None
     owner_concept_id: str
+    objective_id: str | None
     repair_mask: int
     verification_mask: int
 
@@ -488,29 +495,104 @@ def _analyze_target(
     pool = tuple(
         question for question in questions if question.primary_concept_id in scope
     )
-    family_ids = tuple(sorted({question.family_id for question in pool}))
+    pool_ids = {question.id for question in pool}
+    eligible_questions = tuple(
+        sorted(
+            (
+                question
+                for question in pool
+                if question.primary_concept_id in owned
+            ),
+            key=lambda question: (question.family_id, question.id),
+        )
+    )
+    required_objective_ids = {
+        objective_id
+        for question in eligible_questions
+        for objective_id in (
+            question.objective_id,
+            *(
+                option.diagnostic_objective_id
+                for option in question.options
+            ),
+        )
+        if objective_id is not None
+    }
+    # Fine-objective repair is release-wide: a valid companion can use one of
+    # the objective's declared supporting concepts as its primary retrieval
+    # mapping and therefore sit outside the broad graph scope of the main item.
+    reserve_questions = tuple(
+        question
+        for question in questions
+        if question.objective_id in required_objective_ids
+    )
+    capacity_pool = tuple(
+        {question.id: question for question in (*pool, *reserve_questions)}.values()
+    )
+    family_ids = tuple(
+        sorted({question.family_id for question in capacity_pool})
+    )
     family_index = {family_id: index for index, family_id in enumerate(family_ids)}
 
     primary_families: dict[str, set[str]] = {}
     misconception_families: dict[str, set[str]] = {}
     verification_families: dict[str, set[str]] = {}
-    for question in pool:
-        primary_families.setdefault(question.primary_concept_id, set()).add(
-            question.family_id
-        )
-        if question.kind in VERIFICATION_KINDS:
-            verification_families.setdefault(
+    objective_families: dict[str, set[str]] = {}
+    objective_verification_families: dict[str, set[str]] = {}
+    objective_misconception_families: dict[
+        tuple[str, str], set[str]
+    ] = {}
+    objective_misconception_verifications: dict[
+        tuple[str, str], set[str]
+    ] = {}
+    objective_by_id = {
+        question.objective.id: question.objective
+        for question in questions
+        if question.objective is not None
+    }
+    for question in capacity_pool:
+        if question.id in pool_ids:
+            primary_families.setdefault(
                 question.primary_concept_id, set()
             ).add(question.family_id)
-        for misconception_id in question.misconception_ids:
+            if question.kind in VERIFICATION_KINDS:
+                verification_families.setdefault(
+                    question.primary_concept_id, set()
+                ).add(question.family_id)
+        if question.objective_id is not None:
+            objective_families.setdefault(
+                question.objective_id, set()
+            ).add(question.family_id)
+            if question.kind in VERIFICATION_KINDS:
+                objective_verification_families.setdefault(
+                    question.objective_id, set()
+                ).add(question.family_id)
+        for option in question.options:
+            misconception_id = option.misconception_id
+            if misconception_id is None:
+                continue
             if misconception_id not in owner_by_misconception:
                 raise ValueError(
                     f"Question {question.id} references unknown misconception "
                     f"{misconception_id}."
                 )
-            misconception_families.setdefault(misconception_id, set()).add(
-                question.family_id
-            )
+            if question.id in pool_ids:
+                misconception_families.setdefault(
+                    misconception_id, set()
+                ).add(question.family_id)
+            diagnostic_objective_id = option.diagnostic_objective_id
+            if (
+                question.objective_id is not None
+                and diagnostic_objective_id == question.objective_id
+            ):
+                pair = (question.objective_id, misconception_id)
+                objective_misconception_families.setdefault(
+                    pair, set()
+                ).add(question.family_id)
+                if question.kind in VERIFICATION_KINDS:
+                    objective_misconception_verifications.setdefault(
+                        pair, set()
+                    ).add(question.family_id)
 
     def mask(values: Iterable[str]) -> int:
         result = 0
@@ -519,35 +601,93 @@ def _analyze_target(
                 result |= 1 << family_index[value]
         return result
 
-    eligible_questions = tuple(
-        sorted(
-            (question for question in pool if question.primary_concept_id in owned),
-            key=lambda question: (question.family_id, question.id),
-        )
-    )
     compiled_by_family: dict[str, list[_CompiledQuestion]] = {}
     for question in eligible_questions:
         primary = question.primary_concept_id
-        requirements = [
-            _Requirement(
-                "generic",
-                None,
-                primary,
-                mask(primary_families.get(primary, ())),
-                mask(verification_families.get(primary, ())),
-            )
-        ]
-        for misconception_id in sorted(question.misconception_ids):
-            owner = owner_by_misconception[misconception_id]
-            requirements.append(
+        if question.objective_id is not None:
+            objective = objective_by_id[question.objective_id]
+            requirements = [
                 _Requirement(
-                    "misconception",
-                    misconception_id,
-                    owner,
-                    mask(misconception_families.get(misconception_id, ())),
-                    mask(verification_families.get(owner, ())),
+                    "objective_generic",
+                    None,
+                    objective.primary_concept_id,
+                    question.objective_id,
+                    mask(
+                        objective_families.get(
+                            question.objective_id, ()
+                        )
+                    ),
+                    mask(
+                        objective_verification_families.get(
+                            question.objective_id, ()
+                        )
+                    ),
                 )
+            ]
+        else:
+            requirements = [
+                _Requirement(
+                    "generic",
+                    None,
+                    primary,
+                    None,
+                    mask(primary_families.get(primary, ())),
+                    mask(verification_families.get(primary, ())),
+                )
+            ]
+        diagnostic_pairs = {
+            (
+                option.misconception_id,
+                option.diagnostic_objective_id or question.objective_id,
             )
+            for option in question.options
+            if option.misconception_id is not None
+        }
+        for misconception_id, diagnostic_objective_id in sorted(
+            diagnostic_pairs,
+            key=lambda pair: (pair[0], pair[1] or ""),
+        ):
+            owner = owner_by_misconception[misconception_id]
+            if diagnostic_objective_id is not None:
+                if diagnostic_objective_id not in objective_by_id:
+                    raise ValueError(
+                        f"Question {question.id} references unknown diagnostic "
+                        f"objective {diagnostic_objective_id}."
+                    )
+                pair = (diagnostic_objective_id, misconception_id)
+                requirements.append(
+                    _Requirement(
+                        "objective_misconception",
+                        misconception_id,
+                        owner,
+                        diagnostic_objective_id,
+                        mask(
+                            objective_misconception_families.get(
+                                pair, ()
+                            )
+                        ),
+                        mask(
+                            objective_misconception_verifications.get(
+                                pair, ()
+                            )
+                        ),
+                    )
+                )
+            else:
+                requirements.append(
+                    _Requirement(
+                        "misconception",
+                        misconception_id,
+                        owner,
+                        None,
+                        mask(
+                            misconception_families.get(
+                                misconception_id, ()
+                            )
+                        ),
+                        mask(verification_families.get(owner, ())),
+                    )
+                )
         compiled_by_family.setdefault(question.family_id, []).append(
             _CompiledQuestion(
                 question.id,
@@ -779,16 +919,82 @@ def _component_bounds(
     budget: _StateBudget,
 ) -> _Bounds:
     global_bits = tuple(1 << family_index[family_id] for family_id in component)
+    dependency_masks = tuple(
+        sorted(
+            {
+                mask
+                for family_id in component
+                for question in compiled_by_family[family_id]
+                for requirement in question.requirements
+                for mask in (
+                    requirement.repair_mask,
+                    requirement.verification_mask,
+                )
+            }
+        )
+    )
+
+    # Families with the same selectable requirement templates and identical
+    # membership in every reserve set are exact automorphisms of this state
+    # machine.  Search only one deterministic representative for each such
+    # group.  This quotients permutations of interchangeable families while
+    # retaining concrete IDs in the reconstructed witness.
+    equivalence: dict[tuple[object, ...], list[int]] = {}
+    for index, family_id in enumerate(component):
+        bit = global_bits[index]
+        templates = tuple(
+            sorted(
+                {
+                    tuple(
+                        (
+                            requirement.path_kind,
+                            requirement.misconception_id or "",
+                            requirement.owner_concept_id,
+                            requirement.objective_id or "",
+                            requirement.repair_mask,
+                            requirement.verification_mask,
+                        )
+                        for requirement in question.requirements
+                    )
+                    for question in compiled_by_family[family_id]
+                }
+            )
+        )
+        signature: tuple[object, ...] = (
+            tuple(bool(mask & bit) for mask in dependency_masks),
+            templates,
+        )
+        equivalence.setdefault(signature, []).append(index)
+    equivalent_groups = tuple(
+        tuple(indices) for indices in equivalence.values()
+    )
+    local_group_masks = tuple(
+        sum(1 << index for index in group)
+        for group in equivalent_groups
+    )
+    local_group_prefixes = tuple(
+        tuple(
+            sum(1 << index for index in group[:count])
+            for count in range(len(group) + 1)
+        )
+        for group in equivalent_groups
+    )
+    evaluated_states: set[int] = set()
+
+    def charge_state(consumed: int) -> None:
+        if consumed in evaluated_states:
+            return
+        budget.consume(len(component))
+        evaluated_states.add(consumed)
 
     @lru_cache(maxsize=None)
-    def visit(consumed: int) -> _Bounds:
-        budget.consume(len(component))
+    def safe_indices(consumed: int) -> tuple[int, ...]:
         removed = 0
         for index, bit in enumerate(global_bits):
             if consumed & (1 << index):
                 removed |= bit
         remaining = all_mask & ~removed
-        safe_indices = [
+        return tuple(
             index
             for index, family_id in enumerate(component)
             if not consumed & (1 << index)
@@ -796,25 +1002,409 @@ def _component_bounds(
                 question_safe(question, remaining)
                 for question in compiled_by_family[family_id]
             )
-        ]
-        if not safe_indices:
-            return _Bounds(0, 0, (), ())
-        low_options: list[tuple[int, tuple[str, ...]]] = []
-        high_options: list[tuple[int, tuple[str, ...]]] = []
-        for index in safe_indices:
-            family_id = component[index]
-            child = visit(consumed | (1 << index))
-            low_options.append((1 + child.low, (family_id,) + child.low_sequence))
-            high_options.append(
-                (1 + child.high, (family_id,) + child.high_sequence)
-            )
-        low, low_sequence = min(low_options, key=lambda value: (value[0], value[1]))
-        high, high_sequence = min(
-            high_options, key=lambda value: (-value[0], value[1])
         )
-        return _Bounds(low, high, low_sequence, high_sequence)
 
-    return visit(0)
+    def branch_indices(safe: tuple[int, ...]) -> tuple[int, ...]:
+        safe_set = set(safe)
+        return tuple(
+            next(index for index in group if index in safe_set)
+            for group in equivalent_groups
+            if any(index in safe_set for index in group)
+        )
+
+    def canonicalize(consumed: int) -> int:
+        """Return the representative state under proven family symmetries."""
+
+        return sum(
+            prefixes[(consumed & group_mask).bit_count()]
+            for group_mask, prefixes in zip(
+                local_group_masks, local_group_prefixes, strict=True
+            )
+        )
+
+    def certified_equal_bound() -> tuple[int, tuple[str, ...]] | None:
+        """Prove a common bound with mandatory-threshold certificates.
+
+        Every repair/verification requirement induces a cardinality threshold
+        on a reserve mask.  When every selectable family in that mask has the
+        threshold in every variant, no valid sequence can consume more than
+        ``mask_size - threshold`` of those families.  A disjoint cover of the
+        component therefore supplies a rigorous packing upper bound.
+
+        If a real greedy sequence reaches that bound, only the adversarial
+        lower bound remains.  We prove it by searching for any smaller
+        terminal set under the same necessary quotas.  This relaxation may
+        consume families in an impossible order, so failure to find a set is
+        a sound certificate that no real order can exhaust earlier.  Exact
+        automorphisms canonicalize that small proof search.  If any part of
+        the certificate fails, the exhaustive recurrence below remains the
+        fail-closed fallback.
+        """
+
+        initial_safe = safe_indices(0)
+        charge_state(0)
+        if not initial_safe:
+            return 0, ()
+        universe_mask = sum(1 << index for index in initial_safe)
+        universe_global_mask = sum(global_bits[index] for index in initial_safe)
+
+        def localize(mask: int) -> int:
+            return sum(
+                1 << index
+                for index, bit in enumerate(global_bits)
+                if mask & bit
+            )
+
+        def question_thresholds(
+            question: _CompiledQuestion,
+        ) -> dict[int, int]:
+            thresholds: dict[int, int] = {}
+            for requirement in question.requirements:
+                for reserve_mask, threshold in (
+                    (requirement.repair_mask, 1),
+                    (requirement.verification_mask, 1),
+                    (
+                        requirement.repair_mask
+                        | requirement.verification_mask,
+                        2,
+                    ),
+                ):
+                    thresholds[reserve_mask] = max(
+                        thresholds.get(reserve_mask, 0), threshold
+                    )
+            return thresholds
+
+        thresholds_by_question = {
+            question: question_thresholds(question)
+            for family_id in component
+            for question in compiled_by_family[family_id]
+        }
+        possible_thresholds = {
+            (reserve_mask, threshold)
+            for thresholds in thresholds_by_question.values()
+            for reserve_mask, threshold in thresholds.items()
+        }
+        quota_by_block: dict[int, int] = {}
+        for reserve_mask, threshold in possible_thresholds:
+            fixed = (reserve_mask & ~universe_global_mask).bit_count()
+            dynamic_threshold = threshold - fixed
+            block = localize(reserve_mask) & universe_mask
+            if dynamic_threshold <= 0 or not block:
+                continue
+            members = tuple(
+                index
+                for index in initial_safe
+                if block & (1 << index)
+            )
+            mandatory = all(
+                all(
+                    thresholds_by_question[question].get(reserve_mask, 0)
+                    >= threshold
+                    for question in compiled_by_family[component[index]]
+                )
+                for index in members
+            )
+            if not mandatory:
+                continue
+            quota = len(members) - dynamic_threshold
+            if quota < 0:
+                continue
+            quota_by_block[block] = min(
+                quota_by_block.get(block, len(members)), quota
+            )
+
+        # Whole automorphism groups are always valid, symmetry-preserving
+        # fallback blocks with the trivial one-use-per-family quota.
+        for group_mask in local_group_masks:
+            block = group_mask & universe_mask
+            if block:
+                quota_by_block.setdefault(block, block.bit_count())
+        quota_candidates = tuple(
+            sorted(
+                quota_by_block.items(),
+                key=lambda value: (
+                    value[1],
+                    -value[0].bit_count(),
+                    value[0],
+                ),
+            )
+        )
+        candidates_by_index: dict[int, list[int]] = {
+            index: [] for index in initial_safe
+        }
+        for candidate_index, (block, _) in enumerate(quota_candidates):
+            for index in initial_safe:
+                if block & (1 << index):
+                    candidates_by_index[index].append(candidate_index)
+
+        @lru_cache(maxsize=None)
+        def best_partition(
+            remaining: int,
+        ) -> tuple[int, tuple[int, ...]] | None:
+            if not remaining:
+                return 0, ()
+            first = (remaining & -remaining).bit_length() - 1
+            best: tuple[int, tuple[int, ...]] | None = None
+            for candidate_index in candidates_by_index[first]:
+                block, quota = quota_candidates[candidate_index]
+                if block & remaining != block:
+                    continue
+                child = best_partition(remaining ^ block)
+                if child is None:
+                    continue
+                candidate = (
+                    quota + child[0],
+                    (candidate_index,) + child[1],
+                )
+                if best is None or candidate < best:
+                    best = candidate
+            return best
+
+        partition = best_partition(universe_mask)
+        if partition is None:
+            return None
+        partition_cost, partition_indices = partition
+        quota_blocks = tuple(
+            quota_candidates[index] for index in partition_indices
+        )
+
+        # Consume the lexicographically first safe family at each state.  If
+        # its real terminal path reaches the packing bound, it witnesses the
+        # exact achievable capacity and is the canonical sequence when the
+        # lower-bound certificate also succeeds.
+        consumed = 0
+        greedy_sequence: list[str] = []
+        while True:
+            charge_state(consumed)
+            safe = safe_indices(consumed)
+            if not safe:
+                break
+            selected = min(safe, key=lambda index: component[index])
+            greedy_sequence.append(component[selected])
+            consumed = canonicalize(consumed | (1 << selected))
+        if len(greedy_sequence) != partition_cost:
+            return None
+
+        def minimal_masks(values: Iterable[int]) -> tuple[int, ...]:
+            kept: list[int] = []
+            for value in sorted(
+                set(values), key=lambda mask: (mask.bit_count(), mask)
+            ):
+                if any((prior & value) == prior for prior in kept):
+                    continue
+                kept.append(value)
+            return tuple(kept)
+
+        def requirement_failure_masks(
+            question: _CompiledQuestion, requirement: _Requirement
+        ) -> tuple[int, ...]:
+            failures: list[int] = []
+            question_bit = question.family_bit
+            for reserve_mask in (
+                requirement.repair_mask,
+                requirement.verification_mask,
+            ):
+                without_question = reserve_mask & ~question_bit
+                if not without_question & ~universe_global_mask:
+                    failures.append(localize(without_question))
+            union = (
+                requirement.repair_mask | requirement.verification_mask
+            ) & ~question_bit
+            fixed_union = (union & ~universe_global_mask).bit_count()
+            dynamic_union = localize(union) & universe_mask
+            if fixed_union == 0:
+                bits = tuple(
+                    1 << index
+                    for index in initial_safe
+                    if dynamic_union & (1 << index)
+                )
+                if bits:
+                    failures.extend(dynamic_union ^ bit for bit in bits)
+                else:
+                    failures.append(0)
+            elif fixed_union == 1:
+                failures.append(dynamic_union)
+            return minimal_masks(failures)
+
+        def family_disable_masks(index: int) -> tuple[int, ...]:
+            combined: tuple[int, ...] = (0,)
+            for question in compiled_by_family[component[index]]:
+                question_failures = minimal_masks(
+                    failure
+                    for requirement in question.requirements
+                    for failure in requirement_failure_masks(
+                        question, requirement
+                    )
+                )
+                if not question_failures:
+                    combined = ()
+                    break
+                combined = minimal_masks(
+                    prior | failure
+                    for prior in combined
+                    for failure in question_failures
+                )
+            return minimal_masks(((1 << index), *combined))
+
+        disable_masks = {
+            index: family_disable_masks(index) for index in initial_safe
+        }
+
+        def within_quotas(state: int) -> bool:
+            return state.bit_count() < partition_cost and all(
+                (state & block).bit_count() <= quota
+                for block, quota in quota_blocks
+            )
+
+        @lru_cache(maxsize=None)
+        def smaller_terminal_exists(state: int) -> bool:
+            charge_state(state)
+            safe = safe_indices(state)
+            if not safe:
+                return True
+            choices: list[
+                tuple[int, int, str, tuple[int, ...]]
+            ] = []
+            for index in branch_indices(safe):
+                next_states = {
+                    canonicalize(state | failure)
+                    for failure in disable_masks[index]
+                    if failure & ~state
+                }
+                next_states = {
+                    next_state
+                    for next_state in next_states
+                    if next_state != state and within_quotas(next_state)
+                }
+                if not next_states:
+                    return False
+                choices.append(
+                    (
+                        len(next_states),
+                        -min(
+                            next_state.bit_count() - state.bit_count()
+                            for next_state in next_states
+                        ),
+                        component[index],
+                        tuple(
+                            sorted(
+                                next_states,
+                                key=lambda next_state: (
+                                    -(
+                                        next_state.bit_count()
+                                        - state.bit_count()
+                                    ),
+                                    next_state,
+                                ),
+                            )
+                        ),
+                    )
+                )
+            _, _, _, next_states = min(choices)
+            return any(
+                smaller_terminal_exists(next_state)
+                for next_state in next_states
+            )
+
+        if smaller_terminal_exists(0):
+            return None
+        return partition_cost, tuple(greedy_sequence)
+
+    certificate = certified_equal_bound()
+    if certificate is not None:
+        bound, sequence = certificate
+        return _Bounds(bound, bound, sequence, sequence)
+
+    @lru_cache(maxsize=None)
+    def lowest(consumed: int) -> tuple[int, tuple[str, ...]]:
+        charge_state(consumed)
+        safe = safe_indices(consumed)
+        if not safe:
+            return 0, ()
+        children = tuple(
+            sorted(
+                (
+                    (
+                        len(safe_indices(consumed | (1 << index))),
+                        component[index],
+                        index,
+                    )
+                    for index in branch_indices(safe)
+                ),
+                key=lambda value: (value[0], value[1]),
+            )
+        )
+        # A removal that immediately disables every other family is an exact
+        # one-step adversarial witness; avoid recursing merely to rediscover
+        # the terminal state.
+        if children[0][0] == 0:
+            return 1, (children[0][1],)
+        best: tuple[int, tuple[str, ...]] | None = None
+        for _, family_id, index in children:
+            child_count, child_sequence = lowest(
+                consumed | (1 << index)
+            )
+            candidate = (
+                1 + child_count,
+                (family_id,) + child_sequence,
+            )
+            if best is None or candidate < best:
+                best = candidate
+            # Every non-terminal state must consume at least the selected
+            # family. Once a one-step dead end is found, no branch can lower
+            # the adversarial bound further.
+            if best[0] == 1:
+                break
+        assert best is not None
+        return best
+
+    @lru_cache(maxsize=None)
+    def highest(consumed: int) -> tuple[int, tuple[str, ...]]:
+        charge_state(consumed)
+        safe = safe_indices(consumed)
+        if not safe:
+            return 0, ()
+        # Try the least destructive removal first.  When it preserves every
+        # other currently-safe family, repeatedly doing so commonly proves
+        # the monotone upper bound without exploring alternative orders.
+        children = tuple(
+            sorted(
+                (
+                    (
+                        len(safe_indices(consumed | (1 << index))),
+                        component[index],
+                        index,
+                    )
+                    for index in branch_indices(safe)
+                ),
+                key=lambda value: (-value[0], value[1]),
+            )
+        )
+        best: tuple[int, tuple[str, ...]] | None = None
+        for _, family_id, index in children:
+            child_count, child_sequence = highest(
+                consumed | (1 << index)
+            )
+            candidate = (
+                1 + child_count,
+                (family_id,) + child_sequence,
+            )
+            if best is None or candidate[0] > best[0] or (
+                candidate[0] == best[0]
+                and candidate[1] < best[1]
+            ):
+                best = candidate
+            # Safety is monotone under family removal: a family that is unsafe
+            # now cannot become safe later. Consuming every currently safe
+            # family therefore attains the exact upper bound for this state.
+            if best[0] == len(safe):
+                break
+        assert best is not None
+        return best
+
+    low, low_sequence = lowest(0)
+    high, high_sequence = highest(0)
+    return _Bounds(low, high, low_sequence, high_sequence)
 
 
 def _merge_sequences(sequences: Iterable[tuple[str, ...]]) -> tuple[str, ...]:
@@ -874,6 +1464,7 @@ def _witness(
                         family_id=family_id,
                         misconception_id=requirement.misconception_id,
                         owner_concept_id=requirement.owner_concept_id,
+                        objective_id=requirement.objective_id,
                         remaining_repair_families=names(repairs),
                         remaining_verification_families=names(verifications),
                         reason=reason,
@@ -884,6 +1475,7 @@ def _witness(
             value.family_id,
             value.question_id,
             value.path_kind,
+            value.objective_id or "",
             value.misconception_id or "",
         )
     )
