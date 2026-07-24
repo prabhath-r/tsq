@@ -19,9 +19,17 @@ NEW_TRANSFORMER_QUESTIONS = {
     "q_causal_cross_attention_mask_scope_001",
     "q_transformer_token_intervention_trace_001",
 }
+NEW_AGENT_INTRO_QUESTIONS = {
+    "q_agent_catalog_expansion_boundary_001",
+    "q_agent_granted_subset_match_001",
+    "q_agent_context_caveat_expiry_001",
+    "q_agent_dry_run_effect_boundary_001",
+    "q_agent_completion_predicate_counterfactual_001",
+}
 GENERATED_BATCH_ID = "batch_rag_agent_headroom_20260723_c"
+AGENT_INTRO_BATCH_ID = "batch_agent_intro_bridges_20260724_a"
 LEGACY_GENERATED_MIGRATION_COUNT = 39
-TOTAL_UNREVIEWED_GENERATED_COUNT = 52
+TOTAL_UNREVIEWED_GENERATED_COUNT = 57
 
 
 class CorpusMisconceptionRouteTests(unittest.TestCase):
@@ -101,6 +109,103 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
             "manual_only_after_human_review_and_new_immutable_release",
         )
 
+    def test_agent_intro_candidates_are_quarantined_and_exactly_routed(
+        self,
+    ) -> None:
+        for questions in (
+            self.canonical_questions,
+            self.packaged_questions,
+        ):
+            batch = {
+                question.id: question
+                for question in questions.values()
+                if question.provenance.get("batch_id") == AGENT_INTRO_BATCH_ID
+            }
+            self.assertEqual(set(batch), NEW_AGENT_INTRO_QUESTIONS)
+            self.assertEqual(
+                len({question.family_id for question in batch.values()}),
+                5,
+            )
+            self.assertTrue(
+                all(
+                    question.status.value == "quarantined"
+                    and not question.status.eligible_for_adaptation
+                    and question.difficulty < -0.3
+                    and question.provenance.get("generated") is True
+                    and question.provenance.get("human_review") is False
+                    and question.provenance.get("human_review_status")
+                    == "required_before_activation"
+                    and question.provenance.get("activation")
+                    == "manual_only_after_human_review_and_new_immutable_release"
+                    for question in batch.values()
+                )
+            )
+            authorization = [
+                question
+                for question in batch.values()
+                if question.objective_id == "lo_agent_tool_authorization"
+            ]
+            reconciliation = [
+                question
+                for question in batch.values()
+                if question.objective_id == "lo_agent_state_reconciliation"
+            ]
+            self.assertEqual(len(authorization), 3)
+            self.assertEqual(len(reconciliation), 2)
+            self.assertTrue(
+                all(
+                    "src_rfc9396_2023" not in question.source_ids
+                    and any(
+                        option.misconception_id
+                        == "m_agent_tool_availability_is_authorization"
+                        and option.diagnostic_objective_id
+                        == "lo_agent_tool_authorization"
+                        for option in question.options
+                    )
+                    for question in authorization
+                )
+            )
+            subset = batch["q_agent_granted_subset_match_001"]
+            self.assertEqual(
+                next(
+                    option for option in subset.options if option.id == "a"
+                ).misconception_id,
+                "m_agent_requested_authority_is_granted",
+            )
+            self.assertEqual(
+                next(
+                    option for option in subset.options if option.id == "c"
+                ).misconception_id,
+                "m_agent_tool_availability_is_authorization",
+            )
+            self.assertEqual(
+                self.canonical_misconceptions[
+                    "m_agent_requested_authority_is_granted"
+                ].concept_id,
+                "c_agent_tool_use",
+            )
+            completion = batch[
+                "q_agent_completion_predicate_counterfactual_001"
+            ]
+            self.assertEqual(
+                next(
+                    option for option in completion.options if option.id == "c"
+                ).misconception_id,
+                "m_agent_any_required_condition_suffices",
+            )
+            self.assertEqual(
+                next(
+                    option for option in completion.options if option.id == "d"
+                ).misconception_id,
+                "m_agent_observation_equals_success",
+            )
+            self.assertEqual(
+                self.canonical_misconceptions[
+                    "m_agent_any_required_condition_suffices"
+                ].concept_id,
+                "c_agent_observation_loop",
+            )
+
     def test_target_status_boundaries_are_unchanged_in_both_copies(self) -> None:
         for questions in (
             self.canonical_questions,
@@ -156,6 +261,7 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                 for question in unreviewed_generated
                 if question.provenance.get("batch_id") != GENERATED_BATCH_ID
                 and question.id not in NEW_TRANSFORMER_QUESTIONS
+                and question.id not in NEW_AGENT_INTRO_QUESTIONS
             ]
 
             self.assertEqual(

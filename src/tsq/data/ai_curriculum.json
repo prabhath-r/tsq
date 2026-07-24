@@ -2265,6 +2265,13 @@
       "remediation": "Bind authorization to the exact actor, operation, resource, and arguments; tool discovery and schema validation do not expand that grant."
     },
     {
+      "id": "m_agent_requested_authority_is_granted",
+      "name": "Requested authority is granted authority",
+      "description": "Treats permissions proposed in an authorization request as if the user or policy had granted them, even when the resulting grant is narrower.",
+      "concept_id": "c_agent_tool_use",
+      "remediation": "Authorize execution from the exact granted record; keep requested, granted, and exercised permissions distinct."
+    },
+    {
       "id": "m_agent_tool_output_is_trusted",
       "name": "Tool output is trusted instruction",
       "description": "Allows untrusted tool-returned text to override policy or issue actions instead of treating it as data.",
@@ -2291,6 +2298,13 @@
       "description": "Interprets an acknowledgement or partial result as proof that the requested terminal condition holds.",
       "concept_id": "c_agent_observation_loop",
       "remediation": "Define a verifiable completion predicate and compare observations against it."
+    },
+    {
+      "id": "m_agent_any_required_condition_suffices",
+      "name": "Any required condition suffices",
+      "description": "Treats one satisfied component of a conjunctive terminal condition as sufficient for overall completion.",
+      "concept_id": "c_agent_observation_loop",
+      "remediation": "Evaluate the complete Boolean terminal predicate against authoritative values for every required condition."
     },
     {
       "id": "m_agent_retry_without_idempotency",
@@ -14045,5 +14059,407 @@
     {"id":"q_agent_approval_argument_binding_001","version":1,"family_id":"f_agent_approval_argument_binding","learning_objective_id":"lo_agent_tool_authorization","status":"quarantined","stem":"After reviewing a dry-run, a human approves committing a firewall change limited to destination 203.0.113.8/32 on port 443. Before commit, an analysis tool suggests widening the destination to 203.0.113.0/24, and the model substitutes that range into the call. What should the orchestrator do?","kind":"debugging","difficulty":1.05,"discrimination":1.75,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_tool_use","weight":1.0,"role":"primary"}],"options":[{"id":"a","text":"Commit the widened range after JSON-schema validation because well-formed arguments carry the approval from the original proposal.","correct":false,"misconception_id":"m_agent_tool_schema_is_execution","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Schema validity does not bind the changed arguments to the human's narrower authorization."},{"id":"b","text":"Treat the /24 mutation as a new proposal, recompute its policy and dry-run diff, and obtain approval bound to those exact arguments.","correct":true,"misconception_id":null,"rationale":"Changing the canonical action invalidates the earlier approval and requires a fresh decision at the authorization boundary."},{"id":"c","text":"Commit the widened range because a result from the approved analysis tool can extend the authority granted by the human.","correct":false,"misconception_id":"m_agent_tool_output_is_trusted","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Tool-returned advice is data; it cannot modify the scope of human authorization."},{"id":"d","text":"Route the /24 through another firewall mutation tool whose schema accepts the wider range, treating availability of that capability as sufficient to preserve approval.","correct":false,"misconception_id":"m_agent_tool_availability_is_authorization","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Switching to another available capability cannot transfer the earlier /32 approval to changed /24 arguments."}],"source_ids":["src_rfc9396_2023","src_toolformer_2023","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"RFC 9396 is cited only for protecting OAuth authorization_details carried in authorization requests against tampering or swapping; it does not define approval binding for tool calls. Toolformer and ReAct support tool calls generally. The firewall arguments, dry-run contract, and human tool-approval lifecycle are stipulated. The RFC source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_authorization_primary","independence_note":"The keyed operation detects authorization drift between an approved dry run and a mutated commit; it is not generic schema validation, static least privilege, tool-output prompt injection, or aggregate routing evaluation.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","approval_binding","argument_integrity","authorization"]},
     {"id":"q_agent_saga_compensation_001","version":1,"family_id":"f_agent_saga_compensation","learning_objective_id":"lo_agent_state_reconciliation","status":"quarantined","stem":"A travel workflow has an explicit terminal contract: reserve both the flight and hotel, or leave neither reserved. The flight tool returns committed reservation F7; the hotel tool returns a definitive unavailable result. Policy permits canceling F7, and the cancellation API accepts the workflow's stable operation identity for idempotent retries. How should the control loop proceed?","kind":"application","difficulty":1.1,"discrimination":1.75,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_observation_loop","weight":0.85,"role":"primary"},{"concept_id":"c_agent_tool_use","weight":0.15,"role":"prerequisite"}],"options":[{"id":"a","text":"Record both reservations as complete because the plan represented the flight and hotel as one intended trip state.","correct":false,"misconception_id":"m_agent_plan_is_execution_state","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"The intended composite state cannot override the committed-flight and failed-hotel observations."},{"id":"b","text":"Mark the trip complete because the committed flight receipt is an authoritative observation from one required action.","correct":false,"misconception_id":"m_agent_observation_equals_success","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"One successful component does not satisfy the all-or-neither terminal contract."},{"id":"c","text":"Persist the partial state, cancel F7 through a stable operation identity, verify cancellation, and report unresolved failure if restoring the invariant fails.","correct":true,"misconception_id":null,"rationale":"The loop uses observed state to compensate the committed side effect and verifies the permitted terminal alternative."},{"id":"d","text":"Retry both bookings under fresh request identities until matching success receipts arrive for a new flight and hotel.","correct":false,"misconception_id":"m_agent_retry_without_idempotency","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"Blind fresh retries can duplicate the existing flight reservation and do not reconcile F7."}],"source_ids":["src_sagas_1987","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"Garcia-Molina and Salem directly support compensating completed subtransactions after partial saga execution, including reservation cancellation. ReAct supports observation-conditioned plan revision. The all-or-neither predicate and cancellation API's stable operation-identity contract are stipulated. The Sagas source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_reconciliation_primary","independence_note":"The keyed operation compensates one committed step to restore an explicit cross-step invariant; it is not reconciling an unknown payment, polling an accepted asynchronous job, recording a failed rename, repairing homogeneous batch members, or rejecting a stale revision.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","control_loop","compensation","workflow_invariant"]},
     {"id":"q_agent_snapshot_observation_completeness_001","version":1,"family_id":"f_agent_snapshot_observation_completeness","learning_objective_id":"lo_agent_state_reconciliation","status":"quarantined","stem":"A rollout's terminal predicate requires version v7 to be healthy in all 12 regions. The monitoring API contract returns one consistent snapshot in pages. Its first page reports six healthy regions and includes a non-null next_cursor. What should the control loop do next?","kind":"debugging","difficulty":0.8,"discrimination":1.7,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_observation_loop","weight":0.85,"role":"primary"},{"concept_id":"c_agent_tool_use","weight":0.15,"role":"prerequisite"}],"options":[{"id":"a","text":"Record every region as healthy because the rollout plan specified v7 as the intended state for the complete fleet.","correct":false,"misconception_id":"m_agent_plan_is_execution_state","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"Planned coverage is intent, while the observation is incomplete for six regions."},{"id":"b","text":"Mark the rollout complete because the authoritative first page contains only healthy observations for version v7.","correct":false,"misconception_id":"m_agent_observation_equals_success","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"A valid partial observation does not satisfy a predicate quantified over all 12 regions."},{"id":"c","text":"Treat the missing six regions as failed rollout effects and relaunch only those regions under fresh request identities before exhausting the observation cursor.","correct":false,"misconception_id":"m_agent_retry_without_idempotency","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"Incomplete observation does not establish failed effects; fresh retries can duplicate work and bypass the required same-snapshot read."},{"id":"d","text":"Continue from next_cursor within the same snapshot, aggregate every region, and declare completion only if all 12 satisfy the predicate.","correct":true,"misconception_id":null,"rationale":"Cursor exhaustion establishes observation completeness before the conjunctive health predicate is evaluated."}],"source_ids":["src_chandy_lamport_snapshots_1985","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"Chandy and Lamport support recording a consistent global state before evaluating a global-state predicate, with detection guarantees for stable properties. ReAct supports observation-conditioned plan updates. The paginated API and same-snapshot cursor behavior are stipulated. The Chandy-Lamport source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_reconciliation_primary","independence_note":"The keyed operation establishes completeness of a paginated observation before evaluating a universal predicate; it is not polling an accepted job, reconciling per-item execution outcomes, handling unknown side effects, repairing a failed action, or ordering stale callbacks.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","control_loop","observation_completeness","snapshot_pagination"]}
+    ,
+    {
+      "id": "q_agent_catalog_expansion_boundary_001",
+      "version": 1,
+      "family_id": "f_agent_catalog_expansion_boundary",
+      "learning_objective_id": "lo_agent_tool_authorization",
+      "status": "quarantined",
+      "stem": "A user has authorized an agent to read report R. A connector refresh then adds a delete-report tool to the agent's catalog, while the user's grant and the execution policy remain unchanged. What follows?",
+      "kind": "counterfactual",
+      "difficulty": -0.9,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_agent_tool_use",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Delete becomes permitted because the catalog now exposes a tool that can perform it.",
+          "correct": false,
+          "misconception_id": "m_agent_tool_availability_is_authorization",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "Discovering a capability does not add delete permission to the unchanged grant."
+        },
+        {
+          "id": "b",
+          "text": "Delete becomes permitted when its arguments pass the new tool's schema validation.",
+          "correct": false,
+          "misconception_id": "m_agent_tool_schema_is_execution",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "Schema validation checks call shape, not whether the user authorized the action."
+        },
+        {
+          "id": "c",
+          "text": "Reading R remains authorized and deleting R remains unauthorized; catalog membership and permission are separate.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Changing the available capability set does not change the actor, action, or resource covered by the grant."
+        },
+        {
+          "id": "d",
+          "text": "Delete becomes safer to authorize if more write tools are exposed for the agent to compare.",
+          "correct": false,
+          "misconception_id": "m_agent_more_tools_monotonic",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "Adding capabilities does not supply the missing delete grant and can increase routing ambiguity."
+        }
+      ],
+      "source_ids": [
+        "src_macaroons_2014",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_agent_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Macaroons supports attenuated capabilities constrained by object, action, and contextual caveats. The connector catalog, report, user grant, and rule that catalog discovery cannot modify that grant are stipulated scenario facts.",
+        "independence_note": "The keyed counterfactual holds authorization fixed while changing only capability discovery. It is not static least-privilege tool selection, schema parsing, prompt injection, approval-argument mutation, or aggregate routing evaluation."
+      },
+      "tags": [
+        "llm",
+        "agents",
+        "authorization",
+        "tool_availability",
+        "introductory",
+        "counterfactual"
+      ]
+    },
+    {
+      "id": "q_agent_granted_subset_match_001",
+      "version": 1,
+      "family_id": "f_agent_granted_subset_match",
+      "learning_objective_id": "lo_agent_tool_authorization",
+      "status": "quarantined",
+      "stem": "An agent requested read and delete access for folder A, but the user granted only read access and the issued authorization record contains only read. The agent later proposes deleting a file in A. What should the execution boundary do?",
+      "kind": "transfer",
+      "difficulty": -0.65,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_agent_tool_use",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Execute the deletion because it appeared in the original authorization request.",
+          "correct": false,
+          "misconception_id": "m_agent_requested_authority_is_granted",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "The request records what was sought, while the narrower grant records what the user actually authorized."
+        },
+        {
+          "id": "b",
+          "text": "Execute the deletion after its folder and filename pass the delete tool's schema.",
+          "correct": false,
+          "misconception_id": "m_agent_tool_schema_is_execution",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "Well-formed arguments do not supply the missing delete permission."
+        },
+        {
+          "id": "c",
+          "text": "Execute the deletion because an available delete tool can perform it on folder A.",
+          "correct": false,
+          "misconception_id": "m_agent_tool_availability_is_authorization",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "An available capability cannot add delete permission to a read-only grant."
+        },
+        {
+          "id": "d",
+          "text": "Block the deletion and require a new grant that explicitly covers that action and resource.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The execution decision must be checked against the authorization actually granted, not the broader request."
+        }
+      ],
+      "source_ids": [
+        "src_macaroons_2014",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_agent_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Macaroons supports attenuation of delegated capabilities through object, action, and contextual caveats. The distinction between requested and granted folder permissions, the issued authorization record, and the later proposal are stipulated scenario facts.",
+        "independence_note": "The keyed operation compares requested permissions with the smaller granted subset. It is not choosing a minimal catalog, treating schema-valid JSON as execution, mutating already approved arguments, or delegating a capability."
+      },
+      "tags": [
+        "llm",
+        "agents",
+        "authorization",
+        "granted_subset",
+        "introductory",
+        "transfer"
+      ]
+    },
+    {
+      "id": "q_agent_context_caveat_expiry_001",
+      "version": 1,
+      "family_id": "f_agent_context_caveat_expiry",
+      "learning_objective_id": "lo_agent_tool_authorization",
+      "status": "quarantined",
+      "stem": "A short-lived grant authorizes deployment agent D4 to restart service S2 only before 17:00 UTC. At 17:05, an authoritative clock confirms the time; the restart tool remains available, its proposed arguments are schema-valid, and no other grant applies. Which review is correct?",
+      "kind": "diagnostic",
+      "difficulty": -0.45,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_agent_tool_use",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Allow the restart because the service tool remains available to D4 after 17:00.",
+          "correct": false,
+          "misconception_id": "m_agent_tool_availability_is_authorization",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "Tool availability cannot revive a grant whose contextual time condition is no longer satisfied."
+        },
+        {
+          "id": "b",
+          "text": "Allow the restart because the proposed service arguments still satisfy the tool schema.",
+          "correct": false,
+          "misconception_id": "m_agent_tool_schema_is_execution",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "Schema conformance does not satisfy the expired authorization caveat."
+        },
+        {
+          "id": "c",
+          "text": "Deny the restart because the authoritative time falls outside the grant's contextual limit.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The exact capability is usable only while all of its caveats hold; this one has expired."
+        },
+        {
+          "id": "d",
+          "text": "Expose several restart tools because a larger catalog should improve reliability despite the expired grant.",
+          "correct": false,
+          "misconception_id": "m_agent_more_tools_monotonic",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "Adding a route does not remove the time condition and increases unnecessary capability surface."
+        }
+      ],
+      "source_ids": [
+        "src_macaroons_2014",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_agent_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Macaroons directly supports attenuating capabilities with contextual caveats, including time-based restrictions. D4, S2, the authoritative clock, and the absence of another grant are stipulated scenario facts.",
+        "independence_note": "The keyed operation evaluates a contextual time caveat against an authoritative observation. It is not comparing requested and granted sets, changing catalog availability, choosing a static tool set, matching a resource tuple, or validating mutated approval arguments."
+      },
+      "tags": [
+        "llm",
+        "agents",
+        "authorization",
+        "context_caveat",
+        "introductory",
+        "diagnostic"
+      ]
+    },
+    {
+      "id": "q_agent_dry_run_effect_boundary_001",
+      "version": 1,
+      "family_id": "f_agent_dry_run_effect_boundary",
+      "learning_objective_id": "lo_agent_state_reconciliation",
+      "status": "quarantined",
+      "stem": "An agent plans to resize database DB7 from small to large. It calls only preview_resize, which returns \"would change DB7 from small to large\"; the execution endpoint was not called, and an authoritative read still reports size=small. Which state should the control loop persist?",
+      "kind": "diagnostic",
+      "difficulty": -0.75,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_agent_observation_loop",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_agent_tool_use",
+          "weight": 0.15,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Record size=large because the agent's plan states that DB7 will be resized.",
+          "correct": false,
+          "misconception_id": "m_agent_plan_is_execution_state",
+          "diagnostic_objective_id": "lo_agent_state_reconciliation",
+          "rationale": "The plan records intent and cannot override the observed database size."
+        },
+        {
+          "id": "b",
+          "text": "Record size=large because the structured preview observation establishes successful completion.",
+          "correct": false,
+          "misconception_id": "m_agent_observation_equals_success",
+          "diagnostic_objective_id": "lo_agent_state_reconciliation",
+          "rationale": "A preview observation describes a possible effect and does not satisfy the resize completion predicate."
+        },
+        {
+          "id": "c",
+          "text": "Keep size=small as external state and record the preview separately as a non-executing result.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The execution path was not called and the authoritative read confirms that the external state is unchanged."
+        },
+        {
+          "id": "d",
+          "text": "Record size=large because a schema-valid preview call is equivalent to executing the resize.",
+          "correct": false,
+          "misconception_id": "m_agent_tool_schema_is_execution",
+          "diagnostic_objective_id": "lo_agent_tool_authorization",
+          "rationale": "A valid preview request is still a call to a non-executing endpoint, not a resize effect."
+        }
+      ],
+      "source_ids": [
+        "src_react_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_agent_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "ReAct supports interleaving model reasoning with actions and observations. The preview endpoint's non-executing contract, DB7 sizes, and authoritative read are stipulated scenario facts.",
+        "independence_note": "The keyed operation distinguishes a dry-run prediction from an executed external effect using endpoint identity and an authoritative read. It is not partitioning partial batch outcomes, polling an accepted job, handling an unknown timeout, recording a failed rename, ordering revisions, or compensating a saga."
+      },
+      "tags": [
+        "llm",
+        "agents",
+        "control_loop",
+        "dry_run",
+        "execution_state",
+        "introductory",
+        "diagnostic"
+      ]
+    },
+    {
+      "id": "q_agent_completion_predicate_counterfactual_001",
+      "version": 1,
+      "family_id": "f_agent_completion_predicate_counterfactual",
+      "learning_objective_id": "lo_agent_state_reconciliation",
+      "status": "quarantined",
+      "stem": "A backup goal is complete only when upload_done AND checksum_verified are both true. The environment reports upload_done=true and checksum_verified=false. The agent then changes only its plan text to say \"checksum verified.\" What is the resulting goal state?",
+      "kind": "counterfactual",
+      "difficulty": -0.95,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_agent_observation_loop",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_agent_tool_use",
+          "weight": 0.15,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The goal remains incomplete because changing plan text does not change the false environment observation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The conjunction remains false until authoritative evidence changes checksum_verified."
+        },
+        {
+          "id": "b",
+          "text": "The goal becomes complete because the revised plan now records both required conditions as true.",
+          "correct": false,
+          "misconception_id": "m_agent_plan_is_execution_state",
+          "diagnostic_objective_id": "lo_agent_state_reconciliation",
+          "rationale": "Plan text records intent or belief, not the environment's checksum state."
+        },
+        {
+          "id": "c",
+          "text": "The goal becomes complete because the successful upload observation is enough to establish overall success.",
+          "correct": false,
+          "misconception_id": "m_agent_any_required_condition_suffices",
+          "diagnostic_objective_id": "lo_agent_state_reconciliation",
+          "rationale": "One true component cannot satisfy a completion predicate that requires both."
+        },
+        {
+          "id": "d",
+          "text": "The goal becomes complete because observations contain values for both fields, despite one being false.",
+          "correct": false,
+          "misconception_id": "m_agent_observation_equals_success",
+          "diagnostic_objective_id": "lo_agent_state_reconciliation",
+          "rationale": "Observation completeness is not goal success; the observed false value leaves the conjunction unsatisfied."
+        }
+      ],
+      "source_ids": [
+        "src_react_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_agent_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "ReAct supports interleaving reasoning, actions, and observations so plans can be updated from external feedback. The Boolean completion contract and backup observations are stipulated and self-contained.",
+        "independence_note": "The keyed counterfactual evaluates an explicit conjunction while changing only internal plan text. It is not polling an asynchronous acknowledgement, retrying an unknown payment, classifying per-item partial state, or repairing a failed action."
+      },
+      "tags": [
+        "llm",
+        "agents",
+        "control_loop",
+        "completion_predicate",
+        "introductory",
+        "counterfactual"
+      ]
+    }
   ]
 }
