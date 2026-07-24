@@ -167,13 +167,30 @@ def _projection_summaries(database: Database) -> list[dict[str, object]]:
                    FROM skill_states WHERE learner_id=? ORDER BY concept_id""",
                 (learner["id"],),
             ).fetchall()
+            objectives = connection.execute(
+                """SELECT mean, variance, exposures, evidence_mass
+                   FROM objective_states
+                   WHERE learner_id=? ORDER BY objective_id""",
+                (learner["id"],),
+            ).fetchall()
+            objective_grids = connection.execute(
+                """SELECT mastery_probability, acquisition_mass
+                   FROM objective_grid_states
+                   WHERE learner_id=? ORDER BY objective_id""",
+                (learner["id"],),
+            ).fetchall()
             beliefs = connection.execute(
                 """SELECT log_odds FROM misconception_beliefs
                    WHERE learner_id=? ORDER BY misconception_id""",
                 (learner["id"],),
             ).fetchall()
-            families = connection.execute(
+            concept_families = connection.execute(
                 """SELECT COUNT(*) AS n FROM learner_skill_families
+                   WHERE learner_id=?""",
+                (learner["id"],),
+            ).fetchone()["n"]
+            objective_families = connection.execute(
+                """SELECT COUNT(*) AS n FROM learner_objective_families
                    WHERE learner_id=?""",
                 (learner["id"],),
             ).fetchone()["n"]
@@ -184,19 +201,65 @@ def _projection_summaries(database: Database) -> list[dict[str, object]]:
                     "projection_hash": database.learner_projection_hash(
                         learner["id"], connection
                     ),
-                    "skill_count": len(skills),
-                    "total_exposures": sum(row["exposures"] for row in skills),
+                    # The original summary predates objective-aware evidence.
+                    # Its unqualified totals now cover both representations;
+                    # explicit legacy/objective fields below let auditors avoid
+                    # accidentally combining unlike posterior summaries.
+                    "skill_count": len(skills) + len(objectives),
+                    "total_exposures": sum(
+                        row["exposures"] for row in (*skills, *objectives)
+                    ),
                     "total_evidence_mass": sum(
-                        row["evidence_mass"] for row in skills
+                        row["evidence_mass"] for row in (*skills, *objectives)
                     ),
                     "mean_skill_mean": (
-                        sum(row["mean"] for row in skills) / len(skills)
-                        if skills
+                        sum(row["mean"] for row in (*skills, *objectives))
+                        / (len(skills) + len(objectives))
+                        if skills or objectives
                         else None
                     ),
                     "mean_skill_variance": (
-                        sum(row["variance"] for row in skills) / len(skills)
-                        if skills
+                        sum(row["variance"] for row in (*skills, *objectives))
+                        / (len(skills) + len(objectives))
+                        if skills or objectives
+                        else None
+                    ),
+                    "legacy_concept_state_count": len(skills),
+                    "legacy_concept_total_exposures": sum(
+                        row["exposures"] for row in skills
+                    ),
+                    "legacy_concept_total_evidence_mass": sum(
+                        row["evidence_mass"] for row in skills
+                    ),
+                    "objective_state_count": len(objectives),
+                    "objective_grid_state_count": len(objective_grids),
+                    "objective_total_exposures": sum(
+                        row["exposures"] for row in objectives
+                    ),
+                    "objective_total_evidence_mass": sum(
+                        row["evidence_mass"] for row in objectives
+                    ),
+                    "objective_total_acquisition_mass": sum(
+                        row["acquisition_mass"] for row in objective_grids
+                    ),
+                    "mean_objective_mean": (
+                        sum(row["mean"] for row in objectives) / len(objectives)
+                        if objectives
+                        else None
+                    ),
+                    "mean_objective_variance": (
+                        sum(row["variance"] for row in objectives)
+                        / len(objectives)
+                        if objectives
+                        else None
+                    ),
+                    "mean_objective_mastery_probability": (
+                        sum(
+                            row["mastery_probability"]
+                            for row in objective_grids
+                        )
+                        / len(objective_grids)
+                        if objective_grids
                         else None
                     ),
                     "misconception_beliefs": len(beliefs),
@@ -205,7 +268,15 @@ def _projection_summaries(database: Database) -> list[dict[str, object]]:
                         if beliefs
                         else None
                     ),
-                    "certified_families": families,
+                    "certified_families": (
+                        concept_families + objective_families
+                    ),
+                    "legacy_certified_families": concept_families,
+                    "legacy_independent_families": concept_families,
+                    "objective_independent_families": objective_families,
+                    "total_independent_families": (
+                        concept_families + objective_families
+                    ),
                 }
             )
     return result

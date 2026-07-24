@@ -30,14 +30,29 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from math import isfinite
 from types import MappingProxyType
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, TypeVar
 
 
-SCHEMA_VERSION = 1
+# Learning-action history was released with schema 1.  Keep this alias stable:
+# persisted action traces and their commitments must not change merely because
+# the independently versioned task registry evolves.
+ACTION_SCHEMA_VERSION = 1
+ACTION_TRACE_SCHEMA_VERSION = 1
+SCHEMA_VERSION = ACTION_SCHEMA_VERSION
+
+# Productive-task definitions and their evaluations have separate wire
+# contracts.  Task schema 3 adds explicit fine-grained objective bindings to
+# schema 2's instructions, provenance, administration, stimulus, rubric, and
+# scorer commitments.  Evaluation schema 2 is unchanged because its structure
+# already commits to the exact task digest.
+TASK_SCHEMA_VERSION = 3
+TASK_EVALUATION_SCHEMA_VERSION = 2
+EVIDENCE_BUNDLE_SCHEMA_VERSION = 2
 MAX_ACTION_COUNTER = 1_000_000_000
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_StrEnumT = TypeVar("_StrEnumT", bound=StrEnum)
 
 
 class TaskModality(StrEnum):
@@ -148,20 +163,22 @@ class ScorerContract:
     """Release-pinnable trust boundary for a deterministic or human scorer.
 
     A matching ID is not enough: the contract names the exact rubric criteria
-    the scorer may certify, and evidence must be linked to allowlisted semantic
-    actions (optionally constrained to named check sets or artifact kinds), or
-    the contract must require an externally verified attestation digest.  The
-    reducer validates structure only; signature and identity verification
-    belong at the persistence boundary.
+    the scorer may certify, the authority manifest that vouches for it, and the
+    exact named check-set or artifact-format manifests behind applicable
+    semantic actions.  Otherwise the contract must require an externally
+    verified attestation digest.  The reducer validates structure only;
+    signature and authority verification belong at the persistence boundary.
     """
 
     kind: ScorerKind
     scorer_id: str
     scorer_version: str
+    authority_id: str
+    authority_manifest_digest: str
     criterion_ids: tuple[str, ...]
     evidence_action_kinds: tuple[ActionKind, ...] = ()
-    check_set_ids: tuple[str, ...] | None = None
-    artifact_kinds: tuple[str, ...] | None = None
+    check_set_manifests: tuple[tuple[str, str], ...] = ()
+    artifact_manifests: tuple[tuple[str, str], ...] = ()
     requires_attestation: bool = False
 
     def __post_init__(self) -> None:
@@ -172,6 +189,11 @@ class ScorerContract:
             )
         _require_id(self.scorer_id, "ScorerContract.scorer_id")
         _require_id(self.scorer_version, "ScorerContract.scorer_version")
+        _require_id(self.authority_id, "ScorerContract.authority_id")
+        _require_digest(
+            self.authority_manifest_digest,
+            "ScorerContract.authority_manifest_digest",
+        )
         criterion_ids = _sorted_unique_ids(
             self.criterion_ids, "ScorerContract.criterion_ids"
         )
@@ -191,28 +213,53 @@ class ScorerContract:
             "evidence_action_kinds",
             tuple(sorted(self.evidence_action_kinds, key=lambda kind: kind.value)),
         )
-        for name in ("check_set_ids", "artifact_kinds"):
-            values = getattr(self, name)
-            if values is None:
-                continue
-            normalized = _sorted_unique_ids(values, f"ScorerContract.{name}")
-            if not normalized:
-                raise ValueError(f"ScorerContract.{name} must not be empty.")
-            object.__setattr__(self, name, normalized)
+        object.__setattr__(
+            self,
+            "check_set_manifests",
+            _sorted_unique_digest_bindings(
+                self.check_set_manifests,
+                "ScorerContract.check_set_manifests",
+            ),
+        )
+        object.__setattr__(
+            self,
+            "artifact_manifests",
+            _sorted_unique_digest_bindings(
+                self.artifact_manifests,
+                "ScorerContract.artifact_manifests",
+            ),
+        )
         if (
-            self.check_set_ids is not None
+            self.check_set_manifests
             and ActionKind.CHECK_RUN not in self.evidence_action_kinds
         ):
             raise ValueError(
-                "ScorerContract.check_set_ids requires check_run evidence actions."
+                "ScorerContract.check_set_manifests requires check_run evidence "
+                "actions."
             )
         if (
-            self.artifact_kinds is not None
+            self.artifact_manifests
             and ActionKind.ARTIFACT_CHECKPOINT not in self.evidence_action_kinds
         ):
             raise ValueError(
-                "ScorerContract.artifact_kinds requires artifact_checkpoint "
+                "ScorerContract.artifact_manifests requires artifact_checkpoint "
                 "evidence actions."
+            )
+        if (
+            ActionKind.CHECK_RUN in self.evidence_action_kinds
+            and not self.check_set_manifests
+        ):
+            raise ValueError(
+                "A scorer contract authorizing check_run must pin at least one "
+                "named check-set manifest."
+            )
+        if (
+            ActionKind.ARTIFACT_CHECKPOINT in self.evidence_action_kinds
+            and not self.artifact_manifests
+        ):
+            raise ValueError(
+                "A scorer contract authorizing artifact_checkpoint must pin at "
+                "least one named artifact manifest."
             )
         _require_exact_type(
             self.requires_attestation,
@@ -230,23 +277,112 @@ class ScorerContract:
     def key(self) -> tuple[ScorerKind, str, str]:
         return (self.kind, self.scorer_id, self.scorer_version)
 
+    @property
+    def check_set_ids(self) -> tuple[str, ...] | None:
+        """Named check sets this exact manifest contract authorizes."""
+
+        values = tuple(name for name, _ in self.check_set_manifests)
+        return values or None
+
+    @property
+    def artifact_kinds(self) -> tuple[str, ...] | None:
+        """Named artifact formats this exact manifest contract authorizes."""
+
+        values = tuple(name for name, _ in self.artifact_manifests)
+        return values or None
+
     def terms(self) -> dict[str, Any]:
         return {
             "kind": self.kind.value,
             "scorer_id": self.scorer_id,
             "scorer_version": self.scorer_version,
+            "authority_id": self.authority_id,
+            "authority_manifest_digest": self.authority_manifest_digest,
             "criterion_ids": list(self.criterion_ids),
             "evidence_action_kinds": [
                 kind.value for kind in self.evidence_action_kinds
             ],
-            "check_set_ids": (
-                None if self.check_set_ids is None else list(self.check_set_ids)
-            ),
-            "artifact_kinds": (
-                None if self.artifact_kinds is None else list(self.artifact_kinds)
-            ),
+            "check_set_manifests": [
+                {"check_set_id": name, "manifest_digest": digest}
+                for name, digest in self.check_set_manifests
+            ],
+            "artifact_manifests": [
+                {"artifact_kind": name, "manifest_digest": digest}
+                for name, digest in self.artifact_manifests
+            ],
             "requires_attestation": self.requires_attestation,
         }
+
+    @classmethod
+    def from_terms(cls, value: object) -> ScorerContract:
+        """Decode the exact scorer terms embedded in a task definition."""
+
+        terms = _require_terms_object(
+            value,
+            frozenset(
+                {
+                    "kind",
+                    "scorer_id",
+                    "scorer_version",
+                    "authority_id",
+                    "authority_manifest_digest",
+                    "criterion_ids",
+                    "evidence_action_kinds",
+                    "check_set_manifests",
+                    "artifact_manifests",
+                    "requires_attestation",
+                }
+            ),
+            "ScorerContract terms",
+        )
+        decoded = cls(
+            kind=_decode_enum_term(
+                terms["kind"], ScorerKind, "ScorerContract.kind"
+            ),
+            scorer_id=_require_terms_string(
+                terms["scorer_id"], "ScorerContract.scorer_id"
+            ),
+            scorer_version=_require_terms_string(
+                terms["scorer_version"], "ScorerContract.scorer_version"
+            ),
+            authority_id=_require_terms_string(
+                terms["authority_id"], "ScorerContract.authority_id"
+            ),
+            authority_manifest_digest=_require_terms_string(
+                terms["authority_manifest_digest"],
+                "ScorerContract.authority_manifest_digest",
+            ),
+            criterion_ids=tuple(
+                _require_terms_string(item, "ScorerContract.criterion_ids[]")
+                for item in _require_terms_list(
+                    terms["criterion_ids"], "ScorerContract.criterion_ids"
+                )
+            ),
+            evidence_action_kinds=tuple(
+                _decode_enum_term(
+                    item,
+                    ActionKind,
+                    "ScorerContract.evidence_action_kinds[]",
+                )
+                for item in _require_terms_list(
+                    terms["evidence_action_kinds"],
+                    "ScorerContract.evidence_action_kinds",
+                )
+            ),
+            check_set_manifests=_decode_digest_manifest_entries(
+                terms["check_set_manifests"],
+                "check_set_id",
+                "ScorerContract.check_set_manifests",
+            ),
+            artifact_manifests=_decode_digest_manifest_entries(
+                terms["artifact_manifests"],
+                "artifact_kind",
+                "ScorerContract.artifact_manifests",
+            ),
+            requires_attestation=terms["requires_attestation"],
+        )
+        _require_canonical_terms(decoded.terms(), terms, "ScorerContract terms")
+        return decoded
 
 
 def _require_exact_type(value: object, expected: type, label: str) -> None:
@@ -321,6 +457,139 @@ def _sorted_unique_ids(values: object, label: str) -> tuple[str, ...]:
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"{label} must not contain duplicates.")
     return tuple(sorted(normalized))
+
+
+def _sorted_unique_digest_bindings(
+    values: object, label: str
+) -> tuple[tuple[str, str], ...]:
+    """Normalize an immutable semantic-name to manifest-digest mapping."""
+
+    if not isinstance(values, tuple):
+        raise ValueError(f"{label} must be a tuple.")
+    normalized: list[tuple[str, str]] = []
+    names: set[str] = set()
+    for index, pair in enumerate(values):
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise ValueError(
+                f"{label}[{index}] must be a (semantic_id, manifest_digest) tuple."
+            )
+        name = _require_id(pair[0], f"{label}[{index}].semantic_id")
+        digest = _require_digest(
+            pair[1], f"{label}[{index}].manifest_digest"
+        )
+        if name in names:
+            raise ValueError(f"{label} must not bind {name!r} more than once.")
+        names.add(name)
+        normalized.append((name, digest))
+    return tuple(sorted(normalized, key=lambda item: item[0]))
+
+
+def _require_terms_object(
+    value: object,
+    expected_fields: frozenset[str],
+    label: str,
+) -> dict[str, Any]:
+    """Require one exact JSON object before constructing a typed record."""
+
+    if type(value) is not dict:
+        raise ValueError(f"{label} must be a JSON object.")
+    if any(type(key) is not str for key in value):
+        raise ValueError(f"{label} keys must be JSON strings.")
+    _freeze_json(value, label)
+    actual = set(value)
+    missing = expected_fields - actual
+    unexpected = actual - expected_fields
+    if missing or unexpected:
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(sorted(missing)))
+        if unexpected:
+            details.append("unexpected " + ", ".join(sorted(unexpected)))
+        raise ValueError(f"{label} has incompatible fields ({'; '.join(details)}).")
+    return value
+
+
+def _require_terms_list(value: object, label: str) -> list[Any]:
+    if type(value) is not list:
+        raise ValueError(f"{label} must be a JSON array.")
+    return value
+
+
+def _require_terms_string(value: object, label: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{label} must be a JSON string.")
+    return value
+
+
+def _require_json_number(value: object, label: str) -> float:
+    if type(value) not in {int, float}:
+        raise ValueError(f"{label} must be a finite JSON number.")
+    return _finite_number(value, label)
+
+
+def _decode_digest_manifest_entries(
+    value: object,
+    identity_field: str,
+    label: str,
+) -> tuple[tuple[str, str], ...]:
+    entries = _require_terms_list(value, label)
+    decoded: list[tuple[str, str]] = []
+    for index, item in enumerate(entries):
+        entry = _require_terms_object(
+            item,
+            frozenset({identity_field, "manifest_digest"}),
+            f"{label}[{index}]",
+        )
+        decoded.append(
+            (
+                _require_terms_string(
+                    entry[identity_field], f"{label}[{index}].{identity_field}"
+                ),
+                _require_terms_string(
+                    entry["manifest_digest"],
+                    f"{label}[{index}].manifest_digest",
+                ),
+            )
+        )
+    return tuple(decoded)
+
+
+def _decode_enum_term(
+    value: object, enum_type: type[_StrEnumT], label: str
+) -> _StrEnumT:
+    raw = _require_terms_string(value, label)
+    try:
+        return enum_type(raw)
+    except ValueError as exc:
+        raise ValueError(f"{label} is not a supported {enum_type.__name__}.") from exc
+
+
+def _same_json_terms(left: Any, right: Any) -> bool:
+    """Compare JSON without Python's bool/int/float equality collisions."""
+
+    if type(left) is not type(right):
+        return False
+    if type(left) is dict:
+        return set(left) == set(right) and all(
+            _same_json_terms(left[key], right[key]) for key in left
+        )
+    if type(left) is list:
+        return len(left) == len(right) and all(
+            _same_json_terms(left_item, right_item)
+            for left_item, right_item in zip(left, right, strict=True)
+        )
+    return bool(left == right)
+
+
+def _require_canonical_terms(
+    decoded_terms: Mapping[str, Any],
+    supplied_terms: dict[str, Any],
+    label: str,
+) -> None:
+    if not _same_json_terms(decoded_terms, supplied_terms):
+        raise ValueError(
+            f"{label} must use its canonical field types, ordering, and values."
+        )
 
 
 def _freeze_json(value: Any, path: str = "$") -> Any:
@@ -442,7 +711,7 @@ class LearningAction:
     phase: ActionPhase
     payload: Mapping[str, Any] = field(default_factory=dict)
     elapsed_ms: int | None = None
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = ACTION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require_id(self.id, "LearningAction.id")
@@ -468,9 +737,13 @@ class LearningAction:
         object.__setattr__(self, "payload", _validate_action_payload(self.kind, self.payload))
         if self.elapsed_ms is not None:
             _nonnegative_int(self.elapsed_ms, "LearningAction.elapsed_ms")
-        if self.schema_version != SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != ACTION_SCHEMA_VERSION
+        ):
             raise ValueError(
-                f"LearningAction.schema_version must be {SCHEMA_VERSION}."
+                "LearningAction.schema_version must be the integer "
+                f"{ACTION_SCHEMA_VERSION}."
             )
 
     def terms(self) -> dict[str, Any]:
@@ -484,6 +757,48 @@ class LearningAction:
             "elapsed_ms": self.elapsed_ms,
             "schema_version": self.schema_version,
         }
+
+    @classmethod
+    def from_terms(cls, value: object) -> LearningAction:
+        """Strictly decode one persisted schema-1 semantic action."""
+
+        terms = _require_terms_object(
+            value,
+            frozenset(
+                {
+                    "id",
+                    "trace_id",
+                    "sequence",
+                    "kind",
+                    "phase",
+                    "payload",
+                    "elapsed_ms",
+                    "schema_version",
+                }
+            ),
+            "LearningAction terms",
+        )
+        payload = terms["payload"]
+        if type(payload) is not dict:
+            raise ValueError("LearningAction.payload must be a JSON object.")
+        decoded = cls(
+            id=_require_terms_string(terms["id"], "LearningAction.id"),
+            trace_id=_require_terms_string(
+                terms["trace_id"], "LearningAction.trace_id"
+            ),
+            sequence=terms["sequence"],
+            kind=_decode_enum_term(
+                terms["kind"], ActionKind, "LearningAction.kind"
+            ),
+            phase=_decode_enum_term(
+                terms["phase"], ActionPhase, "LearningAction.phase"
+            ),
+            payload=payload,
+            elapsed_ms=terms["elapsed_ms"],
+            schema_version=terms["schema_version"],
+        )
+        _require_canonical_terms(decoded.terms(), terms, "LearningAction terms")
+        return decoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -654,10 +969,13 @@ class ActionTraceSummary:
 class RubricCriterion:
     """One observable rubric claim and its finite evidence budget.
 
-    ``concept_weights`` is an explicit normalized mapping rather than an
-    inference from prose.  ``dependence_group`` joins observations that share a
-    stimulus, artifact, template, scorer, or other source of local dependence.
-    All criteria in the same group must declare the same ``dependence_cap``.
+    ``concept_weights`` is an explicit normalized broad-skill mapping rather
+    than an inference from prose.  ``objective_weights`` optionally binds the
+    observation to exact fine-grained curriculum objectives; an empty mapping
+    means the criterion is intentionally concept-only.  ``dependence_group``
+    joins observations that share a stimulus, artifact, template, scorer, or
+    other source of local dependence.  All criteria in the same group must
+    declare the same ``dependence_cap``.
     """
 
     id: str
@@ -665,6 +983,7 @@ class RubricCriterion:
     scale: CriterionScale
     concept_weights: tuple[tuple[str, float], ...]
     dependence_group: str
+    objective_weights: tuple[tuple[str, float], ...] = ()
     allowed_scores: tuple[float, ...] | None = None
     misconception_ids: tuple[str, ...] = ()
     score_weight: float = 1.0
@@ -730,6 +1049,36 @@ class RubricCriterion:
             "concept_weights",
             tuple(sorted(normalized_weights, key=lambda pair: pair[0])),
         )
+        if not isinstance(self.objective_weights, tuple):
+            raise ValueError("RubricCriterion.objective_weights must be a tuple.")
+        objective_ids: set[str] = set()
+        normalized_objectives: list[tuple[str, float]] = []
+        for index, pair in enumerate(self.objective_weights):
+            if not isinstance(pair, tuple) or len(pair) != 2:
+                raise ValueError(
+                    "RubricCriterion.objective_weights entries must be "
+                    "(objective_id, weight) tuples."
+                )
+            objective_id = _require_id(
+                pair[0], f"objective_weights[{index}].objective_id"
+            )
+            if objective_id in objective_ids:
+                raise ValueError(f"Duplicate objective mapping {objective_id}.")
+            objective_ids.add(objective_id)
+            weight = _finite_number(
+                pair[1], f"objective_weights[{index}].weight"
+            )
+            if weight <= 0.0:
+                raise ValueError("Objective weights must be positive.")
+            normalized_objectives.append((objective_id, weight))
+        objective_total = sum(weight for _, weight in normalized_objectives)
+        if normalized_objectives and abs(objective_total - 1.0) > 1e-9:
+            raise ValueError("RubricCriterion objective weights must sum to 1.")
+        object.__setattr__(
+            self,
+            "objective_weights",
+            tuple(sorted(normalized_objectives, key=lambda pair: pair[0])),
+        )
         _require_id(self.dependence_group, "RubricCriterion.dependence_group")
         object.__setattr__(
             self,
@@ -770,6 +1119,10 @@ class RubricCriterion:
     def concept_ids(self) -> tuple[str, ...]:
         return tuple(concept_id for concept_id, _ in self.concept_weights)
 
+    @property
+    def objective_ids(self) -> tuple[str, ...]:
+        return tuple(objective_id for objective_id, _ in self.objective_weights)
+
     def terms(self) -> dict[str, Any]:
         return {
             "id": self.id,
@@ -779,6 +1132,7 @@ class RubricCriterion:
                 None if self.allowed_scores is None else list(self.allowed_scores)
             ),
             "concept_weights": [list(pair) for pair in self.concept_weights],
+            "objective_weights": [list(pair) for pair in self.objective_weights],
             "dependence_group": self.dependence_group,
             "misconception_ids": list(self.misconception_ids),
             "score_weight": self.score_weight,
@@ -789,9 +1143,126 @@ class RubricCriterion:
         }
 
 
+def _decode_rubric_criterion(value: object) -> RubricCriterion:
+    terms = _require_terms_object(
+        value,
+        frozenset(
+            {
+                "id",
+                "name",
+                "scale",
+                "allowed_scores",
+                "concept_weights",
+                "objective_weights",
+                "dependence_group",
+                "misconception_ids",
+                "score_weight",
+                "evidence_cap",
+                "dependence_cap",
+                "assisted_evidence_factor",
+                "certification_eligible",
+            }
+        ),
+        "RubricCriterion terms",
+    )
+    allowed_scores_term = terms["allowed_scores"]
+    if allowed_scores_term is None:
+        allowed_scores = None
+    else:
+        allowed_scores = tuple(
+            _require_json_number(item, "RubricCriterion.allowed_scores[]")
+            for item in _require_terms_list(
+                allowed_scores_term, "RubricCriterion.allowed_scores"
+            )
+        )
+
+    concept_weight_terms = _require_terms_list(
+        terms["concept_weights"], "RubricCriterion.concept_weights"
+    )
+    concept_weights: list[tuple[str, float]] = []
+    for index, pair in enumerate(concept_weight_terms):
+        pair_terms = _require_terms_list(
+            pair, f"RubricCriterion.concept_weights[{index}]"
+        )
+        if len(pair_terms) != 2:
+            raise ValueError(
+                f"RubricCriterion.concept_weights[{index}] must have two terms."
+            )
+        concept_weights.append(
+            (
+                _require_terms_string(
+                    pair_terms[0],
+                    f"RubricCriterion.concept_weights[{index}].concept_id",
+                ),
+                _require_json_number(
+                    pair_terms[1],
+                    f"RubricCriterion.concept_weights[{index}].weight",
+                ),
+            )
+        )
+    objective_weight_terms = _require_terms_list(
+        terms["objective_weights"], "RubricCriterion.objective_weights"
+    )
+    objective_weights: list[tuple[str, float]] = []
+    for index, pair in enumerate(objective_weight_terms):
+        pair_terms = _require_terms_list(
+            pair, f"RubricCriterion.objective_weights[{index}]"
+        )
+        if len(pair_terms) != 2:
+            raise ValueError(
+                f"RubricCriterion.objective_weights[{index}] must have two terms."
+            )
+        objective_weights.append(
+            (
+                _require_terms_string(
+                    pair_terms[0],
+                    f"RubricCriterion.objective_weights[{index}].objective_id",
+                ),
+                _require_json_number(
+                    pair_terms[1],
+                    f"RubricCriterion.objective_weights[{index}].weight",
+                ),
+            )
+        )
+    decoded = RubricCriterion(
+        id=_require_terms_string(terms["id"], "RubricCriterion.id"),
+        name=_require_terms_string(terms["name"], "RubricCriterion.name"),
+        scale=_decode_enum_term(
+            terms["scale"], CriterionScale, "RubricCriterion.scale"
+        ),
+        allowed_scores=allowed_scores,
+        concept_weights=tuple(concept_weights),
+        objective_weights=tuple(objective_weights),
+        dependence_group=_require_terms_string(
+            terms["dependence_group"], "RubricCriterion.dependence_group"
+        ),
+        misconception_ids=tuple(
+            _require_terms_string(item, "RubricCriterion.misconception_ids[]")
+            for item in _require_terms_list(
+                terms["misconception_ids"],
+                "RubricCriterion.misconception_ids",
+            )
+        ),
+        score_weight=terms["score_weight"],
+        evidence_cap=terms["evidence_cap"],
+        dependence_cap=terms["dependence_cap"],
+        assisted_evidence_factor=terms["assisted_evidence_factor"],
+        certification_eligible=terms["certification_eligible"],
+    )
+    _require_canonical_terms(
+        decoded.terms(), terms, "RubricCriterion terms"
+    )
+    return decoded
+
+
 @dataclass(frozen=True, slots=True)
 class LearningTask:
-    """Immutable multimodal task contract consumed by the pure reducer."""
+    """Immutable, content-addressed multimodal task consumed by the reducer.
+
+    The task digest binds the exact learner instructions, per-source provenance,
+    administration rules, stimulus, rubric, and trusted scorer manifests.  An
+    author must publish a new task version whenever any of those terms changes.
+    """
 
     id: str
     version: int
@@ -799,11 +1270,17 @@ class LearningTask:
     title: str
     modality: TaskModality
     criteria: tuple[RubricCriterion, ...]
+    instructions: str
+    source_manifests: tuple[tuple[str, str], ...]
+    administration_id: str
+    administration_manifest_digest: str
+    stimulus_id: str
+    stimulus_digest: str
     scorer_contracts: tuple[ScorerContract, ...] = ()
     allowed_action_kinds: tuple[ActionKind, ...] = tuple(ActionKind)
     allowed_tool_ids: tuple[str, ...] | None = None
     evidence_cap: float = 1.0
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = TASK_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require_id(self.id, "LearningTask.id")
@@ -811,6 +1288,27 @@ class LearningTask:
         _require_id(self.family_id, "LearningTask.family_id")
         _require_nonblank_text(self.title, "LearningTask.title", maximum=256)
         _require_enum(self.modality, TaskModality, "LearningTask.modality")
+        _require_nonblank_text(
+            self.instructions,
+            "LearningTask.instructions",
+            maximum=32_768,
+        )
+        source_manifests = _sorted_unique_digest_bindings(
+            self.source_manifests,
+            "LearningTask.source_manifests",
+        )
+        if not source_manifests:
+            raise ValueError(
+                "LearningTask.source_manifests must pin at least one source."
+            )
+        object.__setattr__(self, "source_manifests", source_manifests)
+        _require_id(self.administration_id, "LearningTask.administration_id")
+        _require_digest(
+            self.administration_manifest_digest,
+            "LearningTask.administration_manifest_digest",
+        )
+        _require_id(self.stimulus_id, "LearningTask.stimulus_id")
+        _require_digest(self.stimulus_digest, "LearningTask.stimulus_digest")
         if not isinstance(self.criteria, tuple) or not self.criteria:
             raise ValueError("LearningTask.criteria must be a non-empty tuple.")
         if any(not isinstance(item, RubricCriterion) for item in self.criteria):
@@ -894,8 +1392,14 @@ class LearningTask:
             "evidence_cap",
             _unit_interval(self.evidence_cap, "LearningTask.evidence_cap"),
         )
-        if self.schema_version != SCHEMA_VERSION:
-            raise ValueError(f"LearningTask.schema_version must be {SCHEMA_VERSION}.")
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != TASK_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "LearningTask.schema_version must be the integer "
+                f"{TASK_SCHEMA_VERSION}."
+            )
 
     @property
     def concept_ids(self) -> tuple[str, ...]:
@@ -905,6 +1409,18 @@ class LearningTask:
                     concept_id
                     for criterion in self.criteria
                     for concept_id in criterion.concept_ids
+                }
+            )
+        )
+
+    @property
+    def objective_ids(self) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    objective_id
+                    for criterion in self.criteria
+                    for objective_id in criterion.objective_ids
                 }
             )
         )
@@ -932,6 +1448,15 @@ class LearningTask:
             "family_id": self.family_id,
             "title": self.title,
             "modality": self.modality.value,
+            "instructions": self.instructions,
+            "source_manifests": [
+                {"source_id": source_id, "provenance_digest": digest}
+                for source_id, digest in self.source_manifests
+            ],
+            "administration_id": self.administration_id,
+            "administration_manifest_digest": self.administration_manifest_digest,
+            "stimulus_id": self.stimulus_id,
+            "stimulus_digest": self.stimulus_digest,
             "criteria": [criterion.terms() for criterion in self.criteria],
             "scorer_contracts": [
                 contract.terms() for contract in self.scorer_contracts
@@ -943,6 +1468,126 @@ class LearningTask:
             "evidence_cap": self.evidence_cap,
             "schema_version": self.schema_version,
         }
+
+    @classmethod
+    def from_terms(cls, value: object) -> LearningTask:
+        """Strictly decode one canonical release-pinned task definition."""
+
+        terms = _require_terms_object(
+            value,
+            frozenset(
+                {
+                    "id",
+                    "version",
+                    "family_id",
+                    "title",
+                    "modality",
+                    "instructions",
+                    "source_manifests",
+                    "administration_id",
+                    "administration_manifest_digest",
+                    "stimulus_id",
+                    "stimulus_digest",
+                    "criteria",
+                    "scorer_contracts",
+                    "allowed_action_kinds",
+                    "allowed_tool_ids",
+                    "evidence_cap",
+                    "schema_version",
+                }
+            ),
+            "LearningTask terms",
+        )
+        allowed_tools_term = terms["allowed_tool_ids"]
+        if allowed_tools_term is None:
+            allowed_tool_ids = None
+        else:
+            allowed_tool_ids = tuple(
+                _require_terms_string(item, "LearningTask.allowed_tool_ids[]")
+                for item in _require_terms_list(
+                    allowed_tools_term, "LearningTask.allowed_tool_ids"
+                )
+            )
+        source_entries = _require_terms_list(
+            terms["source_manifests"], "LearningTask.source_manifests"
+        )
+        source_manifests: list[tuple[str, str]] = []
+        for index, item in enumerate(source_entries):
+            entry = _require_terms_object(
+                item,
+                frozenset({"source_id", "provenance_digest"}),
+                f"LearningTask.source_manifests[{index}]",
+            )
+            source_manifests.append(
+                (
+                    _require_terms_string(
+                        entry["source_id"],
+                        f"LearningTask.source_manifests[{index}].source_id",
+                    ),
+                    _require_terms_string(
+                        entry["provenance_digest"],
+                        "LearningTask.source_manifests"
+                        f"[{index}].provenance_digest",
+                    ),
+                )
+            )
+        decoded = cls(
+            id=_require_terms_string(terms["id"], "LearningTask.id"),
+            version=terms["version"],
+            family_id=_require_terms_string(
+                terms["family_id"], "LearningTask.family_id"
+            ),
+            title=_require_terms_string(terms["title"], "LearningTask.title"),
+            modality=_decode_enum_term(
+                terms["modality"], TaskModality, "LearningTask.modality"
+            ),
+            criteria=tuple(
+                _decode_rubric_criterion(item)
+                for item in _require_terms_list(
+                    terms["criteria"], "LearningTask.criteria"
+                )
+            ),
+            instructions=_require_terms_string(
+                terms["instructions"], "LearningTask.instructions"
+            ),
+            source_manifests=tuple(source_manifests),
+            administration_id=_require_terms_string(
+                terms["administration_id"], "LearningTask.administration_id"
+            ),
+            administration_manifest_digest=_require_terms_string(
+                terms["administration_manifest_digest"],
+                "LearningTask.administration_manifest_digest",
+            ),
+            stimulus_id=_require_terms_string(
+                terms["stimulus_id"], "LearningTask.stimulus_id"
+            ),
+            stimulus_digest=_require_terms_string(
+                terms["stimulus_digest"], "LearningTask.stimulus_digest"
+            ),
+            scorer_contracts=tuple(
+                ScorerContract.from_terms(item)
+                for item in _require_terms_list(
+                    terms["scorer_contracts"],
+                    "LearningTask.scorer_contracts",
+                )
+            ),
+            allowed_action_kinds=tuple(
+                _decode_enum_term(
+                    item,
+                    ActionKind,
+                    "LearningTask.allowed_action_kinds[]",
+                )
+                for item in _require_terms_list(
+                    terms["allowed_action_kinds"],
+                    "LearningTask.allowed_action_kinds",
+                )
+            ),
+            allowed_tool_ids=allowed_tool_ids,
+            evidence_cap=terms["evidence_cap"],
+            schema_version=terms["schema_version"],
+        )
+        _require_canonical_terms(decoded.terms(), terms, "LearningTask terms")
+        return decoded
 
 
 @dataclass(frozen=True, slots=True)
@@ -1032,6 +1677,91 @@ class CriterionEvaluation:
         }
 
 
+def _decode_criterion_evaluation(value: object) -> CriterionEvaluation:
+    terms = _require_terms_object(
+        value,
+        frozenset(
+            {
+                "criterion_id",
+                "status",
+                "score",
+                "outcome_code",
+                "phase",
+                "scorer_kind",
+                "scorer_id",
+                "scorer_version",
+                "source_action_ids",
+                "attestation_digest",
+                "misconception_ids",
+                "reliability",
+            }
+        ),
+        "CriterionEvaluation terms",
+    )
+    score_term = terms["score"]
+    score = (
+        None
+        if score_term is None
+        else _require_json_number(score_term, "CriterionEvaluation.score")
+    )
+    attestation_term = terms["attestation_digest"]
+    attestation_digest = (
+        None
+        if attestation_term is None
+        else _require_terms_string(
+            attestation_term, "CriterionEvaluation.attestation_digest"
+        )
+    )
+    decoded = CriterionEvaluation(
+        criterion_id=_require_terms_string(
+            terms["criterion_id"], "CriterionEvaluation.criterion_id"
+        ),
+        status=_decode_enum_term(
+            terms["status"], EvaluationStatus, "CriterionEvaluation.status"
+        ),
+        score=score,
+        outcome_code=_require_terms_string(
+            terms["outcome_code"], "CriterionEvaluation.outcome_code"
+        ),
+        phase=_decode_enum_term(
+            terms["phase"], ActionPhase, "CriterionEvaluation.phase"
+        ),
+        scorer_kind=_decode_enum_term(
+            terms["scorer_kind"], ScorerKind, "CriterionEvaluation.scorer_kind"
+        ),
+        scorer_id=_require_terms_string(
+            terms["scorer_id"], "CriterionEvaluation.scorer_id"
+        ),
+        scorer_version=_require_terms_string(
+            terms["scorer_version"], "CriterionEvaluation.scorer_version"
+        ),
+        source_action_ids=tuple(
+            _require_terms_string(
+                item, "CriterionEvaluation.source_action_ids[]"
+            )
+            for item in _require_terms_list(
+                terms["source_action_ids"],
+                "CriterionEvaluation.source_action_ids",
+            )
+        ),
+        attestation_digest=attestation_digest,
+        misconception_ids=tuple(
+            _require_terms_string(
+                item, "CriterionEvaluation.misconception_ids[]"
+            )
+            for item in _require_terms_list(
+                terms["misconception_ids"],
+                "CriterionEvaluation.misconception_ids",
+            )
+        ),
+        reliability=terms["reliability"],
+    )
+    _require_canonical_terms(
+        decoded.terms(), terms, "CriterionEvaluation terms"
+    )
+    return decoded
+
+
 @dataclass(frozen=True, slots=True)
 class TaskEvaluation:
     """Version-pinned set of criterion observations for one task attempt."""
@@ -1043,7 +1773,7 @@ class TaskEvaluation:
     task_digest: str
     action_trace_digest: str
     criteria: tuple[CriterionEvaluation, ...]
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = TASK_EVALUATION_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require_id(self.id, "TaskEvaluation.id")
@@ -1064,8 +1794,14 @@ class TaskEvaluation:
         criterion_ids = [item.criterion_id for item in self.criteria]
         if len(criterion_ids) != len(set(criterion_ids)):
             raise ValueError("TaskEvaluation criterion IDs must be unique.")
-        if self.schema_version != SCHEMA_VERSION:
-            raise ValueError(f"TaskEvaluation.schema_version must be {SCHEMA_VERSION}.")
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != TASK_EVALUATION_SCHEMA_VERSION
+        ):
+            raise ValueError(
+                "TaskEvaluation.schema_version must be the integer "
+                f"{TASK_EVALUATION_SCHEMA_VERSION}."
+            )
 
     @property
     def digest(self) -> str:
@@ -1083,6 +1819,53 @@ class TaskEvaluation:
             "schema_version": self.schema_version,
         }
 
+    @classmethod
+    def from_terms(cls, value: object) -> TaskEvaluation:
+        """Strictly decode one canonical task-evaluation record."""
+
+        terms = _require_terms_object(
+            value,
+            frozenset(
+                {
+                    "id",
+                    "trace_id",
+                    "task_id",
+                    "task_version",
+                    "task_digest",
+                    "action_trace_digest",
+                    "criteria",
+                    "schema_version",
+                }
+            ),
+            "TaskEvaluation terms",
+        )
+        decoded = cls(
+            id=_require_terms_string(terms["id"], "TaskEvaluation.id"),
+            trace_id=_require_terms_string(
+                terms["trace_id"], "TaskEvaluation.trace_id"
+            ),
+            task_id=_require_terms_string(
+                terms["task_id"], "TaskEvaluation.task_id"
+            ),
+            task_version=terms["task_version"],
+            task_digest=_require_terms_string(
+                terms["task_digest"], "TaskEvaluation.task_digest"
+            ),
+            action_trace_digest=_require_terms_string(
+                terms["action_trace_digest"],
+                "TaskEvaluation.action_trace_digest",
+            ),
+            criteria=tuple(
+                _decode_criterion_evaluation(item)
+                for item in _require_terms_list(
+                    terms["criteria"], "TaskEvaluation.criteria"
+                )
+            ),
+            schema_version=terms["schema_version"],
+        )
+        _require_canonical_terms(decoded.terms(), terms, "TaskEvaluation terms")
+        return decoded
+
 
 @dataclass(frozen=True, slots=True)
 class EvidenceRecord:
@@ -1093,6 +1876,7 @@ class EvidenceRecord:
     score: float | None
     outcome_code: str
     concept_weights: tuple[tuple[str, float], ...]
+    objective_weights: tuple[tuple[str, float], ...]
     misconception_ids: tuple[str, ...]
     family_id: str
     dependence_group: str
@@ -1134,6 +1918,23 @@ class EvidenceRecord:
             concept_total += normalized_weight
         if abs(concept_total - 1.0) > 1e-9:
             raise ValueError("EvidenceRecord concept weights must sum to 1.")
+        if not isinstance(self.objective_weights, tuple):
+            raise ValueError("EvidenceRecord.objective_weights must be a tuple.")
+        objective_ids: set[str] = set()
+        objective_total = 0.0
+        for objective_id, weight in self.objective_weights:
+            _require_id(objective_id, "EvidenceRecord.objective_id")
+            if objective_id in objective_ids:
+                raise ValueError("EvidenceRecord objective mappings must be unique.")
+            objective_ids.add(objective_id)
+            normalized_weight = _unit_interval(
+                weight, "EvidenceRecord.objective_weight"
+            )
+            if normalized_weight <= 0.0:
+                raise ValueError("EvidenceRecord objective weights must be positive.")
+            objective_total += normalized_weight
+        if self.objective_weights and abs(objective_total - 1.0) > 1e-9:
+            raise ValueError("EvidenceRecord objective weights must sum to 1.")
         object.__setattr__(
             self,
             "misconception_ids",
@@ -1188,6 +1989,7 @@ class EvidenceRecord:
             "score": self.score,
             "outcome_code": self.outcome_code,
             "concept_weights": [list(pair) for pair in self.concept_weights],
+            "objective_weights": [list(pair) for pair in self.objective_weights],
             "misconception_ids": list(self.misconception_ids),
             "family_id": self.family_id,
             "dependence_group": self.dependence_group,
@@ -1262,7 +2064,7 @@ class EvidenceBundle:
     total_evidence_weight: float
     certification_evidence_weight: float
     missing_criterion_ids: tuple[str, ...]
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = EVIDENCE_BUNDLE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require_id(self.task_id, "EvidenceBundle.task_id")
@@ -1308,8 +2110,11 @@ class EvidenceBundle:
                 self.missing_criterion_ids, "EvidenceBundle.missing_criterion_ids"
             ),
         )
-        if self.schema_version != SCHEMA_VERSION:
-            raise ValueError(f"EvidenceBundle.schema_version must be {SCHEMA_VERSION}.")
+        if self.schema_version != EVIDENCE_BUNDLE_SCHEMA_VERSION:
+            raise ValueError(
+                "EvidenceBundle.schema_version must be "
+                f"{EVIDENCE_BUNDLE_SCHEMA_VERSION}."
+            )
 
     @property
     def digest(self) -> str:
@@ -1548,7 +2353,7 @@ def _action_trace_commitment_terms(
     ordered = tuple(sorted(actions, key=lambda item: (item.sequence, item.id)))
     return {
         "type": "tsq.learning_action_trace",
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": ACTION_TRACE_SCHEMA_VERSION,
         "actions": [action.terms() for action in ordered],
     }
 
@@ -1880,7 +2685,7 @@ class DeterministicEvidenceReducer:
                 "trace_summary_digest": trace.digest,
                 "criterion_id": item.criterion.id,
                 "effective_phase": item.phase.value,
-                "reducer": "deterministic-evidence-v1",
+                "reducer": "deterministic-evidence-v2",
             }
             record_material = {
                 **provenance,
@@ -1893,6 +2698,7 @@ class DeterministicEvidenceReducer:
                     score=item.evaluation.score,
                     outcome_code=item.evaluation.outcome_code,
                     concept_weights=item.criterion.concept_weights,
+                    objective_weights=item.criterion.objective_weights,
                     misconception_ids=item.evaluation.misconception_ids,
                     family_id=task.family_id,
                     dependence_group=item.criterion.dependence_group,
@@ -1986,7 +2792,11 @@ def reduce_evidence(
 
 
 __all__ = [
+    "ACTION_SCHEMA_VERSION",
+    "ACTION_TRACE_SCHEMA_VERSION",
     "SCHEMA_VERSION",
+    "TASK_SCHEMA_VERSION",
+    "TASK_EVALUATION_SCHEMA_VERSION",
     "MAX_ACTION_COUNTER",
     "ACTION_PAYLOAD_CONTRACTS",
     "ActionKind",
@@ -1995,6 +2805,7 @@ __all__ = [
     "CheckProgress",
     "CriterionEvaluation",
     "CriterionScale",
+    "EVIDENCE_BUNDLE_SCHEMA_VERSION",
     "DEFAULT_REDUCER",
     "DeterministicEvidenceReducer",
     "EvaluationStatus",

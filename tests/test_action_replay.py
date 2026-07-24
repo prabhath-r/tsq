@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
-from tsq.errors import ValidationError
+from tsq.errors import ConflictError, ValidationError
 from tsq.learner import MODEL_VERSION
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
@@ -253,6 +253,83 @@ class ActionProjectionReplayTestCase(unittest.TestCase):
                 for error in report["recoverable_source_integrity_errors"]
             )
         )
+
+    def test_replay_copy_rejects_changed_schema_guard_without_normalizing_source(
+        self,
+    ) -> None:
+        with self.database.transaction() as connection:
+            connection.executescript(
+                """
+                DROP TRIGGER learning_actions_no_update;
+                CREATE TRIGGER learning_actions_no_update
+                BEFORE UPDATE ON learning_actions BEGIN
+                    SELECT RAISE(ABORT, 'altered action protection');
+                END;
+                """
+            )
+        with self.database.read() as connection:
+            before = connection.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type='trigger'
+                     AND name='learning_actions_no_update'"""
+            ).fetchone()["sql"]
+
+        with self.assertRaisesRegex(
+            ConflictError,
+            "changed triggers: learning_actions_no_update",
+        ):
+            ProjectionReplay(self.database).check("action-replay")
+
+        with self.database.read() as connection:
+            after = connection.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type='trigger'
+                     AND name='learning_actions_no_update'"""
+            ).fetchone()["sql"]
+        self.assertEqual(after, before)
+
+    def test_clean_missing_schema_guard_is_reported_and_repaired_only_on_copy(
+        self,
+    ) -> None:
+        with self.database.transaction() as connection:
+            connection.execute("DROP TRIGGER events_no_update")
+
+        report = ProjectionReplay(self.database).check("action-replay")
+
+        self.assertFalse(report["ok"])
+        self.assertTrue(report["rebuild_safe"], report["errors"])
+        self.assertEqual(
+            report["missing_source_schema_guards"], ["events_no_update"]
+        )
+        self.assertIn(
+            "source database is missing canonical schema trigger events_no_update",
+            report["errors"],
+        )
+        self.assertIn(
+            "source database is missing canonical schema trigger events_no_update",
+            report["recoverable_source_integrity_errors"],
+        )
+        with self.database.read() as connection:
+            self.assertIsNone(
+                connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                       WHERE type='trigger' AND name='events_no_update'"""
+                ).fetchone()
+            )
+
+        target = Path(self.tempdir.name) / "guard-rebuilt.db"
+        rebuilt_report = ProjectionReplay(self.database).rebuild_copy(
+            "action-replay", target
+        )
+
+        self.assertTrue(rebuilt_report["ok"], rebuilt_report["errors"])
+        self.assertIn(
+            "source database is missing canonical schema trigger events_no_update",
+            rebuilt_report["source_discrepancies"],
+        )
+        rebuilt = Database(target, read_only=True)
+        self.assertTrue(rebuilt.verify_integrity()["ok"])
+        self.assertTrue(ProjectionReplay(rebuilt).check("action-replay")["ok"])
 
     def test_malformed_action_event_fails_closed_and_source_stays_unchanged(self) -> None:
         with self.database.transaction() as connection:

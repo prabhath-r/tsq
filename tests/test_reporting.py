@@ -5,11 +5,17 @@ from __future__ import annotations
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from fractions import Fraction
+from math import comb
 from pathlib import Path
 
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.learner import CONCEPT_MODEL_VERSION, MODEL_VERSION, LearnerModel
+from tsq.response_patterns import (
+    POSITION_ANALYSIS_WINDOW,
+    analyze_position_observations,
+)
 from tsq.store import Database
 
 
@@ -18,7 +24,298 @@ CORPUS = ROOT / "corpus" / "ai_curriculum.json"
 START = datetime(2100, 3, 1, 9, 0, tzinfo=timezone.utc)
 
 
+def exact_binomial_upper_tail(
+    probability: Fraction,
+    trials: int,
+    observed: int,
+) -> Fraction:
+    return sum(
+        (
+            Fraction(comb(trials, successes))
+            * probability**successes
+            * (1 - probability) ** (trials - successes)
+        )
+        for successes in range(observed, trials + 1)
+    )
+
+
+class ResponsePositionAnalysisTests(unittest.TestCase):
+    def test_small_stream_matches_unbounded_exact_binomial_reference(self) -> None:
+        observations = tuple((position, 4) for position in range(4)) * 6
+
+        result = analyze_position_observations(observations)
+
+        window = result["window"]
+        self.assertEqual(window["total_non_abstained_observations"], 24)
+        self.assertEqual(window["analyzed_non_abstained_observations"], 24)
+        self.assertEqual(window["truncated_non_abstained_observations"], 0)
+        for test in result["inference"]["position_tests"]:
+            expected = exact_binomial_upper_tail(Fraction(1, 4), 24, 6)
+            self.assertEqual(
+                test["raw_upper_tail_probability"]["exact"],
+                f"{expected.numerator}/{expected.denominator}",
+            )
+            self.assertEqual(
+                test["calculation"],
+                "exact_binomial_equal_probability",
+            )
+
+    def test_large_stream_analyzes_only_recent_bounded_window(self) -> None:
+        earlier = tuple((index % 4, 4) for index in range(9_744))
+        observations = earlier + ((0, 4),) * POSITION_ANALYSIS_WINDOW
+
+        result = analyze_position_observations(observations)
+
+        window = result["window"]
+        self.assertEqual(window["total_non_abstained_observations"], 10_000)
+        self.assertEqual(
+            window["analyzed_non_abstained_observations"],
+            POSITION_ANALYSIS_WINDOW,
+        )
+        self.assertEqual(
+            window["truncated_non_abstained_observations"],
+            10_000 - POSITION_ANALYSIS_WINDOW,
+        )
+        dominant = result["inference"]["dominant_position"]
+        self.assertEqual(dominant["display_position"], 1)
+        self.assertEqual(
+            dominant["selected_count"],
+            POSITION_ANALYSIS_WINDOW,
+        )
+        self.assertEqual(
+            dominant["calculation"],
+            "exact_binomial_equal_probability",
+        )
+        self.assertEqual(
+            dominant["raw_upper_tail_probability"]["exact"],
+            f"1/{4 ** POSITION_ANALYSIS_WINDOW}",
+        )
+
+    def test_mixed_option_counts_use_bounded_exact_dynamic_program(self) -> None:
+        recent = tuple(
+            (index % option_count, option_count)
+            for index, option_count in enumerate(
+                (3, 4) * (POSITION_ANALYSIS_WINDOW // 2)
+            )
+        )
+        observations = ((0, 3),) * 50 + recent
+
+        result = analyze_position_observations(observations)
+
+        self.assertEqual(
+            result["window"]["analyzed_non_abstained_observations"],
+            POSITION_ANALYSIS_WINDOW,
+        )
+        self.assertEqual(
+            result["window"]["truncated_non_abstained_observations"],
+            50,
+        )
+        self.assertTrue(
+            all(
+                test["calculation"]
+                == "exact_poisson_binomial_dynamic_program"
+                for test in result["inference"]["position_tests"]
+            )
+        )
+
+
+def run_position_pattern(
+    directory: str,
+    *,
+    learner_id: str,
+    count: int,
+    selector,
+) -> tuple[Database, AdaptiveEngine, dict, datetime, set[str]]:
+    database = Database(Path(directory) / "report.db")
+    database.initialize()
+    database.import_corpus(
+        *read_and_parse(CORPUS, include_catalog=True)
+    )
+    engine = AdaptiveEngine(database)
+    engine.create_learner(learner_id)
+    session = engine.start_session(
+        learner_id,
+        # This integration helper deliberately needs up to 24 observations in
+        # one session.  Use the broad released curriculum so the position-habit
+        # test does not depend on one narrower topic's remediation capacity.
+        "t_machine_learning",
+        seed=71,
+        now=START,
+    )
+    current = START
+    first_displayed_ids: set[str] = set()
+    for index in range(count):
+        presentation = engine.next_question(session["id"], now=current)
+        first_displayed_ids.add(presentation.ordered_options[0].id)
+        selected = selector(presentation, index)
+        answered_at = current + timedelta(seconds=2)
+        engine.submit_answer(
+            presentation.decision_id,
+            selected,
+            confidence=0.75 if selected is not None else 0.20,
+            response_ms=1_200,
+            hint_count=0,
+            feedback_shown=True,
+            idempotency_key=f"{learner_id}:{index}",
+            now=answered_at,
+        )
+        current = answered_at + timedelta(minutes=5)
+    return database, engine, session, current, first_displayed_ids
+
+
 class SessionReportingTests(unittest.TestCase):
+    def test_position_shadow_detects_true_first_displayed_habit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _database, engine, session, current, first_ids = run_position_pattern(
+                directory,
+                learner_id="first-position-habit",
+                count=16,
+                selector=lambda presentation, _index: (
+                    presentation.ordered_options[0].id
+                ),
+            )
+            report = engine.session_report(session["id"], now=current)
+
+        shadow = report["response_position_shadow"]
+        self.assertGreaterEqual(len(first_ids), 3)
+        self.assertTrue(shadow["observational_only"])
+        self.assertFalse(shadow["affects_mastery"])
+        self.assertFalse(shadow["affects_certification"])
+        self.assertFalse(shadow["affects_selection"])
+        self.assertTrue(shadow["evidence"]["boundary_valid"])
+        self.assertEqual(
+            shadow["evidence"]["non_abstained_observations"], 16
+        )
+        self.assertEqual(
+            shadow["evidence"]["analyzed_non_abstained_observations"], 16
+        )
+        self.assertEqual(
+            shadow["evidence"]["truncated_non_abstained_observations"], 0
+        )
+        self.assertEqual(
+            shadow["test_contract"][
+                "maximum_recent_non_abstained_observations"
+            ],
+            POSITION_ANALYSIS_WINDOW,
+        )
+        inference = shadow["inference"]
+        self.assertEqual(
+            inference["status"], "position_concentration_signal"
+        )
+        dominant = inference["dominant_position"]
+        self.assertEqual(dominant["display_position"], 1)
+        self.assertEqual(dominant["selected_count"], 16)
+        self.assertEqual(
+            dominant["expected_count"]["exact"], "4/1"
+        )
+        self.assertEqual(
+            dominant["raw_upper_tail_probability"]["exact"],
+            "1/4294967296",
+        )
+        self.assertEqual(
+            dominant["bonferroni_adjusted_probability"]["exact"],
+            "1/1073741824",
+        )
+
+    def test_position_shadow_does_not_flag_content_based_correct_answers(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _database, engine, session, current, _first_ids = run_position_pattern(
+                directory,
+                learner_id="content-based-answers",
+                count=24,
+                selector=lambda presentation, _index: (
+                    presentation.question.correct_option.id
+                ),
+            )
+            report = engine.session_report(session["id"], now=current)
+
+        shadow = report["response_position_shadow"]
+        self.assertTrue(shadow["evidence"]["boundary_valid"])
+        self.assertEqual(
+            shadow["inference"]["status"], "no_signal"
+        )
+        observed_positions = {
+            row["display_position"]
+            for row in shadow["inference"]["position_tests"]
+            if row["selected_count"]
+        }
+        self.assertEqual(observed_positions, {1, 2, 3, 4})
+        self.assertFalse(
+            any(
+                row["familywise_signal"]
+                for row in shadow["inference"]["position_tests"]
+            )
+        )
+
+    def test_position_shadow_is_inconclusive_for_small_abstaining_sample(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            _database, engine, session, current, _first_ids = run_position_pattern(
+                directory,
+                learner_id="small-position-sample",
+                count=8,
+                selector=lambda presentation, index: (
+                    presentation.ordered_options[0].id
+                    if index < 4
+                    else None
+                ),
+            )
+            report = engine.session_report(session["id"], now=current)
+
+        shadow = report["response_position_shadow"]
+        self.assertTrue(shadow["evidence"]["boundary_valid"])
+        self.assertEqual(shadow["evidence"]["answered_observations"], 8)
+        self.assertEqual(shadow["evidence"]["non_abstained_observations"], 4)
+        self.assertEqual(shadow["evidence"]["abstentions_excluded"], 4)
+        self.assertEqual(shadow["inference"]["status"], "inconclusive")
+        self.assertEqual(
+            shadow["inference"]["reason"],
+            "insufficient_non_abstained_observations",
+        )
+        self.assertEqual(shadow["inference"]["position_tests"], [])
+
+    def test_position_shadow_fails_closed_on_tampered_order_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, engine, session, current, _first_ids = run_position_pattern(
+                directory,
+                learner_id="tampered-position-boundary",
+                count=12,
+                selector=lambda presentation, _index: (
+                    presentation.ordered_options[0].id
+                ),
+            )
+            before_hash = database.learner_projection_hash(
+                "tampered-position-boundary"
+            )
+            with database.transaction() as connection:
+                connection.execute(
+                    """UPDATE decisions SET option_order_json = '{'
+                       WHERE id = (
+                           SELECT decision_id FROM attempts
+                           WHERE session_id = ?
+                           ORDER BY answered_at, id LIMIT 1
+                       )""",
+                    (session["id"],),
+                )
+            report = engine.session_report(session["id"], now=current)
+            after_hash = database.learner_projection_hash(
+                "tampered-position-boundary"
+            )
+
+        shadow = report["response_position_shadow"]
+        self.assertEqual(before_hash, after_hash)
+        self.assertFalse(shadow["evidence"]["boundary_valid"])
+        self.assertTrue(shadow["evidence"]["boundary_errors"])
+        self.assertEqual(shadow["inference"]["status"], "unavailable")
+        self.assertEqual(
+            shadow["inference"]["reason"],
+            "immutable_evidence_boundary_invalid",
+        )
+        self.assertEqual(shadow["inference"]["position_tests"], [])
+
     def test_child_topic_question_is_inside_requested_parent_topic(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "report.db")
@@ -160,6 +457,45 @@ class SessionReportingTests(unittest.TestCase):
             report = engine.session_report(
                 session["id"], now=START + timedelta(seconds=4)
             )
+            inference = report["selected_response_inference"]
+            self.assertEqual(
+                inference["claim_scope"],
+                "provisional_selected_response_inference",
+            )
+            self.assertEqual(
+                inference["model_validation_status"],
+                "not_empirically_validated",
+            )
+            self.assertEqual(
+                inference["corpus_calibration_status"],
+                "no_calibrated_items",
+            )
+            self.assertEqual(
+                inference["contract_version"],
+                "selected-response-inference-v1",
+            )
+            self.assertEqual(
+                inference["corpus_release_id"],
+                report["corpus_release_id"],
+            )
+            self.assertEqual(
+                inference["count_scope"], "entire_corpus_release"
+            )
+            self.assertGreater(inference["eligible_question_count"], 0)
+            self.assertEqual(
+                inference["eligible_question_count"],
+                inference["approved_question_count"]
+                + inference["calibrated_question_count"],
+            )
+            self.assertEqual(inference["calibrated_question_count"], 0)
+            self.assertIn(
+                "not a proven universal error envelope",
+                inference["numerical_guard_scope"],
+            )
+            self.assertIn(
+                "legacy gaussian_moments",
+                inference["numerical_guard_scope"],
+            )
             objective = next(
                 row
                 for row in report["objective_performance"]
@@ -187,6 +523,18 @@ class SessionReportingTests(unittest.TestCase):
             profile = engine.profile(
                 learner_id, now=START + timedelta(seconds=4)
             )
+            self.assertEqual(
+                profile["selected_response_inference"], inference
+            )
+            self.assertEqual(
+                profile["corpus_release_id"], report["corpus_release_id"]
+            )
+            self.assertIn(
+                "does not cover item calibration",
+                profile["projection_definitions"][
+                    "mastery_probability_error_bound"
+                ],
+            )
             objective_profile = next(
                 row
                 for row in profile["learning_objectives"]
@@ -198,6 +546,10 @@ class SessionReportingTests(unittest.TestCase):
             self.assertEqual(
                 objective_profile["posterior_representation"], "exact_grid"
             )
+            self.assertEqual(
+                objective_profile["state_qualification"],
+                "provisional_selected_response_state",
+            )
             concept_profile = next(
                 row
                 for row in profile["skills"]
@@ -207,6 +559,24 @@ class SessionReportingTests(unittest.TestCase):
             self.assertEqual(
                 concept_profile["projection_kind"],
                 "derived_objective_readiness_floor",
+            )
+            self.assertEqual(
+                concept_profile["state_qualification"],
+                "provisional_selected_response_state",
+            )
+            floor_objective_profile = next(
+                row
+                for row in profile["learning_objectives"]
+                if row["objective_id"]
+                == concept_profile["objective_floor_source_id"]
+            )
+            self.assertEqual(
+                concept_profile["independent_families"],
+                floor_objective_profile["independent_families"],
+            )
+            self.assertEqual(
+                concept_profile["observed_response_families"],
+                floor_objective_profile["observed_response_families"],
             )
 
     def test_v7_missing_confidence_is_counted_as_uncertain(self) -> None:
@@ -254,6 +624,70 @@ class SessionReportingTests(unittest.TestCase):
             self.assertEqual(
                 objective["session"]["successful_retrieval_families"], 0
             )
+
+    def test_derived_concept_reports_its_exact_floor_objective_evidence(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "report.db")
+            database.initialize()
+            database.import_corpus(
+                *read_and_parse(CORPUS, include_catalog=True)
+            )
+            engine = AdaptiveEngine(database)
+            learner_id = "derived-floor-evidence"
+            engine.create_learner(learner_id)
+            session = engine.start_session(
+                learner_id,
+                "c_causal_masking",
+                seed=1,
+                now=START,
+            )
+            presentation = engine.next_question(session["id"], now=START)
+            self.assertEqual(
+                presentation.question.objective_id,
+                "lo_causal_visibility",
+            )
+            engine.submit_answer(
+                presentation.decision_id,
+                presentation.question.correct_option.id,
+                confidence=0.95,
+                response_ms=4_000,
+                hint_count=0,
+                feedback_shown=False,
+                now=START + timedelta(seconds=4),
+            )
+            profile = engine.profile(
+                learner_id,
+                root_concept_id="c_causal_masking",
+                now=START + timedelta(seconds=4),
+            )
+
+        concept = next(
+            row
+            for row in profile["skills"]
+            if row["concept_id"] == "c_causal_masking"
+        )
+        objective = next(
+            row
+            for row in profile["learning_objectives"]
+            if row["objective_id"] == "lo_causal_visibility"
+        )
+        self.assertEqual(
+            concept["objective_floor_source_id"],
+            objective["objective_id"],
+        )
+        self.assertEqual(concept["independent_families"], 1)
+        self.assertEqual(concept["observed_response_families"], 1)
+        self.assertEqual(
+            concept["independent_families"],
+            objective["independent_families"],
+        )
+        self.assertEqual(
+            concept["observed_response_families"],
+            objective["observed_response_families"],
+        )
+        self.assertEqual(concept["state"], objective["state"])
 
     def test_selection_window_report_uses_exact_integer_milliseconds(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

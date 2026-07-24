@@ -47,10 +47,19 @@ CORPUS = ROOT / "corpus" / "ai_curriculum.json"
 START = datetime(2100, 7, 8, 9, 0, tzinfo=timezone.utc)
 
 
-def legacy_bundle(bundle: dict) -> dict:
-    """Remove the optional v2 extension without changing question content."""
+def declared_fixture_bundle(bundle: dict) -> dict:
+    """Give intentionally edited fixture questions explicit provenance."""
 
-    legacy = copy.deepcopy(bundle)
+    declared = copy.deepcopy(bundle)
+    for question in declared["questions"]:
+        question.setdefault("provenance", {}).setdefault("generated", False)
+    return declared
+
+
+def legacy_bundle(bundle: dict) -> dict:
+    """Remove the optional v2 extension from an explicitly declared fixture."""
+
+    legacy = declared_fixture_bundle(bundle)
     legacy["schema_version"] = 1
     legacy.pop("learning_objectives", None)
     legacy.pop("objective_edges", None)
@@ -129,7 +138,7 @@ class ObjectiveCorpusSchemaTestCase(unittest.TestCase):
         )
 
     def test_v2_rejects_unknown_and_semantically_incompatible_mappings(self) -> None:
-        unknown = copy.deepcopy(self.bundle)
+        unknown = declared_fixture_bundle(self.bundle)
         mapped = next(
             question
             for question in unknown["questions"]
@@ -143,7 +152,7 @@ class ObjectiveCorpusSchemaTestCase(unittest.TestCase):
             {issue.code for issue in raised.exception.issues},
         )
 
-        incompatible = copy.deepcopy(self.bundle)
+        incompatible = declared_fixture_bundle(self.bundle)
         objective_concepts = {
             objective["id"]: {
                 objective["primary_concept_id"],
@@ -782,7 +791,9 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
         self.assertTrue(replay["source_projection_matches_replay"])
 
     def test_cross_objective_route_preserves_an_only_parent_family(self) -> None:
-        bundle = copy.deepcopy(json.loads(CORPUS.read_text(encoding="utf-8")))
+        bundle = declared_fixture_bundle(
+            json.loads(CORPUS.read_text(encoding="utf-8"))
+        )
         parent_objective = "lo_causal_visibility"
         child_objective = "lo_transformer_information_paths"
         shared_family = "f_adversarial_parent_verification"
@@ -1944,7 +1955,9 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
     def test_v4_concept_and_v5_objective_history_replay_together(self) -> None:
         mixed = Database(Path(self.tempdir.name) / "mixed.db")
         mixed.initialize()
-        raw = json.loads(CORPUS.read_text(encoding="utf-8"))
+        raw = declared_fixture_bundle(
+            json.loads(CORPUS.read_text(encoding="utf-8"))
+        )
         v1 = legacy_bundle(raw)
         parsed_v1 = parse_bundle(v1)
         catalog_v1 = parse_catalog(v1, parsed_v1[0], parsed_v1[4])
@@ -1969,8 +1982,12 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
             now=START + timedelta(minutes=1),
         )
 
+        parsed_current = parse_bundle(raw)
+        catalog_current = parse_catalog(
+            raw, parsed_current[0], parsed_current[4]
+        )
         current_release = mixed.import_corpus(
-            *read_and_parse(CORPUS, include_catalog=True)
+            *parsed_current, *catalog_current
         )["release_id"]
         self.assertNotEqual(legacy_release, current_release)
         current_engine = AdaptiveEngine(mixed)

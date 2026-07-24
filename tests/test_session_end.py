@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
+from tsq.errors import ValidationError
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
@@ -182,6 +183,207 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
         self.assertEqual(ended["status"], "completed")
         self.assertTrue(self.database.verify_integrity()["ok"])
 
+    def test_future_domain_session_closes_at_explicit_simulation_time(self) -> None:
+        started_at = datetime(2101, 2, 3, 9, 0, tzinfo=timezone.utc)
+        selected_at = started_at + timedelta(minutes=1)
+        answered_at = selected_at + timedelta(minutes=2)
+        ended_at = answered_at + timedelta(minutes=3)
+        session = self.engine.start_session(
+            "session-end",
+            "c_attention",
+            seed=89,
+            now=started_at,
+        )
+        presentation = self.engine.next_question(
+            session["id"], now=selected_at
+        )
+        self.engine.submit_answer(
+            presentation.decision_id,
+            presentation.question.correct_option.id,
+            confidence=0.8,
+            response_ms=90_000,
+            now=answered_at,
+        )
+
+        ended = self.engine.end_session(
+            session["id"],
+            completed=True,
+            reason="simulation complete",
+            idempotency_key="future-session-end",
+            now=ended_at,
+        )
+        # Domain time is not an idempotency input. A retry returns the same
+        # durable result even when its supplied clock is earlier.
+        replayed = self.engine.end_session(
+            session["id"],
+            completed=True,
+            reason="simulation complete",
+            idempotency_key="future-session-end",
+            now=started_at,
+        )
+        self.assertEqual(ended, replayed)
+        self.assertEqual(ended["updated_at"], ended_at.isoformat())
+        with self.database.read() as connection:
+            boundary = connection.execute(
+                """SELECT occurred_at FROM events
+                   WHERE event_type = 'SessionEnded' AND session_id = ?""",
+                (session["id"],),
+            ).fetchone()
+        self.assertEqual(boundary["occurred_at"], ended_at.isoformat())
+        integrity = self.database.verify_integrity()
+        self.assertTrue(integrity["ok"], integrity["errors"])
+
+    def test_end_rejects_time_before_latest_session_event_atomically(self) -> None:
+        started_at = datetime(2031, 4, 5, 10, 0, tzinfo=timezone.utc)
+        selected_at = started_at + timedelta(minutes=4)
+        session = self.engine.start_session(
+            "session-end",
+            "c_attention",
+            seed=97,
+            now=started_at,
+        )
+        presentation = self.engine.next_question(
+            session["id"], now=selected_at
+        )
+
+        with self.assertRaisesRegex(
+            ValidationError, "latest recorded event"
+        ):
+            self.engine.end_session(
+                session["id"],
+                status="abandoned",
+                now=selected_at - timedelta(seconds=1),
+            )
+
+        current = self.database.get_session(session["id"])
+        self.assertEqual(current["status"], "active")
+        self.assertEqual(current["revision"], session["revision"] + 1)
+        pending = self.database.pending_presentation(session["id"])
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending.decision_id, presentation.decision_id)
+        with self.database.read() as connection:
+            ended_count = connection.execute(
+                """SELECT COUNT(*) AS n FROM events
+                   WHERE event_type = 'SessionEnded' AND session_id = ?""",
+                (session["id"],),
+            ).fetchone()["n"]
+        self.assertEqual(ended_count, 0)
+
+        ended_at = selected_at + timedelta(seconds=1)
+        ended = self.engine.end_session(
+            session["id"],
+            status="abandoned",
+            now=ended_at,
+        )
+        self.assertEqual(ended["updated_at"], ended_at.isoformat())
+        with self.database.read() as connection:
+            times = connection.execute(
+                """SELECT event_type, occurred_at FROM events
+                   WHERE session_id = ?
+                     AND event_type IN (
+                         'DecisionInvalidated', 'SessionEnded'
+                     )
+                   ORDER BY stream_version""",
+                (session["id"],),
+            ).fetchall()
+        self.assertEqual(
+            [(row["event_type"], row["occurred_at"]) for row in times],
+            [
+                ("DecisionInvalidated", ended_at.isoformat()),
+                ("SessionEnded", ended_at.isoformat()),
+            ],
+        )
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_end_rejects_naive_domain_time(self) -> None:
+        session = self.engine.start_session(
+            "session-end", "c_attention", seed=101
+        )
+        with self.assertRaisesRegex(ValidationError, "timezone-aware"):
+            self.engine.end_session(
+                session["id"],
+                now=datetime(2030, 1, 1),
+            )
+        self.assertEqual(
+            self.database.get_session(session["id"])["status"], "active"
+        )
+
+    def test_integrity_detects_closed_session_projection_corruption(self) -> None:
+        ended_at = datetime(2032, 5, 6, 12, 0, tzinfo=timezone.utc)
+        session = self.engine.start_session(
+            "session-end",
+            "c_attention",
+            seed=103,
+            now=ended_at - timedelta(hours=1),
+        )
+        self.engine.end_session(session["id"], now=ended_at)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE sessions SET status = 'active',
+                       updated_at = created_at
+                   WHERE id = ?""",
+                (session["id"],),
+            )
+        integrity = self.database.verify_integrity()
+        self.assertFalse(integrity["ok"])
+        self.assertTrue(
+            any(
+                "active status has a SessionEnded boundary" in error
+                for error in integrity["errors"]
+            ),
+            integrity["errors"],
+        )
+        self.assertTrue(
+            any(
+                "SessionEnded payload: status mismatch" in error
+                for error in integrity["errors"]
+            ),
+            integrity["errors"],
+        )
+        self.assertTrue(
+            any(
+                "updated_at does not match SessionEnded occurrence" in error
+                for error in integrity["errors"]
+            ),
+            integrity["errors"],
+        )
+
+    def test_integrity_detects_session_end_before_start(self) -> None:
+        started_at = datetime(2033, 6, 7, 8, 0, tzinfo=timezone.utc)
+        session = self.engine.start_session(
+            "session-end",
+            "c_attention",
+            seed=107,
+            now=started_at,
+        )
+        self.engine.end_session(
+            session["id"], now=started_at + timedelta(minutes=1)
+        )
+        impossible_end = started_at - timedelta(seconds=1)
+        with self.database.transaction() as connection:
+            connection.execute("DROP TRIGGER events_no_update")
+            connection.execute(
+                """UPDATE events SET occurred_at = ?
+                   WHERE event_type = 'SessionEnded' AND session_id = ?""",
+                (impossible_end.isoformat(), session["id"]),
+            )
+            connection.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (impossible_end.isoformat(), session["id"]),
+            )
+
+        integrity = self.database.verify_integrity()
+        self.assertFalse(integrity["ok"])
+        self.assertTrue(
+            any(
+                "SessionEnded occurred before SessionStarted" in error
+                for error in integrity["errors"]
+            ),
+            integrity["errors"],
+        )
+
     def test_v10_migration_appends_boundary_for_legacy_stale_decision(self) -> None:
         first, stale_decision_id = self._pending_session()
         second = self.engine.start_session(
@@ -219,7 +421,7 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
 
-        self.assertEqual(schema_version, "13")
+        self.assertEqual(schema_version, "17")
         self.assertEqual(
             decision["invalidation_reason"], "learner_projection_advanced"
         )

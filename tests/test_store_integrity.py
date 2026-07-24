@@ -115,7 +115,10 @@ def tiny_corpus(question_status: QuestionStatus = QuestionStatus.APPROVED):
             ),
         ),
         source_ids=("src_tiny",),
-        provenance={"authoring_method": "expert-authored-test-fixture"},
+        provenance={
+            "generated": False,
+            "authoring_method": "expert-authored-test-fixture",
+        },
     )
     return concepts, edges, misconceptions, sources, (question,)
 

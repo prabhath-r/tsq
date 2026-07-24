@@ -6,7 +6,8 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import pi, sqrt
+from math import isfinite, pi, sqrt
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from .inference import (
@@ -32,7 +33,11 @@ from .models import (
     logit,
     sigmoid,
 )
-from .objective_posterior import LikelihoodObservation, ObjectivePosterior
+from .objective_posterior import (
+    LikelihoodObservation,
+    ObjectivePosterior,
+    PosteriorMetrics,
+)
 from .store import Database, to_timestamp
 from .versions import (
     CONCEPT_MODEL_VERSION,
@@ -96,6 +101,51 @@ class FamilyEvidencePower:
     renewal_index: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class ObjectiveReadinessFloor:
+    """Exact fine-objective metrics used by one broad graph node."""
+
+    source_objective_id: str
+    mastery_probability: float
+    expected_competence: float
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.source_objective_id, str)
+            or not self.source_objective_id.strip()
+        ):
+            raise ValueError("Objective readiness floors require a source ID.")
+        for label, value in (
+            ("mastery_probability", self.mastery_probability),
+            ("expected_competence", self.expected_competence),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(float(value))
+                or not 0.0 <= float(value) <= 1.0
+            ):
+                raise ValueError(
+                    f"Objective readiness floor {label} must be a probability."
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class ConceptFloorProjection:
+    """Non-persisted broad states plus exact objective readiness overrides."""
+
+    states: Mapping[str, SkillState]
+    exact_floors: Mapping[str, ObjectiveReadinessFloor]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "states", MappingProxyType(dict(self.states)))
+        object.__setattr__(
+            self,
+            "exact_floors",
+            MappingProxyType(dict(self.exact_floors)),
+        )
+
+
 class LearnerModel:
     """Interpretable online projection over proficiency and misconceptions.
 
@@ -144,6 +194,60 @@ class LearnerModel:
             stability_hours=INITIAL_STABILITY_HOURS,
             model_version=self.model_version,
         )
+
+    def initial_objective_states(
+        self,
+        learner_id: str,
+        objectives: Iterable[LearningObjective],
+    ) -> Mapping[str, ObjectiveState]:
+        """Materialize immutable cold states once per distinct release prior.
+
+        A release commonly assigns the same reviewed prior to several fine
+        objectives. Exact-grid construction and validation are deterministic
+        functions of that prior, and the posterior is immutable, so sharing one
+        request-local posterior derivative across those objective states
+        preserves every encoded byte and metric while avoiding duplicate grid
+        integrations. The returned mapping cannot be mutated by callers.
+        """
+
+        objective_list = tuple(objectives)
+        objective_ids = [objective.id for objective in objective_list]
+        if len(objective_ids) != len(set(objective_ids)):
+            raise ValueError("Initial objective-state IDs must be unique.")
+        if self.model_version not in OBJECTIVE_GRID_MODEL_VERSIONS:
+            return MappingProxyType(
+                {
+                    objective.id: self.initial_objective_state(
+                        learner_id, objective
+                    )
+                    for objective in objective_list
+                }
+            )
+
+        prior_derivatives: dict[
+            float, tuple[ObjectivePosterior, PosteriorMetrics]
+        ] = {}
+        result: dict[str, ObjectiveState] = {}
+        for objective in objective_list:
+            derivative = prior_derivatives.get(objective.prior_mastery)
+            if derivative is None:
+                posterior = ObjectivePosterior.from_prior(
+                    objective.prior_mastery
+                )
+                derivative = (posterior, posterior.metrics())
+                prior_derivatives[objective.prior_mastery] = derivative
+            posterior, metrics = derivative
+            result[objective.id] = ObjectiveState(
+                learner_id=learner_id,
+                objective_id=objective.id,
+                mean=metrics.mean,
+                variance=metrics.variance,
+                stability_hours=INITIAL_STABILITY_HOURS,
+                evidence_mass=metrics.evidence_mass,
+                posterior=posterior,
+                model_version=self.model_version,
+            )
+        return MappingProxyType(result)
 
     def _migrate_objective_posterior(
         self, state: ObjectiveState, objective: LearningObjective
@@ -286,7 +390,7 @@ class LearnerModel:
             model_version=self.model_version,
         )
 
-    def concept_states_with_objective_floor(
+    def concept_projection_with_objective_floor(
         self,
         *,
         learner_id: str,
@@ -295,8 +399,9 @@ class LearnerModel:
         objectives: Iterable[LearningObjective],
         stored_objective_states: Mapping[str, ObjectiveState],
         now: datetime,
-    ) -> dict[str, SkillState]:
-        """Overlay broad graph nodes with a conservative objective floor.
+        projected_objective_states: Mapping[str, ObjectiveState] | None = None,
+    ) -> ConceptFloorProjection:
+        """Derive conservative broad states without losing exact-grid metrics.
 
         Objective responses must not be double-counted into the persisted broad
         concept posterior.  Graph routing still needs a meaningful intrinsic
@@ -308,6 +413,7 @@ class LearnerModel:
         """
 
         result = dict(stored_states)
+        exact_floors: dict[str, ObjectiveReadinessFloor] = {}
         objectives_by_concept: dict[str, list[LearningObjective]] = {}
         for objective in objectives:
             if objective.primary_concept_id in concepts:
@@ -317,14 +423,33 @@ class LearnerModel:
         for concept_id, owned_objectives in objectives_by_concept.items():
             projected = []
             for objective in owned_objectives:
-                state = stored_objective_states.get(objective.id)
-                if state is None:
-                    state = self.initial_objective_state(
-                        learner_id, objective
+                if projected_objective_states is not None:
+                    projected_state = projected_objective_states.get(
+                        objective.id
                     )
-                projected.append(
-                    self.project_objective_state(state, objective, now)
-                )
+                    if projected_state is None:
+                        raise ValueError(
+                            "Objective projection cache is incomplete for "
+                            f"{objective.id}."
+                        )
+                    if (
+                        projected_state.learner_id != learner_id
+                        or projected_state.objective_id != objective.id
+                    ):
+                        raise ValueError(
+                            "Objective projection cache contains a mismatched "
+                            f"state for {objective.id}."
+                        )
+                    projected.append(projected_state)
+                else:
+                    state = stored_objective_states.get(objective.id)
+                    if state is None:
+                        state = self.initial_objective_state(
+                            learner_id, objective
+                        )
+                    projected.append(
+                        self.project_objective_state(state, objective, now)
+                    )
             weakest = min(
                 projected,
                 key=lambda state: (
@@ -363,7 +488,36 @@ class LearnerModel:
                     state.evidence_mass for state in projected
                 ),
             )
-        return result
+            exact_floors[concept_id] = ObjectiveReadinessFloor(
+                source_objective_id=weakest.objective_id,
+                mastery_probability=weakest.mastery_probability,
+                expected_competence=weakest.expected_competence,
+            )
+        return ConceptFloorProjection(result, exact_floors)
+
+    def concept_states_with_objective_floor(
+        self,
+        *,
+        learner_id: str,
+        concepts: Mapping[str, Concept],
+        stored_states: Mapping[str, SkillState],
+        objectives: Iterable[LearningObjective],
+        stored_objective_states: Mapping[str, ObjectiveState],
+        now: datetime,
+        projected_objective_states: Mapping[str, ObjectiveState] | None = None,
+    ) -> dict[str, SkillState]:
+        """Compatibility view of objective-floored Gaussian state moments."""
+
+        projection = self.concept_projection_with_objective_floor(
+            learner_id=learner_id,
+            concepts=concepts,
+            stored_states=stored_states,
+            objectives=objectives,
+            stored_objective_states=stored_objective_states,
+            now=now,
+            projected_objective_states=projected_objective_states,
+        )
+        return dict(projection.states)
 
     @staticmethod
     def evidence_weights(question: Question) -> dict[str, float]:
@@ -548,14 +702,14 @@ class LearnerModel:
                     raise ValueError(
                         "Expected-information evidence power must be in [0, 1]."
                     )
-                return posterior.expected_information(
+                return posterior.expected_information_nats(
                     difficulty=question.difficulty,
                     discrimination=question.discrimination,
                     guess_rate=question.guess_rate,
                     slip_rate=question.slip_rate,
                     option_count=len(question.options),
                     evidence_power=float(evidence_power),
-                ).expected_information_nats
+                )
             theta = objective_state.mean
         else:
             weights = self.evidence_weights(question)
@@ -2360,8 +2514,23 @@ class LearnerModel:
         operation_kinds: int = 0,
         active_misconception_probability: float = 0.0,
         prerequisites_ready: bool = True,
+        *,
+        mastery_probability_override: float | None = None,
     ) -> str:
-        probability = state.mastery_probability
+        if mastery_probability_override is not None and (
+            isinstance(mastery_probability_override, bool)
+            or not isinstance(mastery_probability_override, (int, float))
+            or not isfinite(float(mastery_probability_override))
+            or not 0.0 <= float(mastery_probability_override) <= 1.0
+        ):
+            raise ValueError(
+                "mastery_probability_override must be a finite probability."
+            )
+        probability = (
+            state.mastery_probability
+            if mastery_probability_override is None
+            else float(mastery_probability_override)
+        )
         if state.exposures == 0:
             return "unassessed"
         if active_misconception_probability >= 0.35:

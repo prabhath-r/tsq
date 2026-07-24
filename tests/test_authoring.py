@@ -319,6 +319,8 @@ class AuthoringTestCase(unittest.TestCase):
             any(
                 gap.blueprint.coverage_goal
                 == "objective_misconception_serviceability"
+                and gap.blueprint.learning_objective_id == objective_id
+                and gap.blueprint.target_misconception_id == misconception_id
                 for gap in CoveragePlanner(self.database).gaps(limit=1000)
             )
         )
@@ -330,10 +332,18 @@ class AuthoringTestCase(unittest.TestCase):
                    JOIN options option
                      ON option.question_id = diagnostic.question_id
                     AND option.option_id = diagnostic.option_id
+                   JOIN release_questions membership
+                     ON membership.release_id = diagnostic.release_id
+                    AND membership.question_id = diagnostic.question_id
                    JOIN questions q ON q.id = diagnostic.question_id
                    WHERE diagnostic.release_id = ?
                      AND diagnostic.objective_id = ?
                      AND option.misconception_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM question_revocations revoked
+                         WHERE revoked.question_id = diagnostic.question_id
+                     )
                    ORDER BY q.id LIMIT 1""",
                 (release_id, objective_id, misconception_id),
             ).fetchone()
@@ -381,11 +391,19 @@ class AuthoringTestCase(unittest.TestCase):
                    JOIN options option
                      ON option.question_id = diagnostic.question_id
                     AND option.option_id = diagnostic.option_id
+                   JOIN release_questions membership
+                     ON membership.release_id = diagnostic.release_id
+                    AND membership.question_id = diagnostic.question_id
                    JOIN questions q ON q.id = diagnostic.question_id
                    WHERE diagnostic.release_id = ?
                      AND diagnostic.objective_id = ?
                      AND assessed.objective_id = diagnostic.objective_id
                      AND option.misconception_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM question_revocations revoked
+                         WHERE revoked.question_id = diagnostic.question_id
+                     )
                    ORDER BY q.id LIMIT 1""",
                 (release_id, objective_id, misconception_id),
             ).fetchone()

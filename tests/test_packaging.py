@@ -14,8 +14,13 @@ from importlib.resources import files
 from pathlib import Path
 
 from tsq.corpus import parse_bundle, parse_catalog
-from tsq.cli import BUNDLED_RELEASE_MARKER, _ensure_starter_corpus
+from tsq.cli import (
+    BUNDLED_RELEASE_MARKER,
+    LEGACY_BUNDLED_RELEASE_HASHES,
+    _ensure_starter_corpus,
+)
 from tsq.engine import AdaptiveEngine
+from tsq.errors import ConflictError
 from tsq.store import Database
 
 
@@ -123,9 +128,38 @@ class PackagingTestCase(unittest.TestCase):
             self.assertIn("Session stopped", result.stdout)
             self.assertTrue(database.is_file())
 
+    def test_current_starter_lineage_is_an_exact_noop(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "current.db")
+            database.initialize()
+
+            first = _ensure_starter_corpus(database)
+            with database.read() as connection:
+                before = "\n".join(connection.iterdump())
+                active = connection.execute(
+                    "SELECT value FROM meta WHERE key='active_corpus_release'"
+                ).fetchone()["value"]
+            repeated = _ensure_starter_corpus(database)
+            with database.read() as connection:
+                after = "\n".join(connection.iterdump())
+                marker = connection.execute(
+                    "SELECT value FROM meta WHERE key=?",
+                    (BUNDLED_RELEASE_MARKER,),
+                ).fetchone()["value"]
+
+            self.assertTrue(first)
+            self.assertFalse(repeated)
+            self.assertIsNone(repeated.retained_release_id)
+            self.assertIsNone(repeated.conflict)
+            self.assertEqual(marker, active)
+            self.assertEqual(after, before)
+            self.assertTrue(database.verify_integrity()["ok"])
+
     def test_starter_tracks_its_lineage_without_overriding_custom_corpus(self) -> None:
         bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
-        removed_id = "q_bayes_base_rate_positive_test_001"
+        # Remove one explicitly marked generated/quarantined item so the
+        # immutable legacy-unattested cohort remains complete and byte-stable.
+        removed_id = "q_attention_duplicate_value_identifiability_001"
         bundle["questions"] = [
             question
             for question in bundle["questions"]
@@ -169,6 +203,90 @@ class PackagingTestCase(unittest.TestCase):
                 ).fetchone()["value"]
             self.assertNotEqual(upgraded, custom_release)
             self.assertEqual(marker, upgraded)
+
+    def test_starter_does_not_replace_uncataloged_custom_corpus(self) -> None:
+        bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+        bundle.pop("domains")
+        bundle.pop("topics")
+        removed_id = "q_attention_duplicate_value_identifiability_001"
+        bundle["questions"] = [
+            question
+            for question in bundle["questions"]
+            if question["id"] != removed_id
+        ]
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "uncataloged-custom.db"
+            database = Database(path)
+            database.initialize()
+            custom_release = database.import_corpus(
+                *parse_bundle(bundle)
+            )["release_id"]
+
+            status = _ensure_starter_corpus(database)
+
+            self.assertFalse(status)
+            self.assertIsNone(status.retained_release_id)
+            self.assertIsNone(status.conflict)
+            with database.read() as connection:
+                active = connection.execute(
+                    "SELECT value FROM meta WHERE key='active_corpus_release'"
+                ).fetchone()["value"]
+                marker = connection.execute(
+                    "SELECT value FROM meta WHERE key = ?",
+                    (BUNDLED_RELEASE_MARKER,),
+                ).fetchone()
+                release_count = connection.execute(
+                    "SELECT COUNT(*) AS n FROM corpus_releases"
+                ).fetchone()["n"]
+            self.assertEqual(active, custom_release)
+            self.assertIsNone(marker)
+            self.assertEqual(release_count, 1)
+            self.assertTrue(database.verify_integrity()["ok"])
+
+    def test_untrusted_registry_conflict_is_not_silently_retained(self) -> None:
+        bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+        source = next(
+            item
+            for item in bundle["sources"]
+            if item["id"] == "src_vaswani_attention_2017"
+        )
+        source["uri"] = "https://arxiv.org/abs/1706.03762"
+        parsed = parse_bundle(bundle)
+        domains, topics = parse_catalog(bundle, parsed[0], parsed[4])
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "untrusted-conflict.db")
+            database.initialize()
+            custom_release = database.import_corpus(
+                *parsed, domains, topics
+            )["release_id"]
+            with database.transaction() as connection:
+                connection.execute(
+                    "DELETE FROM meta WHERE key='active_corpus_release'"
+                )
+            with database.read() as connection:
+                before = "\n".join(connection.iterdump())
+
+            with self.assertRaisesRegex(
+                ConflictError,
+                "Source src_vaswani_attention_2017 is immutable",
+            ):
+                _ensure_starter_corpus(database)
+
+            with database.read() as connection:
+                after = "\n".join(connection.iterdump())
+                release_ids = [
+                    row["id"]
+                    for row in connection.execute(
+                        "SELECT id FROM corpus_releases ORDER BY id"
+                    )
+                ]
+                marker = connection.execute(
+                    "SELECT value FROM meta WHERE key=?",
+                    (BUNDLED_RELEASE_MARKER,),
+                ).fetchone()
+            self.assertEqual(after, before)
+            self.assertEqual(release_ids, [custom_release])
+            self.assertIsNone(marker)
 
     def test_answer_cli_rejects_oversize_integer_without_traceback_or_write(
         self,
@@ -222,7 +340,9 @@ class PackagingTestCase(unittest.TestCase):
                     0,
                 )
 
-    def test_start_upgrades_legacy_catalog_without_rewriting_history(self) -> None:
+    def test_start_upgrades_marked_legacy_catalog_without_rewriting_history(
+        self,
+    ) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             isolated = Path(temporary)
             database_path = isolated / "legacy.db"
@@ -239,6 +359,11 @@ class PackagingTestCase(unittest.TestCase):
             database = Database(database_path)
             database.initialize()
             legacy_release = database.import_corpus(*parse_bundle(bundle))["release_id"]
+            with database.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    (BUNDLED_RELEASE_MARKER, legacy_release),
+                )
             engine = AdaptiveEngine(database)
             engine.create_learner("legacy-learner", "Legacy Learner")
             legacy_session = engine.start_session(
@@ -301,6 +426,88 @@ class PackagingTestCase(unittest.TestCase):
             self.assertEqual(legacy_topics, 0)
             self.assertGreater(active_topics, 0)
             self.assertTrue(database.verify_integrity()["ok"])
+
+    def test_start_retains_valid_release_when_bundled_ids_conflict(self) -> None:
+        """A historical metadata collision cannot make an install unusable."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            isolated = Path(temporary)
+            database_path = isolated / "immutable-source.db"
+            bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+            historical_source = next(
+                source
+                for source in bundle["sources"]
+                if source["id"] == "src_vaswani_attention_2017"
+            )
+            historical_source["uri"] = "https://arxiv.org/abs/1706.03762"
+            parsed = parse_bundle(bundle)
+            domains, topics = parse_catalog(bundle, parsed[0], parsed[4])
+
+            database = Database(database_path)
+            database.initialize()
+            retained_release = database.import_corpus(
+                *parsed, domains, topics
+            )["release_id"]
+            with database.transaction() as connection:
+                connection.execute(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    (BUNDLED_RELEASE_MARKER, retained_release),
+                )
+
+            environment = os.environ.copy()
+            environment["PYTHONPATH"] = str(ROOT / "src")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "tsq",
+                    "--db",
+                    str(database_path),
+                    "start",
+                    "--learner",
+                    "immutable-source-user",
+                    "--topic",
+                    "Large Language Models",
+                    "--seed",
+                    "17",
+                ],
+                cwd=isolated,
+                env=environment,
+                input="q\n",
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Large Language Models", result.stdout)
+            self.assertIn("Session stopped", result.stdout)
+            self.assertIn(
+                "Bundled curriculum update was withheld to preserve immutable "
+                f"release {retained_release}",
+                result.stderr,
+            )
+            self.assertIn("Continuing with that sealed release", result.stderr)
+            self.assertIn("TSQ_DB=tsq-latest.db ./start", result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+            with database.read() as connection:
+                active_release = connection.execute(
+                    "SELECT value FROM meta WHERE key = 'active_corpus_release'"
+                ).fetchone()["value"]
+                release_count = connection.execute(
+                    "SELECT COUNT(*) AS n FROM corpus_releases"
+                ).fetchone()["n"]
+            self.assertEqual(active_release, retained_release)
+            self.assertEqual(release_count, 1)
+            self.assertTrue(database.verify_integrity()["ok"])
+
+            with database.read() as connection:
+                bundle_hash = connection.execute(
+                    "SELECT bundle_hash FROM corpus_releases WHERE id=?",
+                    (retained_release,),
+                ).fetchone()["bundle_hash"]
+            self.assertNotIn(bundle_hash, LEGACY_BUNDLED_RELEASE_HASHES)
 
     def test_repository_start_launcher_is_executable(self) -> None:
         launcher = ROOT / "start"

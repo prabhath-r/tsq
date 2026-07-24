@@ -476,7 +476,7 @@ class SkillState:
 
     @property
     def mastery_probability(self) -> float:
-        """Calibrated certification belief, including posterior uncertainty."""
+        """Model-implied certification belief, pending empirical calibration."""
         return self.probability_above(MASTERY_THRESHOLD)
 
 
@@ -603,8 +603,48 @@ class CandidateScore:
     kind_fit: float
     continuity: float = 0.0
     boundary_fit: float = 0.0
+    # Hybrid-coverage values describe the selected target before presentation.
+    # Raw exposure is a burden guard, diagnostic information is cumulative
+    # quality-discounted evidence in the target projection, and successful
+    # retrieval families are learner-model-verified internal selected-response
+    # families. The defaults keep historical selected-score JSON
+    # reconstructible; none of these fields is external skill certification.
+    coverage_raw_exposures: int = 0
+    coverage_diagnostic_information: float = 0.0
+    coverage_successful_retrieval_families: int = 0
 
-    def terms(self) -> dict[str, float]:
+    def __post_init__(self) -> None:
+        if (
+            type(self.coverage_raw_exposures) is not int
+            or self.coverage_raw_exposures < 0
+        ):
+            raise ValueError(
+                "coverage_raw_exposures must be a non-negative integer."
+            )
+        if (
+            isinstance(self.coverage_diagnostic_information, bool)
+            or not isinstance(
+                self.coverage_diagnostic_information, (int, float)
+            )
+            or not isfinite(float(self.coverage_diagnostic_information))
+            or self.coverage_diagnostic_information < 0.0
+        ):
+            raise ValueError(
+                "coverage_diagnostic_information must be finite and "
+                "non-negative."
+            )
+        if (
+            type(self.coverage_successful_retrieval_families) is not int
+            or self.coverage_successful_retrieval_families < 0
+            or self.coverage_successful_retrieval_families
+            > self.coverage_raw_exposures
+        ):
+            raise ValueError(
+                "coverage_successful_retrieval_families must be a "
+                "non-negative integer no greater than raw exposures."
+            )
+
+    def terms(self) -> dict[str, float | int]:
         return {
             "total": self.total,
             "predicted_correct": self.predicted_correct,
@@ -618,6 +658,13 @@ class CandidateScore:
             "kind_fit": self.kind_fit,
             "continuity": self.continuity,
             "boundary_fit": self.boundary_fit,
+            "coverage_raw_exposures": self.coverage_raw_exposures,
+            "coverage_diagnostic_information": (
+                self.coverage_diagnostic_information
+            ),
+            "coverage_successful_retrieval_families": (
+                self.coverage_successful_retrieval_families
+            ),
         }
 
 

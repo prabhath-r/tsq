@@ -1,0 +1,78 @@
+{
+  "corpus_release_id": "rel_fixture_requires_explicit_pinning",
+  "review": {
+    "attestation_digest": "2222222222222222222222222222222222222222222222222222222222222222",
+    "independent_of_author": true,
+    "reviewed_at": "2026-07-23T00:00:00+00:00",
+    "reviewer_id": "fixture_independent_reviewer",
+    "reviewer_kind": "human"
+  },
+  "schema_version": 1,
+  "tasks": [
+    {
+      "status": "pilot",
+      "task": {
+        "administration_id": "fixture_digest_only_no_execution",
+        "administration_manifest_digest": "0000000000000000000000000000000000000000000000000000000000000000",
+        "allowed_action_kinds": [
+          "abandoned",
+          "answer_revised",
+          "artifact_checkpoint",
+          "check_run",
+          "explanation_checkpoint",
+          "feedback_shown",
+          "hint_requested",
+          "started",
+          "submitted",
+          "tool_used"
+        ],
+        "allowed_tool_ids": null,
+        "criteria": [
+          {
+            "allowed_scores": null,
+            "assisted_evidence_factor": 0.0,
+            "certification_eligible": true,
+            "concept_weights": [
+              [
+                "c_causal_masking",
+                1.0
+              ]
+            ],
+            "dependence_cap": 0.8,
+            "dependence_group": "cli_mask_behavior",
+            "evidence_cap": 0.8,
+            "id": "criterion_cli_mask_invariant",
+            "misconception_ids": [],
+            "name": "Causal mask invariant",
+            "objective_weights": [
+              [
+                "lo_causal_visibility",
+                1.0
+              ]
+            ],
+            "scale": "continuous",
+            "score_weight": 1.0
+          }
+        ],
+        "evidence_cap": 1.0,
+        "family_id": "family_cli_attention_debug",
+        "id": "task_cli_attention_debug",
+        "instructions": "Inspect the pinned causal-mask stimulus, diagnose the invariant violation, and submit a content-addressed repair artifact.",
+        "modality": "debugging",
+        "schema_version": 3,
+        "scorer_contracts": [],
+        "source_manifests": [
+          {
+            "provenance_digest": "edf00d9beca858eadbf34a331e7c19843a538179f16cc1b57730696159ba77a1",
+            "source_id": "src_vaswani_attention_2017"
+          }
+        ],
+        "stimulus_digest": "1111111111111111111111111111111111111111111111111111111111111111",
+        "stimulus_id": "fixture_attention_mask_v1",
+        "title": "Diagnose a causal attention mask",
+        "version": 1
+      }
+    }
+  ],
+  "title": "CLI deterministic performance fixture"
+}

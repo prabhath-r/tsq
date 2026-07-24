@@ -18,7 +18,7 @@ from tsq.cli import build_parser, main
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError
-from tsq.store import Database
+from tsq.store import SCHEMA_VERSION, Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,7 +168,11 @@ class CliJourneyTestCase(unittest.TestCase):
             response_ms=1_200,
             now=started_at + timedelta(milliseconds=1_200),
         )
-        engine.end_session(completed["id"], status="completed")
+        engine.end_session(
+            completed["id"],
+            status="completed",
+            now=started_at + timedelta(seconds=2),
+        )
         active = engine.start_session("alpha", "LLM Agents", seed=13)
         other = engine.start_session("beta", "Transformers", seed=17)
 
@@ -378,6 +382,86 @@ class CliJourneyTestCase(unittest.TestCase):
             baseline_logical,
         )
 
+    def test_human_session_report_labels_position_shadow_non_certifying(
+        self,
+    ) -> None:
+        engine = AdaptiveEngine(self.database)
+        engine.create_learner("position-shadow-cli")
+        started_at = datetime(2100, 1, 2, tzinfo=timezone.utc)
+        session = engine.start_session(
+            "position-shadow-cli",
+            "Transformers",
+            seed=71,
+            now=started_at,
+        )
+        presentation = engine.next_question(session["id"], now=started_at)
+        engine.submit_answer(
+            presentation.decision_id,
+            presentation.ordered_options[0].id,
+            confidence=0.75,
+            response_ms=1_200,
+            now=started_at + timedelta(seconds=2),
+        )
+
+        output = io.StringIO()
+        error = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "session",
+                    "report",
+                    session["id"],
+                ]
+            )
+
+        self.assertEqual(exit_code, 0, error.getvalue())
+        rendered = output.getvalue()
+        self.assertIn("response-position shadow: inconclusive", rendered)
+        self.assertIn("shadow-only behavioral hypothesis", rendered)
+        self.assertIn("does not certify skill", rendered)
+        self.assertIn("provisional selected-response model", rendered)
+        self.assertIn("not empirically validated", rendered)
+        self.assertIn(
+            "release-wide calibrated eligible items 0/", rendered
+        )
+        self.assertIn(
+            "numerical guard covers approximation only", rendered
+        )
+        self.assertIn(
+            "authored priors; no empirical calibration has been validated",
+            rendered,
+        )
+        self.assertNotIn("until sufficient response data exists", rendered)
+
+        profile_output = io.StringIO()
+        profile_error = io.StringIO()
+        with redirect_stdout(profile_output), redirect_stderr(profile_error):
+            profile_exit = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "profile",
+                    "--learner",
+                    "position-shadow-cli",
+                    "--topic",
+                    "Transformers",
+                ]
+            )
+        self.assertEqual(profile_exit, 0, profile_error.getvalue())
+        profile_rendered = profile_output.getvalue()
+        self.assertIn("provisional selected-response model", profile_rendered)
+        self.assertIn("not empirically validated", profile_rendered)
+        self.assertIn(
+            "release-wide calibrated eligible items 0/",
+            profile_rendered,
+        )
+        self.assertIn(
+            "numerical guard covers approximation only",
+            profile_rendered,
+        )
+
     def test_read_only_inspection_preserves_live_wal_and_events(self) -> None:
         writer = self.database.connect()
         try:
@@ -529,7 +613,7 @@ class CliJourneyTestCase(unittest.TestCase):
             connection.execute(
                 """UPDATE meta SET value = ?
                    WHERE key = 'schema_version'""",
-                ("13",),
+                (str(SCHEMA_VERSION),),
             )
             connection.execute("DROP TABLE item_reviews")
         before = durable_database_fingerprint(incompatible)
@@ -628,6 +712,60 @@ class CliJourneyTestCase(unittest.TestCase):
             durable_database_fingerprint(malformed_sessions),
             before,
         )
+
+    def test_writable_commands_reject_current_schema_drift_without_mutation(
+        self,
+    ) -> None:
+        cases = (
+            (
+                "missing-trigger",
+                "DROP TRIGGER events_no_update",
+                "missing triggers: events_no_update",
+            ),
+            (
+                "changed-trigger",
+                """
+                DROP TRIGGER events_no_update;
+                CREATE TRIGGER events_no_update
+                BEFORE UPDATE ON events BEGIN
+                    SELECT RAISE(ABORT, 'weakened event protection');
+                END;
+                """,
+                "changed triggers: events_no_update",
+            ),
+            (
+                "unexpected-table",
+                "CREATE TABLE untrusted_extension(value TEXT)",
+                "unexpected tables: untrusted_extension",
+            ),
+        )
+        for label, mutation, expected_error in cases:
+            with self.subTest(case=label):
+                target = Path(self.tempdir.name) / f"{label}.db"
+                backup_database(self.database, target)
+                with closing(sqlite3.connect(target)) as connection:
+                    connection.executescript(mutation)
+                    connection.commit()
+                before = durable_database_fingerprint(target)
+                error = io.StringIO()
+                with redirect_stderr(error):
+                    exit_code = main(
+                        [
+                            "--db",
+                            str(target),
+                            "learner",
+                            "add",
+                            f"should-not-exist-{label}",
+                            "--json",
+                        ]
+                    )
+                self.assertEqual(exit_code, 2)
+                self.assertIn(expected_error, error.getvalue())
+                self.assertNotIn("Traceback", error.getvalue())
+                self.assertEqual(
+                    durable_database_fingerprint(target),
+                    before,
+                )
 
     def test_unexpected_sqlite_error_is_reported_without_a_traceback(
         self,

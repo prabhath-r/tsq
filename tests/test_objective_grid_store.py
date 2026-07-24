@@ -84,6 +84,7 @@ class ObjectiveGridStoreTestCase(unittest.TestCase):
             session["id"],
             status="completed",
             reason="objective_grid_test",
+            now=START + offset + timedelta(minutes=2),
         )
         return presentation.question.objective_id
 
@@ -149,7 +150,7 @@ class ObjectiveGridStoreTestCase(unittest.TestCase):
             ).fetchone()
 
         self.assertEqual(schema_version, str(SCHEMA_VERSION))
-        self.assertEqual(SCHEMA_VERSION, 13)
+        self.assertEqual(SCHEMA_VERSION, 17)
         self.assertEqual(row["posterior_schema_version"], OBJECTIVE_POSTERIOR_SCHEMA_VERSION)
         self.assertEqual(row["algorithm"], OBJECTIVE_POSTERIOR_ALGORITHM)
         self.assertEqual(row["grid_id"], OBJECTIVE_POSTERIOR_GRID_ID)

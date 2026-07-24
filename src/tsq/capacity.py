@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Iterable
+from typing import Callable, Iterable
 
 from .graph import KnowledgeGraph
 from .models import Concept, Misconception, Question, QuestionKind, Topic
@@ -909,6 +909,194 @@ def _dependency_components(
     return tuple(sorted(components, key=lambda values: values[0]))
 
 
+def _maximum_quota_packing(
+    safe_mask: int,
+    constraints: Iterable[tuple[int, int]],
+    *,
+    charge: Callable[[tuple[object, ...]], None] | None = None,
+) -> int:
+    """Return the exact 0/1 cardinality admitted by overlapping quotas.
+
+    Variables with identical constraint incidence are interchangeable and can
+    be grouped by multiplicity. Independent incidence components are solved
+    separately. The residual-capacity dynamic program is exact for this quota
+    relaxation; because real safe-removal paths satisfy every quota, its value
+    is a rigorous upper bound on future consumptions.
+    """
+
+    quota_by_mask: dict[int, int] = {}
+    for mask, quota in constraints:
+        block = mask & safe_mask
+        if not block:
+            continue
+        if quota < 0:
+            return -1
+        bounded_quota = min(quota, block.bit_count())
+        quota_by_mask[block] = min(
+            quota_by_mask.get(block, block.bit_count()),
+            bounded_quota,
+        )
+    rows = tuple(
+        sorted(
+            (
+                (mask, quota)
+                for mask, quota in quota_by_mask.items()
+                if quota < mask.bit_count()
+            ),
+            key=lambda value: (value[1], value[0].bit_count(), value[0]),
+        )
+    )
+    if not rows:
+        return safe_mask.bit_count()
+
+    # A single quota A implies quota B when even filling every B-only variable
+    # after saturating A cannot exceed B's allowance. Removing such rows keeps
+    # the feasible 0/1 region unchanged and shrinks incidence vectors.
+    def implies(
+        source: tuple[int, int], target: tuple[int, int]
+    ) -> bool:
+        source_mask, source_quota = source
+        target_mask, target_quota = target
+        maximum_target = (
+            (target_mask & ~source_mask).bit_count()
+            + min(
+                source_quota,
+                (source_mask & target_mask).bit_count(),
+            )
+        )
+        return maximum_target <= target_quota
+
+    reduced_rows = tuple(
+        row
+        for index, row in enumerate(rows)
+        if not any(
+            other_index != index and implies(other, row)
+            for other_index, other in enumerate(rows)
+        )
+    )
+    if not reduced_rows:
+        return safe_mask.bit_count()
+
+    grouped: dict[tuple[int, ...], int] = {}
+    free = 0
+    pending = safe_mask
+    while pending:
+        bit = pending & -pending
+        incidence = tuple(
+            index
+            for index, (mask, _) in enumerate(reduced_rows)
+            if mask & bit
+        )
+        if incidence:
+            grouped[incidence] = grouped.get(incidence, 0) + 1
+        else:
+            free += 1
+        pending ^= bit
+
+    adjacency = {
+        index: set() for index in range(len(reduced_rows))
+    }
+    for incidence in grouped:
+        first, *others = incidence
+        for other in others:
+            adjacency[first].add(other)
+            adjacency[other].add(first)
+
+    total = free
+    unseen = set(adjacency)
+    while unseen:
+        first = min(unseen)
+        stack = [first]
+        unseen.remove(first)
+        component_indices: list[int] = []
+        while stack:
+            current = stack.pop()
+            component_indices.append(current)
+            for neighbor in sorted(adjacency[current], reverse=True):
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    stack.append(neighbor)
+        component_indices.sort()
+        local_index = {
+            original: index
+            for index, original in enumerate(component_indices)
+        }
+        component_groups = [
+            (
+                tuple(local_index[index] for index in incidence),
+                multiplicity,
+            )
+            for incidence, multiplicity in grouped.items()
+            if incidence[0] in local_index
+        ]
+        component_groups.sort(
+            key=lambda value: (-len(value[0]), value[1], value[0])
+        )
+        capacities = tuple(
+            reduced_rows[index][1] for index in component_indices
+        )
+        group_count = len(component_groups)
+        remaining_total = [0] * (group_count + 1)
+        remaining_incident = [
+            [0] * len(component_indices)
+            for _ in range(group_count + 1)
+        ]
+        for position in range(group_count - 1, -1, -1):
+            incidence, multiplicity = component_groups[position]
+            remaining_total[position] = (
+                remaining_total[position + 1] + multiplicity
+            )
+            remaining_incident[position] = list(
+                remaining_incident[position + 1]
+            )
+            for index in incidence:
+                remaining_incident[position][index] += multiplicity
+
+        def normalize(
+            position: int, residual: tuple[int, ...]
+        ) -> tuple[int, ...]:
+            return tuple(
+                min(value, remaining_incident[position][index])
+                for index, value in enumerate(residual)
+            )
+
+        @lru_cache(maxsize=None)
+        def solve(
+            position: int, residual: tuple[int, ...]
+        ) -> int:
+            residual = normalize(position, residual)
+            if charge is not None:
+                charge(
+                    (
+                        tuple(component_indices),
+                        position,
+                        residual,
+                    )
+                )
+            if position == group_count:
+                return 0
+            incidence, multiplicity = component_groups[position]
+            maximum = min(
+                (multiplicity, *(residual[index] for index in incidence))
+            )
+            best = 0
+            for selected in range(maximum, -1, -1):
+                next_residual = list(residual)
+                for index in incidence:
+                    next_residual[index] -= selected
+                candidate = selected + solve(
+                    position + 1,
+                    normalize(position + 1, tuple(next_residual)),
+                )
+                best = max(best, candidate)
+                if best == remaining_total[position]:
+                    break
+            return best
+
+        total += solve(0, normalize(0, capacities))
+    return total
+
+
 def _component_bounds(
     component: tuple[str, ...],
     *,
@@ -1022,6 +1210,10 @@ def _component_bounds(
             )
         )
 
+    certified_high_bound: int | None = None
+    certified_high_quota_blocks: tuple[tuple[int, int], ...] = ()
+    certified_high_quota_candidates: tuple[tuple[int, int], ...] = ()
+
     def certified_equal_bound() -> tuple[int, tuple[str, ...]] | None:
         """Prove a common bound with mandatory-threshold certificates.
 
@@ -1041,9 +1233,15 @@ def _component_bounds(
         fail-closed fallback.
         """
 
+        nonlocal certified_high_bound
+        nonlocal certified_high_quota_blocks
+        nonlocal certified_high_quota_candidates
         initial_safe = safe_indices(0)
         charge_state(0)
         if not initial_safe:
+            certified_high_bound = 0
+            certified_high_quota_blocks = ()
+            certified_high_quota_candidates = ()
             return 0, ()
         universe_mask = sum(1 << index for index in initial_safe)
         universe_global_mask = sum(global_bits[index] for index in initial_safe)
@@ -1129,6 +1327,7 @@ def _component_bounds(
                 ),
             )
         )
+        certified_high_quota_candidates = quota_candidates
         candidates_by_index: dict[int, list[int]] = {
             index: [] for index in initial_safe
         }
@@ -1167,6 +1366,8 @@ def _component_bounds(
         quota_blocks = tuple(
             quota_candidates[index] for index in partition_indices
         )
+        certified_high_bound = partition_cost
+        certified_high_quota_blocks = quota_blocks
 
         # Consume the lexicographically first safe family at each state.  If
         # its real terminal path reaches the packing bound, it witnesses the
@@ -1315,6 +1516,622 @@ def _component_bounds(
         bound, sequence = certificate
         return _Bounds(bound, bound, sequence, sequence)
 
+    def certified_low_bound() -> tuple[int, tuple[str, ...]] | None:
+        """Certify the earliest terminal path through an order-free relaxation.
+
+        A real removal sequence can end only at a consumed-family set that
+        disables every initially safe family.  Ignore removal order and derive
+        the exact minimal masks that can disable each family: either consume
+        the family itself, or exhaust enough repair/verification reserves to
+        make every one of its question variants unsafe.
+
+        If no such terminal set is smaller than a real lexicographic greedy
+        path, the greedy path is an exact earliest-exhaustion witness.  The
+        relaxation admits states that no real order can reach, so failure to
+        certify falls back to exhaustive search; it can never overstate the
+        lower bound.
+        """
+
+        initial_safe = safe_indices(0)
+        charge_state(0)
+        if not initial_safe:
+            return 0, ()
+        universe_mask = sum(1 << index for index in initial_safe)
+        universe_global_mask = sum(
+            global_bits[index] for index in initial_safe
+        )
+
+        def localize(mask: int) -> int:
+            return sum(
+                1 << index
+                for index, bit in enumerate(global_bits)
+                if mask & bit
+            )
+
+        def minimal_masks(values: Iterable[int]) -> tuple[int, ...]:
+            kept: list[int] = []
+            for value in sorted(
+                set(values), key=lambda mask: (mask.bit_count(), mask)
+            ):
+                if any((prior & value) == prior for prior in kept):
+                    continue
+                kept.append(value)
+            return tuple(kept)
+
+        def requirement_failure_masks(
+            question: _CompiledQuestion, requirement: _Requirement
+        ) -> tuple[int, ...]:
+            failures: list[int] = []
+            question_bit = question.family_bit
+            for reserve_mask in (
+                requirement.repair_mask,
+                requirement.verification_mask,
+            ):
+                without_question = reserve_mask & ~question_bit
+                if not without_question & ~universe_global_mask:
+                    failures.append(localize(without_question))
+            union = (
+                requirement.repair_mask | requirement.verification_mask
+            ) & ~question_bit
+            fixed_union = (union & ~universe_global_mask).bit_count()
+            dynamic_union = localize(union) & universe_mask
+            if fixed_union == 0:
+                bits = tuple(
+                    1 << index
+                    for index in initial_safe
+                    if dynamic_union & (1 << index)
+                )
+                if bits:
+                    failures.extend(dynamic_union ^ bit for bit in bits)
+                else:
+                    failures.append(0)
+            elif fixed_union == 1:
+                failures.append(dynamic_union)
+            return minimal_masks(failures)
+
+        def family_disable_masks(index: int) -> tuple[int, ...]:
+            combined: tuple[int, ...] = (0,)
+            for question in compiled_by_family[component[index]]:
+                question_failures = minimal_masks(
+                    failure
+                    for requirement in question.requirements
+                    for failure in requirement_failure_masks(
+                        question, requirement
+                    )
+                )
+                if not question_failures:
+                    combined = ()
+                    break
+                combined = minimal_masks(
+                    prior | failure
+                    for prior in combined
+                    for failure in question_failures
+                )
+            return minimal_masks(((1 << index), *combined))
+
+        disable_masks = {
+            index: family_disable_masks(index) for index in initial_safe
+        }
+
+        # This is a real sequence, not a relaxation. Prefer the removal that
+        # leaves the fewest safe successors, then the stable family ID.  It is
+        # the same deterministic first branch as the exhaustive lower-bound
+        # recurrence and commonly exposes a small cut set immediately.
+        consumed = 0
+        greedy_sequence: list[str] = []
+        while True:
+            charge_state(consumed)
+            safe = safe_indices(consumed)
+            if not safe:
+                break
+            selected = min(
+                branch_indices(safe),
+                key=lambda index: (
+                    len(
+                        safe_indices(
+                            canonicalize(consumed | (1 << index))
+                        )
+                    ),
+                    component[index],
+                ),
+            )
+            greedy_sequence.append(component[selected])
+            consumed = canonicalize(consumed | (1 << selected))
+        candidate_bound = len(greedy_sequence)
+        if candidate_bound == 0:
+            return 0, ()
+
+        terminal_solvers: dict[int, Callable[[int], bool]] = {}
+
+        def terminal_solver(maximum_consumed: int):
+            cached = terminal_solvers.get(maximum_consumed)
+            if cached is not None:
+                return cached
+
+            @lru_cache(maxsize=None)
+            def terminal_exists(state: int) -> bool:
+                if state.bit_count() > maximum_consumed:
+                    return False
+                charge_state(state)
+                safe = safe_indices(state)
+                if not safe:
+                    return True
+                choices: list[tuple[int, str, tuple[int, ...]]] = []
+                for index in branch_indices(safe):
+                    next_states = {
+                        canonicalize(state | failure)
+                        for failure in disable_masks[index]
+                        if failure & ~state
+                    }
+                    next_states = {
+                        next_state
+                        for next_state in next_states
+                        if next_state != state
+                        and next_state.bit_count() <= maximum_consumed
+                    }
+                    # Every terminal superset must disable this currently safe
+                    # family. If even the order-free relaxation cannot do so
+                    # inside the bound, no terminal set exists below this node.
+                    if not next_states:
+                        return False
+                    choices.append(
+                        (
+                            len(next_states),
+                            component[index],
+                            tuple(
+                                sorted(
+                                    next_states,
+                                    key=lambda next_state: (
+                                        -(
+                                            next_state.bit_count()
+                                            - state.bit_count()
+                                        ),
+                                        next_state,
+                                    ),
+                                )
+                            ),
+                        )
+                    )
+                _, _, next_states = min(choices)
+                return any(
+                    terminal_exists(next_state)
+                    for next_state in next_states
+                )
+
+            terminal_solvers[maximum_consumed] = terminal_exists
+            return terminal_exists
+
+        # Find the exact minimum order-free terminal cardinality. This is a
+        # lower bound on every real sequence because it permits families to be
+        # consumed in an impossible batch. The real greedy terminal supplies a
+        # finite upper bound, so binary search is complete.
+        lower = 0
+        upper = candidate_bound
+        while lower < upper:
+            middle = (lower + upper) // 2
+            if terminal_solver(middle)(0):
+                upper = middle
+            else:
+                lower = middle + 1
+        relaxed_low = lower
+
+        @lru_cache(maxsize=None)
+        def reverse_shellable(terminal: int, required_prefix: int) -> bool:
+            """Whether a terminal set has a real order after one fixed prefix.
+
+            In reverse, remove a last-consumed family from ``terminal`` only
+            when it was safe just before that removal. Adding reserves is
+            monotone: once a family is a valid reverse candidate, removing a
+            different valid candidate cannot make it invalid. Consequently
+            any available reverse candidate is safe to choose and existence
+            needs no permutation backtracking.
+            """
+
+            if required_prefix & ~terminal:
+                return False
+            current = terminal
+            while current != required_prefix:
+                candidates = []
+                pending = current & ~required_prefix
+                while pending:
+                    bit = pending & -pending
+                    index = bit.bit_length() - 1
+                    before_last = current ^ bit
+                    if index in safe_indices(before_last):
+                        candidates.append(index)
+                    pending ^= bit
+                if not candidates:
+                    return False
+                # Existence is choice-independent by monotonicity. Stable
+                # ordering keeps diagnostic behavior deterministic.
+                selected = min(candidates, key=lambda value: component[value])
+                current ^= 1 << selected
+            return True
+
+        def shellable_terminal(
+            required_prefix: int, target_depth: int
+        ) -> int | None:
+            """Find any exact-depth terminal set extending a real prefix."""
+
+            terminal_possible = terminal_solver(target_depth)
+
+            @lru_cache(maxsize=None)
+            def search(state: int) -> int | None:
+                if required_prefix & ~state:
+                    raise AssertionError(
+                        "Terminal relaxation discarded a required prefix."
+                    )
+                charge_state(state)
+                # Reachable consumed sets are hereditary: restricting any real
+                # removal order to a subset only restores reserves, so every
+                # retained removal remains safe. Therefore an unshellable batch
+                # state cannot be repaired by consuming still more families.
+                if (
+                    not reverse_shellable(state, required_prefix)
+                    or not terminal_possible(state)
+                ):
+                    return None
+                safe = safe_indices(state)
+                if not safe:
+                    if (
+                        state.bit_count() == target_depth
+                        and reverse_shellable(state, required_prefix)
+                    ):
+                        return state
+                    return None
+                choices: list[
+                    tuple[int, str, tuple[int, ...]]
+                ] = []
+                for index in branch_indices(safe):
+                    next_states = {
+                        canonicalize(state | failure)
+                        for failure in disable_masks[index]
+                        if failure & ~state
+                    }
+                    next_states = {
+                        next_state
+                        for next_state in next_states
+                        if next_state != state
+                        and next_state.bit_count() <= target_depth
+                        and not required_prefix & ~next_state
+                    }
+                    if not next_states:
+                        return None
+                    choices.append(
+                        (
+                            len(next_states),
+                            component[index],
+                            tuple(
+                                sorted(
+                                    next_states,
+                                    key=lambda next_state: (
+                                        -(
+                                            next_state.bit_count()
+                                            - state.bit_count()
+                                        ),
+                                        next_state,
+                                    ),
+                                )
+                            ),
+                        )
+                    )
+                _, _, next_states = min(choices)
+                for next_state in next_states:
+                    found = search(next_state)
+                    if found is not None:
+                        return found
+                return None
+
+            return search(required_prefix)
+
+        # Search real paths from the proven order-free lower bound upward.
+        # At each prefix, ask the terminal-set solver whether a shellable
+        # completion exists before accepting the smallest safe family. This
+        # recovers the same lexicographic witness as exhaustive sequence search
+        # without enumerating permutations of one terminal set.
+        def real_terminal_sequence(
+            target_depth: int,
+        ) -> tuple[str, ...] | None:
+            if shellable_terminal(0, target_depth) is None:
+                return None
+
+            sequence: list[str] = []
+            state = 0
+            while True:
+                safe = safe_indices(state)
+                if not safe:
+                    break
+                selected: tuple[str, int] | None = None
+                for index in sorted(
+                    branch_indices(safe), key=lambda value: component[value]
+                ):
+                    next_state = canonicalize(state | (1 << index))
+                    if shellable_terminal(
+                        next_state, target_depth
+                    ) is not None:
+                        selected = component[index], next_state
+                        break
+                if selected is None:
+                    raise AssertionError(
+                        "Reachable capacity terminal lost its witness path."
+                    )
+                family_id, state = selected
+                sequence.append(family_id)
+            if len(sequence) != target_depth:
+                raise AssertionError(
+                    "Capacity witness length diverged from certified depth."
+                )
+            return tuple(sequence)
+
+        for depth in range(relaxed_low, candidate_bound + 1):
+            sequence = real_terminal_sequence(depth)
+            if sequence is not None:
+                return depth, sequence
+        raise AssertionError(
+            "A real greedy capacity terminal escaped bounded reconstruction."
+        )
+
+    low_certificate = certified_low_bound()
+
+    def certified_high_sequence() -> tuple[int, tuple[str, ...]] | None:
+        """Prove the latest terminal path below a certified packing bound.
+
+        ``certified_equal_bound`` derives a disjoint cover of the initially
+        safe families with mandatory consumption quotas.  Even when its first
+        greedy witness does not attain the resulting upper bound, those quotas
+        remain valid.  Search candidate depths from that bound downward and
+        decide whether a real prefix of each depth exists.  The first reachable
+        depth is exact: every larger depth was disproved and the packing
+        certificate excludes anything beyond the initial bound.
+
+        At an intermediate state, safety is monotone under further removals.
+        A family that is unsafe now can never be consumed later. Restrict every
+        valid mandatory quota to the currently safe families, subtract quota
+        already consumed, and solve the resulting grouped 0/1 cardinality
+        packing exactly. Its optimum is a sound state-specific upper bound on
+        real removals and accounts for all overlapping quotas simultaneously.
+        """
+
+        if certified_high_bound is None:
+            return None
+        if certified_high_bound == 0:
+            return 0, ()
+        if (
+            not certified_high_quota_blocks
+            or not certified_high_quota_candidates
+        ):
+            return None
+
+        def within_quotas(state: int) -> bool:
+            return all(
+                (state & block).bit_count() <= quota
+                for block, quota in certified_high_quota_candidates
+            )
+
+        def dynamic_quota_constraints(
+            state: int, safe_mask: int
+        ) -> tuple[tuple[int, int], ...]:
+            by_block: dict[int, int] = {}
+            for block, quota in certified_high_quota_candidates:
+                restricted = block & safe_mask
+                if not restricted:
+                    continue
+                residual = quota - (state & block).bit_count()
+                if residual < 0:
+                    return ()
+                residual = min(residual, restricted.bit_count())
+                by_block[restricted] = min(
+                    by_block.get(restricted, restricted.bit_count()),
+                    residual,
+                )
+            return tuple(sorted(by_block.items()))
+
+        evaluated_quota_states: set[tuple[object, ...]] = set()
+
+        def charge_quota_state(
+            state: int, oracle: tuple[object, ...]
+        ) -> None:
+            oracle_state = (state, *oracle)
+            if oracle_state not in evaluated_quota_states:
+                budget.consume(len(component))
+                evaluated_quota_states.add(oracle_state)
+
+        @lru_cache(maxsize=None)
+        def quota_upper(state: int) -> int:
+            if not within_quotas(state):
+                return -1
+            safe_mask = sum(
+                1 << index for index in safe_indices(state)
+            )
+            future = _maximum_quota_packing(
+                safe_mask,
+                dynamic_quota_constraints(state, safe_mask),
+                charge=lambda oracle: charge_quota_state(state, oracle),
+            )
+            if future < 0:
+                return -1
+            return state.bit_count() + future
+
+        # Establish a real lower witness so target search never descends below
+        # a depth already known to be attainable.
+        greedy_state = 0
+        greedy_sequence: list[str] = []
+        while True:
+            charge_state(greedy_state)
+            safe = safe_indices(greedy_state)
+            if not safe:
+                break
+            selected = min(
+                branch_indices(safe),
+                key=lambda index: (
+                    -len(
+                        safe_indices(greedy_state | (1 << index))
+                    ),
+                    component[index],
+                ),
+            )
+            greedy_sequence.append(component[selected])
+            greedy_state |= 1 << selected
+        greedy_bound = len(greedy_sequence)
+        effective_high_bound = min(
+            certified_high_bound, quota_upper(0)
+        )
+        if effective_high_bound < greedy_bound:
+            raise AssertionError(
+                "A valid capacity witness exceeded its quota certificate."
+            )
+
+        # A bounded beam is only an attainment accelerator. Missing the upper
+        # bound proves nothing and falls through to exact target search. If it
+        # reaches the certified packing bound, however, that concrete safe
+        # sequence is a valid exact witness. Keep all generated states inside
+        # the same fail-closed budget as the proof searches.
+        beam: dict[int, tuple[str, ...]] = {0: ()}
+        attainment_sequence: tuple[str, ...] | None = None
+        for _ in range(effective_high_bound):
+            candidates: dict[int, tuple[str, ...]] = {}
+            for state, sequence in sorted(
+                beam.items(), key=lambda value: value[1]
+            ):
+                for index in branch_indices(safe_indices(state)):
+                    next_state = state | (1 << index)
+                    if not within_quotas(next_state):
+                        continue
+                    charge_state(next_state)
+                    next_sequence = sequence + (component[index],)
+                    prior = candidates.get(next_state)
+                    if prior is None or next_sequence < prior:
+                        candidates[next_state] = next_sequence
+            if not candidates:
+                break
+            if next(iter(candidates)).bit_count() == effective_high_bound:
+                terminal = [
+                    sequence
+                    for state, sequence in candidates.items()
+                    if not safe_indices(state)
+                ]
+                if terminal:
+                    attainment_sequence = min(terminal)
+                break
+
+            def beam_rank(
+                item: tuple[int, tuple[str, ...]],
+            ) -> tuple[int, int, int, tuple[str, ...], int]:
+                state, sequence = item
+                safe_count = len(safe_indices(state))
+                slack_damage = sum(
+                    (state & block).bit_count()
+                    * max(1, block.bit_count() - quota)
+                    for block, quota in certified_high_quota_candidates
+                    if quota < block.bit_count()
+                )
+                return (
+                    -quota_upper(state),
+                    -safe_count,
+                    slack_damage,
+                    sequence,
+                    state,
+                )
+
+            beam = dict(
+                sorted(candidates.items(), key=beam_rank)[:256]
+            )
+
+        attaining_prefixes: set[int] = set()
+        if attainment_sequence is not None:
+            state = 0
+            attaining_prefixes.add(state)
+            by_family = {
+                family_id: index
+                for index, family_id in enumerate(component)
+            }
+            for family_id in attainment_sequence:
+                state |= 1 << by_family[family_id]
+                attaining_prefixes.add(state)
+
+        target_depths: Iterable[int]
+        if attainment_sequence is not None:
+            target_depths = (effective_high_bound,)
+        else:
+            target_depths = range(
+                effective_high_bound, greedy_bound - 1, -1
+            )
+
+        for target_depth in target_depths:
+
+            @lru_cache(maxsize=None)
+            def reaches_target(state: int) -> bool:
+                charge_state(state)
+                if state in attaining_prefixes:
+                    return True
+                depth = state.bit_count()
+                if depth == target_depth:
+                    return True
+                safe = safe_indices(state)
+                if not safe or quota_upper(state) < target_depth:
+                    return False
+                children: list[
+                    tuple[int, int, str, int]
+                ] = []
+                for index in branch_indices(safe):
+                    next_state = state | (1 << index)
+                    if not within_quotas(next_state):
+                        continue
+                    next_safe = safe_indices(next_state)
+                    next_upper = quota_upper(next_state)
+                    if next_upper < target_depth:
+                        continue
+                    children.append(
+                        (
+                            -next_upper,
+                            -len(next_safe),
+                            component[index],
+                            next_state,
+                        )
+                    )
+                return any(
+                    reaches_target(next_state)
+                    for _, _, _, next_state in sorted(children)
+                )
+
+            if not reaches_target(0):
+                continue
+
+            # Recover the same stable lexicographic witness as the exhaustive
+            # recurrence by choosing the first concrete family whose suffix
+            # can still attain the proven maximum.
+            sequence: list[str] = []
+            state = 0
+            while state.bit_count() < target_depth:
+                selected: tuple[str, int] | None = None
+                for index in sorted(
+                    branch_indices(safe_indices(state)),
+                    key=lambda value: component[value],
+                ):
+                    next_state = state | (1 << index)
+                    if (
+                        within_quotas(next_state)
+                        and reaches_target(next_state)
+                    ):
+                        selected = component[index], next_state
+                        break
+                if selected is None:
+                    raise AssertionError(
+                        "Reachable maximum capacity lost its witness path."
+                    )
+                family_id, state = selected
+                sequence.append(family_id)
+            if safe_indices(state):
+                raise AssertionError(
+                    "Certified maximum capacity ended before exhaustion."
+                )
+            return target_depth, tuple(sequence)
+
+        # The real greedy path above must be admitted by every sound quota.
+        # Preserve the historical exhaustive recurrence as a fail-closed
+        # fallback if an internal certificate invariant is ever violated.
+        return None
+
     @lru_cache(maxsize=None)
     def lowest(consumed: int) -> tuple[int, tuple[str, ...]]:
         charge_state(consumed)
@@ -1402,8 +2219,15 @@ def _component_bounds(
         assert best is not None
         return best
 
-    low, low_sequence = lowest(0)
-    high, high_sequence = highest(0)
+    if low_certificate is None:
+        low, low_sequence = lowest(0)
+    else:
+        low, low_sequence = low_certificate
+    high_certificate = certified_high_sequence()
+    if high_certificate is None:
+        high, high_sequence = highest(0)
+    else:
+        high, high_sequence = high_certificate
     return _Bounds(low, high, low_sequence, high_sequence)
 
 

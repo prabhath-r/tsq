@@ -42,6 +42,65 @@ class ObjectivePosteriorCacheTestCase(unittest.TestCase):
             )
         )
 
+    @staticmethod
+    def _legacy_metrics(
+        log_density: tuple[float, ...],
+        *,
+        evidence_mass: float,
+        acquisition_mass: float,
+    ):
+        """Reproduce the pre-cache independent-integration sequence."""
+
+        mean = posterior_module._integrate_function(
+            log_density, posterior_module.THETA_GRID
+        )
+        second_moment = posterior_module._integrate_function(
+            log_density,
+            (
+                theta * theta
+                for theta in posterior_module.THETA_GRID
+            ),
+        )
+        variance = max(0.0, second_moment - mean * mean)
+        threshold = posterior_module._logit(
+            posterior_module.DEFAULT_MASTERY_THRESHOLD
+        )
+        mastery = posterior_module._probability_above_theta(
+            log_density, threshold
+        )
+        coarse_mastery = (
+            posterior_module._probability_above_theta_on_stride(
+                log_density,
+                threshold,
+                stride=2,
+            )
+        )
+        mastery_error_bound = min(
+            1.0,
+            max(
+                posterior_module.MASTERY_PROBABILITY_ERROR_BOUND,
+                abs(mastery - coarse_mastery),
+            ),
+        )
+        competence = posterior_module._integrate_function(
+            log_density,
+            (
+                posterior_module._sigmoid(theta)
+                for theta in posterior_module.THETA_GRID
+            ),
+        )
+        edge = posterior_module._edge_mass(log_density)
+        return posterior_module.PosteriorMetrics(
+            mean=mean,
+            variance=variance,
+            mastery_probability=mastery,
+            expected_competence=competence,
+            edge_mass=edge,
+            evidence_mass=evidence_mass,
+            acquisition_mass=acquisition_mass,
+            mastery_probability_error_bound=mastery_error_bound,
+        )
+
     def test_cached_derivatives_preserve_canonical_identity(self) -> None:
         posterior = self._posterior()
         encoded_before = posterior.encode()
@@ -101,6 +160,108 @@ class ObjectivePosteriorCacheTestCase(unittest.TestCase):
         # Only the two hypothetical outcome densities require new metrics; the
         # current posterior's variance comes from its immutable cache.
         self.assertEqual(metrics_for_density.call_count, 2)
+
+    def test_expected_information_is_bit_exact_to_legacy_grid_sequence(
+        self,
+    ) -> None:
+        posterior = self._posterior()
+        parameters = {
+            "difficulty": 0.7,
+            "discrimination": 1.8,
+            "guess_rate": 0.25,
+            "slip_rate": 0.08,
+            "option_count": 4,
+            "evidence_power": 0.75,
+        }
+        current = posterior.log_density
+        predicted_correct = posterior_module._integrate_function(
+            current,
+            (
+                posterior_module._response_probability(
+                    theta,
+                    difficulty=parameters["difficulty"],
+                    discrimination=parameters["discrimination"],
+                    guess_rate=parameters["guess_rate"],
+                    slip_rate=parameters["slip_rate"],
+                    option_count=parameters["option_count"],
+                )
+                for theta in posterior_module.THETA_GRID
+            ),
+        )
+        factors = tuple(
+            LikelihoodObservation(
+                observation_id=(
+                    "expected_information_correct"
+                    if correct
+                    else "expected_information_incorrect"
+                ),
+                family_id="expected_information_family",
+                correct=correct,
+                **parameters,
+            )
+            for correct in (True, False)
+        )
+        densities = tuple(
+            posterior_module._apply_observations(current, (factor,))
+            for factor in factors
+        )
+        metrics = tuple(
+            self._legacy_metrics(
+                density,
+                evidence_mass=(
+                    posterior.evidence_mass + parameters["evidence_power"]
+                ),
+                acquisition_mass=posterior.acquisition_mass,
+            )
+            for density in densities
+        )
+        for density, expected_metrics in zip(
+            densities, metrics, strict=True
+        ):
+            self.assertEqual(
+                posterior_module._metrics_for_density(
+                    density,
+                    evidence_mass=(
+                        posterior.evidence_mass
+                        + parameters["evidence_power"]
+                    ),
+                    acquisition_mass=posterior.acquisition_mass,
+                ),
+                expected_metrics,
+            )
+        divergences = tuple(
+            posterior_module._kl_divergence(density, current)
+            for density in densities
+        )
+        expected_information = (
+            predicted_correct * divergences[0]
+            + (1.0 - predicted_correct) * divergences[1]
+        )
+        current_variance = posterior.metrics().variance
+        expected = posterior_module.ExpectedInformation(
+            predicted_correct=max(0.0, min(1.0, predicted_correct)),
+            expected_information_nats=max(0.0, expected_information),
+            expected_variance=max(
+                0.0,
+                predicted_correct * metrics[0].variance
+                + (1.0 - predicted_correct) * metrics[1].variance,
+            ),
+            variance_reduction=(
+                current_variance
+                - (
+                    predicted_correct * metrics[0].variance
+                    + (1.0 - predicted_correct) * metrics[1].variance
+                )
+            ),
+            correct_mastery_probability=metrics[0].mastery_probability,
+            incorrect_mastery_probability=metrics[1].mastery_probability,
+        )
+
+        self.assertEqual(posterior.expected_information(**parameters), expected)
+        self.assertEqual(
+            posterior.expected_information_nats(**parameters),
+            expected.expected_information_nats,
+        )
 
 
 class PolicyObjectiveProjectionCacheTestCase(unittest.TestCase):
@@ -178,7 +339,99 @@ class PolicyObjectiveProjectionCacheTestCase(unittest.TestCase):
 
         self.assertEqual(cached, uncached)
 
-    def test_one_selection_projects_each_release_objective_at_most_twice(self) -> None:
+    def test_batched_cold_states_are_exact_and_request_immutable(self) -> None:
+        objectives = self.database.get_learning_objectives(self.release_id)
+        individual = {
+            objective.id: self.model.initial_objective_state(
+                "batch-cold-state", objective
+            )
+            for objective in objectives
+        }
+
+        with mock.patch.object(
+            posterior_module.ObjectivePosterior,
+            "from_prior",
+            wraps=posterior_module.ObjectivePosterior.from_prior,
+        ) as from_prior:
+            batched = self.model.initial_objective_states(
+                "batch-cold-state", objectives
+            )
+
+        self.assertEqual(dict(batched), individual)
+        self.assertEqual(
+            from_prior.call_count,
+            len({objective.prior_mastery for objective in objectives}),
+        )
+        with self.assertRaises(TypeError):
+            batched[objectives[0].id] = individual[objectives[0].id]
+
+    def test_full_selection_trace_matches_uncached_reference_path(self) -> None:
+        sessions = []
+        for learner_id in ("trace-cached", "trace-uncached"):
+            self.engine.create_learner(learner_id)
+            sessions.append(
+                self.engine.start_session(
+                    learner_id,
+                    "t_transformers",
+                    mode="learn",
+                    explore_related=False,
+                    seed=4709,
+                    now=NOW,
+                )
+            )
+
+        cached = self.engine.next_question(sessions[0]["id"], now=NOW)
+        original_floor = (
+            self.model.concept_projection_with_objective_floor
+        )
+        original_score = self.engine.policy._score
+
+        def uncached_floor(*args, **kwargs):
+            kwargs.pop("projected_objective_states", None)
+            return original_floor(*args, **kwargs)
+
+        def uncached_score(question, **kwargs):
+            kwargs.pop("projected_objective_states", None)
+            return original_score(question, **kwargs)
+
+        with (
+            mock.patch.object(
+                self.model,
+                "concept_projection_with_objective_floor",
+                side_effect=uncached_floor,
+            ),
+            mock.patch.object(
+                self.engine.policy,
+                "_score",
+                side_effect=uncached_score,
+            ),
+        ):
+            uncached = self.engine.next_question(sessions[1]["id"], now=NOW)
+
+        self.assertEqual(cached.question.id, uncached.question.id)
+        self.assertEqual(cached.option_order, uncached.option_order)
+        fields = (
+            "question_id",
+            "candidate_count",
+            "candidate_digest",
+            "top_candidates_json",
+            "selected_score_json",
+            "propensity",
+            "option_order_json",
+            "rationale",
+        )
+        with self.database.read() as connection:
+            snapshots = []
+            for decision_id in (cached.decision_id, uncached.decision_id):
+                row = connection.execute(
+                    f"""SELECT {", ".join(fields)}
+                        FROM decisions WHERE id = ?""",
+                    (decision_id,),
+                ).fetchone()
+                snapshots.append(tuple(row[field] for field in fields))
+        self.assertEqual(snapshots[0], snapshots[1])
+
+    def test_one_selection_projects_each_release_objective_once(self) -> None:
         learner_id = "cache-selection-count"
         self.engine.create_learner(learner_id)
         session = self.engine.start_session(
@@ -207,9 +460,9 @@ class PolicyObjectiveProjectionCacheTestCase(unittest.TestCase):
             call.args[1].id for call in project_objective_state.call_args_list
         )
         self.assertEqual(set(calls_by_objective), objective_ids)
-        self.assertTrue(
-            all(count == 2 for count in calls_by_objective.values()),
+        self.assertEqual(
             calls_by_objective,
+            Counter({objective_id: 1 for objective_id in objective_ids}),
         )
 
 

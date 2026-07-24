@@ -2258,6 +2258,13 @@
       "remediation": "Track proposal, policy check, execution result, and state verification as distinct records."
     },
     {
+      "id": "m_agent_tool_availability_is_authorization",
+      "name": "Tool availability grants authorization",
+      "description": "Treats discovering a capability or finding a schema that accepts proposed arguments as permission to execute outside the action's approved scope.",
+      "concept_id": "c_agent_tool_use",
+      "remediation": "Bind authorization to the exact actor, operation, resource, and arguments; tool discovery and schema validation do not expand that grant."
+    },
+    {
       "id": "m_agent_tool_output_is_trusted",
       "name": "Tool output is trusted instruction",
       "description": "Allows untrusted tool-returned text to override policy or issue actions instead of treating it as data.",
@@ -4795,7 +4802,7 @@
       "id": "q_conditional_independence_common_cause_001",
       "version": 1,
       "family_id": "f_conditional_dependence_structure",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Two laboratory tests are independent conditional on a patient's disease status. Each test is more likely positive when disease is present. Before disease status is observed, how are the two test results generally related?",
       "kind": "conceptual",
       "difficulty": 0.25,
@@ -7431,7 +7438,7 @@
       "version": 1,
       "family_id": "f_transformer_axis_mixing",
       "learning_objective_id": "lo_transformer_information_paths",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "In a standard Transformer layer, attention output is temporarily replaced with zeros while the position-wise feed-forward sublayer and residual paths remain. Which operation can still combine information from different token positions in that layer?",
       "kind": "counterfactual",
       "difficulty": 0.35,
@@ -8898,7 +8905,7 @@
       "version": 1,
       "family_id": "f_causal_mask_matrix",
       "learning_objective_id": "lo_causal_visibility",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A shifted decoder input has positions indexed from 0 through n-1. Which attention rule gives the standard causal self-attention visibility for query position i?",
       "kind": "debugging",
       "difficulty": 0.55,
@@ -9471,7 +9478,7 @@
       "version": 1,
       "family_id": "f_transformer_position_signal_ablation",
       "learning_objective_id": "lo_attention_permutation_order",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A Transformer uses unrestricted self-attention but receives no positional encoding or other position signal. Two inputs contain the same token representations in different orders. What behavior should an audit expect?",
       "kind": "counterfactual",
       "difficulty": 0.9,
@@ -10313,7 +10320,7 @@
       "id": "q_adaptive_stopping_utility_001",
       "version": 1,
       "family_id": "f_adaptive_stopping_utility",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "At the current decision point, an adaptive diagnostic converts every term to common utility points and scores continuation as expected entropy reduction minus a fatigue-and-reliability penalty minus response burden. Candidate H, the hardest item, scores 0.31 - 0.30 - 0.06. Candidate M, mapped to mastery nearest 0.50, scores 0.36 - 0.22 - 0.17. Candidate I, with the largest unconstrained information estimate, scores 0.48 - 0.34 - 0.18. Stopping now scores 0. Which current action maximizes the defined utility?",
       "kind": "calculation",
       "difficulty": 0.55,
@@ -10390,7 +10397,7 @@
       "id": "q_adaptive_posterior_shape_001",
       "version": 1,
       "family_id": "f_adaptive_posterior_shape",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Define mastery as P(theta > 0). Learner A places probability 0.5 at theta = -0.1 and 0.5 at +0.1; learner B places probability 0.5 at -2 and 0.5 at +2, so both have mastery 0.50. For a candidate item, P(correct | theta) = sigmoid(theta), so both also predict a correct response with probability 0.50. A policy concludes that the item has equal information value for A and B. Which diagnosis is correct?",
       "kind": "calculation",
       "difficulty": 1.15,
@@ -10477,7 +10484,7 @@
       "id": "q_information_gain_orthogonal_partition_001",
       "version": 1,
       "family_id": "f_information_gain_orthogonal_partition",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Four hypotheses A, B, C, and D are equally likely. Probe X reports whether the truth is in {A, B} or {C, D}; probe Z reports whether it is in {A, C} or {B, D}; probe Y returns an independent fair coin. Which two-probe plan has the greatest expected information?",
       "kind": "calculation",
       "difficulty": 0.4,
@@ -10552,7 +10559,7 @@
       "id": "q_information_gain_conditional_table_001",
       "version": 1,
       "family_id": "f_information_gain_conditional_table",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "After existing evidence E, a fault has posterior P(F = 1 | E) = 0.80. A second check Z shares part of the evidence pipeline, so its conditional table is used rather than an independence assumption: P(Z = 1 | F = 1, E) = 0.75 and P(Z = 1 | F = 0, E) = 0.25. Thus P(Z = 1 | E) = 0.65. Approximately what expected additional information I(F; Z | E) does Z provide?",
       "kind": "calculation",
       "difficulty": 0.85,
@@ -10632,7 +10639,7 @@
       "id": "q_tracing_multiskill_likelihood_001",
       "version": 1,
       "family_id": "f_tracing_multiskill_likelihood",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A database-migration exercise requires transaction-boundary reasoning T and foreign-key ordering F. As a separate authoring annotation, its content mapping assigns weight 0.70 to T and 0.30 to F. Before the response, a tracer assigns independent mastery priors P(T) = P(F) = 0.70. Its wrong-answer likelihoods are 0.10 when both are mastered, 0.60 when T is mastered and F is unmastered, 0.70 when T is unmastered and F is mastered, and 0.90 when both are unmastered. After a wrong answer, which update follows from Bayes' rule?",
       "kind": "calculation",
       "difficulty": 1.15,
@@ -10715,7 +10722,7 @@
       "id": "q_tracing_disambiguation_probe_001",
       "version": 1,
       "family_id": "f_tracing_disambiguation_probe",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "After a wrong response to a two-skill item, a joint tracer retains correlated uncertainty with P(A unmastered) = 0.30 and P(B unmastered) = 0.55. The original item had content weights A = 0.70 and B = 0.30. An A-only probe has P(correct | A mastered) = 0.65 and P(correct | A unmastered) = 0.35; a B-only probe has corresponding probabilities 0.90 and 0.10. The goal is to reduce failure-attribution uncertainty without making a hard mastery label. What is the strongest next step?",
       "kind": "transfer",
       "difficulty": 0.95,
@@ -10798,7 +10805,7 @@
       "id": "q_causal_total_effect_adjustment_001",
       "version": 1,
       "family_id": "f_causal_total_effect_adjustment",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A causal graph has pre-treatment severity C causing both treatment T and outcome Y. Treatment also affects Y directly and through a post-treatment mediator M: T to M to Y. An analyst wants the total effect of T on Y. Which adjustment strategy matches that estimand?",
       "kind": "debugging",
       "difficulty": 0.9,
@@ -10873,7 +10880,7 @@
       "id": "q_causal_observational_equivalence_001",
       "version": 1,
       "family_id": "f_causal_observational_equivalence",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Let U be a fair binary variable. In model A, T = U and Y = T. In model B, T = U and Y = U. Both models therefore produce T = Y in every observational record, but they respond differently when T is externally set. What follows?",
       "kind": "counterfactual",
       "difficulty": 1.1,
@@ -10948,7 +10955,7 @@
       "id": "q_generative_missing_feature_001",
       "version": 1,
       "family_id": "f_generative_missing_feature",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Classifier G models p(y)p(x1, x2 | y), while classifier D models p(y | x1, x2) directly. At deployment, x2 is sometimes missing. Which statement correctly describes the generative model's relevant capability and limitation?",
       "kind": "comparison",
       "difficulty": 0.6,
@@ -11024,7 +11031,7 @@
       "id": "q_generative_prior_shift_001",
       "version": 1,
       "family_id": "f_label_shift_prior_odds",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "The source class prior is P_s(y = 1) = 0.10 and the target prior is P_t(y = 1) = 0.40. Audits support label shift: P_t(x | y) = P_s(x | y). At a particular x, a generative classifier and a calibrated discriminative classifier both give source posterior P_s(y = 1 | x) = 0.20. Using target odds = source posterior odds times the target-to-source prior-odds ratio, which response is correct?",
       "kind": "calculation",
       "difficulty": 1.05,
@@ -11113,7 +11120,7 @@
       "id": "q_backprop_detach_scalar_001",
       "version": 1,
       "family_id": "f_backprop_detach_scalar_jacobian",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Let x = 3, theta = 2, h = theta x, z = stop_gradient(h), y = phi z with phi = 5, and L = one half y squared. What gradients does reverse-mode automatic differentiation produce?",
       "kind": "calculation",
       "difficulty": 0.6,
@@ -11192,7 +11199,7 @@
       "id": "q_backprop_straight_through_001",
       "version": 1,
       "family_id": "f_backprop_straight_through_boundary",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A program defines q(x) = round(x) and y = x + stop_gradient(q(x) - x). At x = 3.2, which forward value and local automatic-differentiation derivative dy/dx should a debugger observe?",
       "kind": "debugging",
       "difficulty": 1.0,
@@ -11270,7 +11277,7 @@
       "id": "q_gradient_spectral_contraction_001",
       "version": 1,
       "family_id": "f_gradient_spectral_contraction",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A least-squares model has Hessian eigenvalues 81 and 1. Gradient descent uses eta = 1/81, so an error component with eigenvalue lambda is multiplied by 1 - eta lambda each step. Which diagnosis is correct?",
       "kind": "calculation",
       "difficulty": 0.8,
@@ -11349,7 +11356,7 @@
       "id": "q_gradient_momentum_stability_001",
       "version": 1,
       "family_id": "f_gradient_momentum_stability_region",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "For one Hessian eigen-direction, heavy-ball error follows e_(t+1) = (1 + beta - eta lambda)e_t - beta e_(t-1), whose characteristic polynomial is r^2 - (1 + beta - eta lambda)r + beta. With beta = 0.5, eta = 0.0375, and Hessian eigenvalues 20 and 100, which spectral calculation and response are correct?",
       "kind": "calculation",
       "difficulty": 1.2,
@@ -11427,7 +11434,7 @@
       "id": "q_neural_local_relu_derivative_001",
       "version": 1,
       "family_id": "f_neural_local_relu_derivative",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A one-hidden-layer network is y(x) = v^T ReLU(Wx + b). At x0, the two hidden preactivations are (-2, 3), their directional changes along u are Wu = (5, -4), and v = (7, 2). For a sufficiently small positive step that crosses neither ReLU boundary, what is D_u y(x0), and what does this local result establish?",
       "kind": "calculation",
       "difficulty": 0.9,
@@ -11505,7 +11512,7 @@
       "id": "q_neural_relu_rescaling_001",
       "version": 1,
       "family_id": "f_neural_relu_rescaling_symmetry",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "One hidden ReLU unit contributes v ReLU(w transpose x + b) to a network output. Its incoming w and b are multiplied by positive alpha = 10 while v is divided by 10. What follows from ReLU's positive homogeneity?",
       "kind": "counterfactual",
       "difficulty": 0.85,
@@ -11583,7 +11590,7 @@
       "id": "q_representation_augmentation_semantics_001",
       "version": 1,
       "family_id": "f_representation_augmentation_semantics",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Contrastive pretraining for microscopy treats large stain-color changes as positive pairs. Stain color is partly diagnostic for the downstream assay, and the resulting encoder has low pretraining loss but worse lab-held-out assay accuracy. What is the strongest next step?",
       "kind": "debugging",
       "difficulty": 0.75,
@@ -11661,7 +11668,7 @@
       "id": "q_bellman_potential_cycle_sum_001",
       "version": 1,
       "family_id": "f_bellman_potential_cycle_sum",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Starting in A, an agent repeats the transition cycle A-to-B-to-A forever in a discounted MDP with gamma = 0.5, zero original rewards, Phi(A) = 2, and Phi(B) = 6. Under F(s,s') = gamma Phi(s') - Phi(s), what are the shaping return over the first two transitions and over the infinite trajectory?",
       "kind": "calculation",
       "difficulty": 1.15,
@@ -11739,7 +11746,7 @@
       "id": "q_bellman_discount_mismatch_001",
       "version": 1,
       "family_id": "f_bellman_discount_mismatch",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Training used planning discount 0.9 and shaping term 0.9 Phi(s') - Phi(s). A deployment planner changes its discount to 0.7 but keeps the old shaping term. Which conclusion follows?",
       "kind": "counterfactual",
       "difficulty": 0.65,
@@ -11817,7 +11824,7 @@
       "id": "q_ope_importance_contribution_001",
       "version": 1,
       "family_id": "f_ope_importance_ratio_contribution",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "In a one-step logged decision, the behavior policy chose action a with b(a|x) = 0.2, the target policy has pi(a|x) = 0.8, and the observed reward is 3. Which off-policy account is correct before averaging across samples?",
       "kind": "calculation",
       "difficulty": 0.45,
@@ -11895,7 +11902,7 @@
       "id": "q_ope_doubly_robust_numeric_001",
       "version": 1,
       "family_id": "f_ope_doubly_robust_numeric",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "For a one-step logged bandit sample, define the doubly robust estimate as sum_a pi(a)qhat(a) + pi(A)/b(A)[r - qhat(A)]. Here pi(A) = 0.75, pi(B) = 0.25, b(A) = 0.5, qhat(A) = 2, qhat(B) = 6, the logged action is A, and r = 4. Which calculation and interpretation are correct?",
       "kind": "calculation",
       "difficulty": 1.0,
@@ -11974,7 +11981,7 @@
       "id": "q_calibration_subgroup_uncertainty_batch_c_001",
       "version": 1,
       "family_id": "f_calibration_subgroup_uncertainty",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A risk model assigns 0.70 to 1,000 deployment cases, and 700 events occur. A prespecified subgroup contains ten of those cases, with seven events. Which interpretation is statistically defensible?",
       "kind": "comparison",
       "difficulty": 0.65,
@@ -12068,7 +12075,7 @@
       "id": "q_imbalance_predictive_value_batch_c_001",
       "version": 1,
       "family_id": "f_imbalance_predictive_value_base_rate",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A screening test is applied to 10,000 people with 1% prevalence. Sensitivity is 90% and specificity is 95%. What does the expected confusion count imply?",
       "kind": "calculation",
       "difficulty": 0.55,
@@ -12168,7 +12175,7 @@
       "id": "q_imbalance_cost_matrix_batch_c_001",
       "version": 1,
       "family_id": "f_imbalance_cost_matrix_comparison",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Among 10,000 cases, 100 are positive. Model A predicts every case negative. Model B has 80 true positives, 20 false negatives, and 300 false positives. A false negative costs 50 units and a false positive costs one. Which comparison is correct?",
       "kind": "calculation",
       "difficulty": 0.4,
@@ -12268,7 +12275,7 @@
       "id": "q_ranking_pairwise_auc_batch_c_001",
       "version": 1,
       "family_id": "f_ranking_pairwise_auc",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Two positive cases receive scores 0.90 and 0.40, while two negative cases receive scores 0.80 and 0.30. With no ties, which statement correctly interprets ROC AUC?",
       "kind": "calculation",
       "difficulty": 0.35,
@@ -12362,7 +12369,7 @@
       "id": "q_ranking_confusion_metrics_batch_c_001",
       "version": 1,
       "family_id": "f_ranking_confusion_metrics",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A classifier has ROC AUC 0.90. At one fixed score threshold it produces 40 true positives, 10 false positives, and 20 false negatives. Which calculation and interpretation are sound?",
       "kind": "calculation",
       "difficulty": 0.5,
@@ -12457,7 +12464,7 @@
       "id": "q_bias_variance_repeated_datasets_batch_c_001",
       "version": 1,
       "family_id": "f_bias_variance_repeated_dataset_decomposition",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "At a fixed input, the true regression mean is 8. Across many independently sampled training sets, a fitted model predicts a mean of 2 with standard deviation 0.2. Outcomes around the true mean have standard deviation 3. Which diagnosis fits?",
       "kind": "calculation",
       "difficulty": 0.75,
@@ -12551,7 +12558,7 @@
       "id": "q_leakage_centered_window_batch_c_001",
       "version": 1,
       "family_id": "f_leakage_centered_window",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "At the end of day t, a pipeline issues a forecast for demand on day t plus 1. Before making a chronological train/test split, it gives the row for forecast origin t a centered seven-day mean of observed demand from days t minus 3 through t plus 3. Training rows near the cutoff can therefore also share underlying demand observations with held-out feature windows. Why is this evaluation invalid?",
       "kind": "debugging",
       "difficulty": 0.4,
@@ -12653,7 +12660,7 @@
       "id": "q_partition_rolling_origin_batch_c_001",
       "version": 1,
       "family_id": "f_partition_rolling_origin",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "Monthly data span January 2021 through December 2025. The deployed workflow will retrain on available history and forecast the next month. Hyperparameters must be chosen without using any 2025 outcome, and the team requires one final 2025 performance report. Which partition plan matches those requirements?",
       "kind": "comparison",
       "difficulty": 0.55,
@@ -12754,7 +12761,7 @@
       "id": "q_generalization_finite_target_audit_batch_c_001",
       "version": 1,
       "family_id": "f_generalization_finite_target_uncertainty",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A model has zero training error on 200,000 source cases. A locked model is then audited on 50 independently sampled, representative target-distribution cases and makes zero errors: 45 cases are from a common subgroup and five are from a prespecified rare subgroup. Which report is defensible?",
       "kind": "calculation",
       "difficulty": 0.65,
@@ -12857,7 +12864,7 @@
       "id": "q_generalization_target_mix_batch_c_001",
       "version": 1,
       "family_id": "f_generalization_target_mix_reweighting",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A fitted model's training error is 3%. On an untouched source-population test, its error is 5% for younger users and 20% for older users; that source test is 90% younger. Deployment is expected to be 40% younger. Assuming the stratum-specific errors remain stable, what deployment error is implied?",
       "kind": "calculation",
       "difficulty": 0.5,
@@ -12959,7 +12966,7 @@
       "id": "q_regularization_shear_penalty_batch_c_001",
       "version": 1,
       "family_id": "f_regularization_shear_metric",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A linear model predicts w transpose x and uses the penalty lambda times (w1 squared plus w2 squared). Features are reparameterized as x prime = D x, where D = [[2, 1], [0, 1]], and w prime is chosen so w prime transpose x prime = w transpose x for every x. Which penalty in w prime preserves the original objective exactly for the same lambda?",
       "kind": "calculation",
       "difficulty": 0.9,
@@ -13063,7 +13070,7 @@
       "version": 1,
       "family_id": "f_label_shift_prior_odds",
       "learning_objective_id": null,
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A calibrated classifier was trained where the positive-class prevalence was 0.50. For one case it outputs 0.80. At deployment the prevalence is 0.20, and an audit supports label shift: p(x|y) is unchanged. What is the corrected deployment posterior for this case?",
       "kind": "calculation",
       "difficulty": 0.85,
@@ -13141,7 +13148,7 @@
       "version": 1,
       "family_id": "f_unsupervised_nmf_scaling_invariance",
       "learning_objective_id": null,
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A non-negative matrix factorization uses X approximately equal to WH for soft customer segmentation. One row of W is (0.60, 0.40). With D = diag(0.5, 2), the author replaces W by WD and H by D^-1 H. The reconstruction is unchanged, but that row becomes (0.30, 0.80), reversing its largest component. What follows?",
       "kind": "counterfactual",
       "difficulty": 1.05,
@@ -13219,7 +13226,7 @@
       "version": 1,
       "family_id": "f_unsupervised_dbscan_noise_semantics",
       "learning_objective_id": null,
-      "status": "approved",
+      "status": "quarantined",
       "stem": "DBSCAN is run with minPts = 5, counting the point itself. A transaction p has only four points including itself within epsilon and is not density-reachable from any other core point, so the fit labels p as noise. Which conclusion is justified?",
       "kind": "application",
       "difficulty": 0.75,
@@ -13302,7 +13309,7 @@
       "version": 1,
       "family_id": "f_rag_dual_axis_factuality_grounding",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "An authoritative astronomy catalog lists Planet K's orbital period as 12.4 days. A RAG answer gives 12.4 days but cites a retrieved passage that states only the host star's temperature. Evaluation records factual correctness against the catalog and citation support against the cited passage. Which pair is warranted?",
       "kind": "comparison",
       "difficulty": 0.7,
@@ -13387,7 +13394,7 @@
       "version": 1,
       "family_id": "f_rag_multihop_query_conditioning",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A question asks which university employed the scientist who discovered compound Q at the time of discovery. One broad retrieval query returns five passages that identify the scientist and give the discovery year as 1987, but none gives the scientist's 1987 affiliation. Which next retrieval operation addresses the missing evidence most directly?",
       "kind": "application",
       "difficulty": 0.85,
@@ -13471,7 +13478,7 @@
       "version": 1,
       "family_id": "f_penalty_observation_provenance",
       "learning_objective_id": null,
-      "status": "approved",
+      "status": "quarantined",
       "stem": "A scalar model predicts w. The only observed training target is 4. Procedure P minimizes J_P(w) = (w - 4)^2 + w^2, where the second term is a declared ridge penalty and no row was added. Procedure D instead observes a second genuine training target 0 and minimizes J_D(w) = one half times [(w - 4)^2 + (w - 0)^2]. Which comparison is correct?",
       "kind": "calculation",
       "difficulty": 0.55,
@@ -13555,7 +13562,7 @@
       "version": 1,
       "family_id": "f_agent_revision_ordering",
       "learning_objective_id": "lo_agent_state_reconciliation",
-      "status": "approved",
+      "status": "quarantined",
       "stem": "An agent controls a versioned resource. The API contract says that a higher authoritative revision supersedes a lower one, although callbacks may arrive late. The plan intended state ready. The agent has already processed revision 52 reporting state failed with a quota error. A delayed revision 51 callback then arrives reporting state ready and health pass. The terminal predicate requires the current resource state to be ready and healthy. How should the control-loop projection proceed?",
       "kind": "debugging",
       "difficulty": 0.85,
@@ -13637,12 +13644,405 @@
         "control_loop"
       ]
     },
+    {
+      "id": "q_attention_duplicate_value_identifiability_001",
+      "version": 1,
+      "family_id": "f_attention_duplicate_value_identifiability",
+      "learning_objective_id": "lo_attention_value_routing",
+      "status": "quarantined",
+      "stem": "One attention head has value vectors v1 = u, v2 = u, and v3 = 0. Query A assigns weights [0.9, 0.0, 0.1], while query B assigns [0.0, 0.9, 0.1]. Ignoring output projection, what can be concluded from the two head outputs?",
+      "kind": "calculation",
+      "difficulty": 0.7,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_attention",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The weight vectors are actually equal because fixed value vectors determine the compatibility distribution for both queries.",
+          "correct": false,
+          "misconception_id": "m_attention_values_determine_weights",
+          "rationale": "Queries and keys determine the stated weights; duplicated values can make different weight vectors produce the same routed result."
+        },
+        {
+          "id": "b",
+          "text": "The outputs cannot be computed without the key vectors because attention combines keys rather than values after softmax.",
+          "correct": false,
+          "misconception_id": "m_attention_keys_are_output_payloads",
+          "rationale": "The weights are already given, and the post-softmax mixture uses the value vectors rather than the keys."
+        },
+        {
+          "id": "c",
+          "text": "Both outputs equal u because softmax attention keeps only each query's largest-weight source and discards the 0.1 contribution.",
+          "correct": false,
+          "misconception_id": "m_attention_is_hard_selection",
+          "rationale": "Softmax attention retains every nonzero coefficient, so the zero-valued third position reduces each mixture to 0.9u."
+        },
+        {
+          "id": "d",
+          "text": "Both outputs equal 0.9u; duplicated payloads make the output insufficient to identify which of the first two positions received the weight.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Each weighted sum is 0.9u plus 0.1 times zero, despite the two queries addressing different source positions."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "human_review": false,
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "For query A the output is 0.9u + 0.0u + 0.1(0) = 0.9u; query B gives 0.0u + 0.9u + 0.1(0) = 0.9u. The equal outputs do not identify which duplicated value position carried the mass.",
+        "independence_note": "The keyed operation reasons backward from equal outputs under duplicated payloads. It is not a forward two-value mixture, a value-projection ablation, a single-value perturbation, or a cross-attention shape audit."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "attention",
+        "values",
+        "non_identifiability",
+        "calculation"
+      ]
+    },
+    {
+      "id": "q_causal_mask_softmax_normalization_001",
+      "version": 1,
+      "family_id": "f_causal_mask_softmax_normalization",
+      "learning_objective_id": "lo_causal_visibility",
+      "status": "quarantined",
+      "stem": "During teacher-forced training, the attention logits for shifted-decoder query position i = 1 are [0, 0, 100] for key positions j = 0, 1, 2. Which implementation produces the standard causal attention probabilities for this row?",
+      "kind": "debugging",
+      "difficulty": 0.65,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_causal_masking",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Apply softmax to all three logits during training and defer the causal mask until generated tokens replace teacher-forced inputs.",
+          "correct": false,
+          "misconception_id": "m_mask_only_inference",
+          "rationale": "The future token at j = 2 is already present during teacher forcing and would dominate the unmasked distribution."
+        },
+        {
+          "id": "b",
+          "text": "Set logits for j greater than or equal to i to negative infinity before softmax, producing probabilities [1, 0, 0].",
+          "correct": false,
+          "misconception_id": "m_mask_hides_current_token",
+          "rationale": "Standard shifted-decoder visibility includes j = i; only positions strictly to the right are excluded."
+        },
+        {
+          "id": "c",
+          "text": "Evaluate each training row serially without changing its logits, because sequential execution itself prevents the future key from contributing.",
+          "correct": false,
+          "misconception_id": "m_mask_prevents_parallel_training",
+          "rationale": "Execution order does not remove a supplied logit's softmax contribution; the forbidden edge must be masked explicitly."
+        },
+        {
+          "id": "d",
+          "text": "Set the j = 2 logit to negative infinity before softmax, producing probabilities [0.5, 0.5, 0] in the parallel matrix operation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Causal masking removes the future logit before normalization while retaining both permitted positions and parallel row evaluation."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "human_review": false,
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "For query i = 1, the inclusive causal rule permits j = 0 and j = 1 and excludes j = 2. Replacing the future logit with negative infinity before softmax leaves equal permitted logits and therefore probabilities [0.5, 0.5, 0].",
+        "independence_note": "The keyed operation audits the numerical masking stage and renormalized probabilities. It is not merely choosing an edge inequality, distinguishing training from generation, constructing a packed-sequence mask, or tracing a future activation path."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "causal_mask",
+        "softmax",
+        "teacher_forcing",
+        "debugging"
+      ]
+    },
+    {
+      "id": "q_causal_full_incremental_equivalence_001",
+      "version": 1,
+      "family_id": "f_causal_full_incremental_equivalence",
+      "learning_objective_id": "lo_causal_visibility",
+      "status": "quarantined",
+      "stem": "A deterministic decoder evaluates the same fixed token prefix in two ways: one teacher-forced full-sequence pass with the standard causal mask, and one token-at-a-time pass that reuses exact cached keys and values. Parameters, positions, and arithmetic are otherwise identical. Before sampling, how should the per-position outputs compare?",
+      "kind": "comparison",
+      "difficulty": 0.9,
+      "discrimination": 1.8,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_causal_masking",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.25,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The full pass may use unrestricted attention because the future-information boundary begins with incremental generation, so its outputs can differ.",
+          "correct": false,
+          "misconception_id": "m_mask_only_inference",
+          "rationale": "Teacher forcing contains future inputs and therefore needs the same causal boundary to match autoregressive decoding."
+        },
+        {
+          "id": "b",
+          "text": "The incremental pass excludes its current shifted-input position, while the full causal pass includes that diagonal position, so they differ systematically.",
+          "correct": false,
+          "misconception_id": "m_mask_hides_current_token",
+          "rationale": "Both executions permit the current shifted-input position and exclude positions to its right."
+        },
+        {
+          "id": "c",
+          "text": "The outputs match after the teacher-forced rows are evaluated serially, because parallel matrix evaluation changes which causal dependencies exist.",
+          "correct": false,
+          "misconception_id": "m_mask_prevents_parallel_training",
+          "rationale": "A parallel masked matrix and serial incremental queries implement the same permitted edges; scheduling does not add dependencies."
+        },
+        {
+          "id": "d",
+          "text": "Corresponding outputs match up to numerical effects because each query sees the same permitted shifted-input prefix in both executions.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Causal full-sequence evaluation and exact cached evaluation differ in scheduling and reused intermediates, not in the visible keys and values."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_shazeer_fast_decoding_2019",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "human_review": false,
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "source_scope": "Vaswani et al. ground shifted decoder inputs and causal masking. Shazeer grounds exact incremental decoding with retained key-value state. The equivalence follows by matching the permitted prefix at each query position.",
+        "independence_note": "The keyed operation compares two execution schedules by their visible key-value sets. It is not selecting a mask inequality, normalizing one masked logit row, testing suffix invariance, or inventorying cached tensors."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "causal_mask",
+        "teacher_forcing",
+        "incremental_decoding",
+        "equivalence"
+      ]
+    },
+    {
+      "id": "q_causal_cross_attention_mask_scope_001",
+      "version": 1,
+      "family_id": "f_causal_cross_attention_mask_scope",
+      "learning_objective_id": "lo_causal_visibility",
+      "status": "quarantined",
+      "stem": "An encoder-decoder Transformer is trained with the complete source sequence and a shifted target sequence. There is no source or target padding. Which visibility pattern preserves autoregressive target prediction while retaining access to the encoded source?",
+      "kind": "application",
+      "difficulty": 0.75,
+      "discrimination": 1.8,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_causal_masking",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.25,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Leave target self-attention unrestricted because encoder-decoder Transformer blocks stay bidirectional by architecture when a causal mask is configured.",
+          "correct": false,
+          "misconception_id": "m_transformers_are_inherently_bidirectional",
+          "rationale": "The decoder's configured self-attention mask controls target-side information flow; the architecture label does not override blocked future edges."
+        },
+        {
+          "id": "b",
+          "text": "Use a strict target self-attention mask that excludes the aligned shifted-input position, while cross-attention reads the encoded source.",
+          "correct": false,
+          "misconception_id": "m_mask_hides_current_token",
+          "rationale": "The standard shifted-target alignment permits the diagonal target input; causality excludes positions to its right."
+        },
+        {
+          "id": "c",
+          "text": "Run the target rows serially because exposing the encoded source through cross-attention prevents a parallel causal training computation.",
+          "correct": false,
+          "misconception_id": "m_mask_prevents_parallel_training",
+          "rationale": "Masked target self-attention and source cross-attention can both be evaluated for the teacher-forced target rows in parallel."
+        },
+        {
+          "id": "d",
+          "text": "Use inclusive causal target self-attention, let each target query inspect the complete nonpadding encoder sequence, and compute target rows in parallel.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Causality constrains target-to-target edges; decoder cross-attention may condition each target position on the fully encoded source."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "human_review": false,
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "source_scope": "Vaswani et al. specify masked decoder self-attention over shifted targets and a separate decoder attention sublayer over encoder outputs. The no-padding condition isolates those two visibility contracts.",
+        "independence_note": "The keyed operation assigns different visibility rules to decoder self-attention and encoder cross-attention. It is not computing one triangular row, comparing full and cached execution, composing packed-example masks, or deriving query-key-value shapes."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "causal_mask",
+        "encoder_decoder",
+        "cross_attention",
+        "visibility_scope"
+      ]
+    },
+    {
+      "id": "q_transformer_token_intervention_trace_001",
+      "version": 1,
+      "family_id": "f_transformer_token_intervention_trace",
+      "learning_objective_id": "lo_transformer_information_paths",
+      "status": "quarantined",
+      "stem": "With parameters fixed, an engineer perturbs the input representation at one position r in a Transformer encoder layer and observes a changed output at another position s. The layer has unrestricted self-attention, a position-wise feed-forward sublayer, and residual paths. Which explanation identifies a possible cross-position path without claiming the change is guaranteed?",
+      "kind": "debugging",
+      "difficulty": 0.7,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_attention",
+          "weight": 0.35,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The feed-forward sublayer at s reads row r directly and mixes it into s even when self-attention contributes no route between them.",
+          "correct": false,
+          "misconception_id": "m_feedforward_layers_mix_token_positions",
+          "rationale": "The feed-forward map is applied separately to each position and cannot directly read a different sequence row."
+        },
+        {
+          "id": "b",
+          "text": "The perturbation can alter r's key or value, attention at s can route that difference, and later position-wise transformations process the changed state locally.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Self-attention supplies the cross-position edge; its learned score and projected content determine whether the particular intervention changes s."
+        },
+        {
+          "id": "c",
+          "text": "The observation conflicts with the residual identity path, which restores the original state at s and erases any attention-branch update.",
+          "correct": false,
+          "misconception_id": "m_residual_bypass_erases_updates",
+          "diagnostic_objective_id": "lo_transformer_sublayer_composition",
+          "rationale": "A residual adds the branch output to the prior state; it does not cancel an attention-mediated change by definition."
+        },
+        {
+          "id": "d",
+          "text": "The observation proves Transformers are inherently bidirectional, so the same r-to-s route would remain available even under a mask that blocks that direction.",
+          "correct": false,
+          "misconception_id": "m_transformers_are_inherently_bidirectional",
+          "diagnostic_objective_id": "lo_causal_visibility",
+          "rationale": "This encoder layer permits the route because its self-attention is unrestricted; a configured mask can remove it, so the architecture name does not fix visibility."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "human_review": false,
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "source_scope": "Vaswani et al. ground the token-to-token path in self-attention, the per-position feed-forward map, and residual addition. The intervention and observed change are stipulated original scenario evidence.",
+        "independence_note": "The keyed operation localizes an observed cross-position intervention effect. It is not removing attention, ablating encoder-decoder cross-attention, assigning cross-attention tensor roles, or comparing sublayer order."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "attention",
+        "information_paths",
+        "intervention",
+        "debugging"
+      ]
+    },
     {"id":"q_rag_causal_bridge_attribution_001","version":1,"family_id":"f_rag_causal_bridge_attribution","learning_objective_id":"lo_rag_claim_grounding","status":"quarantined","stem":"An incident report cites passage A, which says release R began on 4 June, and passage B, which says the error rate fell on 6 June. Its answer states, \"Release R caused the error-rate decline,\" with both citations. Neither passage compares alternatives or states a causal link. What is the correct grounding diagnosis?","kind":"debugging","difficulty":0.95,"discrimination":1.7,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_rag_grounding","weight":0.8,"role":"primary"},{"concept_id":"c_rag_retrieval_quality","weight":0.2,"role":"supporting"}],"options":[{"id":"a","text":"Treat the causal conclusion as supported because retrieving the complete incident sequence teaches the generator that release R produced the later decline.","correct":false,"misconception_id":"m_rag_retrieval_updates_weights","diagnostic_objective_id":"lo_rag_claim_grounding","rationale":"Inference-time retrieval does not update model parameters, and temporal sequence still does not supply evidence for the missing causal relation."},{"id":"b","text":"Treat the full conclusion as supported because two citations attached to one sentence establish entailment for the relation between its facts.","correct":false,"misconception_id":"m_rag_citation_proves_entailment","diagnostic_objective_id":"lo_rag_claim_grounding","rationale":"The citations support timing subclaims, but citation presence does not make temporal succession entail causation."},{"id":"c","text":"Mark the dates as supported but the causal bridge as unsupported, because the passages establish sequence without attributing the decline to release R.","correct":true,"misconception_id":null,"rationale":"Claim-level evaluation must preserve the supported observations while withholding support for the additional causal relation."},{"id":"d","text":"Treat the causal conclusion as grounded because placing both relevant facts in context establishes that the generator used them faithfully.","correct":false,"misconception_id":"m_rag_context_guarantees_use","diagnostic_objective_id":"lo_rag_claim_grounding","rationale":"Relevant context can be combined into an inference that the evidence itself does not justify."}],"source_ids":["src_alce_2023","src_ragas_2024","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_grounded_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"ALCE and RAGAS support claim-level citation/faithfulness evaluation. The incident facts and the unsupported causal bridge are original stipulated scenario content.","independence_note":"The keyed operation decomposes a composite causal proposition into supported premises and an unsupported relation; it is not document-presence scoring, a population mismatch, context ablation, a claim-by-document matrix, or factuality-versus-citation classification.","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","rag","grounding","claim_decomposition","causal_attribution"]},
     {"id":"q_rag_derived_rate_entailment_001","version":1,"family_id":"f_rag_derived_rate_entailment","learning_objective_id":"lo_rag_claim_grounding","status":"quarantined","stem":"A retrieved audit table reports 80 inspected records and 20 records with violations. A generated answer cites that table and says, \"The violation rate was 20%.\" No other evidence is used. How should the derived claim be evaluated?","kind":"application","difficulty":0.7,"discrimination":1.65,"guess_rate":0.25,"slip_rate":0.07,"concepts":[{"concept_id":"c_rag_grounding","weight":0.8,"role":"primary"},{"concept_id":"c_rag_retrieval_quality","weight":0.2,"role":"supporting"}],"options":[{"id":"a","text":"Reject 20% because the cited counts imply 20 divided by 80, or 25%; the context supports a different rate.","correct":true,"misconception_id":null,"rationale":"The arithmetic is fully determined by the cited table, so the generated percentage is contradicted by its own evidence."},{"id":"b","text":"Accept 20% because a citation to the exact audit table is sufficient support for any numerical summary derived from it.","correct":false,"misconception_id":"m_rag_citation_proves_entailment","diagnostic_objective_id":"lo_rag_claim_grounding","rationale":"Citation correctness still requires the cited values to entail the derived quantity."},{"id":"c","text":"Accept 20% because retrieving the table updates the model parameters with the audit counts before the rate is generated.","correct":false,"misconception_id":"m_rag_retrieval_updates_weights","diagnostic_objective_id":"lo_rag_claim_grounding","rationale":"The table conditions inference without changing model parameters, and a parameter claim cannot repair incorrect arithmetic."},{"id":"d","text":"Accept 20% because the relevant table was present in context, which establishes faithful use even if the visible calculation differs.","correct":false,"misconception_id":"m_rag_context_guarantees_use","diagnostic_objective_id":"lo_rag_claim_grounding","rationale":"Context presence does not establish that the generator performed or followed the supported calculation."}],"source_ids":["src_alce_2023","src_ragas_2024","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_grounded_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"ALCE and RAGAS support evaluating whether cited evidence supports generated claims. The table, counts, and arithmetic are self-contained original scenario content.","independence_note":"The keyed operation verifies a deterministic derived quantity against cited source values; it does not test citation placement alone, swap context, classify multiple unrelated claims, or separate external truth from citation support.","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","rag","grounding","derived_claim","quantitative_entailment"]},
     {"id":"q_rag_candidate_reranker_funnel_001","version":1,"family_id":"f_rag_candidate_reranker_funnel","learning_objective_id":"lo_rag_retrieval_evidence_quality","status":"quarantined","stem":"For 200 benchmark queries, an authoritative answer-bearing passage appears in the retriever's top 50 for 90% of all queries, but appears in the reranker's final top 5 for only 38% of all 200 queries. When that passage is inserted into the final context, the unchanged generator answers correctly 87% of the time. Which diagnosis and next measurement are best supported?","kind":"debugging","difficulty":1.05,"discrimination":1.75,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_rag_retrieval_quality","weight":0.8,"role":"primary"},{"concept_id":"c_rag_grounding","weight":0.2,"role":"supporting"}],"options":[{"id":"a","text":"Declare retrieval healthy from the 90% candidate recall and use that number as the complete RAG quality score.","correct":false,"misconception_id":"m_rag_recall_alone_sufficient","diagnostic_objective_id":"lo_rag_retrieval_evidence_quality","rationale":"Candidate recall hides the sharp loss between candidate generation and final context construction."},{"id":"b","text":"Measure and repair authoritative-passage retention from top 50 to top 5, then remeasure generation with the resulting fixed context.","correct":true,"misconception_id":null,"rationale":"The funnel and insertion control localize the largest observed loss to reranking while preserving a separate downstream check."},{"id":"c","text":"Trust the reranker's highest similarity score because its top passage determines which evidence is authoritative and correct.","correct":false,"misconception_id":"m_rag_top_score_is_truth","diagnostic_objective_id":"lo_rag_retrieval_evidence_quality","rationale":"A ranking score does not establish authority, and the measured retention failure contradicts this shortcut."},{"id":"d","text":"Send the 50 candidates to the generator because adding the full candidate set should improve evidence use without a reranking tradeoff.","correct":false,"misconception_id":"m_rag_more_context_monotonic","diagnostic_objective_id":"lo_rag_retrieval_evidence_quality","rationale":"Unfiltered context can add redundancy, conflicts, and distraction; it also avoids measuring the identified funnel defect."}],"source_ids":["src_lewis_rag_2020","src_ragas_2024","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_grounded_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"Lewis supports retrieval-conditioned generation, and RAGAS motivates evaluating context relevance separately from answer faithfulness. The candidate-to-top-5 funnel, reranker, insertion control, and rates are stipulated original data; neither paper validates this specific experiment.","independence_note":"The keyed operation localizes loss inside a candidate-to-reranker funnel using an evidence-insertion control; it is not aggregate retrieval-versus-generation reporting, source-conflict resolution, context-budget tuning, a freshness slice, or multihop query formation.","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","rag","retrieval","reranking","stage_ablation"]},
     {"id":"q_rag_temporal_scope_counterfactual_001","version":1,"family_id":"f_rag_temporal_scope_counterfactual","learning_objective_id":"lo_rag_retrieval_evidence_quality","status":"quarantined","stem":"A regulator's current notice says filings are due within 15 days. Its superseded notice was the governing version on 1 March 2024 and says 30 days. An evaluator changes a query from \"What is the deadline today?\" to \"What was the deadline on 1 March 2024?\" The current notice remains top-ranked by similarity. What should change?","kind":"counterfactual","difficulty":0.9,"discrimination":1.7,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_rag_retrieval_quality","weight":0.8,"role":"primary"},{"concept_id":"c_rag_grounding","weight":0.2,"role":"supporting"}],"options":[{"id":"a","text":"Keep the same answer if both notices appear somewhere in the retrieved set, because set recall is the full quality criterion.","correct":false,"misconception_id":"m_rag_recall_alone_sufficient","diagnostic_objective_id":"lo_rag_retrieval_evidence_quality","rationale":"Presence somewhere in the set does not show that retrieval selected evidence valid for the query's requested date."},{"id":"b","text":"Answer 15 days because the highest-similarity authoritative notice determines truth even when the query asks about an earlier effective period.","correct":false,"misconception_id":"m_rag_top_score_is_truth","diagnostic_objective_id":"lo_rag_retrieval_evidence_quality","rationale":"Authority and similarity do not remove the temporal scope in the question; the current notice was not effective then."},{"id":"c","text":"Add both notices and more related policy text, then rely on the larger context to resolve the date conflict without temporal filtering.","correct":false,"misconception_id":"m_rag_more_context_monotonic","diagnostic_objective_id":"lo_rag_retrieval_evidence_quality","rationale":"More conflicting context does not identify which version governed the explicitly requested historical date."},{"id":"d","text":"Retrieve and rank the authoritative version valid on 1 March 2024, preserving effective dates so the historical answer uses 30 days.","correct":true,"misconception_id":null,"rationale":"The counterfactual query changes the relevant validity interval, so temporal alignment must change the selected evidence."}],"source_ids":["src_lewis_rag_2020","src_ragas_2024","src_mrag_2025","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"MRAG directly supports decomposing a time-sensitive question into content and temporal constraints and hybrid-ranking semantic and temporal relevance. Lewis and RAGAS support general retrieval and evaluation boundaries. The notices, deadlines, and governing-date facts are original stipulated scenario content. The MRAG source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_temporal_retrieval_primary","independence_note":"The keyed operation changes evidence selection when the query's target time changes; it is not choosing a newer source for a current-policy query, resolving authority between an unofficial and official source, expanding a missing relation, or tuning context volume.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","rag","retrieval","temporal_scope","counterfactual"]},
     {"id":"q_agent_delegated_capability_envelope_001","version":1,"family_id":"f_agent_delegated_capability_envelope","learning_objective_id":"lo_agent_tool_authorization","status":"quarantined","stem":"A coordinator is authorized to read support tickets T1 through T3 and may delete a ticket only after a separate human approval. It delegates summarization of those three tickets to a helper agent. Which delegation envelope should the coordinator's authorization service issue to preserve the original authorization boundary?","kind":"transfer","difficulty":1.0,"discrimination":1.75,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_tool_use","weight":1.0,"role":"primary"}],"options":[{"id":"a","text":"Have the coordinator's authorization service issue a short-lived read token for T1 through T3, and treat any proposed follow-up action as data requiring separate authorization.","correct":true,"misconception_id":null,"rationale":"The delegated capability is attenuated to the exact read task, while action authority remains at its original boundary."},{"id":"b","text":"Give the helper read access and let its returned summary authorize deletion when the text labels a ticket safe to remove.","correct":false,"misconception_id":"m_agent_tool_output_is_trusted","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"The helper's output remains untrusted data and cannot create deletion authority."},{"id":"c","text":"Give the helper read and delete access, then execute any schema-valid delete call because a valid proposal inherits coordinator authority.","correct":false,"misconception_id":"m_agent_tool_schema_is_execution","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Schema validity does not grant the missing human approval or turn a helper proposal into an authorized effect."},{"id":"d","text":"Expose the full ticket-tool catalog so the helper can compare capabilities and improve its chance of selecting the right operation.","correct":false,"misconception_id":"m_agent_more_tools_monotonic","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Unneeded capabilities expand routing ambiguity and impact without helping the summarization task."}],"source_ids":["src_macaroons_2014","src_rfc9396_2023","src_toolformer_2023","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"Macaroons directly supports delegated credential attenuation through object, action, and contextual caveats. RFC 9396 is cited only for protecting OAuth authorization_details carried in authorization requests against tampering or swapping; it does not define a tool-approval lifecycle. Toolformer and ReAct support model-tool interaction generally. The coordinator issuer, ticket scope, token lifetime, and separate human tool-approval lifecycle are stipulated. Both source records were independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_authorization_primary","independence_note":"This extends the existing static least-privilege family across an agent-to-agent delegation boundary: the keyed operation attenuates a credential to exact objects and actions and preserves separate approval, rather than merely choosing a small static tool set.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","delegation","capability_attenuation","authorization"]},
-    {"id":"q_agent_approval_argument_binding_001","version":1,"family_id":"f_agent_approval_argument_binding","learning_objective_id":"lo_agent_tool_authorization","status":"quarantined","stem":"After reviewing a dry-run, a human approves committing a firewall change limited to destination 203.0.113.8/32 on port 443. Before commit, an analysis tool suggests widening the destination to 203.0.113.0/24, and the model substitutes that range into the call. What should the orchestrator do?","kind":"debugging","difficulty":1.05,"discrimination":1.75,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_tool_use","weight":1.0,"role":"primary"}],"options":[{"id":"a","text":"Commit the widened range after JSON-schema validation because well-formed arguments carry the approval from the original proposal.","correct":false,"misconception_id":"m_agent_tool_schema_is_execution","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Schema validity does not bind the changed arguments to the human's narrower authorization."},{"id":"b","text":"Treat the /24 mutation as a new proposal, recompute its policy and dry-run diff, and obtain approval bound to those exact arguments.","correct":true,"misconception_id":null,"rationale":"Changing the canonical action invalidates the earlier approval and requires a fresh decision at the authorization boundary."},{"id":"c","text":"Commit the widened range because a result from the approved analysis tool can extend the authority granted by the human.","correct":false,"misconception_id":"m_agent_tool_output_is_trusted","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Tool-returned advice is data; it cannot modify the scope of human authorization."},{"id":"d","text":"Route the /24 through another firewall mutation tool whose schema accepts the wider range, treating availability of that capability as sufficient to preserve approval.","correct":false,"misconception_id":"m_agent_more_tools_monotonic","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Switching to another available capability cannot transfer the earlier /32 approval to changed /24 arguments."}],"source_ids":["src_rfc9396_2023","src_toolformer_2023","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"RFC 9396 is cited only for protecting OAuth authorization_details carried in authorization requests against tampering or swapping; it does not define approval binding for tool calls. Toolformer and ReAct support tool calls generally. The firewall arguments, dry-run contract, and human tool-approval lifecycle are stipulated. The RFC source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_authorization_primary","independence_note":"The keyed operation detects authorization drift between an approved dry run and a mutated commit; it is not generic schema validation, static least privilege, tool-output prompt injection, or aggregate routing evaluation.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","approval_binding","argument_integrity","authorization"]},
+    {"id":"q_agent_approval_argument_binding_001","version":1,"family_id":"f_agent_approval_argument_binding","learning_objective_id":"lo_agent_tool_authorization","status":"quarantined","stem":"After reviewing a dry-run, a human approves committing a firewall change limited to destination 203.0.113.8/32 on port 443. Before commit, an analysis tool suggests widening the destination to 203.0.113.0/24, and the model substitutes that range into the call. What should the orchestrator do?","kind":"debugging","difficulty":1.05,"discrimination":1.75,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_tool_use","weight":1.0,"role":"primary"}],"options":[{"id":"a","text":"Commit the widened range after JSON-schema validation because well-formed arguments carry the approval from the original proposal.","correct":false,"misconception_id":"m_agent_tool_schema_is_execution","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Schema validity does not bind the changed arguments to the human's narrower authorization."},{"id":"b","text":"Treat the /24 mutation as a new proposal, recompute its policy and dry-run diff, and obtain approval bound to those exact arguments.","correct":true,"misconception_id":null,"rationale":"Changing the canonical action invalidates the earlier approval and requires a fresh decision at the authorization boundary."},{"id":"c","text":"Commit the widened range because a result from the approved analysis tool can extend the authority granted by the human.","correct":false,"misconception_id":"m_agent_tool_output_is_trusted","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Tool-returned advice is data; it cannot modify the scope of human authorization."},{"id":"d","text":"Route the /24 through another firewall mutation tool whose schema accepts the wider range, treating availability of that capability as sufficient to preserve approval.","correct":false,"misconception_id":"m_agent_tool_availability_is_authorization","diagnostic_objective_id":"lo_agent_tool_authorization","rationale":"Switching to another available capability cannot transfer the earlier /32 approval to changed /24 arguments."}],"source_ids":["src_rfc9396_2023","src_toolformer_2023","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"RFC 9396 is cited only for protecting OAuth authorization_details carried in authorization requests against tampering or swapping; it does not define approval binding for tool calls. Toolformer and ReAct support tool calls generally. The firewall arguments, dry-run contract, and human tool-approval lifecycle are stipulated. The RFC source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_authorization_primary","independence_note":"The keyed operation detects authorization drift between an approved dry run and a mutated commit; it is not generic schema validation, static least privilege, tool-output prompt injection, or aggregate routing evaluation.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","approval_binding","argument_integrity","authorization"]},
     {"id":"q_agent_saga_compensation_001","version":1,"family_id":"f_agent_saga_compensation","learning_objective_id":"lo_agent_state_reconciliation","status":"quarantined","stem":"A travel workflow has an explicit terminal contract: reserve both the flight and hotel, or leave neither reserved. The flight tool returns committed reservation F7; the hotel tool returns a definitive unavailable result. Policy permits canceling F7, and the cancellation API accepts the workflow's stable operation identity for idempotent retries. How should the control loop proceed?","kind":"application","difficulty":1.1,"discrimination":1.75,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_observation_loop","weight":0.85,"role":"primary"},{"concept_id":"c_agent_tool_use","weight":0.15,"role":"prerequisite"}],"options":[{"id":"a","text":"Record both reservations as complete because the plan represented the flight and hotel as one intended trip state.","correct":false,"misconception_id":"m_agent_plan_is_execution_state","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"The intended composite state cannot override the committed-flight and failed-hotel observations."},{"id":"b","text":"Mark the trip complete because the committed flight receipt is an authoritative observation from one required action.","correct":false,"misconception_id":"m_agent_observation_equals_success","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"One successful component does not satisfy the all-or-neither terminal contract."},{"id":"c","text":"Persist the partial state, cancel F7 through a stable operation identity, verify cancellation, and report unresolved failure if restoring the invariant fails.","correct":true,"misconception_id":null,"rationale":"The loop uses observed state to compensate the committed side effect and verifies the permitted terminal alternative."},{"id":"d","text":"Retry both bookings under fresh request identities until matching success receipts arrive for a new flight and hotel.","correct":false,"misconception_id":"m_agent_retry_without_idempotency","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"Blind fresh retries can duplicate the existing flight reservation and do not reconcile F7."}],"source_ids":["src_sagas_1987","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"Garcia-Molina and Salem directly support compensating completed subtransactions after partial saga execution, including reservation cancellation. ReAct supports observation-conditioned plan revision. The all-or-neither predicate and cancellation API's stable operation-identity contract are stipulated. The Sagas source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_reconciliation_primary","independence_note":"The keyed operation compensates one committed step to restore an explicit cross-step invariant; it is not reconciling an unknown payment, polling an accepted asynchronous job, recording a failed rename, repairing homogeneous batch members, or rejecting a stale revision.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","control_loop","compensation","workflow_invariant"]},
     {"id":"q_agent_snapshot_observation_completeness_001","version":1,"family_id":"f_agent_snapshot_observation_completeness","learning_objective_id":"lo_agent_state_reconciliation","status":"quarantined","stem":"A rollout's terminal predicate requires version v7 to be healthy in all 12 regions. The monitoring API contract returns one consistent snapshot in pages. Its first page reports six healthy regions and includes a non-null next_cursor. What should the control loop do next?","kind":"debugging","difficulty":0.8,"discrimination":1.7,"guess_rate":0.25,"slip_rate":0.08,"concepts":[{"concept_id":"c_agent_observation_loop","weight":0.85,"role":"primary"},{"concept_id":"c_agent_tool_use","weight":0.15,"role":"prerequisite"}],"options":[{"id":"a","text":"Record every region as healthy because the rollout plan specified v7 as the intended state for the complete fleet.","correct":false,"misconception_id":"m_agent_plan_is_execution_state","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"Planned coverage is intent, while the observation is incomplete for six regions."},{"id":"b","text":"Mark the rollout complete because the authoritative first page contains only healthy observations for version v7.","correct":false,"misconception_id":"m_agent_observation_equals_success","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"A valid partial observation does not satisfy a predicate quantified over all 12 regions."},{"id":"c","text":"Treat the missing six regions as failed rollout effects and relaunch only those regions under fresh request identities before exhausting the observation cursor.","correct":false,"misconception_id":"m_agent_retry_without_idempotency","diagnostic_objective_id":"lo_agent_state_reconciliation","rationale":"Incomplete observation does not establish failed effects; fresh retries can duplicate work and bypass the required same-snapshot read."},{"id":"d","text":"Continue from next_cursor within the same snapshot, aggregate every region, and declare completion only if all 12 satisfy the predicate.","correct":true,"misconception_id":null,"rationale":"Cursor exhaustion establishes observation completeness before the conjunctive health predicate is evaluated."}],"source_ids":["src_chandy_lamport_snapshots_1985","src_react_2022","src_expert_synthesis_2026"],"provenance":{"method":"ai_assisted_source_scoped_original_scenario","created_on":"2026-07-23","generated":true,"batch_id":"batch_rag_agent_headroom_20260723_c","review_status":"final_independent_ai_review_passed_quarantined","independent_review":"final_independent_ai_review_passed","human_review":false,"activation":"manual_only_after_human_review_and_new_immutable_release","psychometrics":"uncalibrated_expert_prior","source_scope":"Chandy and Lamport support recording a consistent global state before evaluating a global-state predicate, with detection guarantees for stable properties. ReAct supports observation-conditioned plan updates. The paginated API and same-snapshot cursor behavior are stipulated. The Chandy-Lamport source was independently AI-reviewed and registered as supporting evidence; human review and activation of this generated item remain required.","source_gap_id":"gap_agent_reconciliation_primary","independence_note":"The keyed operation establishes completeness of a paginated observation before evaluating a universal predicate; it is not polling an accepted job, reconciling per-item execution outcomes, handling unknown side effects, repairing a failed action, or ordering stale callbacks.","source_gap_status":"supporting_sources_registered_after_independent_ai_review","reviewed_on":"2026-07-23","human_review_status":"required_before_activation","batch_sha256":"d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","review_sha256":"cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","review_payload_sha256":"ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042","review_chain_sha256":["d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42","cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b","ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"]},"tags":["llm","agents","control_loop","observation_completeness","snapshot_pagination"]}
   ]

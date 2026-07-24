@@ -32,7 +32,11 @@ class PersistentObjectiveRemediationTestCase(unittest.TestCase):
         self.database = Database(Path(self.tempdir.name) / "persistent.db")
         self.database.initialize()
         parsed = read_and_parse(CORPUS, include_catalog=True)
-        self.questions = parsed[4]
+        self.questions = tuple(
+            question
+            for question in parsed[4]
+            if question.status.eligible_for_adaptation
+        )
         self.release_id = self.database.import_corpus(*parsed)["release_id"]
         self.objectives = {
             objective.id: objective
@@ -561,7 +565,7 @@ class PersistentObjectiveRemediationTestCase(unittest.TestCase):
             if not option.correct
         )
         clock += timedelta(minutes=1)
-        descended = engine.submit_answer(
+        bounded_exit = engine.submit_answer(
             parent_repair.decision_id,
             parent_wrong.id,
             confidence=0.9,
@@ -569,9 +573,11 @@ class PersistentObjectiveRemediationTestCase(unittest.TestCase):
             now=clock,
         )
         self.assertEqual(
-            descended.transition_reason, "descend_to_evidence_boundary"
+            bounded_exit.transition_reason,
+            "no_serviceable_prerequisite_boundary",
         )
-        self.assertEqual(descended.focus_objective_id, prerequisite_id)
+        self.assertEqual(bounded_exit.next_phase, SessionPhase.LEARN)
+        self.assertIsNone(bounded_exit.focus_objective_id)
 
     def test_v7_missing_telemetry_cannot_satisfy_legacy_concept_prerequisite(self) -> None:
         learner_id = "missing-legacy-prerequisite-telemetry"

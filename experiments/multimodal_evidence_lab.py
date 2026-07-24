@@ -203,6 +203,8 @@ def fixture_scorer_contract(*criterion_ids: str) -> ScorerContract:
         kind=ScorerKind.DETERMINISTIC,
         scorer_id="reviewed_fixture",
         scorer_version="v1",
+        authority_id="authority_reviewed_fixture",
+        authority_manifest_digest=digest("authority|reviewed_fixture|v1"),
         criterion_ids=tuple(criterion_ids),
         evidence_action_kinds=(
             ActionKind.ANSWER_REVISED,
@@ -211,14 +213,42 @@ def fixture_scorer_contract(*criterion_ids: str) -> ScorerContract:
             ActionKind.CHECK_RUN,
             ActionKind.SUBMITTED,
         ),
-        check_set_ids=("fixture_checks_v1",),
-        artifact_kinds=(
-            "architecture_diagram",
-            "design_snapshot",
-            "patch_digest",
-            "source_tree",
+        check_set_manifests=(
+            ("fixture_checks_v1", digest("check_manifest|fixture_checks_v1")),
+        ),
+        artifact_manifests=(
+            (
+                "architecture_diagram",
+                digest("artifact_manifest|architecture_diagram"),
+            ),
+            ("design_snapshot", digest("artifact_manifest|design_snapshot")),
+            ("patch_digest", digest("artifact_manifest|patch_digest")),
+            ("source_tree", digest("artifact_manifest|source_tree")),
         ),
     )
+
+
+def task_identity(task_id: str, title: str) -> dict[str, Any]:
+    """Return the content-addressed administration terms for a lab fixture."""
+
+    return {
+        "instructions": (
+            f"{title}. Follow the pinned stimulus and submit only the requested "
+            "artifact and evidence checkpoints."
+        ),
+        "source_manifests": (
+            (
+                f"source_{task_id}",
+                digest(f"source_provenance|{task_id}|v1"),
+            ),
+        ),
+        "administration_id": "administration_lab_closed_fixture_v1",
+        "administration_manifest_digest": digest(
+            "administration|lab_closed_fixture|v1"
+        ),
+        "stimulus_id": f"stimulus_{task_id}_v1",
+        "stimulus_digest": digest(f"stimulus|{task_id}|v1"),
+    }
 
 
 def rubric(
@@ -252,6 +282,10 @@ def build_tasks() -> dict[str, LearningTask]:
         family_id="fam_cache_implementation",
         title="Implement a bounded cache from a pinned behavioral contract",
         modality=TaskModality.IMPLEMENTATION,
+        **task_identity(
+            "task_cache_implementation",
+            "Implement a bounded cache from a pinned behavioral contract",
+        ),
         scorer_contracts=(
             fixture_scorer_contract(
                 "impl_contract", "impl_boundaries", "impl_structure"
@@ -295,6 +329,10 @@ def build_tasks() -> dict[str, LearningTask]:
         family_id="fam_mask_debugging",
         title="Diagnose and repair a causal-mask regression",
         modality=TaskModality.DEBUGGING,
+        **task_identity(
+            "task_mask_debugging",
+            "Diagnose and repair a causal-mask regression",
+        ),
         scorer_contracts=(
             fixture_scorer_contract("debug_localize", "debug_repair"),
         ),
@@ -329,6 +367,10 @@ def build_tasks() -> dict[str, LearningTask]:
         family_id="fam_attention_explanation",
         title="Explain why scaled dot-product attention uses its scale",
         modality=TaskModality.EXPLANATION,
+        **task_identity(
+            "task_attention_explanation",
+            "Explain why scaled dot-product attention uses its scale",
+        ),
         scorer_contracts=(
             fixture_scorer_contract("explain_mechanism", "explain_boundary"),
         ),
@@ -361,6 +403,10 @@ def build_tasks() -> dict[str, LearningTask]:
         family_id="fam_rag_design",
         title="Design an evidence-grounded retrieval pipeline",
         modality=TaskModality.DESIGN,
+        **task_identity(
+            "task_rag_design",
+            "Design an evidence-grounded retrieval pipeline",
+        ),
         scorer_contracts=(
             fixture_scorer_contract(
                 "design_retrieval", "design_grounding", "design_evaluation"
@@ -926,15 +972,28 @@ def verify_scenarios(scenarios: Mapping[str, Scenario]) -> tuple[str, ...]:
         family_id="fam_mixed_scope_probe",
         title="Implement and explain a reviewed behavior",
         modality=TaskModality.PROJECT,
+        **task_identity(
+            "task_mixed_scope_probe",
+            "Implement and explain a reviewed behavior",
+        ),
         criteria=(implementation_criterion, explanation_criterion),
         scorer_contracts=(
             ScorerContract(
                 kind=ScorerKind.DETERMINISTIC,
                 scorer_id="reviewed_fixture",
                 scorer_version="v1",
+                authority_id="authority_reviewed_fixture",
+                authority_manifest_digest=digest(
+                    "authority|reviewed_fixture|v1"
+                ),
                 criterion_ids=(implementation_criterion.id,),
                 evidence_action_kinds=(ActionKind.CHECK_RUN,),
-                check_set_ids=("fixture_checks_v1",),
+                check_set_manifests=(
+                    (
+                        "fixture_checks_v1",
+                        digest("check_manifest|fixture_checks_v1"),
+                    ),
+                ),
             ),
         ),
     )
@@ -1169,6 +1228,32 @@ def verify_scenarios(scenarios: Mapping[str, Scenario]) -> tuple[str, ...]:
             f"{current.id} bundle digest is unstable",
         )
     checks.append("all_records_are_finite_and_hashable")
+
+    for current in scenarios.values():
+        decoded_task = LearningTask.from_terms(
+            json.loads(canonical_json(current.task.terms()))
+        )
+        decoded_evaluation = TaskEvaluation.from_terms(
+            json.loads(canonical_json(current.evaluation.terms()))
+        )
+        decoded_actions = tuple(
+            LearningAction.from_terms(json.loads(canonical_json(item.terms())))
+            for item in current.actions
+        )
+        require(
+            decoded_task.digest == current.task.digest,
+            f"{current.id} task terms did not round-trip",
+        )
+        require(
+            decoded_evaluation.digest == current.evaluation.digest,
+            f"{current.id} evaluation terms did not round-trip",
+        )
+        require(
+            action_trace_digest(decoded_actions)
+            == action_trace_digest(current.actions),
+            f"{current.id} action terms did not round-trip",
+        )
+    checks.append("strict_persistence_terms_round_trip")
     return tuple(checks)
 
 

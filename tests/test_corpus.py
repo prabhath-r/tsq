@@ -35,6 +35,22 @@ ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
 
 
+def declare_test_fixture_generation_provenance(
+    bundle: dict[str, object],
+) -> None:
+    """Move deliberately mutated raw fixtures outside the legacy exception."""
+
+    questions = bundle.get("questions")
+    if not isinstance(questions, list):
+        return
+    for question in questions:
+        if not isinstance(question, dict):
+            continue
+        provenance = question.get("provenance")
+        if isinstance(provenance, dict) and "generated" not in provenance:
+            provenance["generated"] = False
+
+
 class CorpusTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -117,7 +133,10 @@ class CorpusTestCase(unittest.TestCase):
         diagnosed_pairs: set[tuple[str, str]] = set()
         direct_families: dict[tuple[str, str], set[str]] = {}
         for question in self.questions:
-            if question.objective_id is None:
+            if (
+                question.objective_id is None
+                or not question.status.eligible_for_adaptation
+            ):
                 continue
             for option in question.options:
                 if option.correct or option.misconception_id is None:
@@ -302,6 +321,7 @@ class CorpusTestCase(unittest.TestCase):
 
     def test_semantic_bundle_validation_aggregates_reference_issues(self) -> None:
         bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        declare_test_fixture_generation_provenance(bundle)
         for question in bundle["questions"]:
             question["guess_rate"] = 0.25
         original_concept_id = bundle["concepts"][1]["id"]
@@ -327,6 +347,7 @@ class CorpusTestCase(unittest.TestCase):
 
     def test_distractor_misconception_owner_must_be_mapped_on_item(self) -> None:
         bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        declare_test_fixture_generation_provenance(bundle)
         question = bundle["questions"][0]
         mapped = {mapping["concept_id"] for mapping in question["concepts"]}
         foreign_misconception = next(
@@ -351,6 +372,7 @@ class CorpusTestCase(unittest.TestCase):
 
     def test_revision_graph_preserves_identity_and_acyclic_order(self) -> None:
         baseline = json.loads(CORPUS.read_text(encoding="utf-8"))
+        declare_test_fixture_generation_provenance(baseline)
         cases = (
             ("self", "revision_self_reference"),
             ("cycle", "revision_cycle"),
@@ -548,7 +570,11 @@ class CorpusTestCase(unittest.TestCase):
             database.import_corpus(
                 self.concepts, self.edges, self.misconceptions, self.sources, self.questions
             )
-            question = self.questions[0]
+            question = next(
+                item
+                for item in self.questions
+                if "generated" in item.provenance
+            )
             first = question.options[0]
             changed_option = replace(first, rationale=first.rationale + " Mutated in place.")
             changed_question = replace(
@@ -572,6 +598,52 @@ class CorpusTestCase(unittest.TestCase):
                         changed_question,
                     ],
                 )
+
+    def test_reimporting_active_identical_release_is_event_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "idempotent-import.db")
+            database.initialize()
+            first = database.import_corpus(
+                self.concepts,
+                self.edges,
+                self.misconceptions,
+                self.sources,
+                self.questions,
+                self.domains,
+                self.topics,
+            )
+            with database.read() as connection:
+                before = "\n".join(connection.iterdump())
+                first_events = connection.execute(
+                    """SELECT COUNT(*) AS n FROM events
+                       WHERE event_type='CorpusImported'"""
+                ).fetchone()["n"]
+
+            repeated = database.import_corpus(
+                self.concepts,
+                self.edges,
+                self.misconceptions,
+                self.sources,
+                self.questions,
+                self.domains,
+                self.topics,
+            )
+
+            with database.read() as connection:
+                after = "\n".join(connection.iterdump())
+                repeated_events = connection.execute(
+                    """SELECT COUNT(*) AS n FROM events
+                       WHERE event_type='CorpusImported'"""
+                ).fetchone()["n"]
+                release_count = connection.execute(
+                    "SELECT COUNT(*) AS n FROM corpus_releases"
+                ).fetchone()["n"]
+            self.assertEqual(repeated["release_id"], first["release_id"])
+            self.assertEqual(first_events, 1)
+            self.assertEqual(repeated_events, first_events)
+            self.assertEqual(release_count, 1)
+            self.assertEqual(after, before)
+            self.assertTrue(database.verify_integrity()["ok"])
 
 
 if __name__ == "__main__":

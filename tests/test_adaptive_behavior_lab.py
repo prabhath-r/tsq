@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
 from experiments.adaptive_behavior_lab import (
+    SCENARIO_BY_ID,
     aggregate_audit_gaps,
     capacity_and_demand_snapshot,
     compact_session_report,
@@ -15,6 +17,9 @@ from experiments.adaptive_behavior_lab import (
     projection_summary,
     run_delayed_family_retrieval_check,
     run_misconception_recovery_check,
+    run_position_habit_check,
+    run_scenario,
+    semantic_projection_signature,
     serialize_trace,
 )
 from tsq.corpus import read_and_parse
@@ -29,6 +34,134 @@ START = datetime(2102, 4, 5, 9, 0, tzinfo=timezone.utc)
 
 
 class AdaptiveBehaviorLabTests(unittest.TestCase):
+    def test_real_engine_position_habit_crosses_shadow_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            result = run_position_habit_check(
+                database_path=Path(directory) / "position-habit.db",
+                corpus_path=CORPUS,
+                seed=71,
+            )
+
+        self.assertEqual(result["status"], "passed", result)
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["completed_attempts"], 12)
+        shadow = result["response_position_shadow"]
+        self.assertTrue(shadow["observational_only"])
+        self.assertFalse(shadow["affects_mastery"])
+        self.assertFalse(shadow["affects_certification"])
+        self.assertFalse(shadow["affects_selection"])
+        self.assertEqual(
+            shadow["inference"]["status"],
+            "position_concentration_signal",
+        )
+        self.assertEqual(
+            shadow["inference"]["dominant_position"]["display_position"],
+            1,
+        )
+        self.assertTrue(result["integrity"]["ok"])
+        self.assertTrue(result["exact_same_event_replay"]["ok"])
+
+    def test_fixed_option_bias_uses_first_displayed_position(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database_path = Path(directory) / "fixed-position.db"
+            result, _ = run_scenario(
+                SCENARIO_BY_ID["fixed_option_bias"],
+                database_path=database_path,
+                corpus_path=CORPUS,
+                root_reference="t_transformers",
+                steps=8,
+                seed=71,
+                replicate=False,
+            )
+            database = Database(database_path)
+            with database.read() as connection:
+                rows = connection.execute(
+                    """SELECT attempt.selected_option_id,
+                              decision.option_order_json
+                       FROM attempts attempt
+                       JOIN decisions decision
+                         ON decision.id = attempt.decision_id
+                       ORDER BY attempt.answered_at, attempt.id"""
+                ).fetchall()
+
+        self.assertEqual(len(rows), result["summary"]["attempted"])
+        self.assertTrue(rows)
+        self.assertTrue(
+            all(
+                row["selected_option_id"]
+                == json.loads(row["option_order_json"])[0]
+                for row in rows
+            )
+        )
+
+    def test_fresh_histories_compare_semantics_not_event_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_path = root / "abstention.db"
+            result, _ = run_scenario(
+                SCENARIO_BY_ID["uncertain_abstention"],
+                database_path=source_path,
+                corpus_path=CORPUS,
+                root_reference="t_transformers",
+                steps=3,
+                seed=71,
+                replicate=True,
+            )
+            replica_path = root / "abstention-replica.db"
+            source_database = Database(source_path)
+            replica_database = Database(replica_path)
+            source_exact = source_database.learner_projection_hash(
+                "lab-uncertain_abstention"
+            )
+            replica_exact = replica_database.learner_projection_hash(
+                "lab-uncertain_abstention"
+            )
+            source_semantic = semantic_projection_signature(
+                source_database, "lab-uncertain_abstention"
+            )
+            replica_semantic = semantic_projection_signature(
+                replica_database, "lab-uncertain_abstention"
+            )
+
+            self.assertNotEqual(source_exact, replica_exact)
+            self.assertEqual(
+                source_semantic["sha256"], replica_semantic["sha256"]
+            )
+            replication = result["fresh_database_replication"]
+            self.assertTrue(replication["semantic_behavior_matches"])
+            self.assertTrue(replication["semantic_projection_matches"])
+            self.assertTrue(
+                replication["each_history_exact_commitment_valid"]
+            )
+            self.assertTrue(result["exact_same_event_replay"]["ok"])
+            self.assertNotIn("deterministic_replay", result)
+            self.assertNotIn("projection_matches", replication)
+            self.assertIn(
+                (
+                    "objective_grid_states.posterior_blob."
+                    "pending_observations[].observation_id"
+                ),
+                source_semantic["provenance_exclusions"],
+            )
+
+            with replica_database.transaction() as connection:
+                connection.execute(
+                    """UPDATE objective_states
+                       SET stability_hours = stability_hours + 1
+                       WHERE learner_id = ? AND objective_id = (
+                           SELECT MIN(objective_id)
+                           FROM objective_states WHERE learner_id = ?
+                       )""",
+                    (
+                        "lab-uncertain_abstention",
+                        "lab-uncertain_abstention",
+                    ),
+                )
+            changed = semantic_projection_signature(
+                replica_database, "lab-uncertain_abstention"
+            )
+            self.assertNotEqual(source_semantic["sha256"], changed["sha256"])
+
     def test_named_misconception_can_be_induced_and_recovered(self) -> None:
         for seed in (3, 79, 97):
             with self.subTest(seed=seed), tempfile.TemporaryDirectory() as directory:
@@ -190,7 +323,7 @@ class AdaptiveBehaviorLabTests(unittest.TestCase):
             self.assertGreater(projection["persisted_objective_count"], 0)
             self.assertEqual(len(projection["learning_objectives"]), 8)
             self.assertTrue(
-                projection["database_projection_commitment"][
+                projection["exact_event_projection_commitment"][
                     "matches_latest_event"
                 ]
             )

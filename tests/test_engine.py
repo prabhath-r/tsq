@@ -10,6 +10,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from tsq.authoring import deterministic_test_pipeline
 from tsq.corpus import read_and_parse
@@ -132,6 +133,34 @@ class EngineTestCase(unittest.TestCase):
 
             # These tables were introduced after the legacy schema being
             # reconstructed and must not leak into the migration fixture.
+            performance_tables = (
+                "shadow_evidence_bundles",
+                "task_evaluations",
+                "performance_actions",
+                "performance_scoring_claims",
+                "performance_attempts",
+                "release_performance_tasks",
+                "performance_task_releases",
+                "performance_tasks",
+            )
+            performance_triggers = connection.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='trigger' AND (
+                       name='events_respect_performance_scoring_claim'
+                       OR tbl_name IN (
+                           'shadow_evidence_bundles', 'task_evaluations',
+                           'performance_actions', 'performance_scoring_claims',
+                           'performance_attempts',
+                           'release_performance_tasks',
+                           'performance_task_releases', 'performance_tasks'
+                       )
+                   )"""
+            ).fetchall()
+            for trigger in performance_triggers:
+                escaped = trigger["name"].replace('"', '""')
+                connection.execute(f'DROP TRIGGER "{escaped}"')
+            for table in performance_tables:
+                connection.execute(f"DROP TABLE {table}")
             connection.execute("DROP TABLE learning_actions")
             connection.execute("DROP TABLE learning_artifacts")
             connection.execute("DROP TABLE learner_objective_families")
@@ -247,7 +276,7 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 13)
+        self.assertEqual(SCHEMA_VERSION, 17)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:
@@ -299,6 +328,80 @@ class EngineTestCase(unittest.TestCase):
         self.assertNotEqual(repair.question.family_id, exploration.question.family_id)
         self.assertIn(result.focus_misconception_id, repair.question.misconception_ids)
 
+    def test_unserviceable_optional_exploration_falls_back_to_requested_topic(
+        self,
+    ) -> None:
+        session = self.engine.start_session(
+            "learner-1",
+            "Transformers",
+            mode="learn",
+            seed=109,
+            now=self.test_clock,
+        )
+        release_id = session["corpus_release_id"]
+        base_scope = self.database.topic_scope("t_transformers", release_id)
+        catalog = self.database.get_catalog(release_id)
+        topic = next(
+            item for item in catalog["topics"] if item["id"] == "t_transformers"
+        )
+        exploration_scope: set[str] = set()
+        for related_topic_id in topic["related_topic_ids"]:
+            exploration_scope.update(
+                self.database.topic_scope(related_topic_id, release_id)
+            )
+        exploration_scope -= base_scope
+        self.assertTrue(exploration_scope)
+
+        original_questions_for_scope = self.database.questions_for_scope
+
+        def omit_exploration_scope(scope: set[str], **kwargs):
+            if set(scope) == exploration_scope:
+                return []
+            return original_questions_for_scope(scope, **kwargs)
+
+        with (
+            patch.object(
+                self.engine.policy,
+                "_should_explore",
+                return_value=True,
+            ),
+            patch.object(
+                self.database,
+                "questions_for_scope",
+                side_effect=omit_exploration_scope,
+            ),
+        ):
+            presentation = self.next_at(session["id"])
+
+        decision = self.database.recent_decisions(session["id"], 1)[0]
+        self.assertEqual(decision["pedagogical_role"], "main")
+        self.assertIn(
+            presentation.question.primary_concept_id,
+            self.database.topic_owned_concepts("t_transformers", release_id),
+        )
+        self.assertIn(
+            "exploration_unserviceable=no_approved_questions:",
+            presentation.rationale,
+        )
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) AS n FROM decisions WHERE session_id = ?",
+                    (session["id"],),
+                ).fetchone()["n"],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n FROM events
+                       WHERE session_id = ?
+                         AND event_type = 'CorpusGapDetected'""",
+                    (session["id"],),
+                ).fetchone()["n"],
+                0,
+            )
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
     def test_session_report_exposes_time_difficulty_and_uncertainty_paths(self) -> None:
         session = self.engine.start_session(
             "learner-1",
@@ -324,7 +427,10 @@ class EngineTestCase(unittest.TestCase):
             idempotency_key="report-second",
         )
         self.engine.end_session(
-            session["id"], status="completed", reason="report_test"
+            session["id"],
+            status="completed",
+            reason="report_test",
+            now=self.test_clock + timedelta(seconds=1),
         )
 
         report = self.engine.session_report(session["id"])
@@ -926,6 +1032,69 @@ class EngineTestCase(unittest.TestCase):
             objective.operation.value,
         )
         self.assertEqual(blueprint["coverage_goal"], "live_corpus_gap")
+
+    def test_review_with_only_cross_owner_items_due_is_not_a_corpus_gap(
+        self,
+    ) -> None:
+        now = datetime(2100, 5, 1, 9, 0, tzinfo=timezone.utc)
+        session = self.engine.start_session(
+            "learner-1",
+            "Transformers",
+            mode="review",
+            seed=131,
+            now=now,
+        )
+        release_id = session["corpus_release_id"]
+        owned = self.database.topic_owned_concepts("t_transformers")
+
+        def cross_owner_only_exposure(
+            learner_id: str,
+            *,
+            question_ids: set[str] | None = None,
+            family_ids: set[str] | None = None,
+        ) -> dict[str, object]:
+            self.assertEqual(learner_id, "learner-1")
+            families: dict[str, dict[str, object]] = {}
+            for question_id in question_ids or ():
+                question = self.database.get_question(
+                    question_id,
+                    release_id=release_id,
+                )
+                owner = (
+                    question.objective.primary_concept_id
+                    if question.objective is not None
+                    else question.primary_concept_id
+                )
+                if owner in owned:
+                    families[question.family_id] = {
+                        "count": 1,
+                        "last_at": (now - timedelta(minutes=1)).isoformat(),
+                    }
+            return {"questions": {}, "families": families}
+
+        with patch.object(
+            self.database,
+            "get_exposure_summary",
+            side_effect=cross_owner_only_exposure,
+        ):
+            with self.assertRaisesRegex(
+                ExhaustedError,
+                r"due yet for the requested review target",
+            ):
+                self.engine.next_question(session["id"], now=now)
+
+        with self.database.read() as connection:
+            gap_events = connection.execute(
+                """SELECT COUNT(*) AS n FROM events
+                   WHERE learner_id = 'learner-1'
+                     AND event_type = 'CorpusGapDetected'"""
+            ).fetchone()["n"]
+            jobs = connection.execute(
+                "SELECT COUNT(*) AS n FROM generation_jobs"
+            ).fetchone()["n"]
+        self.assertEqual(gap_events, 0)
+        self.assertEqual(jobs, 0)
+        self.assertTrue(self.database.verify_integrity()["ok"])
 
     def test_focused_live_gap_preserves_exact_objective_and_misconception(self) -> None:
         objective = next(
