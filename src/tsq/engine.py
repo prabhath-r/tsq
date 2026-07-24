@@ -4046,12 +4046,26 @@ class AdaptiveEngine:
                     """SELECT DISTINCT mapping.objective_id,
                                       option.misconception_id
                        FROM release_option_objectives mapping
+                       JOIN release_questions membership
+                         ON membership.release_id = mapping.release_id
+                        AND membership.question_id = mapping.question_id
                        JOIN options option
                          ON option.question_id = mapping.question_id
                         AND option.option_id = mapping.option_id
                        WHERE mapping.release_id = ?
+                         AND membership.status IN (?, ?)
+                         AND option.is_correct = 0
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM question_revocations revoked
+                             WHERE revoked.question_id = mapping.question_id
+                         )
                          AND option.misconception_id IS NOT NULL""",
-                    (active_release,),
+                    (
+                        active_release,
+                        QuestionStatus.APPROVED.value,
+                        QuestionStatus.CALIBRATED.value,
+                    ),
                 ).fetchall()
             for row in diagnostic_rows:
                 if row["objective_id"] in diagnostic_misconceptions:

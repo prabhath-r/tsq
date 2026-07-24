@@ -21,6 +21,10 @@ from typing import Any
 from .errors import ConflictError, NotFoundError, ValidationError
 from .evidence import LearningTask, canonical_digest
 from .learner import LearnerModel
+from .performance_boundaries import (
+    missing_objective_misconception_bindings,
+    release_misconception_objectives,
+)
 from .store import Database
 
 
@@ -443,6 +447,12 @@ def recommend_performance_tasks(
                WHERE belief.learner_id=?""",
             (session["corpus_release_id"], session["learner_id"]),
         ).fetchall()
+        live_misconception_objectives = release_misconception_objectives(
+            connection,
+            session["corpus_release_id"],
+            accepted_only=True,
+            exclude_revoked=True,
+        )
 
     family_attempts: Counter[str] = Counter()
     modality_attempts: Counter[str] = Counter()
@@ -504,6 +514,11 @@ def recommend_performance_tasks(
                 + ", ".join(sorted(unknown_objectives))
                 + "."
             )
+        if missing_objective_misconception_bindings(
+            task,
+            live_misconception_objectives,
+        ):
+            continue
         if not task_concept_ids or not task_concept_ids.issubset(scope):
             continue
         if not task_objective_ids.issubset(scoped_objective_ids):

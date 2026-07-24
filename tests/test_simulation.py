@@ -282,6 +282,170 @@ class BehavioralSimulationTests(unittest.TestCase):
                 evidence_anchor_concept_id(question),
             )
 
+    def test_coverage_denominator_excludes_global_revocations(self) -> None:
+        engine = self.simulator.engine
+        database = engine.database
+
+        engine.create_learner("shared-family-coverage")
+        shared_session = engine.start_session(
+            "shared-family-coverage",
+            "c_data_leakage",
+            seed=801,
+            now=START,
+        )
+        shared_before = self.simulator._coverage_denominator(shared_session)
+        first_shared = "q_data_leakage_prediction_time_001"
+        second_shared = "q_holdout_adaptive_reuse_001"
+        shared_family = "f_deployment_aligned_validation"
+        shared_question_ids = {
+            question_id
+            for question_id in shared_before.eligible_question_ids
+            if database.get_question(
+                question_id,
+                release_id=shared_session["corpus_release_id"],
+            ).family_id
+            == shared_family
+        }
+        self.assertTrue(
+            {first_shared, second_shared}
+            <= shared_question_ids
+        )
+        self.assertIn(shared_family, shared_before.eligible_family_ids)
+
+        database.revoke_question(
+            first_shared,
+            "Simulation coverage shared-family revocation fixture.",
+            idempotency_key="coverage-revoke-shared-first",
+        )
+        shared_middle = self.simulator._coverage_denominator(shared_session)
+        self.assertNotIn(first_shared, shared_middle.eligible_question_ids)
+        self.assertIn(second_shared, shared_middle.eligible_question_ids)
+        self.assertIn(shared_family, shared_middle.eligible_family_ids)
+        self.assertEqual(
+            shared_middle.eligible_questions,
+            shared_before.eligible_questions - 1,
+        )
+        self.assertEqual(
+            shared_middle.eligible_families,
+            shared_before.eligible_families,
+        )
+
+        for index, question_id in enumerate(
+            sorted(shared_question_ids - {first_shared})
+        ):
+            database.revoke_question(
+                question_id,
+                "Simulation coverage last shared-family revocation fixture.",
+                idempotency_key=f"coverage-revoke-shared-rest-{index}",
+            )
+        shared_after = self.simulator._coverage_denominator(shared_session)
+        self.assertFalse(
+            shared_question_ids & shared_after.eligible_question_ids
+        )
+        self.assertNotIn(shared_family, shared_after.eligible_family_ids)
+        self.assertEqual(
+            shared_after.eligible_questions,
+            shared_before.eligible_questions - len(shared_question_ids),
+        )
+        self.assertEqual(
+            shared_after.eligible_families,
+            shared_before.eligible_families - 1,
+        )
+
+        engine.create_learner("objective-coverage-revocation")
+        objective_session = engine.start_session(
+            "objective-coverage-revocation",
+            "t_transformers",
+            seed=802,
+            now=START,
+        )
+        objective_before = self.simulator._coverage_denominator(
+            objective_session
+        )
+        objective_id = "lo_transformer_information_paths"
+        objective_questions = {
+            question_id: question
+            for question_id in objective_before.eligible_question_ids
+            if (
+                question := database.get_question(
+                    question_id,
+                    release_id=objective_session["corpus_release_id"],
+                )
+            ).objective
+            is not None
+            and question.objective.id == objective_id
+        }
+        self.assertGreaterEqual(len(objective_questions), 3)
+        objective_family_ids_raw = {
+            question.family_id for question in objective_questions.values()
+        }
+        objective_family_ids = {
+            f"objective:{objective_id}|family:{family_id}"
+            for family_id in objective_family_ids_raw
+        }
+        self.assertTrue(
+            set(objective_questions)
+            <= objective_before.eligible_question_ids
+        )
+        self.assertTrue(
+            objective_family_ids_raw
+            <= objective_before.eligible_family_ids
+        )
+        self.assertIn(objective_id, objective_before.eligible_objective_ids)
+        self.assertTrue(
+            objective_family_ids
+            <= objective_before.eligible_objective_family_ids
+        )
+        self.assertTrue(
+            objective_family_ids
+            <= objective_before.eligible_evidence_family_ids
+        )
+
+        for index, question_id in enumerate(sorted(objective_questions)):
+            database.revoke_question(
+                question_id,
+                "Simulation coverage objective revocation fixture.",
+                idempotency_key=f"coverage-revoke-objective-{index}",
+            )
+        objective_after = self.simulator._coverage_denominator(
+            objective_session
+        )
+        self.assertFalse(
+            set(objective_questions)
+            & objective_after.eligible_question_ids
+        )
+        self.assertNotIn(objective_id, objective_after.eligible_objective_ids)
+        self.assertFalse(
+            objective_family_ids
+            & objective_after.eligible_objective_family_ids
+        )
+        self.assertFalse(
+            objective_family_ids
+            & objective_after.eligible_evidence_family_ids
+        )
+        self.assertEqual(
+            objective_after.eligible_questions,
+            objective_before.eligible_questions - len(objective_questions),
+        )
+        self.assertEqual(
+            objective_after.eligible_objectives,
+            objective_before.eligible_objectives - 1,
+        )
+        self.assertEqual(
+            objective_after.eligible_objective_families,
+            (
+                objective_before.eligible_objective_families
+                - len(objective_family_ids)
+            ),
+        )
+        self.assertEqual(
+            objective_after.eligible_evidence_families,
+            (
+                objective_before.eligible_evidence_families
+                - len(objective_family_ids)
+            ),
+        )
+
     def test_coverage_separates_exploration_outside_requested_scope(self) -> None:
         report = self.simulator.run(
             SyntheticLearner(

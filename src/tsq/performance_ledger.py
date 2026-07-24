@@ -48,6 +48,10 @@ from .performance import (
     ScoringRequest,
     normalize_imported_evaluation,
 )
+from .performance_boundaries import (
+    missing_objective_misconception_bindings,
+    release_misconception_objectives,
+)
 from .store import (
     PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
     Database,
@@ -472,22 +476,23 @@ class PerformanceLedger:
                     (bundle.corpus_release_id,),
                 )
             }
-            release_misconception_objectives: dict[str, set[str]] = {}
-            for row in connection.execute(
-                """SELECT DISTINCT option.misconception_id,
-                                  mapping.objective_id
-                   FROM release_option_objectives mapping
-                   JOIN options option
-                     ON option.question_id=mapping.question_id
-                    AND option.option_id=mapping.option_id
-                   WHERE mapping.release_id=?
-                     AND option.misconception_id IS NOT NULL""",
-                (bundle.corpus_release_id,),
-            ):
-                release_misconception_objectives.setdefault(
-                    row["misconception_id"], set()
-                ).add(row["objective_id"])
-            for _, task in bundle.tasks:
+            all_release_misconception_objectives = (
+                release_misconception_objectives(
+                    connection,
+                    bundle.corpus_release_id,
+                    accepted_only=False,
+                    exclude_revoked=False,
+                )
+            )
+            live_release_misconception_objectives = (
+                release_misconception_objectives(
+                    connection,
+                    bundle.corpus_release_id,
+                    accepted_only=True,
+                    exclude_revoked=True,
+                )
+            )
+            for task_status, task in bundle.tasks:
                 for source_id, provenance_digest in task.source_manifests:
                     if source_id not in release_sources:
                         raise ValidationError(
@@ -531,31 +536,37 @@ class PerformanceLedger:
                         f"Task {task.id} references misconceptions outside its release: "
                         + ", ".join(sorted(unknown_misconceptions))
                     )
+                task_misconception_objectives = (
+                    live_release_misconception_objectives
+                    if task_status in SERVICEABLE_TASK_STATUSES
+                    else all_release_misconception_objectives
+                )
                 for criterion in task.criteria:
-                    criterion_objectives = set(criterion.objective_ids)
                     criterion_concepts = set(criterion.concept_ids)
                     for misconception_id in criterion.misconception_ids:
-                        if criterion_objectives:
-                            mapped_objectives = (
-                                release_misconception_objectives.get(
-                                    misconception_id, set()
-                                )
+                        if not criterion.objective_ids and (
+                            release_misconception_concepts.get(
+                                misconception_id
                             )
-                            if not criterion_objectives & mapped_objectives:
-                                raise ValidationError(
-                                    f"Task {task.id} criterion {criterion.id} "
-                                    f"misconception {misconception_id} is not "
-                                    "mapped to any of that criterion's "
-                                    "objectives in the pinned release."
-                                )
-                        elif release_misconception_concepts.get(
-                            misconception_id
-                        ) not in criterion_concepts:
+                            not in criterion_concepts
+                        ):
                             raise ValidationError(
                                 f"Task {task.id} criterion {criterion.id} "
                                 f"misconception {misconception_id} is outside "
                                 "that criterion's concept mapping."
                             )
+                missing_bindings = missing_objective_misconception_bindings(
+                    task,
+                    task_misconception_objectives,
+                )
+                if missing_bindings:
+                    criterion_id, misconception_id = missing_bindings[0]
+                    raise ValidationError(
+                        f"Task {task.id} criterion {criterion_id} "
+                        f"misconception {misconception_id} is not mapped to "
+                        "any of that criterion's objectives in the pinned "
+                        "release."
+                    )
                 definition_json = canonical_json(task.terms())
                 existing = connection.execute(
                     """SELECT task_digest, definition_json
@@ -1021,6 +1032,23 @@ class PerformanceLedger:
                 raise ValidationError(
                     f"Stored task definition is invalid: {exc}"
                 ) from exc
+            live_misconception_objectives = (
+                release_misconception_objectives(
+                    connection,
+                    session["corpus_release_id"],
+                    accepted_only=True,
+                    exclude_revoked=True,
+                )
+            )
+            missing_bindings = missing_objective_misconception_bindings(
+                task,
+                live_misconception_objectives,
+            )
+            if missing_bindings:
+                raise NotFoundError(
+                    f"No currently serviceable release contains task "
+                    f"{task_id}; its live diagnostic mapping was withdrawn."
+                )
             if ActionKind.STARTED not in task.allowed_action_kinds:
                 raise ValidationError(
                     f"Task {task.id} does not allow its required started action."
@@ -2768,21 +2796,18 @@ def performance_integrity_errors(
                 (row["corpus_release_id"],),
             )
         }
-        misconception_objectives: dict[str, set[str]] = {}
-        for item in connection.execute(
-            """SELECT DISTINCT option.misconception_id,
-                              mapping.objective_id
-               FROM release_option_objectives mapping
-               JOIN options option
-                 ON option.question_id=mapping.question_id
-                AND option.option_id=mapping.option_id
-               WHERE mapping.release_id=?
-                 AND option.misconception_id IS NOT NULL""",
-            (row["corpus_release_id"],),
-        ):
-            misconception_objectives.setdefault(
-                item["misconception_id"], set()
-            ).add(item["objective_id"])
+        all_misconception_objectives = release_misconception_objectives(
+            connection,
+            row["corpus_release_id"],
+            accepted_only=False,
+            exclude_revoked=False,
+        )
+        accepted_misconception_objectives = release_misconception_objectives(
+            connection,
+            row["corpus_release_id"],
+            accepted_only=True,
+            exclude_revoked=False,
+        )
         definitions: list[tuple[str, LearningTask]] = []
         for member in members:
             task = tasks.get((member["task_id"], member["task_version"]))
@@ -2823,24 +2848,16 @@ def performance_integrity_errors(
                 errors.append(
                     f"{label}: task {task.id} has out-of-release misconceptions"
                 )
+            task_misconception_objectives = (
+                accepted_misconception_objectives
+                if member["status"] in SERVICEABLE_TASK_STATUSES
+                else all_misconception_objectives
+            )
             for criterion in task.criteria:
-                criterion_objectives = set(criterion.objective_ids)
                 criterion_concepts = set(criterion.concept_ids)
                 for misconception_id in criterion.misconception_ids:
-                    if criterion_objectives and not (
-                        criterion_objectives
-                        & misconception_objectives.get(
-                            misconception_id, set()
-                        )
-                    ):
-                        errors.append(
-                            f"{label}: task {task.id} criterion "
-                            f"{criterion.id} misconception "
-                            f"{misconception_id} is not mapped to any of its "
-                            "objectives"
-                        )
-                    elif (
-                        not criterion_objectives
+                    if (
+                        not criterion.objective_ids
                         and misconception_concepts.get(misconception_id)
                         not in criterion_concepts
                     ):
@@ -2849,6 +2866,18 @@ def performance_integrity_errors(
                             f"{criterion.id} misconception "
                             f"{misconception_id} is outside its concept mapping"
                         )
+            for criterion_id, misconception_id in (
+                missing_objective_misconception_bindings(
+                    task,
+                    task_misconception_objectives,
+                )
+            ):
+                errors.append(
+                    f"{label}: task {task.id} criterion "
+                    f"{criterion_id} misconception "
+                    f"{misconception_id} is not mapped to any of its "
+                    "objectives"
+                )
         try:
             reconstructed = PerformanceTaskRelease(
                 title=row["title"],
