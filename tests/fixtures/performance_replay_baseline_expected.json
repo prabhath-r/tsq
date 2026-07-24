@@ -1,0 +1,77 @@
+{
+  "action_count": 4,
+  "action_trace_digest": "3cf5555f33f50ae9e5d7be0df46f530ef03109142d3c616de952ad2c6f993c53",
+  "attempt_count": 1,
+  "bundle_count": 1,
+  "bundle_digest": "d0675600a341b66824017761b66965b5a32d0baa2bf3a20bcd73a9d8378a5d1e",
+  "checkpoints": [
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_004",
+      "event_type": "PerformanceTaskStarted"
+    },
+    {
+      "action_id": "pact_performance_replay_001",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_005",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 0
+    },
+    {
+      "action_id": "pact_performance_replay_002",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_006",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 1
+    },
+    {
+      "action_id": "pact_performance_replay_003",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_007",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 2
+    },
+    {
+      "action_id": "pact_performance_replay_004",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_008",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 3
+    },
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "evaluation_id": "teval_performance_replay_001",
+      "event_id": "evt_performance_replay_009",
+      "event_type": "TaskEvaluationRecorded"
+    },
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "bundle_id": "seb_d0675600a341b66824017761",
+      "evaluation_id": "teval_performance_replay_001",
+      "event_id": "evt_performance_replay_010",
+      "event_type": "ShadowEvidenceReduced"
+    }
+  ],
+  "criterion_objective_weights": [
+    [
+      "lo_attention_value_routing",
+      1.0
+    ]
+  ],
+  "database_schema_version": 17,
+  "evaluation_count": 1,
+  "evaluation_digest": "341773e35cf27e9bfb31f10cee6b1c214a4c99f714fe96e56c17bd35d61eec40",
+  "evidence_bundle_schema_version": 2,
+  "evidence_objective_weights": [
+    [
+      "lo_attention_value_routing",
+      1.0
+    ]
+  ],
+  "format_version": 1,
+  "normalized_scoring_result_schema_version": 1,
+  "performance_event_count": 7,
+  "scoring_claim_count": 0,
+  "task_digest": "4a457fd72018a1ea2f072d4b76a7e4e84e82b8f57ea4795cf9fdf62abd7f61a4",
+  "task_schema_version": 3
+}

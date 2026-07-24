@@ -45,7 +45,9 @@ from .policy import (
     AdaptivePolicy,
     _selection_version_boundary,
 )
-from .store import Database, new_id
+from .performance_reporting import productive_shadow_summary
+from .response_patterns import display_position_shadow
+from .store import Database, new_id, question_runtime_activation_safe
 from .versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
     COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS,
@@ -692,6 +694,7 @@ class AdaptiveEngine:
         status: str | None = None,
         reason: str | None = None,
         idempotency_key: str | None = None,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         if completed is not None and not isinstance(completed, bool):
             raise ValidationError("completed must be a boolean when provided.")
@@ -707,6 +710,7 @@ class AdaptiveEngine:
             status=resolved_status,
             reason=reason,
             idempotency_key=idempotency_key,
+            now=now,
         )
 
     @staticmethod
@@ -803,6 +807,10 @@ class AdaptiveEngine:
             if not decision:
                 raise NotFoundError(f"Unknown decision: {decision_id}")
             session = self.database.get_session(decision["session_id"], connection)
+            self.database.require_learner_evidence_safe(
+                session["learner_id"],
+                connection,
+            )
             self.database.validate_release_focus_tuple(
                 decision["corpus_release_id"],
                 decision["focus_concept_id"],
@@ -1213,6 +1221,10 @@ class AdaptiveEngine:
                 or decision["invalidated_at"] is not None
             ):
                 return None
+            self.database.require_learner_evidence_safe(
+                decision["learner_id"],
+                connection,
+            )
             # Let the ordinary command boundary diagnose any reused key.  In a
             # healthy database a pending decision cannot already have a durable
             # ResponseSubmitted event, so no valid replay is skipped here.
@@ -1399,6 +1411,13 @@ class AdaptiveEngine:
                 session_id=decision["session_id"],
             )
             session = self.database.get_session(decision["session_id"], connection)
+            # A prior idempotent response still exposes learner-facing
+            # adaptive output. Quarantine therefore precedes both replay and
+            # every new projection write.
+            self.database.require_learner_evidence_safe(
+                session["learner_id"],
+                connection,
+            )
             self.database.validate_release_focus_tuple(
                 decision["corpus_release_id"],
                 decision["focus_concept_id"],
@@ -1535,6 +1554,15 @@ class AdaptiveEngine:
                 raise ConflictError(
                     "This question was emergency-revoked and cannot contribute learner "
                     f"evidence: {revocation['reason']}"
+                )
+            if not question_runtime_activation_safe(
+                question,
+                status=decision["question_status"],
+            ):
+                raise ConflictError(
+                    "This generated question lacks the immutable independent "
+                    "human-review commitment required for activation and "
+                    "cannot contribute learner evidence."
                 )
             if session["status"] != "active":
                 raise ConflictError("Session is not active.")
@@ -2382,8 +2410,8 @@ class AdaptiveEngine:
             release_objectives = self.database.get_learning_objectives(
                 decision["corpus_release_id"]
             )
-            boundary_states = (
-                self.learner_model.concept_states_with_objective_floor(
+            boundary_projection = (
+                self.learner_model.concept_projection_with_objective_floor(
                     learner_id=session["learner_id"],
                     concepts=graph.concepts,
                     stored_states=boundary_states,
@@ -2392,6 +2420,7 @@ class AdaptiveEngine:
                     now=now,
                 )
             )
+            boundary_states = boundary_projection.states
             if direct_prerequisite_ids:
                 objectives_by_owner: dict[str, list[Any]] = {}
                 objective_enabled_concepts: set[str] = set()
@@ -2496,16 +2525,32 @@ class AdaptiveEngine:
                               ON choice.id=attempt.decision_id
                             JOIN events response_event
                               ON response_event.event_id=attempt.event_id
+                            JOIN release_questions released
+                              ON released.release_id=choice.corpus_release_id
+                             AND released.question_id=attempt.question_id
                             JOIN question_concepts mapping
                               ON mapping.question_id=attempt.question_id
                              AND mapping.role='primary'
                             WHERE attempt.session_id=?
+                              AND choice.corpus_release_id=?
+                              AND released.status IN (?, ?)
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM question_revocations revoked
+                                  WHERE revoked.question_id=attempt.question_id
+                              )
                               AND choice.focus_valid=1
                               AND choice.focus_objective_id IS NULL
                               AND choice.question_objective_id IS NULL
                               AND mapping.concept_id IN ({legacy_placeholders})
                             GROUP BY mapping.concept_id""",
-                        (session["id"], *sorted(legacy_concept_ids)),
+                        (
+                            session["id"],
+                            decision["corpus_release_id"],
+                            QuestionStatus.APPROVED.value,
+                            QuestionStatus.CALIBRATED.value,
+                            *sorted(legacy_concept_ids),
+                        ),
                     ).fetchall()
                     verified_prerequisites.update(
                         row["concept_id"]
@@ -2591,6 +2636,7 @@ class AdaptiveEngine:
                 excluded_concept_ids=(
                     verified_prerequisites | unserviceable_prerequisites
                 ),
+                intrinsic_overrides=boundary_projection.exact_floors,
             )
             if boundary is not None:
                 prerequisite = boundary.selected_concept_id
@@ -2929,7 +2975,12 @@ class AdaptiveEngine:
         if objective_ids is not None and not objective_ids:
             return set()
         objective_clause = ""
-        parameters: list[Any] = [session_id, release_id]
+        parameters: list[Any] = [
+            session_id,
+            release_id,
+            QuestionStatus.APPROVED.value,
+            QuestionStatus.CALIBRATED.value,
+        ]
         if objective_ids is not None:
             placeholders = ",".join("?" for _ in objective_ids)
             objective_clause = (
@@ -2946,8 +2997,17 @@ class AdaptiveEngine:
                 JOIN decisions choice ON choice.id=attempt.decision_id
                 JOIN events response_event
                   ON response_event.event_id=attempt.event_id
+                JOIN release_questions released
+                  ON released.release_id=choice.corpus_release_id
+                 AND released.question_id=attempt.question_id
                 WHERE attempt.session_id=?
                   AND choice.corpus_release_id=?
+                  AND released.status IN (?, ?)
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM question_revocations revoked
+                      WHERE revoked.question_id=attempt.question_id
+                  )
                   AND choice.focus_valid=1
                   AND choice.focus_objective_id IS NOT NULL
                   AND choice.question_objective_id
@@ -3461,6 +3521,96 @@ class AdaptiveEngine:
             result[row["family_id"]] = parsed.astimezone(timezone.utc)
         return result
 
+    def _selected_response_inference_contract(
+        self,
+        release_id: str,
+    ) -> dict[str, Any]:
+        """Describe what the current selected-response numbers can support."""
+
+        with self.database.read() as connection:
+            row = connection.execute(
+                """SELECT COUNT(*) AS active_questions,
+                          COUNT(DISTINCT question.family_id) AS active_families,
+                          SUM(CASE WHEN released.status = ? THEN 1 ELSE 0 END)
+                              AS approved_questions,
+                          SUM(CASE WHEN released.status = ? THEN 1 ELSE 0 END)
+                              AS calibrated_questions,
+                          COUNT(DISTINCT CASE
+                              WHEN released.status = ? THEN question.family_id
+                              ELSE NULL END) AS calibrated_families
+                   FROM release_questions released
+                   JOIN questions question
+                     ON question.id = released.question_id
+                   WHERE released.release_id = ?
+                     AND released.status IN (?, ?)
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM question_revocations revoked
+                         WHERE revoked.question_id = released.question_id
+                     )""",
+                (
+                    QuestionStatus.APPROVED.value,
+                    QuestionStatus.CALIBRATED.value,
+                    QuestionStatus.CALIBRATED.value,
+                    release_id,
+                    QuestionStatus.APPROVED.value,
+                    QuestionStatus.CALIBRATED.value,
+                ),
+            ).fetchone()
+        active_questions = int(row["active_questions"] or 0)
+        approved_questions = int(row["approved_questions"] or 0)
+        calibrated_questions = int(row["calibrated_questions"] or 0)
+        if active_questions == 0:
+            corpus_calibration_status = "no_active_items"
+        elif calibrated_questions == 0:
+            corpus_calibration_status = "no_calibrated_items"
+        elif calibrated_questions < active_questions:
+            corpus_calibration_status = "partially_calibrated_items"
+        else:
+            corpus_calibration_status = "all_items_marked_calibrated"
+        return {
+            "contract_version": "selected-response-inference-v1",
+            "corpus_release_id": release_id,
+            "count_scope": "entire_corpus_release",
+            "claim_scope": "provisional_selected_response_inference",
+            "model_validation_status": "not_empirically_validated",
+            "corpus_calibration_status": corpus_calibration_status,
+            "eligible_question_count": active_questions,
+            "eligible_family_count": int(row["active_families"] or 0),
+            "approved_question_count": approved_questions,
+            "calibrated_question_count": calibrated_questions,
+            "calibrated_family_count": int(
+                row["calibrated_families"] or 0
+            ),
+            "eligibility_definition": (
+                "Release members currently marked approved or calibrated and "
+                "not globally revoked."
+            ),
+            "calibrated_family_definition": (
+                "Distinct eligible families containing at least one item whose "
+                "release status is calibrated."
+            ),
+            "item_parameter_basis": (
+                "Approved items use authored priors. A corpus-declared "
+                "calibrated status is reported separately but does not by "
+                "itself validate the inference model or target population."
+            ),
+            "state_label_qualification": (
+                "Labels such as proficient or durable are provisional "
+                "selected-response states, not validated real-world skill "
+                "certificates."
+            ),
+            "numerical_guard_scope": (
+                "For exact-grid posteriors, mastery_probability_error_bound is "
+                "a conservative numerical approximation guard, not a proven "
+                "universal error envelope. It excludes item-parameter "
+                "uncertainty, model misspecification, semantic family dependence, "
+                "population calibration, and transfer to productive skill. A "
+                "zero value on a legacy gaussian_moments projection is not a "
+                "validated numerical or model-error bound."
+            ),
+        }
+
     def profile(
         self, learner_id: str, *, root_concept_id: str | None = None, now: datetime | None = None
     ) -> dict[str, Any]:
@@ -3473,6 +3623,10 @@ class AdaptiveEngine:
                 "SELECT 1 FROM learners WHERE id = ?", (learner_id,)
             ).fetchone():
                 raise NotFoundError(f"Unknown learner: {learner_id}")
+            self.database.require_learner_evidence_safe(
+                learner_id,
+                connection,
+            )
         graph = self.database.get_graph()
         resolved_target: dict[str, Any] | None = None
         if root_concept_id:
@@ -3507,32 +3661,130 @@ class AdaptiveEngine:
         ]
         persisted_concept_states = self.database.get_skill_states(learner_id)
         stored_objectives = self.database.get_objective_states(learner_id)
-        stored = self.learner_model.concept_states_with_objective_floor(
-            learner_id=learner_id,
-            concepts=graph.concepts,
-            stored_states=persisted_concept_states,
-            objectives=release_objectives,
-            stored_objective_states=stored_objectives,
-            now=now,
+        floor_projection = (
+            self.learner_model.concept_projection_with_objective_floor(
+                learner_id=learner_id,
+                concepts=graph.concepts,
+                stored_states=persisted_concept_states,
+                objectives=release_objectives,
+                stored_objective_states=stored_objectives,
+                now=now,
+            )
         )
+        stored = floor_projection.states
         all_readiness = self.boundary_planner.readiness_map(
             learner_id=learner_id,
             graph=graph,
             stored_states=stored,
             now=now,
             concept_ids=set(graph.concepts),
+            intrinsic_overrides=floor_projection.exact_floors,
         )
         readiness = {
             concept_id: all_readiness[concept_id] for concept_id in scope
         }
         evidence_summaries = self.database.independent_evidence_summaries(
-            learner_id, set(graph.concepts)
+            learner_id,
+            set(graph.concepts),
+            release_id=active_release,
         )
         objective_ids_by_primary_concept: dict[str, list[str]] = {}
         for objective in release_objectives:
             objective_ids_by_primary_concept.setdefault(
                 objective.primary_concept_id, []
             ).append(objective.id)
+        release_objective_ids = {
+            objective.id for objective in release_objectives
+        }
+        objective_evidence = {
+            objective_id: {
+                "families": 0,
+                "delayed": 0,
+                "operation_kinds": 0,
+            }
+            for objective_id in release_objective_ids
+        }
+        observed_objective_families = {
+            objective_id: 0 for objective_id in release_objective_ids
+        }
+        if release_objective_ids:
+            with self.database.read() as connection:
+                objective_evidence_rows = connection.execute(
+                    """SELECT evidence.objective_id, COUNT(*) AS families,
+                              COUNT(DISTINCT evidence.kind) AS operation_kinds,
+                              SUM(CASE WHEN evidence.delayed_unguided_correct_at
+                                                  IS NOT NULL
+                                       THEN 1 ELSE 0 END) AS delayed
+                       FROM learner_objective_families evidence
+                       WHERE evidence.learner_id = ?
+                         AND EXISTS (
+                             SELECT 1
+                             FROM release_question_objectives direct
+                             JOIN questions question
+                               ON question.id = direct.question_id
+                             JOIN release_questions released
+                               ON released.release_id = direct.release_id
+                              AND released.question_id = direct.question_id
+                             WHERE direct.release_id = ?
+                               AND direct.objective_id = evidence.objective_id
+                               AND question.family_id = evidence.family_id
+                               AND released.status IN (?, ?)
+                               AND NOT EXISTS (
+                                   SELECT 1
+                                   FROM question_revocations revoked
+                                   WHERE revoked.question_id = question.id
+                               )
+                         )
+                       GROUP BY evidence.objective_id""",
+                    (
+                        learner_id,
+                        active_release,
+                        QuestionStatus.APPROVED.value,
+                        QuestionStatus.CALIBRATED.value,
+                    ),
+                ).fetchall()
+                observed_objective_rows = connection.execute(
+                    """SELECT decision.question_objective_id AS objective_id,
+                              COUNT(DISTINCT attempt.family_id) AS families
+                       FROM attempts attempt
+                       JOIN decisions decision
+                         ON decision.id = attempt.decision_id
+                       JOIN release_question_objectives direct
+                         ON direct.release_id = ?
+                        AND direct.question_id = attempt.question_id
+                        AND direct.objective_id
+                            = decision.question_objective_id
+                       JOIN release_questions released
+                         ON released.release_id = direct.release_id
+                        AND released.question_id = direct.question_id
+                       WHERE attempt.learner_id = ?
+                         AND decision.question_objective_id IS NOT NULL
+                         AND released.status IN (?, ?)
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM question_revocations revoked
+                             WHERE revoked.question_id = attempt.question_id
+                         )
+                       GROUP BY decision.question_objective_id""",
+                    (
+                        active_release,
+                        learner_id,
+                        QuestionStatus.APPROVED.value,
+                        QuestionStatus.CALIBRATED.value,
+                    ),
+                ).fetchall()
+            for row in objective_evidence_rows:
+                if row["objective_id"] in objective_evidence:
+                    objective_evidence[row["objective_id"]] = {
+                        "families": int(row["families"] or 0),
+                        "delayed": int(row["delayed"] or 0),
+                        "operation_kinds": int(row["operation_kinds"] or 0),
+                    }
+            for row in observed_objective_rows:
+                if row["objective_id"] in observed_objective_families:
+                    observed_objective_families[row["objective_id"]] = int(
+                        row["families"] or 0
+                    )
         observed_concept_families = {concept_id: 0 for concept_id in scope}
         if scope:
             placeholders = ",".join("?" for _ in scope)
@@ -3544,10 +3796,25 @@ class AdaptiveEngine:
                         JOIN question_concepts mapping
                           ON mapping.question_id = attempt.question_id
                          AND mapping.role = 'primary'
+                        JOIN release_questions released
+                          ON released.release_id = ?
+                         AND released.question_id = attempt.question_id
                         WHERE attempt.learner_id = ?
                           AND mapping.concept_id IN ({placeholders})
+                          AND released.status IN (?, ?)
+                          AND NOT EXISTS (
+                              SELECT 1
+                              FROM question_revocations revoked
+                              WHERE revoked.question_id = attempt.question_id
+                          )
                         GROUP BY mapping.concept_id""",
-                    (learner_id, *sorted(scope)),
+                    (
+                        active_release,
+                        learner_id,
+                        *sorted(scope),
+                        QuestionStatus.APPROVED.value,
+                        QuestionStatus.CALIBRATED.value,
+                    ),
                 ).fetchall()
             for row in observed_rows:
                 observed_concept_families[row["concept_id"]] = int(
@@ -3577,12 +3844,31 @@ class AdaptiveEngine:
             projected_states[concept_id] = self.learner_model.project_state(
                 state, concept, now
             )
+
+        def evidence_for_concept(concept_id: str) -> dict[str, int]:
+            """Match a displayed broad readiness floor to its evidence ledger."""
+
+            floor_objective_id = all_readiness[
+                concept_id
+            ].objective_floor_source_id
+            if floor_objective_id is not None:
+                return objective_evidence[floor_objective_id]
+            return evidence_summaries[concept_id]
+
+        def observed_families_for_concept(concept_id: str) -> int:
+            floor_objective_id = all_readiness[
+                concept_id
+            ].objective_floor_source_id
+            if floor_objective_id is not None:
+                return observed_objective_families[floor_objective_id]
+            return observed_concept_families.get(concept_id, 0)
+
         skills = []
         for concept_id in sorted(scope, key=lambda cid: graph.concepts[cid].name):
             concept = graph.concepts[concept_id]
             projected = projected_states[concept_id]
             boundary = readiness[concept_id]
-            evidence = evidence_summaries[concept_id]
+            evidence = evidence_for_concept(concept_id)
             family_count = evidence["families"]
             delayed_retrievals = evidence["delayed"]
             operation_kinds = evidence["operation_kinds"]
@@ -3591,10 +3877,10 @@ class AdaptiveEngine:
                 for prerequisite_id, _ in graph.direct_prerequisites(concept_id)
             ]
             prerequisites_ready = all(
-                prerequisite_id in projected_states
-                and projected_states[prerequisite_id].exposures > 0
-                and projected_states[prerequisite_id].mastery_probability >= 0.40
-                and evidence_summaries[prerequisite_id]["families"] >= 1
+                prerequisite_id in all_readiness
+                and all_readiness[prerequisite_id].exposures > 0
+                and all_readiness[prerequisite_id].mastery_probability >= 0.40
+                and evidence_for_concept(prerequisite_id)["families"] >= 1
                 for prerequisite_id in direct_prerequisites
             )
             derived_objective_ids = sorted(
@@ -3604,9 +3890,9 @@ class AdaptiveEngine:
                 {
                     "concept_id": concept_id,
                     "name": concept.name,
-                    "mastery": projected.mastery_probability,
-                    "expected_competence": projected.expected_competence,
-                    "uncertainty": projected.variance**0.5,
+                    "mastery": boundary.mastery_probability,
+                    "expected_competence": boundary.expected_competence,
+                    "uncertainty": boundary.uncertainty,
                     "stability_hours": projected.stability_hours,
                     "evidence_mass": projected.evidence_mass,
                     "projection_kind": (
@@ -3615,11 +3901,14 @@ class AdaptiveEngine:
                         else "concept_posterior"
                     ),
                     "derived_from_objective_ids": derived_objective_ids,
+                    "objective_floor_source_id": (
+                        boundary.objective_floor_source_id
+                    ),
                     "independent_families": family_count,
                     "successful_retrieval_families": family_count,
-                    "observed_response_families": observed_concept_families[
-                        concept_id
-                    ],
+                    "observed_response_families": (
+                        observed_families_for_concept(concept_id)
+                    ),
                     "delayed_retrievals": delayed_retrievals,
                     "operation_kinds": operation_kinds,
                     "prerequisites_ready": prerequisites_ready,
@@ -3639,6 +3928,12 @@ class AdaptiveEngine:
                         operation_kinds,
                         misconception_by_concept.get(concept_id, 0.0),
                         prerequisites_ready,
+                        mastery_probability_override=(
+                            boundary.mastery_probability
+                        ),
+                    ),
+                    "state_qualification": (
+                        "provisional_selected_response_state"
                     ),
                     "next_review_at": projected.next_review_at.isoformat() if projected.next_review_at else None,
                 }
@@ -3670,6 +3965,7 @@ class AdaptiveEngine:
         ]
         profile = {
             "learner_id": learner_id,
+            "corpus_release_id": active_release,
             "target": resolved_target,
             "boundary_algorithm_version": BOUNDARY_ALGORITHM_VERSION,
             "skills": skills,
@@ -3679,48 +3975,16 @@ class AdaptiveEngine:
             },
             "misconception_hypotheses": misconception_hypotheses,
             "active_misconceptions": active_misconceptions,
+            "selected_response_inference": (
+                self._selected_response_inference_contract(active_release)
+            ),
         }
         if objectives:
             objective_ids = {objective.id for objective in objectives}
-            release_objective_ids = {
-                objective.id for objective in release_objectives
-            }
-            objective_evidence = {
-                objective_id: {
-                    "families": 0,
-                    "delayed": 0,
-                    "operation_kinds": 0,
-                }
-                for objective_id in release_objective_ids
-            }
-            observed_objective_families = {
-                objective_id: 0 for objective_id in objective_ids
-            }
             diagnostic_misconceptions: dict[str, set[str]] = {
                 objective_id: set() for objective_id in objective_ids
             }
             with self.database.read() as connection:
-                evidence_rows = connection.execute(
-                    """SELECT objective_id, COUNT(*) AS families,
-                              COUNT(DISTINCT kind) AS operation_kinds,
-                              SUM(CASE WHEN delayed_unguided_correct_at IS NOT NULL
-                                       THEN 1 ELSE 0 END) AS delayed
-                       FROM learner_objective_families
-                       WHERE learner_id = ?
-                       GROUP BY objective_id""",
-                    (learner_id,),
-                ).fetchall()
-                observed_rows = connection.execute(
-                    """SELECT decision.question_objective_id AS objective_id,
-                              COUNT(DISTINCT attempt.family_id) AS families
-                       FROM attempts attempt
-                       JOIN decisions decision
-                         ON decision.id = attempt.decision_id
-                       WHERE attempt.learner_id = ?
-                         AND decision.question_objective_id IS NOT NULL
-                       GROUP BY decision.question_objective_id""",
-                    (learner_id,),
-                ).fetchall()
                 diagnostic_rows = connection.execute(
                     """SELECT DISTINCT mapping.objective_id,
                                       option.misconception_id
@@ -3732,18 +3996,6 @@ class AdaptiveEngine:
                          AND option.misconception_id IS NOT NULL""",
                     (active_release,),
                 ).fetchall()
-            for row in evidence_rows:
-                if row["objective_id"] in objective_evidence:
-                    objective_evidence[row["objective_id"]] = {
-                        "families": int(row["families"] or 0),
-                        "delayed": int(row["delayed"] or 0),
-                        "operation_kinds": int(row["operation_kinds"] or 0),
-                    }
-            for row in observed_rows:
-                if row["objective_id"] in observed_objective_families:
-                    observed_objective_families[row["objective_id"]] = int(
-                        row["families"] or 0
-                    )
             for row in diagnostic_rows:
                 if row["objective_id"] in diagnostic_misconceptions:
                     diagnostic_misconceptions[row["objective_id"]].add(
@@ -3889,6 +4141,9 @@ class AdaptiveEngine:
                             active_probability,
                             objective_prerequisites_ready,
                         ),
+                        "state_qualification": (
+                            "provisional_selected_response_state"
+                        ),
                         "next_review_at": (
                             projected.next_review_at.isoformat()
                             if projected.next_review_at
@@ -3908,7 +4163,8 @@ class AdaptiveEngine:
             ),
             "successful_retrieval_families": (
                 "Distinct families with at least one correct, unhinted, "
-                "credible retrieval; this is the count used for certification."
+                "credible retrieval; this is an internal selected-response "
+                "verification gate, not real-world skill certification."
             ),
         }
         profile["projection_definitions"] = {
@@ -3925,12 +4181,27 @@ class AdaptiveEngine:
                 "The conservative probability used for decisions; exact-grid "
                 "estimates subtract their numerical error bound."
             ),
+            "mastery_probability_error_bound": (
+                "A numerical approximation guard only; it does not cover "
+                "item calibration, model validity, family dependence, or "
+                "productive-skill transfer."
+            ),
             "prerequisites_ready": (
                 "Every direct prerequisite has at least one certified independent "
                 "family and a current retention-adjusted mastery probability of "
                 "at least 0.40."
             ),
         }
+        profile["productive_skill_shadow"] = productive_shadow_summary(
+            self.database,
+            learner_id,
+            concept_ids=scope,
+        )
+        with self.database.read() as connection:
+            self.database.require_learner_evidence_safe(
+                learner_id,
+                connection,
+            )
         return profile
 
     def session_report(
@@ -3943,6 +4214,10 @@ class AdaptiveEngine:
         now = now.astimezone(timezone.utc)
         session = self.database.get_session(session_id)
         with self.database.read() as connection:
+            self.database.require_learner_evidence_safe(
+                session["learner_id"],
+                connection,
+            )
             rows = connection.execute(
                 """SELECT decision.id AS decision_id, decision.question_id,
                           decision.question_objective_id,
@@ -4033,8 +4308,73 @@ class AdaptiveEngine:
                    ORDER BY action.occurred_at, action.decision_id, action.sequence""",
                 (session_id,),
             ).fetchall()
+            position_rows = connection.execute(
+                """SELECT decision.id AS decision_id,
+                          decision.question_id,
+                          decision.option_order_json
+                              AS decision_option_order_json,
+                          attempt.selected_option_id,
+                          attempt.presented_order_json
+                              AS attempt_presented_order_json,
+                          (
+                              SELECT json_group_array(option.option_id)
+                              FROM options option
+                              WHERE option.question_id = decision.question_id
+                          ) AS question_option_ids_json,
+                          response.event_id AS response_event_id,
+                          response.stream_id AS response_stream_id,
+                          response.stream_version AS response_stream_version,
+                          response.event_type AS response_event_type,
+                          response.schema_version AS response_schema_version,
+                          response.occurred_at AS response_occurred_at,
+                          response.recorded_at AS response_recorded_at,
+                          response.learner_id AS response_learner_id,
+                          response.session_id AS response_session_id,
+                          response.correlation_id AS response_correlation_id,
+                          response.causation_id AS response_causation_id,
+                          response.idempotency_key AS response_idempotency_key,
+                          response.payload_json AS response_payload_json,
+                          response.metadata_json AS response_metadata_json,
+                          response.previous_hash AS response_previous_hash,
+                          response.payload_hash AS response_payload_hash
+                   FROM attempts attempt
+                   JOIN decisions decision ON decision.id = attempt.decision_id
+                   LEFT JOIN events response
+                     ON response.event_id = attempt.event_id
+                   WHERE attempt.session_id = ?
+                     AND decision.invalidated_at IS NULL
+                   ORDER BY attempt.answered_at, attempt.id""",
+                (session_id,),
+            ).fetchall()
+            position_selection_event_rows = connection.execute(
+                """SELECT event.event_id AS selection_event_id,
+                          event.stream_id AS selection_stream_id,
+                          event.stream_version AS selection_stream_version,
+                          event.event_type AS selection_event_type,
+                          event.schema_version AS selection_schema_version,
+                          event.occurred_at AS selection_occurred_at,
+                          event.recorded_at AS selection_recorded_at,
+                          event.learner_id AS selection_learner_id,
+                          event.session_id AS selection_session_id,
+                          event.correlation_id AS selection_correlation_id,
+                          event.causation_id AS selection_causation_id,
+                          event.idempotency_key AS selection_idempotency_key,
+                          event.payload_json AS selection_payload_json,
+                          event.metadata_json AS selection_metadata_json,
+                          event.previous_hash AS selection_previous_hash,
+                          event.payload_hash AS selection_payload_hash
+                   FROM events event
+                   WHERE event.session_id = ?
+                     AND event.event_type = 'QuestionSelected'
+                   ORDER BY event.stream_version, event.event_id""",
+                (session_id,),
+            ).fetchall()
 
         answered = [row for row in rows if row["attempt_id"] is not None]
+        response_position_shadow = display_position_shadow(
+            (dict(row) for row in position_rows),
+            (dict(row) for row in position_selection_event_rows),
+        )
         difficulties = [float(row["difficulty"]) for row in answered]
         response_times = [
             int(row["response_ms"])
@@ -4389,23 +4729,29 @@ class AdaptiveEngine:
         stored_objective_states = self.database.get_objective_states(
             session["learner_id"]
         )
-        stored_states = self.learner_model.concept_states_with_objective_floor(
-            learner_id=session["learner_id"],
-            concepts=graph.concepts,
-            stored_states=stored_states,
-            objectives=release_objectives,
-            stored_objective_states=stored_objective_states,
-            now=now,
+        floor_projection = (
+            self.learner_model.concept_projection_with_objective_floor(
+                learner_id=session["learner_id"],
+                concepts=graph.concepts,
+                stored_states=stored_states,
+                objectives=release_objectives,
+                stored_objective_states=stored_objective_states,
+                now=now,
+            )
         )
+        stored_states = floor_projection.states
         current_readiness = self.boundary_planner.readiness_map(
             learner_id=session["learner_id"],
             graph=graph,
             stored_states=stored_states,
             now=now,
             concept_ids=seen_concepts,
+            intrinsic_overrides=floor_projection.exact_floors,
         ) if seen_concepts else {}
         evidence = self.database.independent_evidence_summaries(
-            session["learner_id"], seen_concepts
+            session["learner_id"],
+            seen_concepts,
+            release_id=session["corpus_release_id"],
         )
         session_by_concept: dict[str, dict[str, Any]] = {}
         for row in answered:
@@ -4594,6 +4940,9 @@ class AdaptiveEngine:
                             else "concept_posterior"
                         ),
                         "derived_from_objective_ids": derived_objective_ids,
+                        "objective_floor_source_id": (
+                            readiness.objective_floor_source_id
+                        ),
                         "independent_families": family_count,
                         "successful_retrieval_families": family_count,
                         "successful_retrieval_diversity": (
@@ -4625,12 +4974,37 @@ class AdaptiveEngine:
             placeholders = ",".join("?" for _ in seen_objective_ids)
             with self.database.read() as connection:
                 family_rows = connection.execute(
-                    f"""SELECT objective_id, COUNT(*) AS families
-                         FROM learner_objective_families
-                         WHERE learner_id = ?
-                           AND objective_id IN ({placeholders})
-                         GROUP BY objective_id""",
-                    (session["learner_id"], *sorted(seen_objective_ids)),
+                    f"""SELECT evidence.objective_id, COUNT(*) AS families
+                         FROM learner_objective_families evidence
+                         WHERE evidence.learner_id = ?
+                           AND evidence.objective_id IN ({placeholders})
+                           AND EXISTS (
+                               SELECT 1
+                               FROM release_question_objectives direct
+                               JOIN questions question
+                                 ON question.id = direct.question_id
+                               JOIN release_questions released
+                                 ON released.release_id = direct.release_id
+                                AND released.question_id = direct.question_id
+                               WHERE direct.release_id = ?
+                                 AND direct.objective_id
+                                     = evidence.objective_id
+                                 AND question.family_id = evidence.family_id
+                                 AND released.status IN (?, ?)
+                                 AND NOT EXISTS (
+                                     SELECT 1
+                                     FROM question_revocations revoked
+                                     WHERE revoked.question_id = question.id
+                                 )
+                           )
+                         GROUP BY evidence.objective_id""",
+                    (
+                        session["learner_id"],
+                        *sorted(seen_objective_ids),
+                        session["corpus_release_id"],
+                        QuestionStatus.APPROVED.value,
+                        QuestionStatus.CALIBRATED.value,
+                    ),
                 ).fetchall()
             for row in family_rows:
                 objective_family_counts[row["objective_id"]] = int(
@@ -4865,7 +5239,7 @@ class AdaptiveEngine:
                     "stage": effective_stage_by_action[row["id"]],
                 }
             )
-        return {
+        report = {
             "session_id": session_id,
             "learner_id": session["learner_id"],
             "status": session["status"],
@@ -4875,6 +5249,11 @@ class AdaptiveEngine:
             ),
             "root_concept_id": session["root_concept_id"],
             "corpus_release_id": session["corpus_release_id"],
+            "selected_response_inference": (
+                self._selected_response_inference_contract(
+                    session["corpus_release_id"]
+                )
+            ),
             "questions_presented": len(rows),
             "questions_answered": len(answered),
             "correct": correct_count,
@@ -4972,8 +5351,9 @@ class AdaptiveEngine:
                 ),
                 "successful_retrieval_families": (
                     "Distinct families whose immutable answer outcome records a "
-                    "certified retrieval under that answer's learner-model "
-                    "version; lifetime projection counts use the same evidence."
+                    "learner-model-verified retrieval under that answer's model "
+                    "version; lifetime projection counts use the same internal "
+                    "selected-response evidence."
                 ),
             },
             "projection_definitions": {
@@ -4989,6 +5369,11 @@ class AdaptiveEngine:
                 "mastery_probability": (
                     "The conservative probability used for decisions; exact-grid "
                     "estimates subtract their numerical error bound."
+                ),
+                "mastery_probability_error_bound": (
+                    "A numerical approximation guard only; it does not cover "
+                    "item calibration, model validity, family dependence, or "
+                    "productive-skill transfer."
                 ),
             },
             "boundary_algorithm_version": BOUNDARY_ALGORITHM_VERSION,
@@ -5029,11 +5414,23 @@ class AdaptiveEngine:
                     "without a release-pinned rubric and independently valid evaluation."
                 ),
             },
+            "response_position_shadow": response_position_shadow,
+            "productive_skill_shadow": productive_shadow_summary(
+                self.database,
+                session["learner_id"],
+                session_id=session_id,
+            ),
             "diagnostic_contract": (
                 "Findings expose observed evidence and posterior hypotheses; "
                 "they are not causal or clinical diagnoses."
             ),
         }
+        with self.database.read() as connection:
+            self.database.require_learner_evidence_safe(
+                session["learner_id"],
+                connection,
+            )
+        return report
 
     def trace(self, session_id: str) -> list[dict[str, Any]]:
         self.database.get_session(session_id)

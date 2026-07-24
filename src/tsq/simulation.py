@@ -31,6 +31,9 @@ from .models import Option, Presentation, Question, SessionPhase, logit, sigmoid
 
 
 DEFAULT_SIMULATION_START = datetime(2100, 1, 1, 9, 0, tzinfo=timezone.utc)
+SIMULATION_FEEDBACK_PROTOCOL_VERSION = (
+    "response-then-observational-feedback-v1"
+)
 _MAIN_PHASES = frozenset(
     {SessionPhase.LEARN, SessionPhase.DIAGNOSE, SessionPhase.REVIEW}
 )
@@ -458,6 +461,12 @@ class CoverageMetrics:
     observed_families: tuple[str, ...]
     observed_evidence_families: tuple[str, ...]
     observed_objective_families: tuple[str, ...]
+    observed_outside_scope_concepts: tuple[str, ...]
+    observed_outside_scope_objectives: tuple[str, ...]
+    observed_outside_scope_questions: tuple[str, ...]
+    observed_outside_scope_families: tuple[str, ...]
+    observed_outside_scope_evidence_families: tuple[str, ...]
+    observed_outside_scope_objective_families: tuple[str, ...]
 
     @property
     def concept_fraction(self) -> float:
@@ -624,6 +633,7 @@ class SimulationReport:
         return {
             "profile": self.profile_name,
             "generator_model": self.generator_model,
+            "feedback_protocol": SIMULATION_FEEDBACK_PROTOCOL_VERSION,
             "learner_id": self.learner_id,
             "root_concept_id": self.root_concept_id,
             "mode": self.mode,
@@ -656,6 +666,24 @@ class SimulationReport:
                 ),
                 "observed_objective_families": len(
                     self.coverage.observed_objective_families
+                ),
+                "observed_outside_scope_concepts": len(
+                    self.coverage.observed_outside_scope_concepts
+                ),
+                "observed_outside_scope_objectives": len(
+                    self.coverage.observed_outside_scope_objectives
+                ),
+                "observed_outside_scope_questions": len(
+                    self.coverage.observed_outside_scope_questions
+                ),
+                "observed_outside_scope_families": len(
+                    self.coverage.observed_outside_scope_families
+                ),
+                "observed_outside_scope_evidence_families": len(
+                    self.coverage.observed_outside_scope_evidence_families
+                ),
+                "observed_outside_scope_objective_families": len(
+                    self.coverage.observed_outside_scope_objective_families
                 ),
                 "concept_fraction": self.coverage.concept_fraction,
                 "question_fraction": self.coverage.question_fraction,
@@ -847,6 +875,12 @@ class _CoverageDenominator:
     eligible_families: int
     eligible_evidence_families: int
     eligible_objective_families: int
+    eligible_concept_ids: frozenset[str]
+    eligible_objective_ids: frozenset[str]
+    eligible_question_ids: frozenset[str]
+    eligible_family_ids: frozenset[str]
+    eligible_evidence_family_ids: frozenset[str]
+    eligible_objective_family_ids: frozenset[str]
 
 
 class BehavioralSimulator:
@@ -1032,7 +1066,11 @@ class BehavioralSimulator:
                 confidence=answer.confidence,
                 response_ms=answer.response_ms,
                 hint_count=answer.hint_count,
-                feedback_shown=True,
+                # Match the production CLI boundary: the response is committed
+                # before feedback reaches the output boundary.  Observational
+                # feedback telemetry is appended separately below and must not
+                # silently become acquisition evidence.
+                feedback_shown=False,
                 idempotency_key=idempotency_key,
                 now=clock.current,
             )
@@ -1063,7 +1101,7 @@ class BehavioralSimulator:
                     confidence=answer.confidence,
                     response_ms=answer.response_ms,
                     hint_count=answer.hint_count,
-                    feedback_shown=True,
+                    feedback_shown=False,
                     idempotency_key=idempotency_key,
                     now=clock.current,
                 )
@@ -1096,6 +1134,60 @@ class BehavioralSimulator:
                         "An idempotent simulation retry changed durable learner state."
                     )
                 idempotent_retries_verified += 1
+            feedback_material = json.dumps(
+                {
+                    "decision_id": presentation.decision_id,
+                    "selected_option_id": (
+                        result.selected_option.id
+                        if result.selected_option is not None
+                        else None
+                    ),
+                    "correct_option_id": result.correct_option.id,
+                    "selected_rationale": (
+                        result.selected_option.rationale
+                        if result.selected_option is not None
+                        else None
+                    ),
+                    "correct_rationale": result.correct_option.rationale,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+            feedback_digest = hashlib.sha256(feedback_material).hexdigest()
+            feedback_key_digest = hashlib.sha256(
+                (
+                    f"{presentation.decision_id}:{feedback_digest}"
+                ).encode("utf-8")
+            ).hexdigest()
+            feedback_action = self.engine.record_action(
+                presentation.decision_id,
+                "feedback_shown",
+                {"feedback_digest": feedback_digest},
+                stage="post_feedback",
+                idempotency_key=(
+                    f"simulation-feedback:{feedback_key_digest}"
+                ),
+                now=clock.current,
+            )
+            if verify_idempotency:
+                feedback_retry = self.engine.record_action(
+                    presentation.decision_id,
+                    "feedback_shown",
+                    {"feedback_digest": feedback_digest},
+                    stage="post_feedback",
+                    idempotency_key=(
+                        f"simulation-feedback:{feedback_key_digest}"
+                    ),
+                    now=clock.current,
+                )
+                if (
+                    not feedback_retry["idempotent_replay"]
+                    or feedback_retry["id"] != feedback_action["id"]
+                ):
+                    raise ConflictError(
+                        "An idempotent feedback retry changed durable action state."
+                    )
             if result.correct != answer.correct:
                 raise ConflictError(
                     "Synthetic outcome disagreed with the corpus answer key for "
@@ -1235,6 +1327,16 @@ class BehavioralSimulator:
             for step in steps
             if step.learning_objective_id is not None
         }
+        observed_concepts = {
+            step.evidence_anchor_concept_id for step in steps
+        }
+        observed_objectives = {
+            step.learning_objective_id
+            for step in steps
+            if step.learning_objective_id is not None
+        }
+        observed_questions = {step.question_id for step in steps}
+        observed_families = {step.family_id for step in steps}
         coverage = CoverageMetrics(
             scope_concepts=coverage_denominator.scope_concepts,
             scope_objectives=coverage_denominator.scope_objectives,
@@ -1249,25 +1351,79 @@ class BehavioralSimulator:
                 coverage_denominator.eligible_objective_families
             ),
             observed_concepts=tuple(
-                sorted({step.evidence_anchor_concept_id for step in steps})
+                sorted(
+                    observed_concepts
+                    & coverage_denominator.eligible_concept_ids
+                )
             ),
             observed_surface_concepts=tuple(
                 sorted({step.surface_primary_concept_id for step in steps})
             ),
             observed_objectives=tuple(
                 sorted(
-                    {
-                        step.learning_objective_id
-                        for step in steps
-                        if step.learning_objective_id is not None
-                    }
+                    observed_objectives
+                    & coverage_denominator.eligible_objective_ids
                 )
             ),
-            observed_questions=tuple(sorted({step.question_id for step in steps})),
-            observed_families=tuple(sorted({step.family_id for step in steps})),
-            observed_evidence_families=tuple(sorted(observed_evidence_families)),
+            observed_questions=tuple(
+                sorted(
+                    observed_questions
+                    & coverage_denominator.eligible_question_ids
+                )
+            ),
+            observed_families=tuple(
+                sorted(
+                    observed_families
+                    & coverage_denominator.eligible_family_ids
+                )
+            ),
+            observed_evidence_families=tuple(
+                sorted(
+                    observed_evidence_families
+                    & coverage_denominator.eligible_evidence_family_ids
+                )
+            ),
             observed_objective_families=tuple(
-                sorted(observed_objective_families)
+                sorted(
+                    observed_objective_families
+                    & coverage_denominator.eligible_objective_family_ids
+                )
+            ),
+            observed_outside_scope_concepts=tuple(
+                sorted(
+                    observed_concepts
+                    - coverage_denominator.eligible_concept_ids
+                )
+            ),
+            observed_outside_scope_objectives=tuple(
+                sorted(
+                    observed_objectives
+                    - coverage_denominator.eligible_objective_ids
+                )
+            ),
+            observed_outside_scope_questions=tuple(
+                sorted(
+                    observed_questions
+                    - coverage_denominator.eligible_question_ids
+                )
+            ),
+            observed_outside_scope_families=tuple(
+                sorted(
+                    observed_families
+                    - coverage_denominator.eligible_family_ids
+                )
+            ),
+            observed_outside_scope_evidence_families=tuple(
+                sorted(
+                    observed_evidence_families
+                    - coverage_denominator.eligible_evidence_family_ids
+                )
+            ),
+            observed_outside_scope_objective_families=tuple(
+                sorted(
+                    observed_objective_families
+                    - coverage_denominator.eligible_objective_family_ids
+                )
             ),
         )
         return SimulationReport(
@@ -1403,21 +1559,33 @@ class BehavioralSimulator:
             for row, _anchor in eligible
             if row["objective_id"] is not None
         }
+        eligible_concept_ids = frozenset(anchor for _row, anchor in eligible)
+        eligible_objective_ids = frozenset(
+            row["objective_id"]
+            for row, _anchor in eligible
+            if row["objective_id"] is not None
+        )
+        eligible_question_ids = frozenset(
+            row["question_id"] for row, _anchor in eligible
+        )
+        eligible_family_ids = frozenset(
+            row["family_id"] for row, _anchor in eligible
+        )
         return _CoverageDenominator(
             scope_concepts=len(scope),
             scope_objectives=len(scope_objectives),
-            eligible_concepts=len({anchor for _row, anchor in eligible}),
-            eligible_objectives=len(
-                {
-                    row["objective_id"]
-                    for row, _anchor in eligible
-                    if row["objective_id"] is not None
-                }
-            ),
-            eligible_questions=len({row["question_id"] for row, _ in eligible}),
-            eligible_families=len({row["family_id"] for row, _ in eligible}),
+            eligible_concepts=len(eligible_concept_ids),
+            eligible_objectives=len(eligible_objective_ids),
+            eligible_questions=len(eligible_question_ids),
+            eligible_families=len(eligible_family_ids),
             eligible_evidence_families=len(evidence_families),
             eligible_objective_families=len(objective_families),
+            eligible_concept_ids=eligible_concept_ids,
+            eligible_objective_ids=eligible_objective_ids,
+            eligible_question_ids=eligible_question_ids,
+            eligible_family_ids=eligible_family_ids,
+            eligible_evidence_family_ids=frozenset(evidence_families),
+            eligible_objective_family_ids=frozenset(objective_families),
         )
 
 
@@ -1519,7 +1687,7 @@ def assert_behavioral_invariants(report: SimulationReport) -> None:
                 )
             else:
                 consecutive_failures = 0
-        if longest_failure_run >= MAX_REMEDIATION_DEPTH:
+        if longest_failure_run > MAX_REMEDIATION_DEPTH:
             overlong_failure_runs.append(episode)
     if overlong_failure_runs:
         raise AssertionError(

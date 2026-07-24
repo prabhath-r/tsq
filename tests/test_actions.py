@@ -252,7 +252,7 @@ class ActionLedgerTestCase(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        self.assertEqual(schema_version, "13")
+        self.assertEqual(schema_version, "17")
         self.assertEqual(after_events, before_events)
         self.assertEqual(after_releases, before_releases)
         self.assertIn("learning_actions", tables)
@@ -610,7 +610,11 @@ class ActionLedgerTestCase(unittest.TestCase):
         )
 
     def test_integrity_rejects_action_appended_after_session_end(self) -> None:
-        self.database.end_session(self.session["id"], status="completed")
+        self.database.end_session(
+            self.session["id"],
+            status="completed",
+            now=START + timedelta(seconds=1),
+        )
         self._insert_raw_action(
             "started",
             {},

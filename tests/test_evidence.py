@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import math
 import unittest
+from dataclasses import replace
 
 from tsq.evidence import (
+    ACTION_SCHEMA_VERSION,
+    ACTION_TRACE_SCHEMA_VERSION,
     ActionKind,
     ActionPhase,
     CriterionEvaluation,
@@ -16,6 +20,8 @@ from tsq.evidence import (
     RubricCriterion,
     ScorerContract,
     ScorerKind,
+    TASK_EVALUATION_SCHEMA_VERSION,
+    TASK_SCHEMA_VERSION,
     TaskEvaluation,
     TaskModality,
     action_trace_digest,
@@ -68,6 +74,7 @@ def criterion(
     evidence_cap: float = 1.0,
     assisted_factor: float = 0.0,
     concepts: tuple[tuple[str, float], ...] = (("concept_core", 1.0),),
+    objectives: tuple[tuple[str, float], ...] = (),
     misconceptions: tuple[str, ...] = (),
 ) -> RubricCriterion:
     return RubricCriterion(
@@ -75,6 +82,7 @@ def criterion(
         name=criterion_id.replace("_", " ").title(),
         scale=CriterionScale.CONTINUOUS,
         concept_weights=concepts,
+        objective_weights=objectives,
         dependence_group=group,
         misconception_ids=misconceptions,
         evidence_cap=evidence_cap,
@@ -96,11 +104,22 @@ def task(
         title="Diagnose and repair stale cache behavior",
         modality=modality,
         criteria=tuple(criteria),
+        instructions=(
+            "Diagnose the stale-cache behavior, repair the pinned contract, "
+            "and submit the resulting artifact."
+        ),
+        source_manifests=(("source_cache_contract", _D0),),
+        administration_id="admin_local_closed_book",
+        administration_manifest_digest=_D1,
+        stimulus_id="stimulus_stale_cache_v3",
+        stimulus_digest=_D2,
         scorer_contracts=(
             ScorerContract(
                 kind=ScorerKind.DETERMINISTIC,
                 scorer_id="scorer_primary",
                 scorer_version="v1",
+                authority_id="authority_tsq_reviewed",
+                authority_manifest_digest=_D0,
                 criterion_ids=tuple(item.id for item in criteria),
                 evidence_action_kinds=(
                     ActionKind.ANSWER_REVISED,
@@ -109,6 +128,13 @@ def task(
                     ActionKind.CHECK_RUN,
                     ActionKind.SUBMITTED,
                 ),
+                check_set_manifests=(
+                    ("cache_contract", _D0),
+                    ("checks", _D1),
+                    ("contract", _D2),
+                    ("implementation_checks", _D3),
+                ),
+                artifact_manifests=(("reviewed_fixture", _D3),),
             ),
         ),
         allowed_tool_ids=allowed_tools,
@@ -157,6 +183,228 @@ def observed(
         misconception_ids=misconceptions,
         reliability=reliability,
     )
+
+
+class PersistenceContractTests(unittest.TestCase):
+    def test_action_schema_one_trace_commitment_remains_frozen(self) -> None:
+        recorded = action(
+            0,
+            ActionKind.ANSWER_REVISED,
+            {"answer_digest": _D0},
+            elapsed_ms=125,
+        )
+
+        self.assertEqual(ACTION_SCHEMA_VERSION, 1)
+        self.assertEqual(ACTION_TRACE_SCHEMA_VERSION, 1)
+        self.assertEqual(recorded.schema_version, 1)
+        self.assertEqual(
+            action_trace_digest((recorded,)),
+            "60560eb875c36cde9fdd74e333053cc919e176a1b147ab6cd6c6c1af2ec0dbf4",
+        )
+
+    def test_task_digest_binds_release_identity_and_scorer_manifests(self) -> None:
+        base = task(criterion("criterion_identity"))
+        contract = base.scorer_contracts[0]
+        scorer_mutations = (
+            replace(contract, authority_id="authority_alternate"),
+            replace(contract, authority_manifest_digest=_D1),
+            replace(
+                contract,
+                check_set_manifests=tuple(
+                    (name, _D3 if name == "cache_contract" else digest)
+                    for name, digest in contract.check_set_manifests
+                ),
+            ),
+            replace(
+                contract,
+                artifact_manifests=(("reviewed_fixture", _D2),),
+            ),
+        )
+        mutations = (
+            replace(base, instructions=base.instructions + " Preserve ordering."),
+            replace(base, source_manifests=(("source_alternate", _D0),)),
+            replace(
+                base,
+                source_manifests=(("source_cache_contract", _D1),),
+            ),
+            replace(base, administration_id="admin_supervised"),
+            replace(base, administration_manifest_digest=_D2),
+            replace(base, stimulus_id="stimulus_stale_cache_v4"),
+            replace(base, stimulus_digest=_D3),
+            replace(
+                base,
+                criteria=(
+                    replace(
+                        base.criteria[0],
+                        objective_weights=(("objective_cache_invalidation", 1.0),),
+                    ),
+                ),
+            ),
+            *(
+                replace(base, scorer_contracts=(scorer,))
+                for scorer in scorer_mutations
+            ),
+        )
+
+        self.assertEqual(base.schema_version, TASK_SCHEMA_VERSION)
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.assertNotEqual(base.digest, mutation.digest)
+
+    def test_objective_bindings_are_explicit_normalized_and_reduced(self) -> None:
+        rubric = criterion(
+            "criterion_objective_binding",
+            objectives=(("objective_cache_debugging", 1.0),),
+        )
+        learning_task = task(rubric)
+        actions = (checkpoint(),)
+
+        decoded = LearningTask.from_terms(learning_task.terms())
+        bundle = reduce_evidence(
+            learning_task,
+            evaluation(
+                learning_task,
+                observed(
+                    rubric.id,
+                    0.8,
+                    sources=(actions[0].id,),
+                ),
+                actions=actions,
+            ),
+            actions,
+        )
+
+        self.assertEqual(decoded.objective_ids, ("objective_cache_debugging",))
+        self.assertEqual(
+            bundle.records[0].objective_weights,
+            (("objective_cache_debugging", 1.0),),
+        )
+        with self.assertRaisesRegex(ValueError, "objective weights must sum to 1"):
+            criterion(
+                "criterion_bad_objective_weight",
+                objectives=(("objective_cache_debugging", 0.8),),
+            )
+
+    def test_manifest_backed_scorer_scope_is_mandatory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "check-set manifest"):
+            ScorerContract(
+                kind=ScorerKind.DETERMINISTIC,
+                scorer_id="scorer_unpinned",
+                scorer_version="v1",
+                authority_id="authority_tsq_reviewed",
+                authority_manifest_digest=_D0,
+                criterion_ids=("criterion_one",),
+                evidence_action_kinds=(ActionKind.CHECK_RUN,),
+            )
+        with self.assertRaisesRegex(ValueError, "artifact manifest"):
+            ScorerContract(
+                kind=ScorerKind.HUMAN,
+                scorer_id="reviewer_unpinned",
+                scorer_version="v1",
+                authority_id="authority_human_panel",
+                authority_manifest_digest=_D1,
+                criterion_ids=("criterion_one",),
+                evidence_action_kinds=(ActionKind.ARTIFACT_CHECKPOINT,),
+                requires_attestation=True,
+            )
+
+    def test_strict_terms_decoders_round_trip_canonical_records(self) -> None:
+        recorded = checkpoint()
+        learning_task = task(criterion("criterion_round_trip"))
+        scored = evaluation(
+            learning_task,
+            observed(
+                "criterion_round_trip",
+                0.75,
+                sources=(recorded.id,),
+            ),
+            actions=(recorded,),
+        )
+
+        decoded_action = LearningAction.from_terms(recorded.terms())
+        decoded_task = LearningTask.from_terms(learning_task.terms())
+        decoded_evaluation = TaskEvaluation.from_terms(scored.terms())
+
+        self.assertEqual(decoded_action.terms(), recorded.terms())
+        self.assertEqual(decoded_task.terms(), learning_task.terms())
+        self.assertEqual(decoded_task.digest, learning_task.digest)
+        self.assertEqual(decoded_evaluation.terms(), scored.terms())
+        self.assertEqual(decoded_evaluation.digest, scored.digest)
+        self.assertEqual(
+            decoded_evaluation.schema_version,
+            TASK_EVALUATION_SCHEMA_VERSION,
+        )
+
+    def test_strict_terms_decoders_reject_structural_and_numeric_ambiguity(
+        self,
+    ) -> None:
+        recorded = checkpoint()
+        learning_task = task(criterion("criterion_strict_decode"))
+        scored = evaluation(learning_task, actions=(recorded,))
+
+        action_extra = copy.deepcopy(recorded.terms())
+        action_extra["raw_content"] = "not allowed"
+        action_bool_schema = copy.deepcopy(recorded.terms())
+        action_bool_schema["schema_version"] = True
+        action_nonfinite = action(
+            0,
+            ActionKind.CHECK_RUN,
+            {
+                "check_set_id": "checks",
+                "passed": 1,
+                "failed": 0,
+                "errored": 0,
+                "skipped": 0,
+                "result_digest": _D0,
+            },
+        ).terms()
+        action_nonfinite["payload"]["passed"] = math.inf
+
+        for malformed in (action_extra, action_bool_schema, action_nonfinite):
+            with self.subTest(action=malformed):
+                with self.assertRaises(ValueError):
+                    LearningAction.from_terms(malformed)
+
+        task_extra = copy.deepcopy(learning_task.terms())
+        task_extra["unreviewed"] = False
+        task_bool_version = copy.deepcopy(learning_task.terms())
+        task_bool_version["version"] = True
+        task_number_collision = copy.deepcopy(learning_task.terms())
+        task_number_collision["evidence_cap"] = 1
+        task_nonfinite = copy.deepcopy(learning_task.terms())
+        task_nonfinite["criteria"][0]["score_weight"] = math.nan
+        task_manifest_extra = copy.deepcopy(learning_task.terms())
+        task_manifest_extra["source_manifests"][0]["uri"] = "unbound"
+
+        for malformed in (
+            task_extra,
+            task_bool_version,
+            task_number_collision,
+            task_nonfinite,
+            task_manifest_extra,
+        ):
+            with self.subTest(task=malformed):
+                with self.assertRaises(ValueError):
+                    LearningTask.from_terms(malformed)
+
+        evaluation_extra = copy.deepcopy(scored.terms())
+        evaluation_extra["shadow"] = True
+        evaluation_bool_schema = copy.deepcopy(scored.terms())
+        evaluation_bool_schema["schema_version"] = True
+        evaluation_nonfinite = copy.deepcopy(scored.terms())
+        evaluation_nonfinite["criteria"] = [
+            observed("criterion_strict_decode", 0.5).terms()
+        ]
+        evaluation_nonfinite["criteria"][0]["reliability"] = math.inf
+
+        for malformed in (
+            evaluation_extra,
+            evaluation_bool_schema,
+            evaluation_nonfinite,
+        ):
+            with self.subTest(evaluation=malformed):
+                with self.assertRaises(ValueError):
+                    TaskEvaluation.from_terms(malformed)
 
 
 class LearningActionValidationTests(unittest.TestCase):
@@ -830,18 +1078,29 @@ class EvidenceReductionTests(unittest.TestCase):
             title="Implement and explain a cache contract",
             modality=TaskModality.IMPLEMENTATION,
             criteria=(implementation, explanation),
+            instructions=(
+                "Implement the pinned cache contract and explain its boundary "
+                "behavior."
+            ),
+            source_manifests=(("source_cache_contract", _D0),),
+            administration_id="admin_local_closed_book",
+            administration_manifest_digest=_D1,
+            stimulus_id="stimulus_cache_contract_v3",
+            stimulus_digest=_D2,
             scorer_contracts=(
                 ScorerContract(
                     kind=ScorerKind.DETERMINISTIC,
                     scorer_id="scorer_primary",
                     scorer_version="v1",
+                    authority_id="authority_tsq_reviewed",
+                    authority_manifest_digest=_D0,
                     criterion_ids=(implementation.id,),
                     evidence_action_kinds=(
                         ActionKind.ARTIFACT_CHECKPOINT,
                         ActionKind.CHECK_RUN,
                     ),
-                    check_set_ids=("implementation_checks",),
-                    artifact_kinds=("python_source",),
+                    check_set_manifests=(("implementation_checks", _D1),),
+                    artifact_manifests=(("python_source", _D2),),
                 ),
             ),
         )
@@ -972,13 +1231,24 @@ class EvidenceReductionTests(unittest.TestCase):
             title="Diagnose and repair stale cache behavior",
             modality=TaskModality.DEBUGGING,
             criteria=(rubric,),
+            instructions=(
+                "Diagnose the pinned cache defect and justify the repair."
+            ),
+            source_manifests=(("source_cache_contract", _D0),),
+            administration_id="admin_human_review",
+            administration_manifest_digest=_D1,
+            stimulus_id="stimulus_stale_cache_v3",
+            stimulus_digest=_D2,
             scorer_contracts=(
                 ScorerContract(
                     kind=ScorerKind.HUMAN,
                     scorer_id="reviewer_one",
                     scorer_version="v1",
+                    authority_id="authority_human_panel",
+                    authority_manifest_digest=_D0,
                     criterion_ids=(rubric.id,),
                     evidence_action_kinds=(ActionKind.ARTIFACT_CHECKPOINT,),
+                    artifact_manifests=(("reviewed_fixture", _D3),),
                     requires_attestation=True,
                 ),
             ),

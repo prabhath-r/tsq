@@ -10,8 +10,9 @@ import sqlite3
 import sys
 import time
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from importlib.resources import as_file, files
+from math import isfinite
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -25,10 +26,30 @@ from .capacity import (
 from .corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
 from .authoring import AuthoringJobs, CoveragePlanner, deterministic_test_pipeline
 from .engine import AdaptiveEngine
-from .evidence import ACTION_PAYLOAD_CONTRACTS, ActionKind
-from .errors import ExhaustedError, NotFoundError, TSQError, ValidationError
+from .evidence import (
+    ACTION_PAYLOAD_CONTRACTS,
+    ActionKind,
+    ActionPhase,
+    EvaluationStatus,
+    ScorerKind,
+)
+from .errors import (
+    ConflictError,
+    ExhaustedError,
+    NotFoundError,
+    TSQError,
+    ValidationError,
+)
 from .graph import KnowledgeGraph
 from .quality import audit_corpus
+from .performance import (
+    ImportedCriterionResult,
+    ImportedEvaluation,
+    ScoringProviderRegistry,
+    SyntheticDeterministicProvider,
+)
+from .performance_ledger import PerformanceLedger
+from .performance_selection import recommend_performance_tasks
 from .replay import ProjectionReplay, replay_or_error
 from .store import Database, new_id
 
@@ -36,6 +57,7 @@ from .store import Database, new_id
 BUNDLED_CORPUS_PACKAGE = "tsq.data"
 BUNDLED_CORPUS_NAME = "ai_curriculum.json"
 BUNDLED_RELEASE_MARKER = "bundled_corpus_release"
+BUNDLED_RESOURCE_DIGEST_MARKER = "bundled_corpus_resource_sha256"
 # Releases shipped before the marker existed.  This narrow, immutable lineage
 # lets `start` upgrade TSQ's own seed without silently replacing a user's
 # explicitly imported active corpus.
@@ -51,6 +73,19 @@ LEGACY_BUNDLED_RELEASE_HASHES = frozenset(
     }
 )
 BUNDLED_CORPUS_LABEL = f"{BUNDLED_CORPUS_PACKAGE}:{BUNDLED_CORPUS_NAME}"
+
+
+@dataclass(frozen=True, slots=True)
+class StarterCorpusStatus:
+    """Outcome of a conservative bundled-corpus installation attempt."""
+
+    installed: bool
+    retained_release_id: str | None = None
+    conflict: str | None = None
+    legacy_generated_revocations: int = 0
+
+    def __bool__(self) -> bool:
+        return self.installed
 
 
 @contextmanager
@@ -77,6 +112,10 @@ def _default_database() -> Path:
 def _database(args: argparse.Namespace, *, require_corpus: bool = True) -> Database:
     database = Database(args.db)
     database.initialize()
+    # Initialization may create or explicitly migrate a database.  Every
+    # writable command then crosses the same exact current-schema boundary as
+    # an inspection command before it can mutate application state.
+    Database(database.path, read_only=True).validate_current_schema()
     if require_corpus:
         with database.read() as connection:
             active = connection.execute(
@@ -142,24 +181,21 @@ def command_init(args: argparse.Namespace) -> None:
             f"Imported {counts['questions']} questions, {counts['concepts']} concepts, "
             f"and {counts['misconceptions']} misconception hypotheses."
         )
+        if counts["legacy_generated_revocations"]:
+            print(
+                "Emergency-quarantined "
+                f"{counts['legacy_generated_revocations']} unreviewed generated "
+                "question(s) that were active in older releases."
+            )
 
 
-def _ensure_starter_corpus(database: Database) -> bool:
+def _ensure_starter_corpus(database: Database) -> StarterCorpusStatus:
     """Install or safely advance TSQ's own bundled corpus lineage."""
     with database.read() as connection:
         active = connection.execute(
             "SELECT value FROM meta WHERE key = 'active_corpus_release'"
         ).fetchone()
         active_release_id = active["value"] if active else None
-        catalog_count = (
-            connection.execute(
-                """SELECT COUNT(*) AS n FROM release_topics
-                   WHERE release_id = ?""",
-                (active["value"],),
-            ).fetchone()["n"]
-            if active
-            else 0
-        )
         release = (
             connection.execute(
                 "SELECT bundle_hash FROM corpus_releases WHERE id = ?",
@@ -172,6 +208,10 @@ def _ensure_starter_corpus(database: Database) -> bool:
             "SELECT value FROM meta WHERE key = ?",
             (BUNDLED_RELEASE_MARKER,),
         ).fetchone()
+        resource_digest_marker = connection.execute(
+            "SELECT value FROM meta WHERE key = ?",
+            (BUNDLED_RESOURCE_DIGEST_MARKER,),
+        ).fetchone()
     trusted_lineage = bool(
         active_release_id
         and (
@@ -182,20 +222,57 @@ def _ensure_starter_corpus(database: Database) -> bool:
             )
         )
     )
-    if active and catalog_count and not trusted_lineage:
-        return False
-    with _corpus_path(None) as (corpus_path, _):
-        imported = database.import_corpus(
-            *read_and_parse(corpus_path, include_catalog=True)
+    if active and not trusted_lineage:
+        return StarterCorpusStatus(False)
+    try:
+        with _corpus_path(None) as (corpus_path, _):
+            bundled_resource_digest = hashlib.sha256(
+                corpus_path.read_bytes()
+            ).hexdigest()
+            if (
+                active_release_id is not None
+                and marker
+                and marker["value"] == active_release_id
+                and resource_digest_marker
+                and resource_digest_marker["value"]
+                == bundled_resource_digest
+            ):
+                return StarterCorpusStatus(False)
+            imported = database.import_corpus(
+                *read_and_parse(corpus_path, include_catalog=True)
+            )
+    except ConflictError as exc:
+        # A short-lived historical bundled release accidentally changed an
+        # existing source record.  Its users must still be able to study from
+        # the valid release already sealed in their database.  Never rewrite
+        # the registry or pretend that the new release was installed: retain
+        # the immutable active snapshot and make the withheld upgrade visible.
+        if not trusted_lineage or active_release_id is None:
+            raise
+        return StarterCorpusStatus(
+            False,
+            retained_release_id=active_release_id,
+            conflict=str(exc),
         )
     installed_release_id = str(imported["release_id"])
     with database.transaction() as connection:
-        connection.execute(
+        connection.executemany(
             """INSERT INTO meta(key, value) VALUES (?, ?)
                ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-            (BUNDLED_RELEASE_MARKER, installed_release_id),
+            (
+                (BUNDLED_RELEASE_MARKER, installed_release_id),
+                (
+                    BUNDLED_RESOURCE_DIGEST_MARKER,
+                    bundled_resource_digest,
+                ),
+            ),
         )
-    return installed_release_id != active_release_id
+    return StarterCorpusStatus(
+        installed_release_id != active_release_id,
+        legacy_generated_revocations=int(
+            imported["legacy_generated_revocations"]
+        ),
+    )
 
 
 def _starter_topic(database: Database, requested: str | None) -> str:
@@ -244,10 +321,25 @@ def _starter_topic(database: Database, requested: str | None) -> str:
 
 def command_start(args: argparse.Namespace) -> None:
     database = _database(args, require_corpus=False)
-    installed = _ensure_starter_corpus(database)
+    starter_status = _ensure_starter_corpus(database)
     topic = _starter_topic(database, args.topic)
-    if installed:
+    if starter_status:
         print("Installed the bundled reviewed curriculum catalog.")
+    if starter_status.legacy_generated_revocations:
+        print(
+            "Emergency-quarantined "
+            f"{starter_status.legacy_generated_revocations} unreviewed generated "
+            "question(s) that were active in older releases."
+        )
+    if starter_status.conflict is not None:
+        print(
+            "Bundled curriculum update was withheld to preserve immutable "
+            f"release {starter_status.retained_release_id}: "
+            f"{starter_status.conflict} Continuing with that sealed release. "
+            "To install the latest curriculum independently, run with a new "
+            "database path such as `TSQ_DB=tsq-latest.db ./start`.",
+            file=sys.stderr,
+        )
     command_study(
         argparse.Namespace(
             db=args.db,
@@ -334,16 +426,31 @@ def command_capacity(args: argparse.Namespace) -> int:
         ) = read_and_parse(corpus_path, include_catalog=True)
     try:
         if args.concept:
-            targets = (concept_target(args.concept),)
+            targets = (
+                concept_target(
+                    args.concept,
+                    target_main_count=args.target_main_count,
+                ),
+            )
         elif args.topic:
-            targets = (topic_target(args.topic, topics),)
+            targets = (
+                topic_target(
+                    args.topic,
+                    topics,
+                    target_main_count=args.target_main_count,
+                ),
+            )
         else:
             if not topics:
                 raise ValueError(
                     "The corpus has no curriculum topics; select --concept explicitly."
                 )
             targets = tuple(
-                topic_target(topic.id, topics)
+                topic_target(
+                    topic.id,
+                    topics,
+                    target_main_count=args.target_main_count,
+                )
                 for topic in sorted(topics, key=lambda value: value.id)
             )
         report = analyze_sustained_capacity(
@@ -372,6 +479,7 @@ def command_capacity(args: argparse.Namespace) -> int:
         "strict": bool(args.strict),
         "summary": {
             "target_count": len(report.targets),
+            "requested_main_capacity": args.target_main_count,
             "strict_failure_count": len(strict_failures),
             "strict_failure_targets": strict_failures,
         },
@@ -762,6 +870,67 @@ def command_session_list(args: argparse.Namespace) -> None:
         )
 
 
+def _print_productive_shadow(summary: dict[str, Any]) -> None:
+    if not summary["attempt_count"]:
+        return
+    behavior = summary["behavior"]
+    observations = summary["rubric_observations"]
+    statuses = ", ".join(
+        f"{status} {count}"
+        for status, count in summary["attempt_statuses"].items()
+    )
+    print("  productive-task shadow observations (diagnostic only):")
+    print(
+        f"    {summary['attempt_count']} attempt(s) across "
+        f"{summary['distinct_task_count']} task(s) and "
+        f"{summary['observed_task_families']} task family/families · "
+        f"{summary['observed_elapsed_seconds']:.1f}s observed elapsed"
+    )
+    if statuses:
+        print(f"    attempt status: {statuses}")
+    print(
+        f"    {behavior['actions']} semantic action(s) · "
+        f"{behavior['hint_requests']} hint request(s) · "
+        f"{behavior['check_runs']} check run(s) · "
+        f"{behavior['answer_revisions']} answer revision(s)"
+    )
+    rubric_line = (
+        f"    {observations['evaluations']} evaluation(s) · "
+        f"{observations['criteria_observed']} rubric observation(s)"
+    )
+    if observations["valid_score_average"] is not None:
+        rubric_line += (
+            " · raw valid-score mean "
+            f"{observations['valid_score_average'] * 100:.1f}%"
+        )
+    print(rubric_line)
+    objective_ids = summary["scope_binding"]["objective_ids"]
+    if objective_ids:
+        rendered_objectives = ", ".join(objective_ids[:5])
+        if len(objective_ids) > 5:
+            rendered_objectives += f" (+{len(objective_ids) - 5} more)"
+        print(
+            "    explicit rubric objective binding(s): "
+            + rendered_objectives
+        )
+    if observations["misconception_signals"]:
+        signals = list(observations["misconception_signals"].items())
+        rendered_signals = ", ".join(
+            f"{misconception_id} {count}"
+            for misconception_id, count in signals[:5]
+        )
+        if len(signals) > 5:
+            rendered_signals += f" (+{len(signals) - 5} more)"
+        print(
+            "    rubric-reported named misconception signal(s): "
+            + rendered_signals
+        )
+    print(
+        "    boundary: no mastery update, certification claim, or adaptive "
+        "routing effect"
+    )
+
+
 def command_session_report(args: argparse.Namespace) -> None:
     report = AdaptiveEngine(_inspection_database(args)).session_report(args.session)
     if args.json:
@@ -775,6 +944,17 @@ def command_session_report(args: argparse.Namespace) -> None:
     response = report["response_time"]
     difficulty = report["difficulty"]
     print(f"Session {report['session_id']} · {target} · {report['status']}")
+    inference = report["selected_response_inference"]
+    print(
+        "  inference boundary: provisional selected-response model; "
+        "not empirically validated"
+    )
+    print(
+        "    release-wide calibrated eligible items "
+        f"{inference['calibrated_question_count']}/"
+        f"{inference['eligible_question_count']} · numerical guard covers "
+        "approximation only"
+    )
     print(
         f"  {report['questions_answered']} answered · {report['correct']} correct "
         f"({accuracy}) · {report['abstained']} unsure"
@@ -811,6 +991,55 @@ def command_session_report(args: argparse.Namespace) -> None:
             f"{row['name']} {row['n']}" for row in report["topic_distribution"]
         )
         print(f"  topic mix: {rendered}")
+    position_shadow = report["response_position_shadow"]
+    position_evidence = position_shadow["evidence"]
+    position_inference = position_shadow["inference"]
+    position_status = position_inference["status"]
+    analyzed_position_answers = position_evidence[
+        "analyzed_non_abstained_observations"
+    ]
+    total_position_answers = position_evidence[
+        "total_non_abstained_observations"
+    ]
+    position_window_suffix = (
+        f", most recent of {total_position_answers}"
+        if analyzed_position_answers < total_position_answers
+        else ""
+    )
+    if position_status == "position_concentration_signal":
+        dominant = position_inference["dominant_position"]
+        adjusted = dominant["bonferroni_adjusted_probability"]["value"]
+        print(
+            "  response-position shadow: concentration signal at displayed "
+            f"position {dominant['display_position']} "
+            f"({dominant['selected_count']}/"
+            f"{analyzed_position_answers}{position_window_suffix}; "
+            f"family-wise p={adjusted:.3g})"
+        )
+    elif position_status == "no_signal":
+        print(
+            "  response-position shadow: no family-wise concentration signal "
+            f"across {analyzed_position_answers} non-abstained answers"
+            f"{position_window_suffix}"
+        )
+    elif position_status == "inconclusive":
+        minimum = position_shadow["test_contract"][
+            "minimum_non_abstained_observations"
+        ]
+        print(
+            "  response-position shadow: inconclusive "
+            f"({analyzed_position_answers}/{minimum} "
+            "required non-abstained answers)"
+        )
+    else:
+        print(
+            "  response-position shadow: unavailable because its immutable "
+            "evidence boundary is invalid"
+        )
+    print(
+        "    shadow-only behavioral hypothesis; does not certify skill or "
+        "change mastery or selection"
+    )
     if report["objective_performance"]:
         print("  fine-grained objective evidence:")
         for objective in report["objective_performance"]:
@@ -850,9 +1079,10 @@ def command_session_report(args: argparse.Namespace) -> None:
                 f"    {finding['name']}: graph readiness "
                 f"{projection['effective_readiness'] * 100:.1f}% · {reasons}"
             )
+    _print_productive_shadow(report["productive_skill_shadow"])
     print(
-        "  difficulty values are authored priors and remain uncalibrated until "
-        "sufficient response data exists."
+        "  difficulty values are authored priors; no empirical calibration has "
+        "been validated."
     )
 
 
@@ -1079,6 +1309,25 @@ def command_answer(args: argparse.Namespace) -> None:
     )
 
 
+def _strict_action_object(
+    pairs: list[tuple[str, Any]],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValidationError(
+                f"Action payload contains duplicate field {key!r}."
+            )
+        payload[key] = value
+    return payload
+
+
+def _reject_action_constant(value: str) -> None:
+    raise ValidationError(
+        f"Action payload contains non-finite number {value!r}."
+    )
+
+
 def _action_payload(args: argparse.Namespace) -> dict[str, Any]:
     if args.payload_file is not None:
         try:
@@ -1087,6 +1336,10 @@ def _action_payload(args: argparse.Namespace) -> dict[str, Any]:
                     "Action payload files must not exceed 16384 bytes."
                 )
             raw = args.payload_file.read_text(encoding="utf-8")
+        except UnicodeError as exc:
+            raise ValidationError(
+                f"Action payload file {args.payload_file} is not valid UTF-8."
+            ) from exc
         except OSError as exc:
             raise ValidationError(
                 f"Could not read action payload file {args.payload_file}: {exc}"
@@ -1096,7 +1349,13 @@ def _action_payload(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(raw, str) or len(raw.encode("utf-8")) > 16_384:
         raise ValidationError("Action payload JSON must not exceed 16384 bytes.")
     try:
-        payload = json.loads(raw)
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_strict_action_object,
+            parse_constant=_reject_action_constant,
+        )
+    except ValidationError:
+        raise
     except (TypeError, json.JSONDecodeError) as exc:
         raise ValidationError(f"Action payload must be valid JSON: {exc}") from exc
     if type(payload) is not dict:
@@ -1189,6 +1448,17 @@ def command_profile(args: argparse.Namespace) -> None:
         _emit(profile, as_json=True)
         return
     print(f"Learner: {profile['learner_id']}")
+    inference = profile["selected_response_inference"]
+    print(
+        "Inference boundary: provisional selected-response model; "
+        "not empirically validated"
+    )
+    print(
+        "  release-wide calibrated eligible items "
+        f"{inference['calibrated_question_count']}/"
+        f"{inference['eligible_question_count']} · numerical guard covers "
+        "approximation only"
+    )
     objectives = profile.get("learning_objectives", [])
     assessed_objectives = [
         objective
@@ -1197,7 +1467,7 @@ def command_profile(args: argparse.Namespace) -> None:
     ]
     assessed = [skill for skill in profile["skills"] if skill["evidence_mass"] > 0]
     if not assessed and not assessed_objectives:
-        print("No response evidence yet.")
+        print("No selected-response evidence yet.")
     if assessed_objectives:
         print("Assessed selected-response objectives:")
         for objective in sorted(
@@ -1256,6 +1526,7 @@ def command_profile(args: argparse.Namespace) -> None:
         print("Monitored misconception hypotheses (below routing threshold):")
         for item in monitored:
             print(f"  {item['probability'] * 100:5.1f}%  {item['name']}")
+    _print_productive_shadow(profile["productive_skill_shadow"])
 
 
 def command_trace(args: argparse.Namespace) -> None:
@@ -1460,6 +1731,318 @@ def command_reviews_show(args: argparse.Namespace) -> None:
                 f"{reviewer.get('reviewer_name', '<unknown>')} -> "
                 f"{output.get('verdict', '<invalid>')}"
             )
+
+
+def command_task_import(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_database(args)).import_release(args.path)
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    replay = " (already present)" if result["idempotent_replay"] else ""
+    print(
+        f"Published performance-task release {result['release_id']}{replay}: "
+        f"{result['task_count']} task(s), pinned to "
+        f"{result['corpus_release_id']}."
+    )
+    print("All resulting evidence remains shadow-only until a later reviewed model boundary.")
+
+
+def command_task_releases(args: argparse.Namespace) -> None:
+    rows = PerformanceLedger(_inspection_database(args)).list_releases()
+    if args.json:
+        _emit(rows, as_json=True)
+        return
+    if not rows:
+        print("No performance-task releases are installed.")
+        return
+    for row in rows:
+        print(
+            f"{row['id']}  tasks={row['task_count']} "
+            f"approved={row['approved_count'] or 0} "
+            f"pilot={row['pilot_count'] or 0} "
+            f"quarantined={row['quarantined_count'] or 0}"
+        )
+
+
+def command_task_list(args: argparse.Namespace) -> None:
+    rows = PerformanceLedger(_inspection_database(args)).list_tasks(
+        release_id=args.release,
+        status=args.status,
+    )
+    if args.json:
+        _emit(rows, as_json=True)
+        return
+    if not rows:
+        print("No performance tasks matched.")
+        return
+    for row in rows:
+        print(
+            f"{row['task_id']}@{row['task_version']} [{row['status']}] "
+            f"{row['modality']}: {row['title']} ({row['release_id']})"
+        )
+
+
+def command_task_show(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_inspection_database(args)).show_task(
+        args.task,
+        task_version=args.version,
+        release_id=args.release,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    task = result["task"]
+    print(
+        f"{task['id']}@{task['version']} [{result['status']}] "
+        f"{task['modality']}: {task['title']}"
+    )
+    print(f"  release: {result['release_id']} -> {result['corpus_release_id']}")
+    print(f"  family: {task['family_id']}")
+    print(f"  instructions: {task['instructions']}")
+    print("  rubric:")
+    for criterion in task["criteria"]:
+        concepts = ", ".join(
+            concept_id for concept_id, _ in criterion["concept_weights"]
+        )
+        objectives = ", ".join(
+            objective_id for objective_id, _ in criterion["objective_weights"]
+        )
+        binding = f"concepts={concepts or 'none'}"
+        if objectives:
+            binding += f"; objectives={objectives}"
+        print(f"    {criterion['id']}: {criterion['name']} ({binding})")
+    print("  semantic checkpoints:")
+    for action_type in task["allowed_action_kinds"]:
+        contract = ACTION_PAYLOAD_CONTRACTS[ActionKind(action_type)]
+        fields = ", ".join(
+            f"{name}:{value_type}" for name, value_type in contract.items()
+        )
+        print(f"    {action_type}: {{{fields}}}")
+    if task["allowed_tool_ids"] is None:
+        print("  tools: no task-specific allowlist")
+    else:
+        print(f"  tools: {', '.join(task['allowed_tool_ids']) or 'none'}")
+    print(f"  task digest: {result['task_digest']}")
+    print("  evidence boundary: shadow only; no mastery or certification update")
+
+
+def command_task_recommend(args: argparse.Namespace) -> None:
+    result = recommend_performance_tasks(
+        _inspection_database(args),
+        args.session,
+        limit=args.limit,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    if not result["recommendations"]:
+        print("No released productive-skill probe matches this session scope.")
+        return
+    print(
+        "Optional productive-skill probes (read-only recommendation; "
+        "shadow evidence only):"
+    )
+    for rank, item in enumerate(result["recommendations"], start=1):
+        reasons = ", ".join(reason.replace("_", " ") for reason in item["reasons"])
+        print(
+            f"  {rank}. {item['task_id']}@{item['task_version']} "
+            f"[{item['status']}/{item['modality']}] score={item['score']:.3f}"
+        )
+        print(f"     release {item['task_release_id']} · {reasons}")
+    boundary = result["selection_boundary"]
+    if not boundary["startable_now"]:
+        blockers = ", ".join(
+            blocker["code"].replace("_", " ")
+            for blocker in boundary["start_blockers"]
+        )
+        print(f"Start currently blocked by: {blockers}.")
+    print("Nothing was started; use `tsq task start` with the exact task and release.")
+
+
+def command_task_start(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_database(args)).start_attempt(
+        args.session,
+        args.task,
+        task_version=args.version,
+        task_release_id=args.release,
+        idempotency_key=args.idempotency_key,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(
+        f"Started shadow performance attempt {result['id']} for "
+        f"{result['task_id']}@{result['task_version']}."
+    )
+    print(result["task"]["instructions"])
+
+
+def command_task_action(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_database(args)).record_action(
+        args.attempt,
+        args.action_type,
+        _action_payload(args),
+        phase=args.phase,
+        idempotency_key=args.idempotency_key,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    replay = " (idempotent replay)" if result["idempotent_replay"] else ""
+    print(
+        f"Recorded {result['action_type']} sequence {result['sequence']} "
+        f"for {result['attempt_id']}{replay}."
+    )
+
+
+def command_task_actions(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_inspection_database(args)).list_actions(args.attempt)
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    for action in result:
+        print(
+            f"{action['sequence']:>3}  {action['phase']:<13} "
+            f"{action['action_type']:<24} {action['elapsed_ms']} ms"
+        )
+
+
+def command_task_claims(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_inspection_database(args)).list_scoring_claims(
+        attempt_id=args.attempt,
+        status=args.status,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    if not result:
+        print("No scoring callback admissions matched.")
+        return
+    for claim in result:
+        print(
+            f"{claim['status']:<10} {claim['id']}  "
+            f"{claim['provider_id']}@{claim['provider_version']}  "
+            f"attempt={claim['attempt_id']}"
+        )
+    if any(claim["status"] == "unresolved" for claim in result):
+        print(
+            "Unresolved admissions remain fail-closed; TSQ will not retry the "
+            "provider automatically."
+        )
+
+
+def command_task_score(args: argparse.Namespace) -> None:
+    if args.provider != "deterministic-test":
+        raise ValidationError(f"Unsupported performance provider: {args.provider!r}.")
+    for option, value in (
+        ("--score", args.score),
+        ("--reliability", args.reliability),
+    ):
+        if not isfinite(value) or not 0.0 <= value <= 1.0:
+            raise ValidationError(
+                f"{option} must be finite and between 0 and 1."
+            )
+    ledger = PerformanceLedger(_database(args))
+    report = ledger.report(args.attempt)
+    submitted = [
+        action for action in report["actions"] if action["action_type"] == "submitted"
+    ]
+    if len(submitted) != 1:
+        raise ValidationError(
+            "The deterministic test provider requires exactly one submitted checkpoint."
+        )
+    imported = ImportedEvaluation(
+        criteria=tuple(
+            ImportedCriterionResult(
+                criterion_id=criterion["id"],
+                status=EvaluationStatus.VALID,
+                score=args.score,
+                outcome_code="synthetic_fixture",
+                phase=ActionPhase.UNASSISTED,
+                source_action_ids=(submitted[0]["id"],),
+                reliability=args.reliability,
+            )
+            for criterion in report["task"]["criteria"]
+        )
+    )
+    provider = SyntheticDeterministicProvider(imported)
+    registry = ScoringProviderRegistry(allow_synthetic=True)
+    registry.register(provider, provider.authority_binding)
+    result = ledger.score_attempt(
+        args.attempt,
+        registry,
+        provider.provider_id,
+        provider.provider_version,
+        idempotency_key=args.idempotency_key,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(
+        f"Synthetic score recorded for {args.attempt}; candidate shadow weight "
+        f"{result['shadow_evidence']['total_evidence_weight']:.3f}."
+    )
+    print("Mastery applied: no. Certification applied: no.")
+
+
+def command_task_import_evaluation(args: argparse.Namespace) -> None:
+    try:
+        size = args.path.stat().st_size
+    except OSError as exc:
+        raise ValidationError(f"Could not inspect evaluation {args.path}: {exc}") from exc
+    if size > 1024 * 1024:
+        raise ValidationError("Imported evaluation exceeds the 1 MiB limit.")
+    try:
+        raw = args.path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ValidationError(f"Could not read evaluation {args.path}: {exc}") from exc
+    if len(raw.encode("utf-8")) > 1024 * 1024:
+        raise ValidationError("Imported evaluation exceeds the 1 MiB limit.")
+    try:
+        imported = ImportedEvaluation.from_json(raw)
+    except ValueError as exc:
+        raise ValidationError(f"Imported evaluation is invalid: {exc}") from exc
+    result = PerformanceLedger(_database(args)).import_evaluation(
+        args.attempt,
+        imported,
+        provider_id=args.provider_id,
+        provider_version=args.provider_version,
+        declared_kind=ScorerKind(args.declared_kind),
+        idempotency_key=args.idempotency_key,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(f"Imported evaluation {result['evaluation']['id']} as shadow evidence.")
+    print("Mastery applied: no. Certification applied: no.")
+
+
+def command_task_report(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_inspection_database(args)).report(args.attempt)
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(
+        f"Attempt {result['id']} [{result['status']}] "
+        f"{result['task_id']}@{result['task_version']}"
+    )
+    print(
+        f"  actions: {result['action_count']}  hints: {result['hint_count']}  "
+        f"checks: {result['check_count']}  elapsed: {result['elapsed_ms']} ms"
+    )
+    print(f"  evaluations: {result['evaluation_count']} (all shadow ledger entries)")
+    for item in result["evaluations"]:
+        shadow = item["shadow_evidence"]
+        normalized = item["authority"]["normalized_result"]
+        provider = normalized["provider"]
+        reported = shadow["reported_task_score"]
+        score = "unavailable" if reported is None else f"{reported * 100:.1f}%"
+        print(
+            f"    {item['evaluation']['id']}: raw task score {score} · "
+            f"{provider['provider_id']}@{provider['provider_version']} · "
+            f"candidate weight {shadow['total_evidence_weight']:.3f}"
+        )
+    print("  mastery claim: no  certification claim: no")
 
 
 def command_replay(args: argparse.Namespace) -> None:
@@ -1708,7 +2291,10 @@ def build_parser() -> argparse.ArgumentParser:
         "start", help="Initialize if needed and begin an interactive study session"
     )
     start.add_argument("--learner", default="me")
-    start.add_argument("--name")
+    start.add_argument(
+        "--name",
+        help="Display name for a new learner; omit for an existing learner",
+    )
     start.add_argument(
         "--topic",
         help="Topic ID or friendly topic name (interactive choice when omitted)",
@@ -1793,6 +2379,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     capacity.add_argument("--strict", action="store_true")
     capacity.add_argument(
+        "--target-main-count",
+        type=int,
+        help=(
+            "Require this many safely serviceable credible-correct main "
+            "families per selected target instead of the concept-count default"
+        ),
+    )
+    capacity.add_argument(
         "--state-limit",
         type=int,
         default=DEFAULT_STATE_LIMIT,
@@ -1819,7 +2413,9 @@ def build_parser() -> argparse.ArgumentParser:
     learner_sub = learner.add_subparsers(dest="learner_command", required=True)
     learner_add = learner_sub.add_parser("add")
     learner_add.add_argument("learner_id")
-    learner_add.add_argument("--name")
+    learner_add.add_argument(
+        "--name", help="Display name (defaults to the learner ID)"
+    )
     learner_add.add_argument("--json", action="store_true")
     learner_add.set_defaults(func=command_learner_add)
 
@@ -1840,7 +2436,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     session_start = session_sub.add_parser("start")
     session_start.add_argument("--learner", required=True)
-    session_start.add_argument("--name")
+    session_start.add_argument(
+        "--name",
+        help="Display name for a new learner; omit for an existing learner",
+    )
     session_start.add_argument("--topic", required=True)
     session_start.add_argument("--mode", choices=["learn", "diagnose", "review"], default="learn")
     session_start.add_argument("--seed", type=int)
@@ -1927,7 +2526,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     study = subparsers.add_parser("study", help="Run an interactive adaptive CLI session")
     study.add_argument("--learner", required=True)
-    study.add_argument("--name")
+    study.add_argument(
+        "--name",
+        help="Display name for a new learner; omit for an existing learner",
+    )
     study.add_argument("--topic", required=True)
     study.add_argument("--mode", choices=["learn", "diagnose", "review"], default="learn")
     study.add_argument("--limit", type=int, default=10)
@@ -2025,6 +2627,133 @@ def build_parser() -> argparse.ArgumentParser:
     reviews_show.add_argument("job")
     reviews_show.add_argument("--json", action="store_true")
     reviews_show.set_defaults(func=command_reviews_show)
+
+    task = subparsers.add_parser(
+        "task",
+        help="Operate immutable productive-skill tasks and shadow evidence",
+    )
+    task_sub = task.add_subparsers(dest="task_command", required=True)
+
+    task_import = task_sub.add_parser(
+        "import", help="Publish a reviewed task release pinned to a corpus release"
+    )
+    task_import.add_argument("path", type=Path)
+    task_import.add_argument("--json", action="store_true")
+    task_import.set_defaults(func=command_task_import)
+
+    task_releases = task_sub.add_parser(
+        "releases", help="List installed immutable task releases"
+    )
+    task_releases.add_argument("--json", action="store_true")
+    task_releases.set_defaults(func=command_task_releases)
+
+    task_list = task_sub.add_parser("list", help="List released performance tasks")
+    task_list.add_argument("--release")
+    task_list.add_argument("--status", choices=sorted({"quarantined", "pilot", "approved"}))
+    task_list.add_argument("--json", action="store_true")
+    task_list.set_defaults(func=command_task_list)
+
+    task_show = task_sub.add_parser("show", help="Inspect one exact task contract")
+    task_show.add_argument("task")
+    task_show.add_argument("--version", type=int)
+    task_show.add_argument("--release")
+    task_show.add_argument("--json", action="store_true")
+    task_show.set_defaults(func=command_task_show)
+
+    task_recommend = task_sub.add_parser(
+        "recommend",
+        help="Rank optional released skill probes from session uncertainty",
+    )
+    task_recommend.add_argument("--session", required=True)
+    task_recommend.add_argument("--limit", type=int, default=5)
+    task_recommend.add_argument("--json", action="store_true")
+    task_recommend.set_defaults(func=command_task_recommend)
+
+    task_start = task_sub.add_parser(
+        "start", help="Start an explicit shadow performance attempt"
+    )
+    task_start.add_argument("session")
+    task_start.add_argument("task")
+    task_start.add_argument("--version", type=int)
+    task_start.add_argument("--release")
+    task_start.add_argument("--idempotency-key")
+    task_start.add_argument("--json", action="store_true")
+    task_start.set_defaults(func=command_task_start)
+
+    task_action = task_sub.add_parser(
+        "action", help="Append a content-free semantic task checkpoint"
+    )
+    task_action.add_argument("attempt")
+    task_action.add_argument(
+        "action_type",
+        choices=[kind.value for kind in ActionKind if kind is not ActionKind.STARTED],
+    )
+    task_action_payload = task_action.add_mutually_exclusive_group(required=True)
+    task_action_payload.add_argument("--payload", help="Exact action payload JSON object")
+    task_action_payload.add_argument("--payload-file", type=Path)
+    task_action.add_argument(
+        "--phase",
+        choices=[phase.value for phase in ActionPhase],
+        default=ActionPhase.UNASSISTED.value,
+    )
+    task_action.add_argument("--idempotency-key")
+    task_action.add_argument("--json", action="store_true")
+    task_action.set_defaults(func=command_task_action)
+
+    task_actions = task_sub.add_parser(
+        "actions", help="List one performance attempt's semantic trace"
+    )
+    task_actions.add_argument("attempt")
+    task_actions.add_argument("--json", action="store_true")
+    task_actions.set_defaults(func=command_task_actions)
+
+    task_claims = task_sub.add_parser(
+        "claims",
+        help="List completed or unresolved scorer callback admissions",
+    )
+    task_claims.add_argument("--attempt")
+    task_claims.add_argument(
+        "--status", choices=["completed", "unresolved"]
+    )
+    task_claims.add_argument("--json", action="store_true")
+    task_claims.set_defaults(func=command_task_claims)
+
+    task_score = task_sub.add_parser(
+        "score", help="Record a visibly synthetic deterministic test score"
+    )
+    task_score.add_argument("attempt")
+    task_score.add_argument(
+        "--provider", choices=["deterministic-test"], required=True
+    )
+    task_score.add_argument("--score", type=float, required=True)
+    task_score.add_argument("--reliability", type=float, default=1.0)
+    task_score.add_argument("--idempotency-key")
+    task_score.add_argument("--json", action="store_true")
+    task_score.set_defaults(func=command_task_score)
+
+    task_evaluation = task_sub.add_parser(
+        "import-evaluation",
+        help="Import authority-free scorer observations as shadow evidence",
+    )
+    task_evaluation.add_argument("attempt")
+    task_evaluation.add_argument("path", type=Path)
+    task_evaluation.add_argument("--provider-id", required=True)
+    task_evaluation.add_argument("--provider-version", required=True)
+    task_evaluation.add_argument(
+        "--declared-kind",
+        choices=[kind.value for kind in ScorerKind],
+        default=ScorerKind.IMPORTED.value,
+    )
+    task_evaluation.add_argument("--idempotency-key")
+    task_evaluation.add_argument("--json", action="store_true")
+    task_evaluation.set_defaults(func=command_task_import_evaluation)
+
+    task_report = task_sub.add_parser(
+        "report", help="Inspect timing, actions, and unapplied shadow evaluations"
+    )
+    task_report.add_argument("attempt")
+    task_report.add_argument("--json", action="store_true")
+    task_report.set_defaults(func=command_task_report)
 
     replay = subparsers.add_parser(
         "replay", help="Reconstruct and verify a learner projection on a database copy"

@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import random
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from functools import lru_cache
 from pathlib import Path
+from unittest.mock import patch
 
+import tsq.capacity as capacity_module
 from tsq.capacity import (
     CapacityAnalysisLimitError,
     CapacityTarget,
@@ -139,6 +143,281 @@ def interchangeable_bank(
 
 
 class SustainedCapacityTestCase(unittest.TestCase):
+    def test_overlapping_quota_packing_matches_binary_brute_force(self) -> None:
+        triangle = (
+            (0b011, 1),
+            (0b110, 1),
+            (0b101, 1),
+        )
+        self.assertEqual(
+            capacity_module._maximum_quota_packing(0b111, triangle),
+            1,
+        )
+
+        rng = random.Random(47_117)
+        for case in range(120):
+            variable_count = rng.randint(1, 8)
+            safe_mask = (1 << variable_count) - 1
+            constraints: list[tuple[int, int]] = []
+            for _ in range(rng.randint(0, 10)):
+                block = sum(
+                    1 << index
+                    for index in range(variable_count)
+                    if rng.random() < 0.55
+                )
+                if not block:
+                    block = 1 << rng.randrange(variable_count)
+                constraints.append(
+                    (block, rng.randint(0, block.bit_count()))
+                )
+            expected = max(
+                subset.bit_count()
+                for subset in range(safe_mask + 1)
+                if subset & ~safe_mask == 0
+                and all(
+                    (subset & block).bit_count() <= quota
+                    for block, quota in constraints
+                )
+            )
+            with self.subTest(case=case):
+                self.assertEqual(
+                    capacity_module._maximum_quota_packing(
+                        safe_mask, constraints
+                    ),
+                    expected,
+                )
+
+    def assert_matches_brute_force(
+        self,
+        questions: list[Question],
+        graph: KnowledgeGraph,
+        misconceptions: list[Misconception],
+        target: CapacityTarget,
+    ) -> None:
+        optimized_component_bounds = capacity_module._component_bounds
+        checked_components = 0
+
+        def checked_component_bounds(component, **kwargs):
+            nonlocal checked_components
+            checked_components += 1
+            actual = optimized_component_bounds(component, **kwargs)
+            all_mask = kwargs["all_mask"]
+            family_index = kwargs["family_index"]
+            compiled_by_family = kwargs["compiled_by_family"]
+            question_safe = kwargs["question_safe"]
+            global_bits = tuple(
+                1 << family_index[family_id] for family_id in component
+            )
+
+            @lru_cache(maxsize=None)
+            def safe_indices(consumed: int) -> tuple[int, ...]:
+                removed = sum(
+                    bit
+                    for index, bit in enumerate(global_bits)
+                    if consumed & (1 << index)
+                )
+                remaining = all_mask & ~removed
+                return tuple(
+                    index
+                    for index, family_id in enumerate(component)
+                    if not consumed & (1 << index)
+                    and any(
+                        question_safe(question, remaining)
+                        for question in compiled_by_family[family_id]
+                    )
+                )
+
+            @lru_cache(maxsize=None)
+            def brute_low(consumed: int) -> tuple[int, tuple[str, ...]]:
+                safe = safe_indices(consumed)
+                if not safe:
+                    return 0, ()
+                return min(
+                    (
+                        1 + child_count,
+                        (component[index],) + child_sequence,
+                    )
+                    for index in safe
+                    for child_count, child_sequence in (
+                        brute_low(consumed | (1 << index)),
+                    )
+                )
+
+            @lru_cache(maxsize=None)
+            def brute_high(consumed: int) -> tuple[int, tuple[str, ...]]:
+                safe = safe_indices(consumed)
+                if not safe:
+                    return 0, ()
+                candidates = [
+                    (
+                        1 + child_count,
+                        (component[index],) + child_sequence,
+                    )
+                    for index in safe
+                    for child_count, child_sequence in (
+                        brute_high(consumed | (1 << index)),
+                    )
+                ]
+                return min(
+                    candidates,
+                    key=lambda candidate: (-candidate[0], candidate[1]),
+                )
+
+            expected_low, expected_low_sequence = brute_low(0)
+            expected_high, expected_high_sequence = brute_high(0)
+            self.assertEqual(
+                (
+                    actual.low,
+                    actual.high,
+                    actual.low_sequence,
+                    actual.high_sequence,
+                ),
+                (
+                    expected_low,
+                    expected_high,
+                    expected_low_sequence,
+                    expected_high_sequence,
+                ),
+            )
+            return actual
+
+        with patch.object(
+            capacity_module,
+            "_component_bounds",
+            side_effect=checked_component_bounds,
+        ):
+            analyze_sustained_capacity(
+                questions,
+                graph,
+                misconceptions,
+                [target],
+            )
+        self.assertGreater(checked_components, 0)
+
+    def test_certificates_match_exhaustive_random_small_banks(self) -> None:
+        concept = Concept("c", "Concept", "Description")
+        graph = KnowledgeGraph([concept], [])
+        rng = random.Random(803_021)
+        for case in range(80):
+            misconception_count = rng.randint(2, 4)
+            misconceptions = [
+                Misconception(
+                    f"m_{case}_{index}",
+                    "c",
+                    f"Gap {index}",
+                    "Description",
+                )
+                for index in range(misconception_count)
+            ]
+            misconception_ids = tuple(
+                misconception.id for misconception in misconceptions
+            )
+            questions: list[Question] = []
+            for family_index in range(rng.randint(3, 7)):
+                family_id = f"f_{case}_{family_index}"
+                variant_count = 2 if rng.random() < 0.35 else 1
+                for variant in range(variant_count):
+                    selected = tuple(
+                        misconception_id
+                        for misconception_id in misconception_ids
+                        if rng.random() < 0.55
+                    )
+                    if not selected:
+                        selected = (
+                            misconception_ids[
+                                (family_index + variant) % misconception_count
+                            ],
+                        )
+                    questions.append(
+                        make_question(
+                            family_id,
+                            "c",
+                            selected,
+                            question_id=f"q_{family_id}_{variant}",
+                        )
+                    )
+            with self.subTest(case=case):
+                self.assert_matches_brute_force(
+                    questions,
+                    graph,
+                    misconceptions,
+                    concept_target("c"),
+                )
+
+    def test_certificates_match_brute_force_with_external_reserves(self) -> None:
+        root = Concept("root", "Root", "Description")
+        support = Concept("support", "Support", "Description")
+        graph = KnowledgeGraph(
+            [root, support],
+            [ConceptEdge("support", "root", RelationType.PREREQUISITE)],
+        )
+        misconceptions = [
+            Misconception("shared", "root", "Shared gap", "Description"),
+            Misconception("other", "root", "Other gap", "Description"),
+            Misconception("support_gap", "support", "Support gap", "Description"),
+        ]
+        questions = [
+            make_question("main_a", "root", ("shared", "other")),
+            make_question(
+                "main_b",
+                "root",
+                ("shared",),
+                question_id="q_main_b_variant_a",
+            ),
+            make_question(
+                "main_b",
+                "root",
+                ("other",),
+                question_id="q_main_b_variant_b",
+            ),
+            make_question("main_c", "root", ("other",)),
+            make_question("support_a", "support", ("shared", "support_gap")),
+            make_question("support_b", "support", ("shared", "support_gap")),
+        ]
+
+        self.assert_matches_brute_force(
+            questions,
+            graph,
+            misconceptions,
+            concept_target("root"),
+        )
+
+    def test_certificates_match_brute_force_with_exact_automorphisms(self) -> None:
+        concept = Concept("c", "Concept", "Description")
+        misconceptions = [
+            Misconception(name, "c", name, "Description")
+            for name in ("m1", "m2", "m3")
+        ]
+        questions = [
+            make_question(family_id, "c", ("m1", "m2"))
+            for family_id in ("symmetric_a", "symmetric_b", "symmetric_c")
+        ]
+        questions.extend(
+            (
+                make_question("overlap_a", "c", ("m2", "m3")),
+                make_question("overlap_b", "c", ("m1", "m3")),
+                make_question(
+                    "variant",
+                    "c",
+                    ("m1",),
+                    question_id="q_variant_a",
+                ),
+                make_question(
+                    "variant",
+                    "c",
+                    ("m3",),
+                    question_id="q_variant_b",
+                ),
+            )
+        )
+
+        self.assert_matches_brute_force(
+            questions,
+            KnowledgeGraph([concept], []),
+            misconceptions,
+            concept_target("c"),
+        )
+
     def test_objective_reserves_may_use_a_supporting_primary_concept(self) -> None:
         root = Concept("root", "Root", "Description")
         support = Concept("support", "Support", "Description")
@@ -668,6 +947,35 @@ class CapacityCliTestCase(unittest.TestCase):
         self.assertEqual(
             json.loads(strict_output)["summary"]["strict_failure_count"], 1
         )
+
+    def test_explicit_main_horizon_exposes_topic_capacity_debt(self) -> None:
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_retrieval_augmented_generation",
+                "--target-main-count",
+                "10",
+                "--strict",
+                "--json",
+            ]
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(code, 2, errors)
+        self.assertEqual(payload["summary"]["requested_main_capacity"], 10)
+        self.assertEqual(
+            payload["summary"]["strict_failure_targets"],
+            ["t_retrieval_augmented_generation"],
+        )
+        [result] = payload["targets"]
+        self.assertEqual(result["target_main_count"], 10)
+        # Generated questions without human review are quarantined and must not
+        # inflate the live serviceability horizon.
+        self.assertEqual(result["order_robust_main_capacity"], 4)
+        self.assertEqual(result["achievable_main_capacity"], 4)
+        self.assertEqual(result["status"], "thin")
 
     def test_state_limit_failure_never_emits_a_partial_report(self) -> None:
         code, output, errors = self.run_cli(

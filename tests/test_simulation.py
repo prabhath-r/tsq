@@ -9,6 +9,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from scripts.run_behavioral_audit import _projection_summaries
 from tsq.corpus import read_and_parse
 from tsq.engine import MAX_REMEDIATION_DEPTH, AdaptiveEngine
 from tsq.errors import ValidationError
@@ -17,6 +18,7 @@ from tsq.simulation import (
     BehavioralSimulator,
     SyntheticAnswer,
     SyntheticLearner,
+    assert_behavioral_invariants,
     evidence_anchor_concept_id,
 )
 from tsq.store import Database
@@ -247,14 +249,26 @@ class BehavioralSimulationTests(unittest.TestCase):
         self.assertGreater(
             report.coverage.eligible_evidence_families, 0
         )
+        all_observed_objectives = {
+            step.learning_objective_id
+            for step in report.steps
+            if step.learning_objective_id is not None
+        }
         self.assertEqual(
-            set(report.coverage.observed_objectives),
-            {
-                step.learning_objective_id
-                for step in report.steps
-                if step.learning_objective_id is not None
-            },
+            all_observed_objectives,
+            set(report.coverage.observed_objectives)
+            | set(report.coverage.observed_outside_scope_objectives),
         )
+        self.assertFalse(
+            set(report.coverage.observed_objectives)
+            & set(report.coverage.observed_outside_scope_objectives)
+        )
+        self.assertLessEqual(report.coverage.objective_fraction, 1.0)
+        self.assertLessEqual(report.coverage.concept_fraction, 1.0)
+        self.assertLessEqual(report.coverage.question_fraction, 1.0)
+        self.assertLessEqual(report.coverage.family_fraction, 1.0)
+        self.assertLessEqual(report.coverage.evidence_family_fraction, 1.0)
+        self.assertLessEqual(report.coverage.objective_family_fraction, 1.0)
         release_id = self.simulator.engine.database.get_active_release_id()
         for step in report.steps:
             question = self.simulator.engine.database.get_question(
@@ -267,6 +281,44 @@ class BehavioralSimulationTests(unittest.TestCase):
                 step.evidence_anchor_concept_id,
                 evidence_anchor_concept_id(question),
             )
+
+    def test_coverage_separates_exploration_outside_requested_scope(self) -> None:
+        report = self.simulator.run(
+            SyntheticLearner(
+                "coverage-excursion",
+                forced_correctness=True,
+                confidence_override=0.95,
+                base_response_ms=8_000,
+                seed=71,
+            ),
+            learner_id="coverage-excursion",
+            root_concept_id="t_transformers",
+            policy_seed=71,
+            max_steps=5,
+            start_at=START,
+        )
+
+        self.assertTrue(
+            report.coverage.observed_outside_scope_questions,
+            report.summary(),
+        )
+        self.assertTrue(
+            report.coverage.observed_outside_scope_objectives,
+            report.summary(),
+        )
+        self.assertFalse(
+            set(report.coverage.observed_objectives)
+            & set(report.coverage.observed_outside_scope_objectives)
+        )
+        for fraction in (
+            report.coverage.concept_fraction,
+            report.coverage.objective_fraction,
+            report.coverage.question_fraction,
+            report.coverage.family_fraction,
+            report.coverage.evidence_family_fraction,
+            report.coverage.objective_family_fraction,
+        ):
+            self.assertLessEqual(fraction, 1.0)
 
     def test_idempotent_retries_across_two_sessions_do_not_duplicate_state(self) -> None:
         profile = SyntheticLearner(
@@ -363,6 +415,79 @@ class BehavioralSimulationTests(unittest.TestCase):
         # If the next episode hits a real corpus hole, it must be explicit in the
         # report rather than silently selecting an unrelated fallback item.
         self.assertEqual(report.has_blockers, bool(report.summary()["blockers"]))
+
+    def test_declared_depth_three_tunnel_does_not_fail_audit_bound(self) -> None:
+        report = self.simulator.run(
+            self.always_wrong(),
+            learner_id="declared-depth-three",
+            root_concept_id="t_transformers",
+            policy_seed=12,
+            max_steps=4,
+            start_at=START,
+        )
+
+        self.assertEqual(len(report.focus_episodes), 1, report.summary())
+        self.assertEqual(
+            report.focus_episodes[0].length,
+            MAX_REMEDIATION_DEPTH,
+            report.summary(),
+        )
+        self.assertEqual(
+            report.focus_episodes[0].outcome,
+            "bounded_failure_exit",
+        )
+        assert_behavioral_invariants(report)
+
+    def test_operational_projection_summary_includes_objective_grid_evidence(
+        self,
+    ) -> None:
+        report = self.simulator.run(
+            SyntheticLearner(
+                "objective-summary",
+                forced_correctness=True,
+                confidence_override=0.95,
+                default_objective_ability=0.90,
+            ),
+            learner_id="objective-summary",
+            root_concept_id="t_transformers",
+            policy_seed=6,
+            max_steps=1,
+            start_at=START,
+        )
+
+        [summary] = _projection_summaries(self.simulator.engine.database)
+        self.assertEqual(report.attempted, 1)
+        self.assertEqual(summary["skill_count"], 1)
+        self.assertEqual(
+            summary["total_evidence_mass"],
+            summary["objective_total_evidence_mass"],
+        )
+        self.assertEqual(summary["certified_families"], 1)
+        self.assertEqual(summary["legacy_concept_state_count"], 0)
+        self.assertEqual(summary["legacy_concept_total_evidence_mass"], 0)
+        self.assertEqual(summary["objective_state_count"], 1)
+        self.assertEqual(summary["objective_grid_state_count"], 1)
+        self.assertGreater(summary["objective_total_evidence_mass"], 0)
+        # The production CLI commits the response before displaying feedback.
+        # Simulator feedback is likewise observational and cannot silently add
+        # acquisition mass to the learner projection.
+        self.assertEqual(summary["objective_total_acquisition_mass"], 0)
+        with self.simulator.engine.database.read() as connection:
+            attempt = connection.execute(
+                "SELECT feedback_shown FROM attempts"
+            ).fetchone()
+            feedback_actions = connection.execute(
+                """SELECT COUNT(*) AS n FROM learning_actions
+                   WHERE action_type = 'feedback_shown'
+                     AND stage = 'post_feedback'"""
+            ).fetchone()["n"]
+        self.assertEqual(attempt["feedback_shown"], 0)
+        self.assertEqual(feedback_actions, 1)
+        self.assertGreater(
+            summary["mean_objective_mastery_probability"],
+            0,
+        )
+        self.assertEqual(summary["objective_independent_families"], 1)
 
     def test_stronger_ground_truth_learners_outperform_over_paired_trials(self) -> None:
         strong = SyntheticLearner(
@@ -588,7 +713,9 @@ class BehavioralSimulationTests(unittest.TestCase):
             ),
             learner_id="verified-boundary",
             root_concept_id="t_large_language_models",
-            policy_seed=21,
+            # v17's hybrid breadth frontier changes the deterministic main-path
+            # ordering; seed 1 retains this test's recursive-boundary episode.
+            policy_seed=1,
             trial_index=4,
             max_steps=16,
             start_at=START,

@@ -12,6 +12,7 @@ from tsq.policy import (
     POLICY_VERSION,
     PERSISTENT_GAP_EPISODE_BUDGET,
     AdaptivePolicy,
+    _HybridCoverage,
 )
 
 
@@ -30,6 +31,19 @@ def objective_state(
         mastery_probability=mastery,
         mastery_probability_error_bound=error,
         next_review_at=due_at,
+    )
+
+
+def coverage(
+    raw: int,
+    *,
+    information: float = 0.65,
+    retrieval: int = 0,
+) -> _HybridCoverage:
+    return _HybridCoverage(
+        raw_exposures=raw,
+        diagnostic_information=information,
+        successful_retrieval_families=retrieval,
     )
 
 
@@ -59,17 +73,37 @@ class PersistentGapRevisitTests(unittest.TestCase):
         candidates, minimum, bypassed = (
             AdaptivePolicy._fair_coverage_candidates(
                 (frontier, gap),
-                target_exposures={"q_frontier": 0, "q_gap": 5},
+                coverage_by_question={
+                    "q_frontier": coverage(1, retrieval=1),
+                    "q_gap": coverage(5, information=3.25),
+                },
                 persistent_gap_objective_ids={"lo_gap"},
             )
         )
 
-        self.assertEqual(minimum, 0)
+        self.assertEqual(minimum, 1)
         self.assertEqual(
             {question.id for question in candidates},
             {"q_frontier", "q_gap"},
         )
         self.assertEqual(bypassed, {"lo_gap"})
+
+    def test_unseen_target_precedes_persistent_gap_bypass(self) -> None:
+        frontier = SimpleNamespace(id="q_frontier", objective_id="lo_new")
+        gap = SimpleNamespace(id="q_gap", objective_id="lo_gap")
+        candidates, minimum, bypassed = (
+            AdaptivePolicy._fair_coverage_candidates(
+                (frontier, gap),
+                coverage_by_question={
+                    "q_frontier": coverage(0, information=0.0),
+                    "q_gap": coverage(5, information=3.25),
+                },
+                persistent_gap_objective_ids={"lo_gap"},
+            )
+        )
+        self.assertEqual(minimum, 0)
+        self.assertEqual([question.id for question in candidates], ["q_frontier"])
+        self.assertEqual(bypassed, set())
 
     def test_strong_or_not_due_objectives_do_not_bypass_breadth(self) -> None:
         cases = {
@@ -115,10 +149,14 @@ class PersistentGapRevisitTests(unittest.TestCase):
         candidates, minimum, bypassed = (
             AdaptivePolicy._fair_coverage_candidates(
                 questions,
-                target_exposures={
-                    "q_frontier": 0,
-                    "q_strong": 4,
-                    "q_not_due": 3,
+                coverage_by_question={
+                    "q_frontier": coverage(0, information=0.0),
+                    "q_strong": coverage(
+                        4, information=2.6, retrieval=2
+                    ),
+                    "q_not_due": coverage(
+                        3, information=1.95, retrieval=1
+                    ),
                 },
                 persistent_gap_objective_ids=qualified,
             )
@@ -171,6 +209,9 @@ class PersistentGapRevisitTests(unittest.TestCase):
             review_value=0.75,
             boundary_fit=1.0,
             continuity=0.40,
+            coverage_raw_exposures=5,
+            coverage_diagnostic_information=2.75,
+            coverage_successful_retrieval_families=0,
         )
 
         rationale = AdaptivePolicy._rationale(
@@ -197,6 +238,15 @@ class PersistentGapRevisitTests(unittest.TestCase):
         self.assertIn("persistent_gap_episode_spend=1", rationale)
         self.assertIn("persistent_gap_episode_budget=2", rationale)
         self.assertIn("fair_coverage_target_exposures=0", rationale)
+        self.assertIn("coverage_raw_exposures=5", rationale)
+        self.assertIn(
+            "coverage_diagnostic_information=2.750000000000",
+            rationale,
+        )
+        self.assertIn(
+            "coverage_successful_retrieval_families=0",
+            rationale,
+        )
         marker = AdaptivePolicy._persistent_gap_marker(
             rationale=rationale,
             policy_version=POLICY_VERSION,

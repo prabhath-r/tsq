@@ -45,12 +45,13 @@ from tsq.policy import AdaptivePolicy  # noqa: E402
 from tsq.replay import ProjectionReplay  # noqa: E402
 from tsq.simulation import (  # noqa: E402
     BehavioralSimulator,
+    SIMULATION_FEEDBACK_PROTOCOL_VERSION,
     SyntheticAnswer,
 )
 from tsq.store import Database  # noqa: E402
 
 
-LAB_VERSION = "objective-discovery-lab-v4"
+LAB_VERSION = "objective-discovery-lab-v5"
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
 DEFAULT_OUTPUT = (
     PROJECT_ROOT / "experiments" / "results" / "objective_discovery_lab.json"
@@ -722,6 +723,7 @@ def run_case(
             idempotency_key=(
                 f"objective-discovery-end-{target_objective_id}-{session_index}"
             ),
+            now=report.ended_at,
         )
         snapshot_at = report.ended_at
         snapshot = objective_snapshot(
@@ -1041,6 +1043,7 @@ def build_report(
             "session_spacing_days": 45,
             "seed": seed,
             "include_recovery": include_recovery,
+            "feedback_protocol": SIMULATION_FEEDBACK_PROTOCOL_VERSION,
         },
         "cases": cases,
         "recovery_case": recovery,

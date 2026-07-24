@@ -46,6 +46,10 @@ from .learner import (
     LearnerModel,
 )
 from .models import MAX_REMEDIATION_DEPTH, QuestionStatus, SessionPhase
+from .performance_ledger import (
+    performance_projection_snapshot,
+    rebuild_performance_projections,
+)
 from .store import SCHEMA_VERSION, Database, question_content_hash
 from .versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
@@ -753,6 +757,23 @@ class ProjectionReplay:
                 or "traced hints" in error
             )
 
+        def performance_projection_error(error: str) -> bool:
+            return (
+                error.startswith("performance attempt ")
+                or error.startswith("performance action ")
+                or error.startswith("performance scoring claim ")
+                or error.startswith("task evaluation ")
+                or error.startswith("shadow evidence bundle ")
+                or "PerformanceTaskStarted has no attempt projection" in error
+                or "PerformanceActionRecorded has no action projection" in error
+                or "PerformanceScoringClaimed has no scoring claim projection"
+                in error
+                or "PerformanceScoringClaimMigrated has no scoring claim projection"
+                in error
+                or "TaskEvaluationRecorded has no evaluation projection" in error
+                or "ShadowEvidenceReduced has no bundle projection" in error
+            )
+
         recoverable = [
             error
             for error in errors
@@ -761,6 +782,7 @@ class ProjectionReplay:
                 or error.startswith(projection_hash_failure)
                 or error.startswith(objective_projection_prefix)
                 or action_projection_error(error)
+                or performance_projection_error(error)
             )
         ]
         blocking = [error for error in errors if error not in recoverable]
@@ -2044,7 +2066,17 @@ class ProjectionReplay:
     def _run_on_copy(self, copy_path: Path, learner_id: str) -> dict[str, Any]:
         source_schema_version = self._backup_to(copy_path)
         work_database = Database(copy_path)
-        work_database.initialize()
+        missing_source_schema_guards: tuple[str, ...] = ()
+        if source_schema_version < SCHEMA_VERSION:
+            work_database.initialize()
+        else:
+            # The source is never normalized.  A current-version replay copy
+            # may be missing a canonical immutability trigger precisely because
+            # its mutable projection was corrupted.  Restore only absent guards
+            # after exact structural validation, on this isolated copy alone.
+            missing_source_schema_guards = (
+                work_database._restore_missing_schema_guards_for_replay_copy()
+            )
         with work_database.read() as connection:
             if not connection.execute(
                 "SELECT 1 FROM learners WHERE id=?", (learner_id,)
@@ -2078,12 +2110,23 @@ class ProjectionReplay:
             source_action_projection_hash = _projection_digest(
                 source_action_snapshot
             )
+            source_performance_snapshot = performance_projection_snapshot(connection)
+            source_performance_projection_hash = _projection_digest(
+                source_performance_snapshot
+            )
         source_integrity = work_database.verify_integrity()
         recoverable, blocking = self._recoverable_projection_errors(
             source_integrity["errors"], learner_id
         )
+        source_schema_guard_errors = [
+            "source database is missing canonical schema trigger " + trigger_name
+            for trigger_name in missing_source_schema_guards
+        ]
+        recoverable = [*source_schema_guard_errors, *recoverable]
         replay = self._rebuild_projection(work_database, learner_id)
         action_replay = self._rebuild_action_projections(work_database)
+        with work_database.transaction() as connection:
+            performance_replay = rebuild_performance_projections(connection)
         rebuilt_integrity = work_database.verify_integrity()
         source_matches = (
             source_projection_hash == replay["reconstructed_projection_hash"]
@@ -2091,11 +2134,18 @@ class ProjectionReplay:
         action_source_matches = (
             source_action_snapshot == action_replay["snapshot"]
         )
+        performance_source_matches = (
+            source_performance_snapshot == performance_replay["snapshot"]
+        )
         commitment_matches = (
             committed_projection_hash is None
             or committed_projection_hash == replay["reconstructed_projection_hash"]
         )
-        errors = [*blocking, *replay["replay_errors"]]
+        errors = [
+            *blocking,
+            *source_schema_guard_errors,
+            *replay["replay_errors"],
+        ]
         if not source_matches:
             errors.append("stored learner projection differs from deterministic replay")
         if source_projection_hash_error is not None:
@@ -2108,6 +2158,10 @@ class ProjectionReplay:
         if not action_source_matches:
             errors.append(
                 "stored learning-action projection differs from deterministic replay"
+            )
+        if not performance_source_matches:
+            errors.append(
+                "stored performance projection differs from deterministic replay"
             )
         if not rebuilt_integrity["ok"]:
             errors.extend(
@@ -2125,6 +2179,9 @@ class ProjectionReplay:
             "learner_model_version": replay["learner_model_version"],
             "source_schema_version": source_schema_version,
             "replay_schema_version": SCHEMA_VERSION,
+            "missing_source_schema_guards": list(
+                missing_source_schema_guards
+            ),
             "response_count": len(replay["checkpoints"]),
             "source_projection_hash": source_projection_hash,
             "source_projection_hash_error": source_projection_hash_error,
@@ -2146,6 +2203,45 @@ class ProjectionReplay:
             ],
             "action_projection_matches_replay": action_source_matches,
             "action_checkpoints": action_replay["checkpoints"],
+            "performance_event_count": len(performance_replay["checkpoints"]),
+            "source_performance_attempt_count": len(
+                source_performance_snapshot["attempts"]
+            ),
+            "reconstructed_performance_attempt_count": performance_replay[
+                "attempt_count"
+            ],
+            "source_performance_action_count": len(
+                source_performance_snapshot["actions"]
+            ),
+            "reconstructed_performance_action_count": performance_replay[
+                "action_count"
+            ],
+            "source_performance_scoring_claim_count": len(
+                source_performance_snapshot["scoring_claims"]
+            ),
+            "reconstructed_performance_scoring_claim_count": performance_replay[
+                "scoring_claim_count"
+            ],
+            "source_task_evaluation_count": len(
+                source_performance_snapshot["evaluations"]
+            ),
+            "reconstructed_task_evaluation_count": performance_replay[
+                "evaluation_count"
+            ],
+            "source_shadow_evidence_bundle_count": len(
+                source_performance_snapshot["bundles"]
+            ),
+            "reconstructed_shadow_evidence_bundle_count": performance_replay[
+                "bundle_count"
+            ],
+            "source_performance_projection_hash": (
+                source_performance_projection_hash
+            ),
+            "reconstructed_performance_projection_hash": performance_replay[
+                "projection_hash"
+            ],
+            "performance_projection_matches_replay": performance_source_matches,
+            "performance_checkpoints": performance_replay["checkpoints"],
             "recoverable_source_integrity_errors": recoverable,
             "blocking_source_integrity_errors": blocking,
             "checkpoints": replay["checkpoints"],
@@ -2216,6 +2312,9 @@ class ProjectionReplay:
         ]
         report["source_action_projection_was_repaired"] = not report[
             "action_projection_matches_replay"
+        ]
+        report["source_performance_projection_was_repaired"] = not report[
+            "performance_projection_matches_replay"
         ]
         report["source_discrepancies"] = list(report["errors"])
         report["errors"] = []

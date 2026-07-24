@@ -34,9 +34,12 @@ from tsq.corpus import read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.errors import NotFoundError  # noqa: E402
 from tsq.models import Presentation, SessionPhase  # noqa: E402
+from tsq.objective_posterior import decode_objective_posterior  # noqa: E402
 from tsq.policy import POLICY_VERSION  # noqa: E402
+from tsq.replay import ProjectionReplay  # noqa: E402
 from tsq.simulation import (  # noqa: E402
     BehavioralSimulator,
+    SIMULATION_FEEDBACK_PROTOCOL_VERSION,
     SimulationReport,
     SyntheticAnswer,
     SyntheticLearner,
@@ -44,7 +47,8 @@ from tsq.simulation import (  # noqa: E402
 from tsq.store import Database  # noqa: E402
 
 
-LAB_VERSION = "adaptive-behavior-lab-v4"
+LAB_VERSION = "adaptive-behavior-lab-v7"
+SEMANTIC_PROJECTION_SIGNATURE_SCHEMA = 1
 DEFAULT_START = datetime(2100, 7, 21, 9, 0, tzinfo=timezone.utc)
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "adaptive_lab.json"
 DEFAULT_ROOT = "t_transformers"
@@ -95,7 +99,7 @@ SCENARIOS = (
     ),
     ScenarioSpec(
         "fixed_option_bias",
-        "The lexicographically first option is selected on every item.",
+        "The first displayed option is selected on every item.",
         "A repeated response-position habit should not resemble credible mastery.",
     ),
     ScenarioSpec(
@@ -157,7 +161,7 @@ class PatternLearner:
         call_index = self.calls
         self.calls += 1
         if self.rule == "fixed_option":
-            selected = min(presentation.question.options, key=lambda option: option.id)
+            selected = presentation.ordered_options[0]
             return SyntheticAnswer(
                 selected_option_id=selected.id,
                 correct=selected.correct,
@@ -465,6 +469,192 @@ def _projection_commitment(database: Database, learner_id: str) -> dict[str, Any
     }
 
 
+def semantic_projection_signature(
+    database: Database, learner_id: str
+) -> dict[str, Any]:
+    """Commit to learner semantics without binding fresh-run event identities.
+
+    Production projection commitments intentionally bind ``as_of_event_id`` and
+    exact posterior observation IDs.  That is the right contract when replaying
+    one immutable event history, but independent deterministic simulations
+    create different event IDs.  This laboratory signature retains every
+    numerical state, posterior density, evidence-family certificate, timestamp,
+    model identity, and misconception belief while removing only those event
+    provenance identifiers.  The exact production commitment remains checked
+    separately.
+    """
+
+    with database.read() as connection:
+        learner = connection.execute(
+            "SELECT id, revision FROM learners WHERE id = ?",
+            (learner_id,),
+        ).fetchone()
+        if learner is None:
+            raise NotFoundError(f"Unknown learner: {learner_id}")
+
+        skill_states = [
+            dict(row)
+            for row in connection.execute(
+                """SELECT learner_id, concept_id, mean, variance,
+                          stability_hours, exposures, last_seen_at,
+                          next_review_at, evidence_mass, model_version
+                   FROM skill_states WHERE learner_id = ?
+                   ORDER BY concept_id""",
+                (learner_id,),
+            )
+        ]
+        objective_states = [
+            dict(row)
+            for row in connection.execute(
+                """SELECT learner_id, objective_id, mean, variance,
+                          stability_hours, exposures, last_seen_at,
+                          next_review_at, evidence_mass, model_version
+                   FROM objective_states WHERE learner_id = ?
+                   ORDER BY objective_id""",
+                (learner_id,),
+            )
+        ]
+        misconception_beliefs = [
+            dict(row)
+            for row in connection.execute(
+                """SELECT learner_id, misconception_id, log_odds,
+                          evidence_count, last_seen_at, model_version
+                   FROM misconception_beliefs WHERE learner_id = ?
+                   ORDER BY misconception_id""",
+                (learner_id,),
+            )
+        ]
+        skill_families = [
+            dict(row)
+            for row in connection.execute(
+                """SELECT learner_id, concept_id, family_id, kind,
+                          first_unguided_correct_at,
+                          last_unguided_correct_at,
+                          delayed_unguided_correct_at
+                   FROM learner_skill_families WHERE learner_id = ?
+                   ORDER BY concept_id, family_id""",
+                (learner_id,),
+            )
+        ]
+        objective_families = [
+            dict(row)
+            for row in connection.execute(
+                """SELECT learner_id, objective_id, family_id, kind,
+                          first_unguided_correct_at,
+                          last_unguided_correct_at,
+                          delayed_unguided_correct_at
+                   FROM learner_objective_families WHERE learner_id = ?
+                   ORDER BY objective_id, family_id""",
+                (learner_id,),
+            )
+        ]
+        grid_rows = connection.execute(
+            """SELECT learner_id, objective_id, posterior_schema_version,
+                      algorithm, grid_id, codec, posterior_blob,
+                      posterior_sha256, mean, variance, mastery_probability,
+                      expected_competence, edge_mass,
+                      mastery_probability_error_bound, evidence_mass,
+                      acquisition_mass, model_version
+               FROM objective_grid_states WHERE learner_id = ?
+               ORDER BY objective_id""",
+            (learner_id,),
+        ).fetchall()
+
+    objective_grid_states: list[dict[str, Any]] = []
+    for row in grid_rows:
+        posterior = decode_objective_posterior(
+            bytes(row["posterior_blob"]),
+            expected_digest=row["posterior_sha256"],
+        )
+        pending_observations = []
+        for observation in posterior.pending_observations:
+            semantic_observation = observation.as_payload()
+            semantic_observation.pop("observation_id")
+            pending_observations.append(semantic_observation)
+        pending_observations.sort(
+            key=lambda item: json.dumps(
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+        posterior_semantics = {
+            "schema_version": row["posterior_schema_version"],
+            "algorithm": row["algorithm"],
+            "codec": row["codec"],
+            "grid_id": row["grid_id"],
+            "prior_mastery": posterior.prior_mastery,
+            "prior_variance": posterior.prior_variance,
+            "anchor_log_density": list(posterior.anchor_log_density),
+            "current_log_density": list(posterior.log_density),
+            "pending_observations": pending_observations,
+            "committed_evidence_mass": posterior.committed_evidence_mass,
+            "acquisition_mass": posterior.acquisition_mass,
+        }
+        objective_grid_states.append(
+            {
+                "learner_id": row["learner_id"],
+                "objective_id": row["objective_id"],
+                "posterior_schema_version": row[
+                    "posterior_schema_version"
+                ],
+                "algorithm": row["algorithm"],
+                "grid_id": row["grid_id"],
+                "codec": row["codec"],
+                "mean": row["mean"],
+                "variance": row["variance"],
+                "mastery_probability": row["mastery_probability"],
+                "expected_competence": row["expected_competence"],
+                "edge_mass": row["edge_mass"],
+                "mastery_probability_error_bound": row[
+                    "mastery_probability_error_bound"
+                ],
+                "evidence_mass": row["evidence_mass"],
+                "acquisition_mass": row["acquisition_mass"],
+                "model_version": row["model_version"],
+                "posterior_semantics_sha256": canonical_hash(
+                    posterior_semantics
+                ),
+            }
+        )
+
+    payload = {
+        "signature_schema_version": SEMANTIC_PROJECTION_SIGNATURE_SCHEMA,
+        "learner_id": learner["id"],
+        "learner_revision": learner["revision"],
+        "skill_states": skill_states,
+        "objective_states": objective_states,
+        "objective_grid_states": objective_grid_states,
+        "misconception_beliefs": misconception_beliefs,
+        "skill_families": skill_families,
+        "objective_families": objective_families,
+    }
+    return {
+        "schema_version": SEMANTIC_PROJECTION_SIGNATURE_SCHEMA,
+        "sha256": canonical_hash(payload),
+        "provenance_exclusions": [
+            "skill_states.as_of_event_id",
+            "objective_states.as_of_event_id",
+            "objective_grid_states.as_of_event_id",
+            "misconception_beliefs.as_of_event_id",
+            "objective_grid_states.posterior_sha256",
+            (
+                "objective_grid_states.posterior_blob."
+                "pending_observations[].observation_id"
+            ),
+        ],
+        "retained_semantics": [
+            "all scalar learner-state values and model versions",
+            "complete exact posterior anchor and current densities",
+            "pending observation values and multiplicity",
+            "skill and objective family certification records",
+            "misconception belief values",
+            "learner revision and semantic timestamps",
+        ],
+    }
+
+
 def projection_summary(
     profile: Mapping[str, Any],
     *,
@@ -595,7 +785,7 @@ def projection_summary(
         exact_posterior = None
         if metadata.get("posterior_sha256") is not None:
             exact_posterior = {
-                "sha256": metadata["posterior_sha256"],
+                "provenance_bound_sha256": metadata["posterior_sha256"],
                 "edge_mass": metadata["edge_mass"],
                 "mastery_probability_error_bound": metadata[
                     "mastery_probability_error_bound"
@@ -622,12 +812,7 @@ def projection_summary(
         unit for unit in assessed_units if float(unit["evidence_mass"] or 0.0) > 0
     ]
     commitment = _projection_commitment(database, learner_id)
-    stable_payload = {
-        "skills": by_concept,
-        "learning_objectives": by_objective,
-        "misconception_hypotheses": misconception_hypotheses,
-        "active_misconceptions": active_misconceptions,
-    }
+    semantic_signature = semantic_projection_signature(database, learner_id)
     legacy_evidence_mass = float(legacy_state["evidence_mass"])
     objective_evidence_mass = float(objective_state["evidence_mass"])
     return {
@@ -669,8 +854,8 @@ def projection_summary(
         "learning_objectives": by_objective,
         "misconception_hypotheses": misconception_hypotheses,
         "active_misconceptions": active_misconceptions,
-        "stable_hash": canonical_hash(stable_payload),
-        "database_projection_commitment": commitment,
+        "semantic_projection_signature": semantic_signature,
+        "exact_event_projection_commitment": commitment,
         "aggregate_contract": (
             "Totals combine durable legacy skill rows with durable objective rows; "
             "derived broad objective floors are shown but never counted twice."
@@ -926,6 +1111,7 @@ def compact_session_report(report: Mapping[str, Any]) -> dict[str, Any]:
         "objective_evidence_scope",
         "family_evidence_definitions",
         "behavior_trace",
+        "response_position_shadow",
         "diagnostic_findings",
         "diagnostic_contract",
     )
@@ -1224,7 +1410,7 @@ def run_scenario(
     root_reference: str,
     steps: int,
     seed: int,
-    replay: bool,
+    replicate: bool,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     database = Database(database_path)
     database.initialize()
@@ -1260,20 +1446,43 @@ def run_scenario(
     invariant_failures = scenario_invariants(
         report, trace_violations, integrity
     )
-    if not profile["database_projection_commitment"]["matches_latest_event"]:
+    if not profile["exact_event_projection_commitment"][
+        "matches_latest_event"
+    ]:
         invariant_failures.append(
             "database projection differs from its latest event commitment"
         )
-    replay_result: dict[str, Any] | None = None
-    if replay:
-        replay_path = database_path.with_name(database_path.stem + "-replay.db")
-        replay_database = Database(replay_path)
-        replay_database.initialize()
-        replay_database.import_corpus(
+
+    exact_replay_report = ProjectionReplay(database).check(learner_id)
+    exact_event_replay = {
+        "checked": True,
+        "ok": exact_replay_report["ok"],
+        "response_count": exact_replay_report["response_count"],
+        "stored_projection_matches_reconstruction": exact_replay_report[
+            "source_projection_matches_replay"
+        ],
+        "event_commitment_matches_reconstruction": exact_replay_report[
+            "commitment_matches_replay"
+        ],
+        "errors": exact_replay_report["errors"],
+    }
+    if not exact_event_replay["ok"]:
+        invariant_failures.append(
+            "exact same-event projection replay failed"
+        )
+
+    replication_result: dict[str, Any] | None = None
+    if replicate:
+        replica_path = database_path.with_name(
+            database_path.stem + "-replica.db"
+        )
+        replica_database = Database(replica_path)
+        replica_database.initialize()
+        replica_database.import_corpus(
             *read_and_parse(corpus_path, include_catalog=True)
         )
-        replay_engine = AdaptiveEngine(replay_database)
-        replay_report = BehavioralSimulator(replay_engine).run(
+        replica_engine = AdaptiveEngine(replica_database)
+        replica_report = BehavioralSimulator(replica_engine).run(
             make_learner(spec.id, seed),
             learner_id=learner_id,
             root_concept_id=root_reference,
@@ -1281,42 +1490,63 @@ def run_scenario(
             max_steps=steps,
             start_at=DEFAULT_START,
         )
-        replay_profile = projection_summary(
-            replay_engine.profile(
+        replica_profile = projection_summary(
+            replica_engine.profile(
                 learner_id,
                 root_concept_id=root_reference,
-                now=replay_report.ended_at,
+                now=replica_report.ended_at,
             ),
-            database=replay_database,
+            database=replica_database,
             learner_id=learner_id,
         )
-        replay_integrity = replay_database.verify_integrity()
-        signature_matches = (
-            report.behavior_signature() == replay_report.behavior_signature()
+        replica_integrity = replica_database.verify_integrity()
+        behavior_matches = (
+            report.behavior_signature() == replica_report.behavior_signature()
         )
-        projection_matches = profile["stable_hash"] == replay_profile["stable_hash"]
+        projection_matches = (
+            profile["semantic_projection_signature"]["sha256"]
+            == replica_profile["semantic_projection_signature"]["sha256"]
+        )
         commitments_valid = bool(
-            profile["database_projection_commitment"]["matches_latest_event"]
-            and replay_profile["database_projection_commitment"][
+            profile["exact_event_projection_commitment"][
+                "matches_latest_event"
+            ]
+            and replica_profile["exact_event_projection_commitment"][
                 "matches_latest_event"
             ]
         )
-        if not signature_matches:
-            invariant_failures.append("fresh-database behavior replay diverged")
+        if not behavior_matches:
+            invariant_failures.append(
+                "fresh-database semantic behavior replication diverged"
+            )
         if not projection_matches:
-            invariant_failures.append("fresh-database learner projection diverged")
+            invariant_failures.append(
+                "fresh-database semantic learner projection replication diverged"
+            )
         if not commitments_valid:
             invariant_failures.append(
                 "database projection differs from its latest event commitment"
             )
-        if not replay_integrity["ok"]:
-            invariant_failures.append("replay database integrity failed")
-        replay_result = {
+        if not replica_integrity["ok"]:
+            invariant_failures.append("replica database integrity failed")
+        replication_result = {
             "checked": True,
-            "behavior_signature_matches": signature_matches,
-            "projection_matches": projection_matches,
-            "projection_commitments_valid": commitments_valid,
-            "database_integrity_ok": replay_integrity["ok"],
+            "semantic_behavior_matches": behavior_matches,
+            "semantic_projection_matches": projection_matches,
+            "source_semantic_projection_sha256": profile[
+                "semantic_projection_signature"
+            ]["sha256"],
+            "replica_semantic_projection_sha256": replica_profile[
+                "semantic_projection_signature"
+            ]["sha256"],
+            "each_history_exact_commitment_valid": commitments_valid,
+            "replica_database_integrity_ok": replica_integrity["ok"],
+            "comparison_contract": (
+                "Independent histories are compared only by behavior and "
+                "provenance-free learner semantics. Exact event-bound "
+                "commitments are validated within each history, never compared "
+                "across histories."
+            ),
         }
 
     summary = report.summary()
@@ -1341,7 +1571,10 @@ def run_scenario(
             "stream_count": integrity["stream_count"],
             "errors": integrity["errors"],
         },
-        "deterministic_replay": replay_result or {"checked": False},
+        "exact_same_event_replay": exact_event_replay,
+        "fresh_database_replication": (
+            replication_result or {"checked": False}
+        ),
         "invariant_failures": invariant_failures,
     }
     return result, graph_snapshot(
@@ -1349,6 +1582,81 @@ def run_scenario(
         root_reference=root_reference,
         release_id=release["release_id"],
     )
+
+
+def run_position_habit_check(
+    *,
+    database_path: Path,
+    corpus_path: Path,
+    seed: int,
+    steps: int = 16,
+) -> dict[str, Any]:
+    """Cross the conservative response-position threshold on the real engine.
+
+    The ordinary Transformer scenario is intentionally allowed to expose a
+    narrow-topic capacity gap, which can stop it one answer short of the
+    twelve-observation statistical boundary.  This planned probe uses the
+    broader Machine Learning curriculum, but otherwise runs the same selector,
+    learner projection, immutable events, and report implementation.  The
+    signal remains observational and cannot feed selection or mastery.
+    """
+
+    if steps < 12:
+        raise ValueError("The position-habit probe requires at least 12 steps.")
+    scenario, _topology = run_scenario(
+        SCENARIO_BY_ID["fixed_option_bias"],
+        database_path=database_path,
+        corpus_path=corpus_path,
+        root_reference="t_machine_learning",
+        steps=steps,
+        seed=seed,
+        replicate=False,
+    )
+    shadow = scenario["session"]["response_position_shadow"]
+    inference = shadow["inference"]
+    dominant = inference.get("dominant_position")
+    failures = list(scenario["invariant_failures"])
+    if scenario["summary"]["attempted"] < 12:
+        failures.append(
+            "broad-curriculum probe did not reach the position-test boundary"
+        )
+    if not shadow["evidence"]["boundary_valid"]:
+        failures.append("response-position evidence boundary was invalid")
+    if inference["status"] != "position_concentration_signal":
+        failures.append("fixed displayed-position habit did not produce a signal")
+    if not isinstance(dominant, dict) or dominant.get("display_position") != 1:
+        failures.append("the first displayed position was not the dominant signal")
+    if not (
+        shadow["observational_only"]
+        and not shadow["affects_mastery"]
+        and not shadow["affects_certification"]
+        and not shadow["affects_selection"]
+    ):
+        failures.append("response-position diagnostic escaped its shadow boundary")
+    gap_records = [
+        {"segment": "broad_position_probe", **gap}
+        for gap in scenario["gaps"]
+    ]
+    status = planned_check_status(failures, gap_records)
+    return {
+        "id": "display_position_shadow",
+        "behavior": (
+            "The learner selects displayed position one for every question in a "
+            "broad curriculum until the exact family-wise test is estimable."
+        ),
+        "root_reference": "t_machine_learning",
+        "planned_attempts": steps,
+        "completed_attempts": scenario["summary"]["attempted"],
+        "response_position_shadow": shadow,
+        "projection": scenario["projection"],
+        "trace": scenario["trace"],
+        "gap_records": gap_records,
+        "integrity": scenario["integrity"],
+        "exact_same_event_replay": scenario["exact_same_event_replay"],
+        "status": status,
+        "ok": status == "passed",
+        "failures": failures,
+    }
 
 
 def run_longitudinal_idempotency_check(
@@ -1442,7 +1750,9 @@ def run_longitudinal_idempotency_check(
         or second.idempotent_retries_verified != second.attempted
     ):
         failures.append("not every answer completed an exact idempotent retry")
-    if not profile["database_projection_commitment"]["matches_latest_event"]:
+    if not profile["exact_event_projection_commitment"][
+        "matches_latest_event"
+    ]:
         failures.append("final projection commitment does not match the database")
     if not integrity["ok"]:
         failures.append("longitudinal database integrity failed")
@@ -2084,9 +2394,9 @@ def parser() -> argparse.ArgumentParser:
         help="preserve synthetic SQLite databases in this directory",
     )
     result.add_argument(
-        "--no-replay-check",
+        "--no-replication-check",
         action="store_true",
-        help="skip the second fresh-database determinism run",
+        help="skip the independent fresh-database semantic replication run",
     )
     result.add_argument(
         "--fail-on-hypothesis",
@@ -2122,7 +2432,7 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
             root_reference=arguments.root,
             steps=arguments.steps,
             seed=arguments.seed,
-            replay=not arguments.no_replay_check,
+            replicate=not arguments.no_replication_check,
         )
         results.append(scenario_result)
         topology = topology or scenario_topology
@@ -2162,10 +2472,20 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
         {"scenario": misconception_recovery["id"], "failure": failure}
         for failure in misconception_recovery["failures"]
     )
+    position_habit = run_position_habit_check(
+        database_path=database_directory / "display_position_shadow.db",
+        corpus_path=arguments.corpus,
+        seed=arguments.seed + 401,
+    )
+    invariant_failures.extend(
+        {"scenario": position_habit["id"], "failure": failure}
+        for failure in position_habit["failures"]
+    )
     special_checks = (
         longitudinal,
         delayed_family,
         misconception_recovery,
+        position_habit,
     )
     contradictions = [
         comparison
@@ -2194,8 +2514,12 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
             "steps_per_scenario": arguments.steps,
             "policy_seed": arguments.seed,
             "simulation_start": DEFAULT_START.isoformat(),
-            "fresh_database_replay": not arguments.no_replay_check,
+            "fresh_database_semantic_replication": (
+                not arguments.no_replication_check
+            ),
+            "feedback_protocol": SIMULATION_FEEDBACK_PROTOCOL_VERSION,
             "scenario_ids": selected_ids,
+            "position_habit_probe_root": "t_machine_learning",
         },
         "observation_boundary": {
             "currently_observed": [
@@ -2229,6 +2553,7 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
         "longitudinal_check": longitudinal,
         "delayed_family_check": delayed_family,
         "misconception_recovery_check": misconception_recovery,
+        "display_position_shadow_check": position_habit,
         "comparisons": comparisons,
         "audit": {
             "hard_invariants_ok": not invariant_failures,
@@ -2244,6 +2569,7 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
             "longitudinal_idempotency_ok": longitudinal["ok"],
             "delayed_family_retrieval_ok": delayed_family["ok"],
             "misconception_recovery_ok": misconception_recovery["ok"],
+            "display_position_shadow_ok": position_habit["ok"],
             "planned_check_statuses": planned_check_statuses,
             "all_planned_checks_complete": all(
                 status == "passed"
@@ -2264,22 +2590,31 @@ def execute(arguments: argparse.Namespace, database_directory: Path) -> dict[str
             )
             + longitudinal["completed_attempts"]
             + delayed_family["completed_attempts"]
-            + misconception_recovery["completed_attempts"],
+            + misconception_recovery["completed_attempts"]
+            + position_habit["completed_attempts"],
             "all_integrity_checks_ok": all(
                 result["integrity"]["ok"] for result in results
             )
             and longitudinal["integrity"]["ok"]
             and delayed_family["integrity"]["ok"]
-            and misconception_recovery["integrity"]["ok"],
-            "all_replays_deterministic": all(
-                not result["deterministic_replay"].get("checked")
+            and misconception_recovery["integrity"]["ok"]
+            and position_habit["integrity"]["ok"],
+            "all_exact_same_event_replays_ok": all(
+                result["exact_same_event_replay"]["ok"]
+                for result in results
+            )
+            and position_habit["exact_same_event_replay"]["ok"],
+            "all_fresh_database_semantic_replications_match": all(
+                not result["fresh_database_replication"].get("checked")
                 or (
-                    result["deterministic_replay"][
-                        "behavior_signature_matches"
+                    result["fresh_database_replication"][
+                        "semantic_behavior_matches"
                     ]
-                    and result["deterministic_replay"]["projection_matches"]
-                    and result["deterministic_replay"][
-                        "projection_commitments_valid"
+                    and result["fresh_database_replication"][
+                        "semantic_projection_matches"
+                    ]
+                    and result["fresh_database_replication"][
+                        "each_history_exact_commitment_valid"
                     ]
                 )
                 for result in results

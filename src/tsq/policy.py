@@ -7,13 +7,15 @@ import json
 import math
 import random
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from statistics import median
+from types import MappingProxyType
 from typing import Iterable, Mapping
 
 from .adaptive import RecursiveEvidenceBoundary
 from .capacity import VERIFICATION_KINDS
-from .errors import ExhaustedError, ValidationError
+from .errors import ConflictError, ExhaustedError, ValidationError
 from .inference import classify_response_for_model
 from .learner import (
     OBJECTIVE_MODEL_VERSIONS,
@@ -28,7 +30,7 @@ from .models import (
     Question,
     SessionPhase,
 )
-from .store import Database, new_id
+from .store import Database, new_id, question_runtime_activation_safe
 from .versions import (
     SUPPORTED_MODEL_VERSIONS,
     question_selected_schema_for,
@@ -37,17 +39,24 @@ from .versions import (
 
 PERSISTENT_GAP_EPISODE_POLICY_VERSION = "recursive-evidence-graph-v13"
 ACTIVE_MISCONCEPTION_REVISIT_POLICY_VERSION = "recursive-evidence-graph-v14"
-POLICY_VERSION = ACTIVE_MISCONCEPTION_REVISIT_POLICY_VERSION
+EXACT_OBJECTIVE_READINESS_POLICY_VERSION = "recursive-evidence-graph-v15"
+EXPLORATION_FALLBACK_POLICY_VERSION = "recursive-evidence-graph-v16"
+HYBRID_COVERAGE_POLICY_VERSION = "recursive-evidence-graph-v17"
+POLICY_VERSION = HYBRID_COVERAGE_POLICY_VERSION
 PERSISTENT_GAP_EPISODE_POLICY_VERSIONS = frozenset(
     {
         PERSISTENT_GAP_EPISODE_POLICY_VERSION,
         ACTIVE_MISCONCEPTION_REVISIT_POLICY_VERSION,
+        EXACT_OBJECTIVE_READINESS_POLICY_VERSION,
+        EXPLORATION_FALLBACK_POLICY_VERSION,
+        HYBRID_COVERAGE_POLICY_VERSION,
     }
 )
 PERSISTENT_GAP_MIN_OBSERVED_FAMILIES = 2
 PERSISTENT_GAP_COMPARISON_EPSILON = 1e-12
 PERSISTENT_GAP_EPISODE_BUDGET = 2
 ACTIVE_MISCONCEPTION_REVISIT_THRESHOLD = 0.35
+HYBRID_COVERAGE_RAW_BURDEN_SLACK = 1
 _PERSISTENT_GAP_BASE_MARKERS = frozenset(
     {
         "persistent_gap_revisit",
@@ -67,6 +76,57 @@ _PERSISTENT_GAP_EPISODE_MARKERS = frozenset(
 
 class _RetrySelection(Exception):
     pass
+
+
+class _ExplorationUnserviceable(Exception):
+    """Ask the caller to retry the unchanged session in its requested scope."""
+
+    def __init__(self, reason: str, topic_ids: tuple[str, ...]):
+        super().__init__(reason)
+        self.reason = reason
+        self.topic_ids = topic_ids
+
+
+@dataclass(frozen=True, slots=True)
+class _HybridCoverage:
+    """Three non-interchangeable views of one adaptive target.
+
+    ``raw_exposures`` limits repeated learner burden. ``diagnostic_information``
+    is the target projection's cumulative quality- and dependence-discounted
+    evidence mass, so credible errors count while abstention, hints, low
+    confidence, and implausible latency contribute only their learner-model
+    discount. ``successful_retrieval_families`` remains a separate positive
+    competence signal and is never inferred from the other two values.
+    """
+
+    raw_exposures: int
+    diagnostic_information: float
+    successful_retrieval_families: int
+
+    def __post_init__(self) -> None:
+        if type(self.raw_exposures) is not int or self.raw_exposures < 0:
+            raise ValidationError(
+                "Hybrid coverage raw exposures must be a non-negative integer."
+            )
+        if (
+            isinstance(self.diagnostic_information, bool)
+            or not isinstance(self.diagnostic_information, (int, float))
+            or not math.isfinite(float(self.diagnostic_information))
+            or self.diagnostic_information < 0.0
+        ):
+            raise ValidationError(
+                "Hybrid coverage diagnostic information must be finite and "
+                "non-negative."
+            )
+        if (
+            type(self.successful_retrieval_families) is not int
+            or self.successful_retrieval_families < 0
+            or self.successful_retrieval_families > self.raw_exposures
+        ):
+            raise ValidationError(
+                "Hybrid coverage successful retrieval families must be a "
+                "non-negative integer no greater than raw exposures."
+            )
 
 
 def _selection_version_boundary(
@@ -665,13 +725,202 @@ class AdaptivePolicy:
         return 2 if interleaved else None
 
     @staticmethod
+    def _coverage_target(question: Question) -> tuple[str, str]:
+        if question.objective_id is not None:
+            if (
+                type(question.objective_id) is not str
+                or not question.objective_id
+            ):
+                raise ValidationError(
+                    "A hybrid-coverage objective target is malformed."
+                )
+            return ("objective", question.objective_id)
+        if (
+            type(question.primary_concept_id) is not str
+            or not question.primary_concept_id
+        ):
+            raise ValidationError(
+                "A hybrid-coverage concept target is malformed."
+            )
+        return ("concept", question.primary_concept_id)
+
+    def _successful_retrieval_family_counts(
+        self,
+        learner_id: str,
+        release_id: str,
+        targets: set[tuple[str, str]],
+    ) -> dict[tuple[str, str], int]:
+        """Read positive families accepted by the pinned release.
+
+        Removed, quarantined, or emergency-revoked item families cannot
+        contribute current internal retrieval coverage.
+        """
+
+        if type(learner_id) is not str or not learner_id:
+            raise ValidationError(
+                "Hybrid coverage requires a valid learner identifier."
+            )
+        if type(release_id) is not str or not release_id:
+            raise ValidationError(
+                "Hybrid coverage requires a valid pinned release identifier."
+            )
+        counts = {target: 0 for target in targets}
+        if not targets:
+            return counts
+        families = {target: set() for target in targets}
+        with self.database.read() as connection:
+            release = connection.execute(
+                """SELECT sealed_at FROM corpus_releases WHERE id = ?""",
+                (release_id,),
+            ).fetchone()
+            if release is None or release["sealed_at"] is None:
+                raise ValidationError(
+                    "Hybrid coverage requires an existing sealed pinned release."
+                )
+            rows = connection.execute(
+                """SELECT 'objective' AS target_kind,
+                          evidence.objective_id AS target_id,
+                          evidence.family_id
+                   FROM learner_objective_families evidence
+                   WHERE evidence.learner_id = ?
+                     AND EXISTS (
+                         SELECT 1
+                         FROM release_question_objectives direct
+                         JOIN questions question
+                           ON question.id = direct.question_id
+                         JOIN release_questions released
+                           ON released.release_id = direct.release_id
+                          AND released.question_id = direct.question_id
+                         WHERE direct.release_id = ?
+                           AND direct.objective_id = evidence.objective_id
+                           AND question.family_id = evidence.family_id
+                           AND released.status IN ('approved', 'calibrated')
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM question_revocations revoked
+                               WHERE revoked.question_id = question.id
+                           )
+                     )
+                   UNION ALL
+                   SELECT 'concept' AS target_kind,
+                          evidence.concept_id AS target_id,
+                          evidence.family_id
+                   FROM learner_skill_families evidence
+                   WHERE evidence.learner_id = ?
+                     AND EXISTS (
+                         SELECT 1
+                         FROM release_questions released
+                         JOIN questions question
+                           ON question.id = released.question_id
+                         JOIN question_concepts mapping
+                           ON mapping.question_id = question.id
+                          AND mapping.role = 'primary'
+                         WHERE released.release_id = ?
+                           AND released.status IN ('approved', 'calibrated')
+                           AND mapping.concept_id = evidence.concept_id
+                           AND question.family_id = evidence.family_id
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM question_revocations revoked
+                               WHERE revoked.question_id = question.id
+                           )
+                     )
+                   ORDER BY target_kind, target_id, family_id""",
+                (learner_id, release_id, learner_id, release_id),
+            ).fetchall()
+        for row in rows:
+            target = (row["target_kind"], row["target_id"])
+            family_id = row["family_id"]
+            if (
+                target[0] not in {"objective", "concept"}
+                or type(target[1]) is not str
+                or not target[1]
+                or type(family_id) is not str
+                or not family_id
+            ):
+                raise ValidationError(
+                    "Hybrid coverage found a malformed retrieval-family ledger."
+                )
+            if target not in families:
+                continue
+            if family_id in families[target]:
+                raise ValidationError(
+                    "Hybrid coverage found a duplicate retrieval family."
+                )
+            families[target].add(family_id)
+        for target, target_families in families.items():
+            counts[target] = len(target_families)
+        return counts
+
+    def _hybrid_coverage_by_question(
+        self,
+        questions: Iterable[Question],
+        *,
+        learner_id: str,
+        release_id: str,
+        objective_states: Mapping[str, ObjectiveState],
+        concept_states: Mapping[str, object],
+    ) -> dict[str, _HybridCoverage]:
+        """Resolve exact pre-selection burden, information, and retrieval state."""
+
+        candidates = tuple(questions)
+        question_ids = [question.id for question in candidates]
+        if (
+            any(
+                type(question_id) is not str or not question_id
+                for question_id in question_ids
+            )
+            or len(question_ids) != len(set(question_ids))
+        ):
+            raise ValidationError(
+                "Hybrid coverage requires unique non-empty question IDs."
+            )
+        targets = {
+            self._coverage_target(question) for question in candidates
+        }
+        retrieval_counts = self._successful_retrieval_family_counts(
+            learner_id, release_id, targets
+        )
+        by_target: dict[tuple[str, str], _HybridCoverage] = {}
+        for target_kind, target_id in sorted(targets):
+            if target_kind == "objective":
+                state = objective_states.get(target_id)
+                state_identity = (
+                    state.objective_id if state is not None else target_id
+                )
+            else:
+                state = concept_states.get(target_id)
+                state_identity = (
+                    state.concept_id if state is not None else target_id
+                )
+            if state_identity != target_id:
+                raise ValidationError(
+                    "Hybrid coverage projection crossed adaptive targets."
+                )
+            raw_exposures = state.exposures if state is not None else 0
+            diagnostic_information = (
+                state.evidence_mass if state is not None else 0.0
+            )
+            by_target[(target_kind, target_id)] = _HybridCoverage(
+                raw_exposures=raw_exposures,
+                diagnostic_information=diagnostic_information,
+                successful_retrieval_families=retrieval_counts[
+                    (target_kind, target_id)
+                ],
+            )
+        return {
+            question.id: by_target[self._coverage_target(question)]
+            for question in candidates
+        }
+
+    @staticmethod
     def _fair_coverage_candidates(
         questions: Iterable[Question],
         *,
-        target_exposures: Mapping[str, int],
+        coverage_by_question: Mapping[str, _HybridCoverage],
         persistent_gap_objective_ids: set[str],
     ) -> tuple[list[Question], int, set[str]]:
-        """Keep the breadth frontier while admitting qualified due gaps."""
+        """Apply hybrid breadth without confusing burden, evidence, and skill."""
 
         candidates = list(questions)
         if not candidates:
@@ -679,26 +928,79 @@ class AdaptivePolicy:
                 "Fair-coverage selection requires at least one candidate."
             )
         if any(
-            question.id not in target_exposures
-            or type(target_exposures[question.id]) is not int
-            or target_exposures[question.id] < 0
+            question.id not in coverage_by_question
+            or not isinstance(
+                coverage_by_question[question.id], _HybridCoverage
+            )
             for question in candidates
         ):
             raise ValidationError(
-                "Fair-coverage target exposures are incomplete or invalid."
+                "Fair-coverage hybrid state is incomplete or invalid."
             )
-        minimum = min(target_exposures[question.id] for question in candidates)
-        selected = [
-            question
+        minimum = min(
+            coverage_by_question[question.id].raw_exposures
             for question in candidates
-            if target_exposures[question.id] == minimum
-            or question.objective_id in persistent_gap_objective_ids
+        )
+        if minimum == 0:
+            # Complete an initial breadth sweep before a previously observed
+            # persistent gap may bypass an entirely unseen target.
+            ordinary = [
+                question
+                for question in candidates
+                if coverage_by_question[question.id].raw_exposures == 0
+            ]
+            persistent_candidates: list[Question] = []
+        else:
+            burden_limit = minimum + HYBRID_COVERAGE_RAW_BURDEN_SLACK
+            burden_safe = [
+                question
+                for question in candidates
+                if coverage_by_question[question.id].raw_exposures
+                <= burden_limit
+            ]
+            minimum_retrieval = min(
+                coverage_by_question[
+                    question.id
+                ].successful_retrieval_families
+                for question in burden_safe
+            )
+            retrieval_frontier = [
+                question
+                for question in burden_safe
+                if coverage_by_question[
+                    question.id
+                ].successful_retrieval_families
+                == minimum_retrieval
+            ]
+            minimum_information = min(
+                coverage_by_question[
+                    question.id
+                ].diagnostic_information
+                for question in retrieval_frontier
+            )
+            ordinary = [
+                question
+                for question in retrieval_frontier
+                if coverage_by_question[
+                    question.id
+                ].diagnostic_information
+                == minimum_information
+            ]
+            persistent_candidates = [
+                question
+                for question in candidates
+                if question.objective_id in persistent_gap_objective_ids
+            ]
+        selected_ids = {
+            question.id for question in (*ordinary, *persistent_candidates)
+        }
+        selected = [
+            question for question in candidates if question.id in selected_ids
         ]
         bypassed = {
             question.objective_id
-            for question in selected
-            if question.objective_id in persistent_gap_objective_ids
-            and target_exposures[question.id] > minimum
+            for question in persistent_candidates
+            if coverage_by_question[question.id].raw_exposures > minimum
         }
         return selected, minimum, {
             objective_id for objective_id in bypassed if objective_id is not None
@@ -709,14 +1011,35 @@ class AdaptivePolicy:
         if now.tzinfo is None or now.utcoffset() is None:
             raise ValidationError("now must be timezone-aware.")
         now = now.astimezone(timezone.utc)
-        for _ in range(4):
+        exploration_fallback: tuple[str, tuple[str, ...]] | None = None
+        retries = 0
+        while retries < 4:
             try:
-                return self._choose_once(session_id, now=now)
+                return self._choose_once(
+                    session_id,
+                    now=now,
+                    allow_exploration=exploration_fallback is None,
+                    exploration_fallback=exploration_fallback,
+                )
+            except _ExplorationUnserviceable as exc:
+                if exploration_fallback is not None:
+                    raise ValidationError(
+                        "Requested-scope fallback attempted exploration twice."
+                    ) from exc
+                exploration_fallback = (exc.reason, exc.topic_ids)
             except _RetrySelection:
+                retries += 1
                 continue
         raise ExhaustedError("Selection state changed repeatedly; retry the request.")
 
-    def _choose_once(self, session_id: str, *, now: datetime) -> Presentation:
+    def _choose_once(
+        self,
+        session_id: str,
+        *,
+        now: datetime,
+        allow_exploration: bool = True,
+        exploration_fallback: tuple[str, tuple[str, ...]] | None = None,
+    ) -> Presentation:
         session = self.database.get_session(session_id)
         if session["status"] != "active":
             raise ExhaustedError(f"Session {session_id} is {session['status']}.")
@@ -740,6 +1063,28 @@ class AdaptivePolicy:
                 or not learner_row
             ):
                 raise _RetrySelection()
+            self.database.require_learner_evidence_safe(
+                session["learner_id"],
+                connection,
+            )
+            open_performance_attempt = connection.execute(
+                """SELECT attempt.id
+                   FROM performance_attempts attempt
+                   WHERE attempt.session_id = ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM performance_actions terminal
+                         WHERE terminal.attempt_id = attempt.id
+                           AND terminal.action_type IN ('submitted', 'abandoned')
+                     )
+                   ORDER BY attempt.started_at, attempt.id LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+            if open_performance_attempt is not None:
+                raise ConflictError(
+                    "Session has an active performance task "
+                    f"{open_performance_attempt['id']}; submit or abandon it "
+                    "before selecting another question."
+                )
             learner_revision = learner_row["revision"]
             pending_row = connection.execute(
                 """SELECT decision.*, revocation.revoked_at AS emergency_revoked_at
@@ -767,6 +1112,17 @@ class AdaptivePolicy:
             selection_policy_version = (
                 selection_boundary[1] if selection_boundary else None
             )
+            pending_activation_safe = True
+            if pending_row is not None:
+                pending_question = self.database.get_question(
+                    pending_row["question_id"],
+                    connection,
+                    release_id=pending_row["corpus_release_id"],
+                )
+                pending_activation_safe = question_runtime_activation_safe(
+                    pending_question,
+                    status=pending_row["question_status"],
+                )
             if (
                 pending_row
                 and selection_policy_version
@@ -779,6 +1135,7 @@ class AdaptivePolicy:
             if (
                 pending_row
                 and pending_row["emergency_revoked_at"] is None
+                and pending_activation_safe
                 and pending_row["learner_revision"] == learner_revision
                 and selection_model_version == self.learner_model.model_version
                 and selection_policy_version == POLICY_VERSION
@@ -789,13 +1146,17 @@ class AdaptivePolicy:
                     "question_emergency_revoked"
                     if pending_row["emergency_revoked_at"] is not None
                     else (
-                        "learner_model_changed"
-                        if selection_model_version
-                        != self.learner_model.model_version
+                        "question_activation_provenance_invalid"
+                        if not pending_activation_safe
                         else (
-                            "policy_changed"
-                            if selection_policy_version != POLICY_VERSION
-                            else "learner_projection_advanced"
+                            "learner_model_changed"
+                            if selection_model_version
+                            != self.learner_model.model_version
+                            else (
+                                "policy_changed"
+                                if selection_policy_version != POLICY_VERSION
+                                else "learner_projection_advanced"
+                            )
                         )
                     )
                 )
@@ -867,7 +1228,9 @@ class AdaptivePolicy:
         )
         exploration_topic_ids: tuple[str, ...] = ()
         exploring = False
-        if self._should_explore(session, phase, recent_performance):
+        if allow_exploration and self._should_explore(
+            session, phase, recent_performance
+        ):
             catalog = self.database.get_catalog(release_id)
             topic = next(
                 (item for item in catalog["topics"] if item["id"] == topic_id),
@@ -892,13 +1255,8 @@ class AdaptivePolicy:
             session["learner_id"]
         )
         release_objectives = self.database.get_learning_objectives(release_id)
-        stored_states = self.learner_model.concept_states_with_objective_floor(
-            learner_id=session["learner_id"],
-            concepts=concepts,
-            stored_states=persisted_concept_states,
-            objectives=release_objectives,
-            stored_objective_states=objective_states,
-            now=now,
+        cold_objective_states = self.learner_model.initial_objective_states(
+            session["learner_id"], release_objectives
         )
         # Objective projection is substantially more expensive than looking up
         # a Gaussian concept state: v6 applies retention to a full fixed-grid
@@ -909,14 +1267,27 @@ class AdaptivePolicy:
         for objective in release_objectives:
             objective_state = objective_states.get(objective.id)
             if objective_state is None:
-                objective_state = self.learner_model.initial_objective_state(
-                    session["learner_id"], objective
-                )
+                objective_state = cold_objective_states[objective.id]
             projected_objective_states[objective.id] = (
                 self.learner_model.project_objective_state(
                     objective_state, objective, now
                 )
             )
+        projected_objective_states = MappingProxyType(
+            projected_objective_states
+        )
+        floor_projection = (
+            self.learner_model.concept_projection_with_objective_floor(
+                learner_id=session["learner_id"],
+                concepts=concepts,
+                stored_states=persisted_concept_states,
+                objectives=release_objectives,
+                stored_objective_states=objective_states,
+                now=now,
+                projected_objective_states=projected_objective_states,
+            )
+        )
+        stored_states = floor_projection.states
         focus_objective_id = session.get("focus_objective_id")
         target_ids = [session["focus_concept_id"]] if session["focus_concept_id"] else list(scope)
         target_means = []
@@ -1027,6 +1398,10 @@ class AdaptivePolicy:
                     by_id.setdefault(reserve.id, reserve)
             questions = list(by_id.values())
         if not questions:
+            if exploring:
+                raise _ExplorationUnserviceable(
+                    "no_approved_questions", exploration_topic_ids
+                )
             target = topic_id or session["root_concept_id"]
             raise ExhaustedError(f"Corpus gap: no approved questions cover {target}.")
         if (
@@ -1086,8 +1461,36 @@ class AdaptivePolicy:
             reuse_eligible.append(question)
         questions = reuse_eligible
         if not questions:
+            if exploring:
+                raise _ExplorationUnserviceable(
+                    "no_due_independent_family", exploration_topic_ids
+                )
             raise ExhaustedError(
                 "No safely independent question family is due yet for this learner."
+            )
+        if (
+            phase == SessionPhase.REVIEW
+            and not exploring
+            and focus_objective_id is None
+            and not any(
+                question.id in main_candidate_ids
+                and (
+                    question.objective.primary_concept_id
+                    if question.objective is not None
+                    else question.primary_concept_id
+                )
+                in owned_targets
+                for question in questions
+            )
+        ):
+            # Release-wide objective reserves and questions attached through a
+            # supporting concept can remain due even when nothing owned by the
+            # requested curriculum is due.  They are not evidence of a corpus
+            # deficit and must not enqueue an authoring job for the requested
+            # topic.
+            raise ExhaustedError(
+                "No safely independent question family is due yet for the "
+                "requested review target."
             )
         recent = list(session["recent_families"])
         focus_concept = session["focus_concept_id"]
@@ -1103,6 +1506,10 @@ class AdaptivePolicy:
             and question.family_id not in recent[-4:]
         ]
         if not independent_pool:
+            if exploring:
+                raise _ExplorationUnserviceable(
+                    "no_unseen_independent_family", exploration_topic_ids
+                )
             raise ExhaustedError(
                 "Corpus gap: no unseen independent item family remains in this session."
             )
@@ -1435,6 +1842,11 @@ class AdaptivePolicy:
                 and serviceable(question)
             ]
             if not safe:
+                if exploring:
+                    raise _ExplorationUnserviceable(
+                        "no_safely_serviceable_question",
+                        exploration_topic_ids,
+                    )
                 raise ExhaustedError(
                     "Corpus gap: no safely serviceable main question remains while preserving "
                     "independent repair and verification families."
@@ -1496,6 +1908,13 @@ class AdaptivePolicy:
                         active_misconception_revisit = misconception_id
                         break
 
+        hybrid_coverage_by_question = self._hybrid_coverage_by_question(
+            eligible,
+            learner_id=session["learner_id"],
+            release_id=release_id,
+            objective_states=objective_states,
+            concept_states=persisted_concept_states,
+        )
         fair_coverage_exposure: int | None = None
         persistent_gap_revisit_details: dict[str, dict[str, object]] = {}
         if (
@@ -1510,19 +1929,6 @@ class AdaptivePolicy:
                 learner_id=session["learner_id"],
             )
 
-            def evidence_target_exposures(question: Question) -> int:
-                if question.objective_id is not None:
-                    state = objective_states.get(question.objective_id)
-                else:
-                    state = persisted_concept_states.get(
-                        question.primary_concept_id
-                    )
-                return int(state.exposures) if state is not None else 0
-
-            target_exposures = {
-                question.id: evidence_target_exposures(question)
-                for question in eligible
-            }
             eligible_objective_ids = {
                 question.objective_id
                 for question in eligible
@@ -1556,9 +1962,7 @@ class AdaptivePolicy:
                         "Observed objective-family evidence lacks a durable "
                         f"objective projection: {objective_id}."
                     )
-                cold_start = self.learner_model.initial_objective_state(
-                    session["learner_id"], objective
-                )
+                cold_start = cold_objective_states[objective.id]
                 history = episode_history.get(objective_id)
                 prior_spends = (
                     int(history["spends"]) if history is not None else 0
@@ -1643,17 +2047,13 @@ class AdaptivePolicy:
             # revisit episode. Its second token survives the first response's
             # review-clock update, but only after a non-target response and only
             # while the exact gap and a distinct safe family remain.
-            target_exposures = {
-                question.id: target_exposures[question.id]
-                for question in eligible
-            }
             (
                 eligible,
                 fair_coverage_exposure,
                 _,
             ) = self._fair_coverage_candidates(
                 eligible,
-                target_exposures=target_exposures,
+                coverage_by_question=hybrid_coverage_by_question,
                 persistent_gap_objective_ids=set(qualified_persistent_gaps),
             )
             # Mark a qualified spend even when that objective happened to sit
@@ -1709,6 +2109,7 @@ class AdaptivePolicy:
             stored_states=stored_states,
             now=now,
             concept_ids={question.primary_concept_id for question in eligible},
+            intrinsic_overrides=floor_projection.exact_floors,
         )
         potential_family_powers: dict[str, float] | None = None
         if (
@@ -1751,11 +2152,16 @@ class AdaptivePolicy:
                 readiness=readiness,
                 now=now,
                 potential_family_powers=potential_family_powers,
+                coverage=hybrid_coverage_by_question[question.id],
             )
             for question in eligible
         ]
         scores.sort(key=lambda score: (-score.total, score.question_id))
         if not scores:
+            if exploring:
+                raise _ExplorationUnserviceable(
+                    "no_scored_candidate", exploration_topic_ids
+                )
             raise ExhaustedError("Corpus gap: the policy found no eligible question.")
 
         top_k = scores[: min(5, len(scores))]
@@ -1768,7 +2174,15 @@ class AdaptivePolicy:
         order_rng = random.Random(f"options:{session['rng_seed']}:{session['step']}:{chosen.id}")
         order_rng.shuffle(option_ids)
 
-        digest_material = "|".join(f"{score.question_id}:{score.total:.8f}" for score in scores)
+        digest_material = "|".join(
+            (
+                f"{score.question_id}:{score.total:.8f}:"
+                f"{score.coverage_raw_exposures}:"
+                f"{score.coverage_diagnostic_information:.12f}:"
+                f"{score.coverage_successful_retrieval_families}"
+            )
+            for score in scores
+        )
         candidate_digest = hashlib.sha256(digest_material.encode("utf-8")).hexdigest()
         rationale = self._rationale(
             chosen,
@@ -1777,6 +2191,7 @@ class AdaptivePolicy:
             focus_concept,
             focus_misconception,
             exploration_topic_ids=exploration_topic_ids if exploring else (),
+            exploration_fallback=exploration_fallback,
             fair_coverage_exposure=fair_coverage_exposure,
             persistent_gap_revisit=(
                 persistent_gap_revisit_details.get(chosen.objective_id)
@@ -1794,6 +2209,37 @@ class AdaptivePolicy:
             current_learner = connection.execute(
                 "SELECT revision FROM learners WHERE id = ?", (session["learner_id"],)
             ).fetchone()
+            # Candidate scoring and randomized top-k sampling happen outside
+            # the writer lock. A safety migration can quarantine historical
+            # evidence without changing learner/session revisions, so close
+            # that race before any decision or event is written.
+            self.database.require_learner_evidence_safe(
+                session["learner_id"],
+                connection,
+            )
+            # Scoring runs outside the writer transaction. A performance task
+            # can therefore start after the early reconciliation check without
+            # changing either session or learner revision. Recheck under this
+            # final serialized write boundary so a session can never expose a
+            # pending question and an open productive task at the same time.
+            open_performance_attempt = connection.execute(
+                """SELECT attempt.id
+                   FROM performance_attempts attempt
+                   WHERE attempt.session_id = ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM performance_actions terminal
+                         WHERE terminal.attempt_id = attempt.id
+                           AND terminal.action_type IN ('submitted', 'abandoned')
+                     )
+                   ORDER BY attempt.started_at, attempt.id LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+            if open_performance_attempt is not None:
+                raise ConflictError(
+                    "Session has an active performance task "
+                    f"{open_performance_attempt['id']}; submit or abandon it "
+                    "before selecting another question."
+                )
             release_question = connection.execute(
                 """SELECT rq.*, q.version, q.content_hash FROM release_questions rq
                    JOIN questions q ON q.id = rq.question_id
@@ -2040,6 +2486,7 @@ class AdaptivePolicy:
         readiness,
         now: datetime,
         potential_family_powers: Mapping[str, float] | None = None,
+        coverage: _HybridCoverage | None = None,
     ) -> CandidateScore:
         states = self.learner_model.states_for_question(
             session["learner_id"], question, concepts, stored_states, now
@@ -2237,6 +2684,19 @@ class AdaptivePolicy:
             kind_fit=kind_fit,
             continuity=continuity,
             boundary_fit=boundary_fit,
+            coverage_raw_exposures=(
+                coverage.raw_exposures if coverage is not None else 0
+            ),
+            coverage_diagnostic_information=(
+                coverage.diagnostic_information
+                if coverage is not None
+                else 0.0
+            ),
+            coverage_successful_retrieval_families=(
+                coverage.successful_retrieval_families
+                if coverage is not None
+                else 0
+            ),
         )
 
     @staticmethod
@@ -2267,6 +2727,7 @@ class AdaptivePolicy:
         focus_misconception: str | None,
         *,
         exploration_topic_ids: tuple[str, ...] = (),
+        exploration_fallback: tuple[str, tuple[str, ...]] | None = None,
         fair_coverage_exposure: int | None = None,
         persistent_gap_revisit: Mapping[str, object] | None = None,
         active_misconception_revisit: str | None = None,
@@ -2276,6 +2737,12 @@ class AdaptivePolicy:
             f"predicted_success={score.predicted_correct:.2f}",
             f"information={score.information_gain:.2f}",
             f"need={score.concept_need:.2f}",
+            "coverage_raw_exposures="
+            + str(score.coverage_raw_exposures),
+            "coverage_diagnostic_information="
+            + format(score.coverage_diagnostic_information, ".12f"),
+            "coverage_successful_retrieval_families="
+            + str(score.coverage_successful_retrieval_families),
         ]
         if focus_misconception and focus_misconception in question.misconception_ids:
             reasons.append(f"discriminates_misconception={focus_misconception}")
@@ -2290,6 +2757,14 @@ class AdaptivePolicy:
         if exploration_topic_ids:
             reasons.append(
                 "deliberate_related_topic_probe=" + ",".join(exploration_topic_ids)
+            )
+        elif exploration_fallback is not None:
+            fallback_reason, fallback_topic_ids = exploration_fallback
+            reasons.append(
+                "exploration_unserviceable="
+                + fallback_reason
+                + ":"
+                + ",".join(fallback_topic_ids)
             )
         elif score.continuity >= 0.70:
             reasons.append(f"continuity={score.continuity:.2f}")

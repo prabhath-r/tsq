@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import sqlite3
 import time
@@ -20,6 +21,8 @@ from .evidence import (
     ActionKind,
     ActionPhase,
     LearningAction,
+    action_trace_digest,
+    canonical_digest,
     canonical_json,
     summarize_actions,
 )
@@ -82,6 +85,12 @@ from .objective_posterior import (
     posterior_digest,
 )
 from .quality import audit_corpus
+from .provenance import (
+    generated_question_runtime_safe,
+    legacy_question_identity_payload,
+    legacy_unattested_member_compatible,
+    question_provenance_issues,
+)
 from .versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
     BOUND_QUESTION_SELECTED_EVENT_SCHEMA_VERSION,
@@ -99,7 +108,22 @@ from .versions import (
 )
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 17
+PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX = (
+    "performance-score-claim:v1:"
+)
+LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON = (
+    "Unreviewed generated question was active in a historical corpus release."
+)
+LEGACY_UNREVIEWED_GENERATED_REVOCATION_KEY_PREFIX = (
+    "corpus-safety:legacy-unreviewed-generated:v1:"
+)
+HISTORICAL_GENERATED_EVIDENCE_POLICY = (
+    "historical-generated-evidence-v1"
+)
+HISTORICAL_GENERATED_EVIDENCE_KEY_PREFIX = (
+    "learner-safety:historical-generated-evidence:v1:"
+)
 CURRENT_SCHEMA_TABLES = frozenset(
     {
         "attempts",
@@ -124,6 +148,11 @@ CURRENT_SCHEMA_TABLES = frozenset(
         "objective_grid_states",
         "objective_states",
         "options",
+        "performance_actions",
+        "performance_attempts",
+        "performance_scoring_claims",
+        "performance_task_releases",
+        "performance_tasks",
         "question_concepts",
         "question_revocations",
         "question_sources",
@@ -136,6 +165,7 @@ CURRENT_SCHEMA_TABLES = frozenset(
         "release_objective_edges",
         "release_objective_graphs",
         "release_option_objectives",
+        "release_performance_tasks",
         "release_question_objectives",
         "release_question_topics",
         "release_questions",
@@ -144,13 +174,71 @@ CURRENT_SCHEMA_TABLES = frozenset(
         "release_topics",
         "sessions",
         "skill_states",
+        "shadow_evidence_bundles",
         "sources",
         "stream_heads",
+        "task_evaluations",
     }
 )
 # Compatibility name retained for code that previously imported store's
 # singular current-grid identifier. Immutable dispatch uses explicit versions.
 OBJECTIVE_GRID_MODEL_VERSION = OBJECTIVE_GRID_V8_MODEL_VERSION
+
+
+def performance_scoring_claim_event_key(command_hash: str) -> str:
+    """Return the reserved event idempotency key for a scoring admission."""
+
+    if (
+        type(command_hash) is not str
+        or len(command_hash) != 64
+        or any(character not in "0123456789abcdef" for character in command_hash)
+    ):
+        raise ValidationError(
+            "Performance scoring claim command hash must be lowercase SHA-256."
+        )
+    return PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX + command_hash
+
+
+def performance_scoring_claim_payload(
+    *,
+    claim_id: str,
+    caller_idempotency_key: str | None,
+    attempt_id: str,
+    evaluation_id: str,
+    through_sequence: int,
+    provider_id: str,
+    provider_version: str,
+    action_trace_digest_value: str,
+    command_hash: str,
+    claimed_at: str,
+) -> dict[str, Any]:
+    """Return the closed event payload for one provider-callback admission."""
+
+    return {
+        "claim_id": claim_id,
+        "caller_idempotency_key": caller_idempotency_key,
+        "attempt_id": attempt_id,
+        "evaluation_id": evaluation_id,
+        "through_sequence": through_sequence,
+        "provider_id": provider_id,
+        "provider_version": provider_version,
+        "action_trace_digest": action_trace_digest_value,
+        "command_hash": command_hash,
+        "claimed_at": claimed_at,
+    }
+
+
+def question_runtime_activation_safe(
+    question: Question,
+    *,
+    status: str | None = None,
+) -> bool:
+    """Return whether a stored question may contribute new learner evidence."""
+
+    return generated_question_runtime_safe(
+        question.provenance,
+        status=status or question.status.value,
+    )
 
 OBJECTIVE_STATE_WITH_GRID_SELECT = """SELECT
     state.learner_id,
@@ -392,6 +480,50 @@ def question_content_hash(question: Question) -> str:
         immutable, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _legacy_question_identity(question: Question) -> dict[str, object]:
+    return legacy_question_identity_payload(
+        question_id=question.id,
+        version=question.version,
+        family_id=question.family_id,
+        stem=question.stem,
+        kind=question.kind.value,
+        difficulty=question.difficulty,
+        discrimination=question.discrimination,
+        guess_rate=question.guess_rate,
+        slip_rate=question.slip_rate,
+        concepts=(
+            (mapping.concept_id, mapping.weight, mapping.role.value)
+            for mapping in question.concepts
+        ),
+        options=(
+            (
+                option.id,
+                option.text,
+                option.correct,
+                option.rationale,
+                option.misconception_id,
+                option.diagnostic_objective_id,
+            )
+            for option in question.options
+        ),
+        source_ids=question.source_ids,
+        provenance=question.provenance,
+        tags=question.tags,
+        revision_of=question.revision_of,
+        learning_objective_id=question.objective_id,
+    )
+
+
+def _legacy_unreviewed_generated_revocation_key(question_id: str) -> str:
+    identity = hashlib.sha256(question_id.encode("utf-8")).hexdigest()
+    return LEGACY_UNREVIEWED_GENERATED_REVOCATION_KEY_PREFIX + identity
+
+
+def _historical_generated_evidence_key(attempt_id: str) -> str:
+    identity = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()
+    return HISTORICAL_GENERATED_EVIDENCE_KEY_PREFIX + identity
 
 
 def _content_hash(payload: dict[str, Any]) -> str:
@@ -928,6 +1060,209 @@ ON learning_actions(session_id, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_learning_actions_learner
 ON learning_actions(learner_id, occurred_at);
 
+-- Productive-skill tasks are versioned independently from selected-response
+-- questions, but every task release is pinned to the exact curriculum release
+-- whose concepts it names.  The operational ledger is shadow-only: none of
+-- these tables is a learner projection or a certification projection.
+CREATE TABLE IF NOT EXISTS performance_tasks (
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL CHECK(task_version > 0),
+    task_digest TEXT NOT NULL UNIQUE CHECK(
+        length(task_digest) = 64
+        AND task_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    definition_json TEXT NOT NULL CHECK(
+        length(definition_json) <= 1048576
+        AND json_valid(definition_json)
+        AND json_type(definition_json) = 'object'
+    ),
+    imported_at TEXT NOT NULL,
+    PRIMARY KEY(task_id, task_version)
+);
+
+CREATE TABLE IF NOT EXISTS performance_task_releases (
+    id TEXT PRIMARY KEY,
+    corpus_release_id TEXT NOT NULL REFERENCES corpus_releases(id),
+    bundle_hash TEXT NOT NULL UNIQUE CHECK(
+        length(bundle_hash) = 64
+        AND bundle_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 256),
+    review_json TEXT NOT NULL CHECK(
+        length(review_json) <= 16384
+        AND json_valid(review_json)
+        AND json_type(review_json) = 'object'
+    ),
+    created_at TEXT NOT NULL,
+    sealed_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS release_performance_tasks (
+    release_id TEXT NOT NULL REFERENCES performance_task_releases(id),
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL,
+    task_digest TEXT NOT NULL CHECK(
+        length(task_digest) = 64
+        AND task_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    status TEXT NOT NULL CHECK(status IN ('quarantined', 'pilot', 'approved')),
+    PRIMARY KEY(release_id, task_id, task_version),
+    FOREIGN KEY(task_id, task_version)
+        REFERENCES performance_tasks(task_id, task_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_release_performance_tasks_status
+ON release_performance_tasks(release_id, status, task_id, task_version);
+
+CREATE TABLE IF NOT EXISTS performance_attempts (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    task_release_id TEXT NOT NULL REFERENCES performance_task_releases(id),
+    corpus_release_id TEXT NOT NULL REFERENCES corpus_releases(id),
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL,
+    task_digest TEXT NOT NULL CHECK(
+        length(task_digest) = 64
+        AND task_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    learner_id TEXT NOT NULL REFERENCES learners(id),
+    session_revision INTEGER NOT NULL CHECK(session_revision >= 0),
+    learner_revision INTEGER NOT NULL CHECK(learner_revision >= 0),
+    started_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    command_hash TEXT NOT NULL CHECK(
+        length(command_hash) = 64
+        AND command_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    FOREIGN KEY(task_release_id, task_id, task_version)
+        REFERENCES release_performance_tasks(release_id, task_id, task_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_performance_attempts_session
+ON performance_attempts(session_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_performance_attempts_learner
+ON performance_attempts(learner_id, started_at);
+
+CREATE TABLE IF NOT EXISTS performance_actions (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    attempt_id TEXT NOT NULL REFERENCES performance_attempts(id),
+    sequence INTEGER NOT NULL CHECK(sequence >= 0),
+    phase TEXT NOT NULL CHECK(phase IN ('unassisted', 'assisted', 'post_feedback')),
+    action_type TEXT NOT NULL CHECK(action_type IN (
+        'started', 'hint_requested', 'answer_revised', 'artifact_checkpoint',
+        'explanation_checkpoint', 'check_run', 'tool_used', 'submitted',
+        'feedback_shown', 'abandoned'
+    )),
+    payload_json TEXT NOT NULL CHECK(
+        length(payload_json) <= 16384
+        AND json_valid(payload_json)
+        AND json_type(payload_json) = 'object'
+    ),
+    elapsed_ms INTEGER CHECK(elapsed_ms IS NULL OR elapsed_ms >= 0),
+    occurred_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    command_hash TEXT NOT NULL CHECK(
+        length(command_hash) = 64
+        AND command_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    UNIQUE(attempt_id, sequence)
+);
+
+CREATE INDEX IF NOT EXISTS idx_performance_actions_attempt
+ON performance_actions(attempt_id, sequence);
+
+-- A scoring claim is an immutable admission record for one logical provider
+-- callback.  Its command hash, and the caller key when one is supplied, are
+-- committed before the callback runs.  This provides cross-process,
+-- at-most-once callback admission even for no-key callers.  A claim
+-- deliberately has no automatic expiry: after an interrupted callback the
+-- system fails closed instead of guessing whether an external scorer ran.
+CREATE TABLE IF NOT EXISTS performance_scoring_claims (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    idempotency_key TEXT UNIQUE CHECK(
+        idempotency_key IS NULL
+        OR (
+            length(idempotency_key) BETWEEN 1 AND 256
+            AND idempotency_key = trim(idempotency_key)
+        )
+    ),
+    attempt_id TEXT NOT NULL,
+    evaluation_id TEXT NOT NULL UNIQUE CHECK(
+        length(evaluation_id) BETWEEN 1 AND 128
+    ),
+    through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+    provider_id TEXT NOT NULL CHECK(length(trim(provider_id)) BETWEEN 1 AND 128),
+    provider_version TEXT NOT NULL CHECK(
+        length(trim(provider_version)) BETWEEN 1 AND 128
+    ),
+    action_trace_digest TEXT NOT NULL CHECK(
+        length(action_trace_digest) = 64
+        AND action_trace_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    command_hash TEXT NOT NULL UNIQUE CHECK(
+        length(command_hash) = 64
+        AND command_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    claimed_at TEXT NOT NULL,
+    FOREIGN KEY(attempt_id) REFERENCES performance_attempts(id)
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+CREATE TABLE IF NOT EXISTS task_evaluations (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    attempt_id TEXT NOT NULL REFERENCES performance_attempts(id),
+    through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+    evaluation_digest TEXT NOT NULL CHECK(
+        length(evaluation_digest) = 64
+        AND evaluation_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    evaluation_json TEXT NOT NULL CHECK(
+        length(evaluation_json) <= 1048576
+        AND json_valid(evaluation_json)
+        AND json_type(evaluation_json) = 'object'
+    ),
+    authority_json TEXT NOT NULL CHECK(
+        length(authority_json) <= 65536
+        AND json_valid(authority_json)
+        AND json_type(authority_json) = 'object'
+    ),
+    recorded_at TEXT NOT NULL,
+    command_hash TEXT NOT NULL CHECK(
+        length(command_hash) = 64
+        AND command_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    UNIQUE(attempt_id, evaluation_digest)
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_evaluations_attempt
+ON task_evaluations(attempt_id, recorded_at);
+
+CREATE TABLE IF NOT EXISTS shadow_evidence_bundles (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    evaluation_id TEXT NOT NULL UNIQUE REFERENCES task_evaluations(id),
+    attempt_id TEXT NOT NULL REFERENCES performance_attempts(id),
+    bundle_digest TEXT NOT NULL CHECK(
+        length(bundle_digest) = 64
+        AND bundle_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    bundle_json TEXT NOT NULL CHECK(
+        length(bundle_json) <= 1048576
+        AND json_valid(bundle_json)
+        AND json_type(bundle_json) = 'object'
+    ),
+    projection_applied INTEGER NOT NULL DEFAULT 0
+        CHECK(projection_applied = 0),
+    certification_applied INTEGER NOT NULL DEFAULT 0
+        CHECK(certification_applied = 0),
+    recorded_at TEXT NOT NULL,
+    UNIQUE(attempt_id, bundle_digest)
+);
+
 CREATE TABLE IF NOT EXISTS skill_states (
     learner_id TEXT NOT NULL REFERENCES learners(id),
     concept_id TEXT NOT NULL REFERENCES concepts(id),
@@ -1163,6 +1498,431 @@ CREATE TRIGGER IF NOT EXISTS question_revocations_no_delete
 BEFORE DELETE ON question_revocations BEGIN
     SELECT RAISE(ABORT, 'question revocations are append-only');
 END;
+
+CREATE TRIGGER IF NOT EXISTS performance_tasks_no_update
+BEFORE UPDATE ON performance_tasks BEGIN
+    SELECT RAISE(ABORT, 'performance tasks are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_tasks_no_delete
+BEFORE DELETE ON performance_tasks BEGIN
+    SELECT RAISE(ABORT, 'performance tasks are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_task_releases_no_update
+BEFORE UPDATE ON performance_task_releases BEGIN
+    SELECT RAISE(ABORT, 'performance task releases are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_task_releases_no_delete
+BEFORE DELETE ON performance_task_releases BEGIN
+    SELECT RAISE(ABORT, 'performance task releases are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS release_performance_tasks_validate_insert
+BEFORE INSERT ON release_performance_tasks BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM performance_tasks task
+        WHERE task.task_id = NEW.task_id
+          AND task.task_version = NEW.task_version
+          AND task.task_digest = NEW.task_digest
+    ) THEN RAISE(ABORT, 'performance task release digest mismatch') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS release_performance_tasks_no_update
+BEFORE UPDATE ON release_performance_tasks BEGIN
+    SELECT RAISE(ABORT, 'performance task membership is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS release_performance_tasks_no_delete
+BEFORE DELETE ON release_performance_tasks BEGIN
+    SELECT RAISE(ABORT, 'performance task membership is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_attempts_validate_insert
+BEFORE INSERT ON performance_attempts BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM sessions session
+        JOIN learners learner ON learner.id = session.learner_id
+        JOIN performance_task_releases task_release
+          ON task_release.id = NEW.task_release_id
+        JOIN release_performance_tasks member
+          ON member.release_id = task_release.id
+         AND member.task_id = NEW.task_id
+         AND member.task_version = NEW.task_version
+        WHERE session.id = NEW.session_id
+          AND session.learner_id = NEW.learner_id
+          AND session.corpus_release_id = NEW.corpus_release_id
+          AND session.corpus_release_id = task_release.corpus_release_id
+          AND session.status = 'active'
+          AND session.revision = NEW.session_revision
+          AND learner.revision = NEW.learner_revision
+          AND member.task_digest = NEW.task_digest
+          AND member.status IN ('pilot', 'approved')
+    ) THEN RAISE(ABORT, 'performance attempt violates its release/session boundary') END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM decisions decision
+        WHERE decision.session_id = NEW.session_id
+          AND decision.consumed_at IS NULL
+          AND decision.invalidated_at IS NULL
+    ) THEN RAISE(ABORT, 'performance attempt conflicts with a pending question') END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM performance_attempts prior
+        WHERE prior.session_id = NEW.session_id
+          AND NOT EXISTS (
+              SELECT 1 FROM performance_actions terminal
+              WHERE terminal.attempt_id = prior.id
+                AND terminal.action_type IN ('submitted', 'abandoned')
+          )
+    ) THEN RAISE(ABORT, 'session already has an active performance attempt') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM events event
+        WHERE event.event_id = NEW.event_id
+          AND event.event_type = 'PerformanceTaskStarted'
+          AND event.schema_version = 1
+          AND event.stream_id = 'learner:' || NEW.learner_id
+          AND event.learner_id = NEW.learner_id
+          AND event.session_id = NEW.session_id
+          AND event.occurred_at = NEW.started_at
+          AND event.recorded_at = NEW.recorded_at
+          AND json_extract(event.payload_json, '$.attempt_id') = NEW.id
+          AND json_extract(event.payload_json, '$.task_release_id') = NEW.task_release_id
+          AND json_extract(event.payload_json, '$.task_id') = NEW.task_id
+          AND json_extract(event.payload_json, '$.task_version') = NEW.task_version
+          AND json_extract(event.payload_json, '$.task_digest') = NEW.task_digest
+    ) THEN RAISE(ABORT, 'performance attempt does not match its event') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_attempts_no_update
+BEFORE UPDATE ON performance_attempts BEGIN
+    SELECT RAISE(ABORT, 'performance attempts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_attempts_no_delete
+BEFORE DELETE ON performance_attempts BEGIN
+    SELECT RAISE(ABORT, 'performance attempts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_actions_validate_insert
+BEFORE INSERT ON performance_actions BEGIN
+    SELECT CASE WHEN NEW.sequence != COALESCE((
+        SELECT MAX(action.sequence) + 1
+        FROM performance_actions action
+        WHERE action.attempt_id = NEW.attempt_id
+    ), 0) THEN RAISE(ABORT, 'performance action sequence is not contiguous') END;
+    SELECT CASE WHEN NEW.sequence = 0 AND NEW.action_type != 'started'
+        THEN RAISE(ABORT, 'performance trace must start explicitly') END;
+    SELECT CASE WHEN NEW.sequence > 0 AND NEW.action_type = 'started'
+        THEN RAISE(ABORT, 'performance trace cannot restart') END;
+    SELECT CASE WHEN NEW.action_type IN (
+        'started', 'submitted', 'abandoned', 'feedback_shown'
+    ) AND EXISTS (
+        SELECT 1 FROM performance_actions singleton
+        WHERE singleton.attempt_id = NEW.attempt_id
+          AND singleton.action_type = NEW.action_type
+    ) THEN RAISE(ABORT, 'performance lifecycle action cannot repeat') END;
+    SELECT CASE WHEN NEW.phase = 'post_feedback' AND NOT EXISTS (
+        SELECT 1 FROM performance_actions submission
+        WHERE submission.attempt_id = NEW.attempt_id
+          AND submission.action_type = 'submitted'
+    ) THEN RAISE(ABORT, 'post-feedback action precedes submission') END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM performance_actions terminal
+        WHERE terminal.attempt_id = NEW.attempt_id
+          AND terminal.action_type IN ('submitted', 'abandoned')
+    ) AND NEW.phase != 'post_feedback'
+        THEN RAISE(ABORT, 'pre-feedback action follows terminal checkpoint') END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM performance_actions terminal
+        WHERE terminal.attempt_id = NEW.attempt_id
+          AND terminal.action_type = 'abandoned'
+    ) THEN RAISE(ABORT, 'performance action follows abandonment') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM performance_attempts attempt
+        JOIN sessions session ON session.id = attempt.session_id
+        JOIN events start_event ON start_event.event_id = attempt.event_id
+        JOIN events action_event ON action_event.event_id = NEW.event_id
+        WHERE attempt.id = NEW.attempt_id
+          AND session.status = 'active'
+          AND action_event.event_type = 'PerformanceActionRecorded'
+          AND action_event.schema_version = 1
+          AND action_event.stream_id = 'learner:' || attempt.learner_id
+          AND action_event.learner_id = attempt.learner_id
+          AND action_event.session_id = attempt.session_id
+          AND action_event.causation_id = attempt.id
+          AND action_event.stream_version > start_event.stream_version
+          AND action_event.occurred_at = NEW.occurred_at
+          AND action_event.recorded_at = NEW.recorded_at
+          AND json_extract(action_event.payload_json, '$.action.id') = NEW.id
+          AND json_extract(action_event.payload_json, '$.action.trace_id') = NEW.attempt_id
+          AND json_extract(action_event.payload_json, '$.action.sequence') = NEW.sequence
+          AND json_extract(action_event.payload_json, '$.action.kind') = NEW.action_type
+          AND json_extract(action_event.payload_json, '$.action.phase') = NEW.phase
+    ) THEN RAISE(ABORT, 'performance action does not match its attempt/event') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_actions_no_update
+BEFORE UPDATE ON performance_actions BEGIN
+    SELECT RAISE(ABORT, 'performance actions are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_actions_no_delete
+BEFORE DELETE ON performance_actions BEGIN
+    SELECT RAISE(ABORT, 'performance actions are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_scoring_claims_validate_insert
+BEFORE INSERT ON performance_scoring_claims BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM events event
+        WHERE event.idempotency_key = NEW.idempotency_key
+          AND event.event_id != NEW.event_id
+    ) THEN RAISE(ABORT, 'scoring claim idempotency key already has an event') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM performance_attempts attempt
+        JOIN performance_actions submission
+          ON submission.attempt_id = attempt.id
+         AND submission.sequence = NEW.through_sequence
+         AND submission.action_type = 'submitted'
+        WHERE attempt.id = NEW.attempt_id
+    ) THEN RAISE(ABORT, 'scoring claim lacks its submitted trace boundary') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM events claim_event
+        JOIN performance_attempts attempt ON attempt.id = NEW.attempt_id
+        WHERE claim_event.event_id = NEW.event_id
+          AND claim_event.event_type IN (
+              'PerformanceScoringClaimed',
+              'PerformanceScoringClaimMigrated'
+          )
+          AND claim_event.schema_version = 1
+          AND claim_event.stream_id = 'learner:' || attempt.learner_id
+          AND claim_event.learner_id = attempt.learner_id
+          AND (
+              (
+                  claim_event.event_type = 'PerformanceScoringClaimed'
+                  AND claim_event.session_id = attempt.session_id
+              )
+              OR (
+                  claim_event.event_type = 'PerformanceScoringClaimMigrated'
+                  AND (
+                      claim_event.session_id IS NULL
+                      OR claim_event.session_id = attempt.session_id
+                  )
+              )
+          )
+          AND claim_event.idempotency_key =
+              'performance-score-claim:v1:' || NEW.command_hash
+          AND claim_event.correlation_id = NEW.attempt_id
+          AND claim_event.causation_id = NEW.attempt_id
+          AND json_extract(
+              claim_event.payload_json, '$.claim_id'
+          ) = NEW.id
+          AND json_extract(
+              claim_event.payload_json, '$.caller_idempotency_key'
+          ) IS NEW.idempotency_key
+          AND json_extract(
+              claim_event.payload_json, '$.attempt_id'
+          ) = NEW.attempt_id
+          AND json_extract(
+              claim_event.payload_json, '$.evaluation_id'
+          ) = NEW.evaluation_id
+          AND json_extract(
+              claim_event.payload_json, '$.through_sequence'
+          ) = NEW.through_sequence
+          AND json_extract(
+              claim_event.payload_json, '$.provider_id'
+          ) = NEW.provider_id
+          AND json_extract(
+              claim_event.payload_json, '$.provider_version'
+          ) = NEW.provider_version
+          AND json_extract(
+              claim_event.payload_json, '$.action_trace_digest'
+          ) = NEW.action_trace_digest
+          AND json_extract(
+              claim_event.payload_json, '$.command_hash'
+          ) = NEW.command_hash
+          AND json_extract(
+              claim_event.payload_json, '$.claimed_at'
+          ) = NEW.claimed_at
+    ) THEN RAISE(ABORT, 'scoring claim does not match its event') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_scoring_claims_no_update
+BEFORE UPDATE ON performance_scoring_claims BEGIN
+    SELECT RAISE(ABORT, 'performance scoring claims are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_scoring_claims_no_delete
+BEFORE DELETE ON performance_scoring_claims BEGIN
+    SELECT RAISE(ABORT, 'performance scoring claims are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS events_respect_performance_scoring_claim
+BEFORE INSERT ON events
+WHEN NEW.idempotency_key IS NOT NULL
+ AND EXISTS (
+     SELECT 1 FROM performance_scoring_claims claim
+     WHERE claim.idempotency_key = NEW.idempotency_key
+ )
+BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM performance_scoring_claims claim
+        WHERE claim.idempotency_key = NEW.idempotency_key
+          AND NEW.event_type = 'TaskEvaluationRecorded'
+          AND json_extract(
+              NEW.metadata_json, '$.command_hash'
+          ) = claim.command_hash
+          AND json_extract(
+              NEW.payload_json, '$.attempt_id'
+          ) = claim.attempt_id
+          AND json_extract(
+              NEW.payload_json, '$.through_sequence'
+          ) = claim.through_sequence
+          AND json_extract(
+              NEW.payload_json, '$.evaluation.id'
+          ) = claim.evaluation_id
+    ) THEN RAISE(
+        ABORT, 'event does not complete its performance scoring claim'
+    ) END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_evaluations_validate_scoring_claim
+BEFORE INSERT ON task_evaluations BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1
+        FROM performance_scoring_claims claim
+        JOIN events evaluation_event
+          ON evaluation_event.event_id = NEW.event_id
+        WHERE claim.command_hash = NEW.command_hash
+          AND (
+              claim.attempt_id != NEW.attempt_id
+              OR claim.evaluation_id != NEW.id
+              OR claim.through_sequence != NEW.through_sequence
+              OR evaluation_event.idempotency_key
+                 IS NOT claim.idempotency_key
+          )
+    ) THEN RAISE(
+        ABORT, 'task evaluation does not complete its scoring claim'
+    ) END;
+    SELECT CASE WHEN json_extract(
+        NEW.authority_json,
+        '$.normalized_result.normalization_mode'
+    ) = 'registered_provider' AND NOT EXISTS (
+        SELECT 1 FROM performance_scoring_claims claim
+        WHERE claim.command_hash = NEW.command_hash
+          AND claim.attempt_id = NEW.attempt_id
+          AND claim.evaluation_id = NEW.id
+          AND claim.through_sequence = NEW.through_sequence
+    ) AND NOT EXISTS (
+        SELECT 1 FROM events exemption
+        WHERE exemption.event_type = 'PerformanceScoringLegacyExempted'
+          AND exemption.schema_version = 1
+          AND json_extract(
+              exemption.payload_json, '$.evaluation_id'
+          ) = NEW.id
+          AND json_extract(
+              exemption.payload_json, '$.attempt_id'
+          ) = NEW.attempt_id
+          AND json_extract(
+              exemption.payload_json, '$.command_hash'
+          ) = NEW.command_hash
+    ) THEN RAISE(
+        ABORT, 'registered evaluation lacks its scoring claim'
+    ) END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_evaluations_validate_insert
+BEFORE INSERT ON task_evaluations BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1 FROM performance_actions submission
+        WHERE submission.attempt_id = NEW.attempt_id
+          AND submission.action_type = 'submitted'
+          AND submission.sequence = NEW.through_sequence
+    ) THEN RAISE(ABORT, 'task evaluation lacks its submitted trace boundary') END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM performance_attempts attempt
+        JOIN events evaluation_event ON evaluation_event.event_id = NEW.event_id
+        WHERE attempt.id = NEW.attempt_id
+          AND evaluation_event.event_type = 'TaskEvaluationRecorded'
+          AND evaluation_event.schema_version = 1
+          AND evaluation_event.stream_id = 'learner:' || attempt.learner_id
+          AND evaluation_event.learner_id = attempt.learner_id
+          AND evaluation_event.session_id = attempt.session_id
+          AND (
+              evaluation_event.causation_id = NEW.attempt_id
+              OR EXISTS (
+                  SELECT 1 FROM performance_scoring_claims claim
+                  WHERE claim.event_id = evaluation_event.causation_id
+                    AND claim.attempt_id = NEW.attempt_id
+                    AND claim.evaluation_id = NEW.id
+                    AND claim.command_hash = NEW.command_hash
+              )
+          )
+          AND evaluation_event.recorded_at = NEW.recorded_at
+          AND json_extract(evaluation_event.payload_json, '$.evaluation.id') = NEW.id
+          AND json_extract(
+              evaluation_event.payload_json, '$.evaluation_digest'
+          ) = NEW.evaluation_digest
+          AND json_extract(
+              evaluation_event.payload_json, '$.through_sequence'
+          ) = NEW.through_sequence
+    ) THEN RAISE(ABORT, 'task evaluation does not match its event') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_evaluations_no_update
+BEFORE UPDATE ON task_evaluations BEGIN
+    SELECT RAISE(ABORT, 'task evaluations are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS task_evaluations_no_delete
+BEFORE DELETE ON task_evaluations BEGIN
+    SELECT RAISE(ABORT, 'task evaluations are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS shadow_evidence_bundles_validate_insert
+BEFORE INSERT ON shadow_evidence_bundles BEGIN
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM task_evaluations evaluation
+        JOIN performance_attempts attempt ON attempt.id = evaluation.attempt_id
+        JOIN events bundle_event ON bundle_event.event_id = NEW.event_id
+        WHERE evaluation.id = NEW.evaluation_id
+          AND evaluation.attempt_id = NEW.attempt_id
+          AND bundle_event.event_type = 'ShadowEvidenceReduced'
+          AND bundle_event.schema_version = 1
+          AND bundle_event.stream_id = 'learner:' || attempt.learner_id
+          AND bundle_event.learner_id = attempt.learner_id
+          AND bundle_event.session_id = attempt.session_id
+          AND bundle_event.causation_id = evaluation.id
+          AND bundle_event.recorded_at = NEW.recorded_at
+          AND json_extract(bundle_event.payload_json, '$.bundle_id') = NEW.id
+          AND json_extract(
+              bundle_event.payload_json, '$.bundle_digest'
+          ) = NEW.bundle_digest
+          AND json_extract(
+              bundle_event.payload_json, '$.projection_applied'
+          ) = 0
+          AND json_extract(
+              bundle_event.payload_json, '$.certification_applied'
+          ) = 0
+    ) THEN RAISE(ABORT, 'shadow evidence does not match its evaluation/event') END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS shadow_evidence_bundles_no_update
+BEFORE UPDATE ON shadow_evidence_bundles BEGIN
+    SELECT RAISE(ABORT, 'shadow evidence bundles are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS shadow_evidence_bundles_no_delete
+BEFORE DELETE ON shadow_evidence_bundles BEGIN
+    SELECT RAISE(ABORT, 'shadow evidence bundles are immutable');
+END;
 """
 
 
@@ -1183,6 +1943,7 @@ class _TableSchemaContract:
     """Read-only structural contract for one application table."""
 
     name: str
+    definition: str
     columns: tuple[
         tuple[str, str, bool, str | None, int, int],
         ...,
@@ -1213,6 +1974,30 @@ class _CurrentSchemaContract:
 
 def _quote_sqlite_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
+
+
+def _execute_sql_script(
+    connection: sqlite3.Connection,
+    script: str,
+) -> None:
+    """Execute a SQL script without sqlite3.executescript's implicit commit.
+
+    SQLite DDL is transactional, but ``Connection.executescript`` commits any
+    pending transaction before it starts. Migration and guard installation
+    must stay inside the caller's serialized transaction, so split only where
+    SQLite itself recognizes a complete statement.
+    """
+
+    pending: list[str] = []
+    for line in script.splitlines(keepends=True):
+        pending.append(line)
+        statement = "".join(pending).strip()
+        if statement and sqlite3.complete_statement(statement):
+            connection.execute(statement)
+            pending.clear()
+    remainder = "".join(pending).strip()
+    if remainder:
+        raise RuntimeError("SQL script ended with an incomplete statement.")
 
 
 def _normalize_schema_sql(sql: str) -> str:
@@ -1273,6 +2058,92 @@ def _normalize_index_definition(sql: str) -> str:
     )
 
 
+def _normalize_table_definition(sql: str) -> str:
+    """Preserve table-level semantics omitted by SQLite's PRAGMA views."""
+
+    normalized = _normalize_schema_sql(sql)
+    opening = normalized.find("(")
+    definition = normalized[opening:] if opening >= 0 else normalized
+    compacted: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(definition):
+        character = definition[index]
+        if quote is not None:
+            compacted.append(character)
+            if quote == "[":
+                if character == "]":
+                    if (
+                        index + 1 < len(definition)
+                        and definition[index + 1] == "]"
+                    ):
+                        compacted.append(definition[index + 1])
+                        index += 1
+                    else:
+                        quote = None
+            elif character == quote:
+                if (
+                    index + 1 < len(definition)
+                    and definition[index + 1] == quote
+                ):
+                    compacted.append(definition[index + 1])
+                    index += 1
+                else:
+                    quote = None
+            index += 1
+            continue
+        if character in {'"', "`", "["}:
+            closing = "]" if character == "[" else character
+            cursor = index + 1
+            identifier: list[str] = []
+            while cursor < len(definition):
+                current = definition[cursor]
+                if current == closing:
+                    if (
+                        cursor + 1 < len(definition)
+                        and definition[cursor + 1] == closing
+                    ):
+                        identifier.append(closing)
+                        cursor += 2
+                        continue
+                    break
+                identifier.append(current)
+                cursor += 1
+            identifier_text = "".join(identifier)
+            if (
+                cursor < len(definition)
+                and identifier_text
+                and (
+                    identifier_text[0].isalpha()
+                    or identifier_text[0] == "_"
+                )
+                and all(
+                    item.isalnum() or item == "_"
+                    for item in identifier_text
+                )
+            ):
+                compacted.extend(identifier_text.casefold())
+                index = cursor + 1
+                continue
+            quote = character
+            compacted.append(character)
+        elif character == "'":
+            quote = character
+            compacted.append(character)
+        elif character == " " and (
+            (compacted and compacted[-1] in {"(", ","})
+            or (
+                index + 1 < len(definition)
+                and definition[index + 1] in {")", ","}
+            )
+        ):
+            pass
+        else:
+            compacted.append(character)
+        index += 1
+    return "".join(compacted)
+
+
 def _normalize_trigger_definition(sql: str) -> str:
     """Normalize a trigger while ignoring idempotent installation syntax."""
 
@@ -1281,6 +2152,56 @@ def _normalize_trigger_definition(sql: str) -> str:
     if normalized.startswith(prefix):
         return "create trigger " + normalized[len(prefix) :]
     return normalized
+
+
+@lru_cache(maxsize=None)
+def _canonical_table_sql_bundle(
+    table_name: str,
+) -> tuple[str, tuple[str, ...], tuple[str, ...]]:
+    """Return canonical table-tail, column order, and explicit indexes."""
+
+    reference = sqlite3.connect(":memory:")
+    reference.row_factory = sqlite3.Row
+    try:
+        reference.execute("PRAGMA foreign_keys = ON")
+        reference.executescript(DDL)
+        row = reference.execute(
+            """SELECT sql FROM sqlite_master
+               WHERE type='table' AND name=?""",
+            (table_name,),
+        ).fetchone()
+        if row is None or not row["sql"]:
+            raise RuntimeError(
+                f"Current DDL has no table definition for {table_name}."
+            )
+        raw_sql = row["sql"]
+        opening = raw_sql.find("(")
+        if opening < 0:
+            raise RuntimeError(
+                f"Current DDL table {table_name} has no definition body."
+            )
+        columns = tuple(
+            row["name"]
+            for row in sorted(
+                reference.execute(
+                    f"PRAGMA table_xinfo({_quote_sqlite_identifier(table_name)})"
+                ).fetchall(),
+                key=lambda item: int(item["cid"]),
+            )
+            if int(row["hidden"]) == 0
+        )
+        indexes = tuple(
+            row["sql"]
+            for row in reference.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type='index' AND tbl_name=? AND sql IS NOT NULL
+                   ORDER BY name""",
+                (table_name,),
+            ).fetchall()
+        )
+        return raw_sql[opening:], columns, indexes
+    finally:
+        reference.close()
 
 
 def _extract_check_constraints(sql: str) -> tuple[str, ...]:
@@ -1482,6 +2403,11 @@ def _capture_current_schema_contract(
         tables.append(
             _TableSchemaContract(
                 name=table,
+                # PRAGMA foreign_key_list omits DEFERRABLE/INITIALLY terms.
+                # Keeping the normalized definition tail also closes that and
+                # any future table-level semantic blind spots while ignoring
+                # CREATE IF NOT EXISTS and table-name spelling.
+                definition=_normalize_table_definition(table_sql),
                 columns=columns,
                 foreign_keys=foreign_keys,
                 indexes=tuple(sorted(indexes, key=repr)),
@@ -1521,6 +2447,9 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         connection.executescript(DDL)
         reference._migrate_v11_to_v12(connection)
         reference._migrate_v12_to_v13(connection)
+        reference._migrate_v13_to_v14(connection)
+        reference._migrate_v14_to_v15(connection)
+        reference._install_current_performance_scoring_triggers(connection)
         reference._install_v5_indexes(connection)
         reference._install_v6_authoring_triggers(connection)
         reference._install_v4_attempt_triggers(connection)
@@ -1531,6 +2460,238 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         return _capture_current_schema_contract(connection)
     finally:
         connection.close()
+
+
+_CURRENT_CLAIM_SESSION_TRIGGER_FRAGMENT = (
+    "and ( ( claim_event.event_type = 'PerformanceScoringClaimed' "
+    "and claim_event.session_id = attempt.session_id ) or ( "
+    "claim_event.event_type = 'PerformanceScoringClaimMigrated' and ( "
+    "claim_event.session_id is null or claim_event.session_id = "
+    "attempt.session_id ) ) )"
+)
+_V16_CLAIM_SESSION_TRIGGER_FRAGMENT = (
+    "and claim_event.session_id = attempt.session_id"
+)
+
+
+@lru_cache(maxsize=1)
+def _expected_v16_schema_contract() -> _CurrentSchemaContract:
+    """Return the one exact v16 structure accepted as a migration source."""
+
+    current = _expected_current_schema_contract()
+    triggers: list[tuple[str, str, str]] = []
+    replaced = False
+    for name, table, sql in current.triggers:
+        if name == "performance_scoring_claims_validate_insert":
+            if sql.count(_CURRENT_CLAIM_SESSION_TRIGGER_FRAGMENT) != 1:
+                raise RuntimeError(
+                    "Current scoring-claim trigger cannot derive v16 contract."
+                )
+            sql = sql.replace(
+                _CURRENT_CLAIM_SESSION_TRIGGER_FRAGMENT,
+                _V16_CLAIM_SESSION_TRIGGER_FRAGMENT,
+            )
+            replaced = True
+        triggers.append((name, table, sql))
+    if not replaced:
+        raise RuntimeError("Current schema lacks the scoring-claim trigger.")
+    return _CurrentSchemaContract(
+        tables=current.tables,
+        triggers=tuple(triggers),
+    )
+
+
+_LEGACY_CANONICALIZATION_NULLABLE_COLUMNS = frozenset(
+    {
+        ("attempts", "command_hash"),
+        ("concepts", "content_hash"),
+        ("decisions", "corpus_release_id"),
+        ("decisions", "evidence_weight"),
+        ("decisions", "focus_valid"),
+        ("decisions", "learner_revision"),
+        ("decisions", "pedagogical_role"),
+        ("decisions", "question_content_hash"),
+        ("decisions", "question_status"),
+        ("decisions", "question_version"),
+        ("decisions", "session_revision"),
+        ("learner_skill_families", "kind"),
+        ("misconceptions", "content_hash"),
+        ("questions", "content_hash"),
+        ("sessions", "corpus_release_id"),
+        ("sources", "content_hash"),
+    }
+)
+_LEGACY_CANONICALIZATION_MISSING_FOREIGN_KEYS = {
+    "decisions": frozenset(
+        {
+            "corpus_release_id",
+            "focus_concept_id",
+            "focus_misconception_id",
+        }
+    ),
+    "sessions": frozenset({"corpus_release_id"}),
+}
+_LEGACY_CANONICALIZATION_MISSING_CHECKS = {
+    "decisions": frozenset({"focus_valid in (0, 1)"}),
+}
+_LEGACY_CANONICALIZATION_MISSING_INDEXES = {
+    "decisions": frozenset({"idx_one_pending_decision"}),
+}
+_TABLE_DEFINITION_SENSITIVE_TOKENS = frozenset(
+    {
+        "autoincrement",
+        "collate",
+        "conflict",
+        "deferrable",
+        "generated",
+        "initially",
+        "stored",
+        "strict",
+        "unique",
+        "virtual",
+        "without",
+    }
+)
+
+
+def _validate_legacy_canonicalization_source(
+    table: str,
+    actual: _TableSchemaContract,
+    expected: _TableSchemaContract,
+) -> None:
+    """Admit only semantic differences produced by known ALTER migrations."""
+
+    actual_columns = {row[0]: row[1:] for row in actual.columns}
+    expected_columns = {row[0]: row[1:] for row in expected.columns}
+    if set(actual_columns) != set(expected_columns):
+        raise ConflictError(
+            f"Schema v13 cannot safely rebuild {table}: column set differs."
+        )
+    for name, expected_terms in expected_columns.items():
+        actual_terms = actual_columns[name]
+        if actual_terms == expected_terms:
+            continue
+        # Historical SQLite ADD COLUMN operations could not retrofit these
+        # backfilled NOT NULL constraints. No type, default, key, or hidden
+        # attribute is allowed to differ.
+        relaxed = (
+            expected_terms[0],
+            False,
+            expected_terms[2],
+            expected_terms[3],
+            expected_terms[4],
+        )
+        if (
+            (table, name)
+            not in _LEGACY_CANONICALIZATION_NULLABLE_COLUMNS
+            or expected_terms[1] is not True
+            or actual_terms != relaxed
+        ):
+            raise ConflictError(
+                f"Schema v13 cannot safely rebuild {table}: "
+                f"column {name} has an unknown legacy definition."
+            )
+
+    actual_foreign_keys = set(actual.foreign_keys)
+    expected_foreign_keys = set(expected.foreign_keys)
+    if not actual_foreign_keys <= expected_foreign_keys:
+        raise ConflictError(
+            f"Schema v13 cannot safely rebuild {table}: "
+            "foreign-key definitions differ."
+        )
+    allowed_missing_fk_columns = (
+        _LEGACY_CANONICALIZATION_MISSING_FOREIGN_KEYS.get(
+            table,
+            frozenset(),
+        )
+    )
+    for foreign_key in expected_foreign_keys - actual_foreign_keys:
+        source_columns = {
+            source
+            for _sequence, source, _target in foreign_key[4]
+        }
+        if not source_columns or not (
+            source_columns <= allowed_missing_fk_columns
+        ):
+            raise ConflictError(
+                f"Schema v13 cannot safely rebuild {table}: "
+                "a non-legacy foreign key is missing."
+            )
+
+    actual_checks = set(actual.checks)
+    expected_checks = set(expected.checks)
+    allowed_missing_checks = (
+        _LEGACY_CANONICALIZATION_MISSING_CHECKS.get(
+            table,
+            frozenset(),
+        )
+    )
+    if (
+        not actual_checks <= expected_checks
+        or not (expected_checks - actual_checks) <= allowed_missing_checks
+    ):
+        raise ConflictError(
+            f"Schema v13 cannot safely rebuild {table}: "
+            "CHECK constraints differ."
+        )
+
+    actual_indexes = set(actual.indexes)
+    expected_indexes = set(expected.indexes)
+    if not actual_indexes <= expected_indexes:
+        raise ConflictError(
+            f"Schema v13 cannot safely rebuild {table}: "
+            "an unknown or changed index is attached."
+        )
+    allowed_missing_indexes = (
+        _LEGACY_CANONICALIZATION_MISSING_INDEXES.get(
+            table,
+            frozenset(),
+        )
+    )
+    for index in expected_indexes - actual_indexes:
+        if index.name not in allowed_missing_indexes:
+            raise ConflictError(
+                f"Schema v13 cannot safely rebuild {table}: "
+                "a required index is missing."
+            )
+
+    if (
+        actual.without_rowid != expected.without_rowid
+        or actual.strict != expected.strict
+    ):
+        raise ConflictError(
+            f"Schema v13 cannot safely rebuild {table}: "
+            "storage constraints differ."
+        )
+
+    # PRAGMA metadata covers the admitted nullability, key, CHECK, index,
+    # and foreign-key differences above. These terms cover remaining SQLite
+    # table-definition semantics that PRAGMA views can omit.
+    actual_tokens = re.findall(r"[a-z_]+", actual.definition)
+    expected_tokens = re.findall(r"[a-z_]+", expected.definition)
+    for token in _TABLE_DEFINITION_SENSITIVE_TOKENS:
+        if actual_tokens.count(token) != expected_tokens.count(token):
+            raise ConflictError(
+                f"Schema v13 cannot safely rebuild {table}: "
+                f"unexpected {token.upper()} semantics."
+            )
+
+
+def _require_no_foreign_key_violations(
+    connection: sqlite3.Connection,
+    *,
+    context: str,
+) -> None:
+    """Reject an existing or newly produced referential-integrity breach."""
+
+    violations = connection.execute("PRAGMA foreign_key_check").fetchall()
+    if not violations:
+        return
+    first = violations[0]
+    raise ConflictError(
+        f"{context} has a foreign-key violation in "
+        f"{first['table']} at row {first['rowid']}."
+    )
 
 
 class Database:
@@ -1574,7 +2735,11 @@ class Database:
         finally:
             connection.close()
 
-    def validate_current_schema(self) -> None:
+    def validate_current_schema(
+        self,
+        *,
+        _allow_missing_triggers: bool = False,
+    ) -> tuple[str, ...]:
         """Validate a current TSQ schema without installing or migrating it."""
 
         try:
@@ -1678,6 +2843,13 @@ class Database:
                             + (f" ({'; '.join(details)})" if details else "")
                         )
                     if (
+                        expected_table.definition
+                        != actual_table.definition
+                    ):
+                        incompatibilities.append(
+                            f"table {table_name} SQL definition differs"
+                        )
+                    if (
                         expected_table.foreign_keys
                         != actual_table.foreign_keys
                     ):
@@ -1721,7 +2893,7 @@ class Database:
                     & set(actual_triggers)
                     if expected_triggers[name] != actual_triggers[name]
                 )
-                if missing_triggers:
+                if missing_triggers and not _allow_missing_triggers:
                     incompatibilities.append(
                         "missing triggers: " + ", ".join(missing_triggers)
                     )
@@ -1739,6 +2911,7 @@ class Database:
                         "Current database schema structure is incompatible: "
                         + "; ".join(incompatibilities)
                     )
+                return tuple(missing_triggers)
         except (ConflictError, NotFoundError, ValidationError):
             raise
         except sqlite3.Error as exc:
@@ -1746,13 +2919,164 @@ class Database:
                 f"Could not validate TSQ database schema: {exc}"
             ) from exc
 
+    def _restore_missing_schema_guards_for_replay_copy(self) -> tuple[str, ...]:
+        """Restore only absent canonical triggers on an isolated replay copy.
+
+        Replay must be able to diagnose a projection that was altered after an
+        immutability trigger was removed.  Normal writable opens still reject
+        that database before mutation.  This internal path first proves that
+        tables, indexes, constraints, and every present trigger exactly match
+        the current schema; it then recreates only missing canonical triggers
+        on the disposable copy and validates the complete schema again.
+        """
+
+        if self.read_only:
+            raise ConflictError(
+                "A read-only database cannot prepare a replay copy."
+            )
+        missing = self.validate_current_schema(
+            _allow_missing_triggers=True
+        )
+        if missing:
+            expected = {
+                name: sql
+                for name, _table, sql in (
+                    _expected_current_schema_contract().triggers
+                )
+            }
+            with self.transaction() as connection:
+                for trigger_name in missing:
+                    trigger_sql = expected.get(trigger_name)
+                    if trigger_sql is None:
+                        raise ConflictError(
+                            "Replay copy is missing an unknown schema guard: "
+                            f"{trigger_name}"
+                        )
+                    connection.execute(trigger_sql)
+        self.validate_current_schema()
+        return missing
+
     def initialize(self) -> None:
         if self.read_only:
             raise ConflictError(
                 "A read-only database cannot be initialized or migrated."
             )
+        # A database already claiming the current version is not a migration
+        # target.  Validate it through a genuinely read-only handle before a
+        # writable SQLite connection can create a journal, reinstall a missing
+        # trigger, or otherwise normalize tampered structure.  Older recognized
+        # schemas continue through the explicit migration path below.
+        if (
+            self.path != Path(":memory:")
+            and self.path.exists()
+            and self.path.is_file()
+            and self.path.stat().st_size > 0
+        ):
+            inspector = Database(self.path, read_only=True)
+            try:
+                with inspector.read() as existing_connection:
+                    user_tables = {
+                        row["name"]
+                        for row in existing_connection.execute(
+                            """SELECT name FROM sqlite_master
+                               WHERE type='table'
+                                 AND name NOT LIKE 'sqlite_%'"""
+                        ).fetchall()
+                    }
+                    if "meta" in user_tables:
+                        version_row = existing_connection.execute(
+                            """SELECT value FROM meta
+                               WHERE key='schema_version'"""
+                        ).fetchone()
+                        if version_row is None:
+                            raise ValidationError(
+                                "Database has no TSQ schema version."
+                            )
+                        try:
+                            existing_version = int(version_row["value"])
+                        except (TypeError, ValueError) as exc:
+                            raise ValidationError(
+                                "Database schema version is not an integer."
+                            ) from exc
+                        if existing_version > SCHEMA_VERSION:
+                            raise ConflictError(
+                                f"Database schema is {existing_version}; engine "
+                                f"expects at most {SCHEMA_VERSION}."
+                            )
+                        if existing_version == SCHEMA_VERSION:
+                            inspector.validate_current_schema()
+                            _require_no_foreign_key_violations(
+                                existing_connection,
+                                context="Current database",
+                            )
+                            self._enforce_historical_generated_safety()
+                            return
+                        if existing_version == 16:
+                            actual_v16 = _capture_current_schema_contract(
+                                existing_connection
+                            )
+                            if actual_v16 != _expected_v16_schema_contract():
+                                raise ConflictError(
+                                    "Schema v16 structure is not the exact "
+                                    "supported v17 migration source."
+                                )
+                            self._validate_v16_migration_lifecycle(
+                                existing_connection
+                            )
+                    elif user_tables and "questions" not in user_tables:
+                        raise ConflictError(
+                            "Existing database is not a recognized TSQ schema; "
+                            "refusing to modify it."
+                        )
+            except (ConflictError, NotFoundError, ValidationError):
+                raise
+            except sqlite3.Error as exc:
+                raise ValidationError(
+                    f"Could not inspect existing database before migration: {exc}"
+                ) from exc
         connection = self.connect()
+        legacy_foreign_keys_disabled = False
         try:
+            preliminary_had_schema = bool(
+                connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                       WHERE type='table' AND name='questions'"""
+                ).fetchone()
+            )
+            preliminary_has_meta = bool(
+                connection.execute(
+                    """SELECT 1 FROM sqlite_master
+                       WHERE type='table' AND name='meta'"""
+                ).fetchone()
+            )
+            preliminary_row = (
+                connection.execute(
+                    """SELECT value FROM meta WHERE key='schema_version'"""
+                ).fetchone()
+                if preliminary_has_meta
+                else None
+            )
+            preliminary_version = (
+                int(preliminary_row["value"])
+                if preliminary_row is not None
+                else (
+                    1
+                    if preliminary_had_schema
+                    else SCHEMA_VERSION
+                )
+            )
+            if preliminary_version < 16:
+                # Canonicalizing legacy parent tables requires foreign-key
+                # enforcement to be disabled before the transaction begins.
+                # This PRAGMA is connection-local and non-durable; the source
+                # version is rechecked after the writer lock is acquired.
+                connection.execute("PRAGMA foreign_keys = OFF")
+                legacy_foreign_keys_disabled = True
+            # Every source read and every migration write below shares one
+            # serialized boundary. The earlier read-only inspection gives
+            # clean failures without creating journals, while this lock closes
+            # the inspection/write race against another SQLite connection.
+            connection.execute("BEGIN IMMEDIATE")
             had_schema = bool(
                 connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name='questions'"
@@ -1793,11 +3117,26 @@ class Database:
                 if existing
                 else (1 if had_schema else SCHEMA_VERSION)
             )
+            if current_version != preliminary_version:
+                raise ConflictError(
+                    "Database schema version changed while acquiring the "
+                    "migration writer boundary."
+                )
             starting_version = current_version
             if current_version > SCHEMA_VERSION:
                 raise ConflictError(
                     f"Database schema is {current_version}; engine expects at most {SCHEMA_VERSION}."
                 )
+            if current_version == 16:
+                if (
+                    _capture_current_schema_contract(connection)
+                    != _expected_v16_schema_contract()
+                ):
+                    raise ConflictError(
+                        "Schema v16 structure is not the exact supported "
+                        "v17 migration source."
+                    )
+                self._validate_v16_migration_lifecycle(connection)
             if current_version < SCHEMA_VERSION:
                 # Defensive for databases that were manually downgraded or
                 # produced by a prerelease build which installed protections
@@ -1807,8 +3146,7 @@ class Database:
                 self._drop_corpus_registry_triggers(connection)
                 self._drop_release_snapshot_triggers(connection)
                 self._drop_v6_authoring_triggers(connection)
-            connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(DDL)
+            _execute_sql_script(connection, DDL)
             if current_version < 2:
                 self._migrate_v1_to_v2(connection)
                 current_version = 2
@@ -1860,6 +3198,30 @@ class Database:
             # prerelease database already labelled v13, but return without
             # writes when their canonical constraints are already present.
             self._migrate_v12_to_v13(connection)
+            if current_version < 14:
+                current_version = 14
+            # v14 installs an empty, shadow-only productive-skill ledger.
+            # Historical events and learner projections are never fabricated.
+            self._migrate_v13_to_v14(connection)
+            if current_version < 15:
+                current_version = 15
+            # v15 adds immutable provider-callback admission claims.  Existing
+            # v14 evaluations cannot be assigned synthetic historical claims.
+            self._migrate_v14_to_v15(connection)
+            if current_version < 16:
+                self._migrate_v15_to_v16(
+                    connection,
+                    starting_version=starting_version,
+                )
+                current_version = 16
+            # v16 commits every callback admission to the hash-chained event
+            # history and makes the claim projection replayable.  Existing
+            # v15 rows receive honest migration-observation events; a direct
+            # v14 upgrade records explicit exceptions for older registered
+            # evaluations instead of fabricating pre-callback admissions.
+            if current_version < 17:
+                self._migrate_v16_to_v17(connection)
+                current_version = 17
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -1870,9 +3232,109 @@ class Database:
             self._install_v8_learning_action_triggers(connection)
             self._install_release_snapshot_triggers(connection)
             self._install_corpus_registry_triggers(connection)
+            self._install_current_performance_scoring_triggers(connection)
+            unsafe_generated_ids = (
+                self._historically_active_unsafe_generated_ids(connection)
+            )
+            self._revoke_historically_active_unreviewed_generated_questions(
+                connection,
+                unsafe_generated_ids,
+            )
+            self._quarantine_historical_generated_evidence(connection)
+            if (
+                _capture_current_schema_contract(connection)
+                != _expected_current_schema_contract()
+            ):
+                raise ConflictError(
+                    "Migrated database does not match the exact current "
+                    "schema contract."
+                )
+            _require_no_foreign_key_violations(
+                connection,
+                context="Migrated database",
+            )
             connection.commit()
+            if legacy_foreign_keys_disabled:
+                connection.execute("PRAGMA foreign_keys = ON")
+            # Journal mode is operational rather than semantic. Change it
+            # only after the atomic schema/data migration commits so rejected
+            # sources retain their prior durable contents.
+            connection.execute("PRAGMA journal_mode = WAL")
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            if legacy_foreign_keys_disabled:
+                connection.execute("PRAGMA foreign_keys = ON")
+            raise
         finally:
             connection.close()
+
+    @staticmethod
+    def _historically_active_unsafe_generated_ids(
+        connection: sqlite3.Connection,
+    ) -> tuple[str, ...]:
+        """Find active historical members that fail today's generation gate."""
+
+        rows = connection.execute(
+            """SELECT DISTINCT question.id, question.provenance_json,
+                              membership.status
+               FROM release_questions membership
+               JOIN questions question ON question.id=membership.question_id
+               WHERE membership.status IN ('approved', 'calibrated')
+               ORDER BY question.id"""
+        ).fetchall()
+        unsafe: set[str] = set()
+        for row in rows:
+            try:
+                provenance = json.loads(row["provenance_json"])
+            except (TypeError, json.JSONDecodeError):
+                provenance = None
+            if not generated_question_runtime_safe(
+                provenance,
+                status=row["status"],
+            ):
+                unsafe.add(row["id"])
+        return tuple(sorted(unsafe))
+
+    def _enforce_historical_generated_safety(self) -> int:
+        """Append idempotent revocations after exact current-schema validation."""
+
+        with self.transaction() as connection:
+            version_row = connection.execute(
+                """SELECT value FROM meta WHERE key='schema_version'"""
+            ).fetchone()
+            if (
+                version_row is None
+                or version_row["value"] != str(SCHEMA_VERSION)
+                or _capture_current_schema_contract(connection)
+                != _expected_current_schema_contract()
+            ):
+                raise ConflictError(
+                    "Current database schema structure changed during "
+                    "safety enforcement."
+                )
+            _require_no_foreign_key_violations(
+                connection,
+                context="Current database",
+            )
+            revoked = self._revoke_historically_active_unreviewed_generated_questions(
+                connection,
+                self._historically_active_unsafe_generated_ids(connection),
+            )
+            self._quarantine_historical_generated_evidence(connection)
+            if (
+                _capture_current_schema_contract(connection)
+                != _expected_current_schema_contract()
+            ):
+                raise ConflictError(
+                    "Current database schema structure changed during "
+                    "safety enforcement."
+                )
+            _require_no_foreign_key_violations(
+                connection,
+                context="Current database",
+            )
+            return revoked
 
     def _install_v4_attempt_triggers(self, connection: sqlite3.Connection) -> None:
         """Make attempts immutable except for their atomic outcome finalization.
@@ -2658,7 +4120,8 @@ class Database:
                     (previous_hash, payload_hash, event["event_id"]),
                 )
                 previous_hash = payload_hash
-        connection.executescript(
+        _execute_sql_script(
+            connection,
             """CREATE TRIGGER events_no_update
                BEFORE UPDATE ON events BEGIN
                    SELECT RAISE(ABORT, 'events are append-only');
@@ -2666,7 +4129,7 @@ class Database:
                CREATE TRIGGER events_no_delete
                BEFORE DELETE ON events BEGIN
                    SELECT RAISE(ABORT, 'events are append-only');
-               END;"""
+               END;""",
         )
         connection.execute("DELETE FROM stream_heads")
         connection.execute(
@@ -3258,247 +4721,879 @@ class Database:
         self,
         connection: sqlite3.Connection,
     ) -> None:
-        """Make legacy backfilled fields structurally non-null.
+        """Canonicalize every table shaped by legacy ALTER migrations.
 
-        SQLite cannot add a required column without either a lasting default
-        or a table rebuild.  The v1-to-v2 and v2-to-v3 migrations therefore
-        backfilled nullable ``questions.content_hash`` and
-        ``learner_skill_families.kind`` columns.  A fresh database has always
-        used the stricter DDL, so migrated databases otherwise failed the exact
-        read-only schema contract despite containing equivalent data.
-
-        Rebuilding a referenced table requires foreign-key enforcement to be
-        disabled outside a transaction.  Commit the preceding versioned
-        migrations, perform both replacements in one immediate transaction,
-        run a full foreign-key check before commit, and restore the connection
-        pragma on every path.  Explicit column lists prevent either silently
-        dropping an unknown extension or depending on historical column order.
+        The legacy upgrade path added required fields as nullable trailing
+        columns. Values were backfilled correctly, but the resulting table
+        definitions still differed in nullability, order, and foreign-key
+        declarations. Rebuild only definitions that differ from current DDL,
+        with explicit column sets and a caller-owned transaction. ``initialize``
+        disables foreign-key enforcement before its serialized transaction for
+        pre-v13 sources and performs a complete check before committing.
         """
 
-        question_columns = {
-            row["name"]: row
-            for row in connection.execute(
-                "PRAGMA table_info(questions)"
-            ).fetchall()
-        }
-        family_columns = {
-            row["name"]: row
-            for row in connection.execute(
-                "PRAGMA table_info(learner_skill_families)"
-            ).fetchall()
-        }
-        expected_question_columns = {
-            "id",
-            "version",
-            "content_hash",
-            "family_id",
-            "status",
-            "stem",
-            "kind",
-            "difficulty",
-            "discrimination",
-            "guess_rate",
-            "slip_rate",
-            "provenance_json",
-            "tags_json",
-            "revision_of",
-            "imported_at",
-        }
-        expected_family_columns = {
-            "learner_id",
-            "concept_id",
-            "family_id",
-            "kind",
-            "first_unguided_correct_at",
-            "last_unguided_correct_at",
-            "delayed_unguided_correct_at",
-        }
-        for table, actual, expected in (
-            ("questions", set(question_columns), expected_question_columns),
-            (
-                "learner_skill_families",
-                set(family_columns),
-                expected_family_columns,
-            ),
-        ):
-            if actual != expected:
-                missing = sorted(expected - actual)
-                unexpected = sorted(actual - expected)
+        canonicalizable = (
+            "attempts",
+            "concepts",
+            "decisions",
+            "learner_skill_families",
+            "learners",
+            "misconceptions",
+            "questions",
+            "sessions",
+            "sources",
+        )
+        plans: list[
+            tuple[str, str, tuple[str, ...], tuple[str, ...]]
+        ] = []
+        for table in canonicalizable:
+            canonical_tail, canonical_columns, canonical_indexes = (
+                _canonical_table_sql_bundle(table)
+            )
+            quoted = _quote_sqlite_identifier(table)
+            table_row = connection.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type='table' AND name=?""",
+                (table,),
+            ).fetchone()
+            if table_row is None or not table_row["sql"]:
+                raise ConflictError(
+                    f"Schema v13 cannot find required table {table}."
+                )
+            actual_columns = tuple(
+                row["name"]
+                for row in sorted(
+                    connection.execute(
+                        f"PRAGMA table_xinfo({quoted})"
+                    ).fetchall(),
+                    key=lambda item: int(item["cid"]),
+                )
+                if int(row["hidden"]) == 0
+            )
+            if set(actual_columns) != set(canonical_columns):
+                missing = sorted(
+                    set(canonical_columns) - set(actual_columns)
+                )
+                unexpected = sorted(
+                    set(actual_columns) - set(canonical_columns)
+                )
                 details: list[str] = []
                 if missing:
                     details.append("missing " + ", ".join(missing))
                 if unexpected:
-                    details.append("unexpected " + ", ".join(unexpected))
+                    details.append(
+                        "unexpected " + ", ".join(unexpected)
+                    )
                 raise ConflictError(
                     f"Schema v13 cannot safely rebuild {table} ("
                     + "; ".join(details)
                     + ")."
                 )
+            if _normalize_table_definition(
+                table_row["sql"]
+            ) != _normalize_table_definition(canonical_tail):
+                plans.append(
+                    (
+                        table,
+                        canonical_tail,
+                        canonical_columns,
+                        canonical_indexes,
+                    )
+                )
 
-        rebuild_questions = not bool(
-            question_columns["content_hash"]["notnull"]
-        )
-        rebuild_families = not bool(family_columns["kind"]["notnull"])
-        if not rebuild_questions and not rebuild_families:
+        if not plans:
             return
-
-        # PRAGMA foreign_keys is a no-op inside a transaction.  Historical
-        # migrations may have opened one, so establish an explicit durable
-        # boundary before the atomic pair of table replacements.
-        connection.commit()
-        foreign_keys_enabled = bool(
-            connection.execute("PRAGMA foreign_keys").fetchone()[0]
-        )
-        connection.execute("PRAGMA foreign_keys = OFF")
         if connection.execute("PRAGMA foreign_keys").fetchone()[0]:
             raise ConflictError(
-                "Schema v13 could not suspend foreign-key enforcement "
-                "for an atomic table rebuild."
+                "Schema v13 canonical rebuild requires the serialized legacy "
+                "migration boundary."
             )
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            # A database marked v13 by a partial prerelease may still have the
-            # immutable question triggers installed.  They are restored by
-            # initialize() only after every migration succeeds.
-            self._drop_corpus_registry_triggers(connection)
+        expected_contract = _expected_current_schema_contract()
+        expected_tables = {
+            table.name: table for table in expected_contract.tables
+        }
+        actual_contract = _capture_current_schema_contract(connection)
+        actual_tables = {
+            table.name: table for table in actual_contract.tables
+        }
+        planned_tables = {table for table, *_rest in plans}
+        for table in sorted(planned_tables):
+            _validate_legacy_canonicalization_source(
+                table,
+                actual_tables[table],
+                expected_tables[table],
+            )
 
-            if rebuild_questions:
-                rows = connection.execute(
-                    """SELECT * FROM questions
-                       WHERE content_hash IS NULL ORDER BY id"""
-                ).fetchall()
-                for row in rows:
-                    question = self._question_from_row(connection, row)
-                    connection.execute(
-                        """UPDATE questions SET content_hash = ?
-                           WHERE id = ?""",
-                        (question_content_hash(question), question.id),
-                    )
-                connection.execute(
-                    """
-                    CREATE TABLE _tsq_v13_questions_new (
-                        id TEXT PRIMARY KEY,
-                        version INTEGER NOT NULL CHECK(version > 0),
-                        content_hash TEXT NOT NULL,
-                        family_id TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        stem TEXT NOT NULL,
-                        kind TEXT NOT NULL,
-                        difficulty REAL NOT NULL,
-                        discrimination REAL NOT NULL,
-                        guess_rate REAL NOT NULL,
-                        slip_rate REAL NOT NULL,
-                        provenance_json TEXT NOT NULL,
-                        tags_json TEXT NOT NULL,
-                        revision_of TEXT
-                            REFERENCES _tsq_v13_questions_new(id),
-                        imported_at TEXT NOT NULL
-                    )
-                    """
-                )
-                connection.execute(
-                    """
-                    INSERT INTO _tsq_v13_questions_new (
-                        id, version, content_hash, family_id, status, stem,
-                        kind, difficulty, discrimination, guess_rate,
-                        slip_rate, provenance_json, tags_json, revision_of,
-                        imported_at
-                    )
-                    SELECT id, version, content_hash, family_id, status, stem,
-                           kind, difficulty, discrimination, guess_rate,
-                           slip_rate, provenance_json, tags_json, revision_of,
-                           imported_at
-                    FROM questions
-                    """
-                )
-                connection.execute("DROP TABLE questions")
-                connection.execute(
-                    """ALTER TABLE _tsq_v13_questions_new
-                       RENAME TO questions"""
-                )
-                connection.execute(
-                    """CREATE INDEX idx_questions_status
-                       ON questions(status)"""
-                )
-                connection.execute(
-                    """CREATE INDEX idx_questions_family
-                       ON questions(family_id)"""
-                )
-
-            if rebuild_families:
-                connection.execute(
-                    """
-                    UPDATE learner_skill_families AS evidence
-                    SET kind = COALESCE((
-                        SELECT question.kind
-                        FROM questions question
-                        WHERE question.family_id = evidence.family_id
-                        ORDER BY question.id
-                        LIMIT 1
-                    ), 'unknown')
-                    WHERE kind IS NULL
-                    """
-                )
-                connection.execute(
-                    """
-                    CREATE TABLE _tsq_v13_skill_families_new (
-                        learner_id TEXT NOT NULL REFERENCES learners(id),
-                        concept_id TEXT NOT NULL REFERENCES concepts(id),
-                        family_id TEXT NOT NULL,
-                        kind TEXT NOT NULL,
-                        first_unguided_correct_at TEXT NOT NULL,
-                        last_unguided_correct_at TEXT NOT NULL,
-                        delayed_unguided_correct_at TEXT,
-                        PRIMARY KEY(learner_id, concept_id, family_id)
-                    )
-                    """
-                )
-                connection.execute(
-                    """
-                    INSERT INTO _tsq_v13_skill_families_new (
-                        learner_id, concept_id, family_id, kind,
-                        first_unguided_correct_at,
-                        last_unguided_correct_at,
-                        delayed_unguided_correct_at
-                    )
-                    SELECT learner_id, concept_id, family_id, kind,
-                           first_unguided_correct_at,
-                           last_unguided_correct_at,
-                           delayed_unguided_correct_at
-                    FROM learner_skill_families
-                    """
-                )
-                connection.execute("DROP TABLE learner_skill_families")
-                connection.execute(
-                    """ALTER TABLE _tsq_v13_skill_families_new
-                       RENAME TO learner_skill_families"""
-                )
-
-            violations = connection.execute(
-                "PRAGMA foreign_key_check"
-            ).fetchall()
-            if violations:
-                first = violations[0]
+        expected_triggers = {
+            name: (table, definition)
+            for name, table, definition in expected_contract.triggers
+        }
+        for name, table, definition in actual_contract.triggers:
+            if table not in planned_tables:
+                continue
+            if expected_triggers.get(name) != (table, definition):
                 raise ConflictError(
-                    "Schema v13 table rebuild exposed a foreign-key "
-                    f"violation in {first['table']} at row {first['rowid']}."
+                    f"Schema v13 cannot safely rebuild {table}: "
+                    f"unknown or changed trigger {name} is attached."
                 )
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            raise
-        finally:
+
+        # These backfills precede the NOT NULL copy and therefore fail closed
+        # if a legacy row cannot be reconstructed exactly.
+        if any(table == "questions" for table, *_ in plans):
+            for row in connection.execute(
+                """SELECT * FROM questions
+                   WHERE content_hash IS NULL ORDER BY id"""
+            ).fetchall():
+                question = self._question_from_row(connection, row)
+                connection.execute(
+                    """UPDATE questions SET content_hash=? WHERE id=?""",
+                    (question_content_hash(question), question.id),
+                )
+        if any(
+            table == "learner_skill_families"
+            for table, *_ in plans
+        ):
             connection.execute(
-                "PRAGMA foreign_keys = "
-                + ("ON" if foreign_keys_enabled else "OFF")
+                """UPDATE learner_skill_families AS evidence
+                   SET kind=COALESCE((
+                       SELECT question.kind FROM questions question
+                       WHERE question.family_id=evidence.family_id
+                       ORDER BY question.id LIMIT 1
+                   ), 'unknown')
+                   WHERE kind IS NULL"""
             )
+
+        self._drop_corpus_registry_triggers(connection)
+        # DDL has already installed current guards for every newly introduced
+        # table. Some of those guards join legacy parents (for example a
+        # performance-attempt guard joins decisions), and SQLite recompiles
+        # them while a parent is renamed. Remove only triggers whose complete
+        # definition is exactly the current trusted definition. Unknown or
+        # modified triggers remain in place, causing the rebuild or final
+        # exact-contract check to fail and the caller-owned transaction to
+        # roll back without discarding local schema objects.
+        for row in connection.execute(
+            """SELECT name, tbl_name, sql FROM sqlite_master
+               WHERE type='trigger' AND name NOT LIKE 'sqlite_%'
+               ORDER BY name"""
+        ).fetchall():
+            expected = expected_triggers.get(row["name"])
+            actual = (
+                row["tbl_name"],
+                _normalize_trigger_definition(row["sql"] or ""),
+            )
+            if expected == actual:
+                connection.execute(
+                    "DROP TRIGGER " + _quote_sqlite_identifier(row["name"])
+                )
+        for table, canonical_tail, columns, indexes in plans:
+            temporary = f"_tsq_v13_{table}_new"
+            quoted_table = _quote_sqlite_identifier(table)
+            quoted_temporary = _quote_sqlite_identifier(temporary)
+            if connection.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name=?""",
+                (temporary,),
+            ).fetchone():
+                raise ConflictError(
+                    f"Schema v13 temporary table already exists: {temporary}."
+                )
+            connection.execute(
+                f"CREATE TABLE {quoted_temporary} {canonical_tail}"
+            )
+            column_sql = ", ".join(
+                _quote_sqlite_identifier(column) for column in columns
+            )
+            connection.execute(
+                f"""INSERT INTO {quoted_temporary} ({column_sql})
+                    SELECT {column_sql} FROM {quoted_table}"""
+            )
+            connection.execute(f"DROP TABLE {quoted_table}")
+            connection.execute(
+                f"ALTER TABLE {quoted_temporary} RENAME TO {quoted_table}"
+            )
+            for index_sql in indexes:
+                connection.execute(index_sql)
+        # Restore the static guards that were removed above. Dynamic guards
+        # are reinstalled by initialize after every migration step.
+        _execute_sql_script(connection, DDL)
+
+    @staticmethod
+    def _migrate_v13_to_v14(connection: sqlite3.Connection) -> None:
+        """Validate the empty shadow-performance ledger installed by DDL.
+
+        Productive-skill observations did not exist in earlier schemas.  An
+        upgrade therefore creates no task, action, evaluation, or evidence
+        rows and leaves every learner/session revision and event stream intact.
+        """
+
+        required = {
+            "performance_tasks",
+            "performance_task_releases",
+            "release_performance_tasks",
+            "performance_attempts",
+            "performance_actions",
+            "task_evaluations",
+            "shadow_evidence_bundles",
+        }
+        present = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        missing = required - present
+        if missing:
+            raise ConflictError(
+                "Schema v14 performance ledger was not installed: "
+                + ", ".join(sorted(missing))
+            )
+
+    @staticmethod
+    def _migrate_v14_to_v15(connection: sqlite3.Connection) -> None:
+        """Validate immutable scoring claims installed by the current DDL.
+
+        Schema v14 already contains the complete shadow-performance event and
+        projection ledger.  Callback admission claims did not yet exist, so an
+        upgrade installs an empty table and never fabricates claims for prior
+        evaluations.
+        """
+
+        table = connection.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='performance_scoring_claims'"""
+        ).fetchone()
+        required_triggers = {
+            "performance_scoring_claims_validate_insert",
+            "performance_scoring_claims_no_update",
+            "performance_scoring_claims_no_delete",
+            "events_respect_performance_scoring_claim",
+            "task_evaluations_validate_scoring_claim",
+        }
+        triggers = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+        missing_triggers = required_triggers - triggers
+        if table is None or missing_triggers:
+            details: list[str] = []
+            if table is None:
+                details.append("performance_scoring_claims")
+            details.extend(sorted(missing_triggers))
+            raise ConflictError(
+                "Schema v15 scoring admission was not installed: "
+                + ", ".join(details)
+            )
+
+    @staticmethod
+    def _create_v16_scoring_claim_table(
+        connection: sqlite3.Connection,
+    ) -> None:
+        connection.execute(
+            """
+            CREATE TABLE performance_scoring_claims (
+                id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+                event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+                idempotency_key TEXT UNIQUE CHECK(
+                    idempotency_key IS NULL
+                    OR (
+                        length(idempotency_key) BETWEEN 1 AND 256
+                        AND idempotency_key = trim(idempotency_key)
+                    )
+                ),
+                attempt_id TEXT NOT NULL,
+                evaluation_id TEXT NOT NULL UNIQUE CHECK(
+                    length(evaluation_id) BETWEEN 1 AND 128
+                ),
+                through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+                provider_id TEXT NOT NULL CHECK(
+                    length(trim(provider_id)) BETWEEN 1 AND 128
+                ),
+                provider_version TEXT NOT NULL CHECK(
+                    length(trim(provider_version)) BETWEEN 1 AND 128
+                ),
+                action_trace_digest TEXT NOT NULL CHECK(
+                    length(action_trace_digest) = 64
+                    AND action_trace_digest NOT GLOB '*[^0-9a-f]*'
+                ),
+                command_hash TEXT NOT NULL UNIQUE CHECK(
+                    length(command_hash) = 64
+                    AND command_hash NOT GLOB '*[^0-9a-f]*'
+                ),
+                claimed_at TEXT NOT NULL,
+                FOREIGN KEY(attempt_id) REFERENCES performance_attempts(id)
+                    DEFERRABLE INITIALLY DEFERRED
+            )
+            """
+        )
+
+    @staticmethod
+    def _legacy_scoring_claim_trace(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+    ) -> tuple[tuple[LearningAction, ...], sqlite3.Row]:
+        attempt = connection.execute(
+            "SELECT * FROM performance_attempts WHERE id=?",
+            (row["attempt_id"],),
+        ).fetchone()
+        if attempt is None:
+            raise ConflictError(
+                f"Schema v15 scoring claim {row['id']} has no attempt."
+            )
+        action_rows = connection.execute(
+            """SELECT * FROM performance_actions
+               WHERE attempt_id=? AND sequence<=?
+               ORDER BY sequence, id""",
+            (row["attempt_id"], row["through_sequence"]),
+        ).fetchall()
+        actions: list[LearningAction] = []
+        try:
+            for action_row in action_rows:
+                actions.append(
+                    LearningAction.from_terms(
+                        {
+                            "id": action_row["id"],
+                            "trace_id": action_row["attempt_id"],
+                            "sequence": action_row["sequence"],
+                            "kind": action_row["action_type"],
+                            "phase": action_row["phase"],
+                            "payload": json.loads(action_row["payload_json"]),
+                            "elapsed_ms": action_row["elapsed_ms"],
+                            "schema_version": 1,
+                        }
+                    )
+                )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ConflictError(
+                f"Schema v15 scoring claim {row['id']} has an invalid trace: {exc}"
+            ) from exc
+        trace = tuple(actions)
+        submissions = [
+            action
+            for action in trace
+            if action.kind is ActionKind.SUBMITTED
+            and action.sequence == row["through_sequence"]
+        ]
+        try:
+            trace_digest = action_trace_digest(trace)
+        except (TypeError, ValueError) as exc:
+            raise ConflictError(
+                f"Schema v15 scoring claim {row['id']} trace cannot be committed: {exc}"
+            ) from exc
+        expected_command_hash = canonical_digest(
+            {
+                "type": "tsq.performance_command",
+                "operation": "score_attempt",
+                "attempt_id": row["attempt_id"],
+                "through_sequence": row["through_sequence"],
+                "provider_id": row["provider_id"],
+                "provider_version": row["provider_version"],
+                "action_trace_digest": trace_digest,
+            }
+        )
+        if (
+            len(submissions) != 1
+            or row["action_trace_digest"] != trace_digest
+            or row["command_hash"] != expected_command_hash
+            or row["id"] != "psc_" + expected_command_hash
+        ):
+            raise ConflictError(
+                f"Schema v15 scoring claim {row['id']} fails its trace commitment."
+            )
+        evaluation = connection.execute(
+            "SELECT * FROM task_evaluations WHERE id=?",
+            (row["evaluation_id"],),
+        ).fetchone()
+        if evaluation is not None:
+            event = connection.execute(
+                "SELECT * FROM events WHERE event_id=?",
+                (evaluation["event_id"],),
+            ).fetchone()
+            if (
+                evaluation["attempt_id"] != row["attempt_id"]
+                or evaluation["through_sequence"] != row["through_sequence"]
+                or evaluation["command_hash"] != row["command_hash"]
+                or event is None
+                or event["idempotency_key"] != row["idempotency_key"]
+            ):
+                raise ConflictError(
+                    f"Schema v15 scoring claim {row['id']} does not match its completion."
+                )
+        return trace, attempt
+
+    def _migrate_v15_to_v16(
+        self,
+        connection: sqlite3.Connection,
+        *,
+        starting_version: int,
+    ) -> None:
+        """Commit callback admissions to events without inventing history."""
+
+        columns = {
+            row["name"]
+            for row in connection.execute(
+                "PRAGMA table_info(performance_scoring_claims)"
+            ).fetchall()
+        }
+        if not columns:
+            raise ConflictError(
+                "Schema v16 scoring claim projection was not installed."
+            )
+        old_rows: list[sqlite3.Row] = []
+        rebuilding = "event_id" not in columns
+        if rebuilding:
+            old_rows = connection.execute(
+                "SELECT * FROM performance_scoring_claims ORDER BY id"
+            ).fetchall()
+            for row in old_rows:
+                self._legacy_scoring_claim_trace(connection, row)
+            for trigger in (
+                "performance_scoring_claims_validate_insert",
+                "performance_scoring_claims_no_update",
+                "performance_scoring_claims_no_delete",
+                "events_respect_performance_scoring_claim",
+                "task_evaluations_validate_scoring_claim",
+                "task_evaluations_validate_insert",
+            ):
+                connection.execute(f'DROP TRIGGER IF EXISTS "{trigger}"')
+            connection.execute(
+                """ALTER TABLE performance_scoring_claims
+                   RENAME TO _tsq_v16_scoring_claims_old"""
+            )
+            self._create_v16_scoring_claim_table(connection)
+
+            for row in old_rows:
+                attempt = connection.execute(
+                    "SELECT * FROM performance_attempts WHERE id=?",
+                    (row["attempt_id"],),
+                ).fetchone()
+                if attempt is None:
+                    raise ConflictError(
+                        f"Schema v15 scoring claim {row['id']} lost its attempt."
+                    )
+                payload = performance_scoring_claim_payload(
+                    claim_id=row["id"],
+                    caller_idempotency_key=row["idempotency_key"],
+                    attempt_id=row["attempt_id"],
+                    evaluation_id=row["evaluation_id"],
+                    through_sequence=row["through_sequence"],
+                    provider_id=row["provider_id"],
+                    provider_version=row["provider_version"],
+                    action_trace_digest_value=row["action_trace_digest"],
+                    command_hash=row["command_hash"],
+                    claimed_at=row["claimed_at"],
+                )
+                event = self.append_event(
+                    connection,
+                    stream_id=f"learner:{attempt['learner_id']}",
+                    event_type="PerformanceScoringClaimMigrated",
+                    schema_version=1,
+                    payload=payload,
+                    metadata={
+                        "claim_schema_version": 1,
+                        "admission_mode": "legacy_projection_migration",
+                        "source_schema_version": 15,
+                        "shadow_only": True,
+                    },
+                    learner_id=attempt["learner_id"],
+                    # This is a migration observation appended after the
+                    # historical stream tail, not an event that occurred in
+                    # the learner's possibly already-ended session.
+                    session_id=None,
+                    idempotency_key=performance_scoring_claim_event_key(
+                        row["command_hash"]
+                    ),
+                    correlation_id=row["attempt_id"],
+                    causation_id=row["attempt_id"],
+                    occurred_at=from_timestamp(row["claimed_at"]),
+                )
+                connection.execute(
+                    """INSERT INTO performance_scoring_claims(
+                           id, event_id, idempotency_key, attempt_id,
+                           evaluation_id, through_sequence, provider_id,
+                           provider_version, action_trace_digest, command_hash,
+                           claimed_at
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        row["id"],
+                        event["event_id"],
+                        row["idempotency_key"],
+                        row["attempt_id"],
+                        row["evaluation_id"],
+                        row["through_sequence"],
+                        row["provider_id"],
+                        row["provider_version"],
+                        row["action_trace_digest"],
+                        row["command_hash"],
+                        row["claimed_at"],
+                    ),
+                )
+            connection.execute("DROP TABLE _tsq_v16_scoring_claims_old")
+
+        unclaimed_registered = connection.execute(
+            """SELECT evaluation.id AS evaluation_id,
+                      evaluation.attempt_id,
+                      evaluation.command_hash,
+                      attempt.learner_id, attempt.session_id
+               FROM task_evaluations evaluation
+               JOIN performance_attempts attempt
+                 ON attempt.id=evaluation.attempt_id
+               WHERE json_extract(
+                   evaluation.authority_json,
+                   '$.normalized_result.normalization_mode'
+               )='registered_provider'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM performance_scoring_claims claim
+                     WHERE claim.evaluation_id=evaluation.id
+                       AND claim.attempt_id=evaluation.attempt_id
+                       AND claim.command_hash=evaluation.command_hash
+                 )
+                 AND NOT EXISTS (
+                     SELECT 1 FROM events exemption
+                     WHERE exemption.event_type =
+                           'PerformanceScoringLegacyExempted'
+                       AND exemption.schema_version = 1
+                       AND json_extract(
+                           exemption.payload_json, '$.evaluation_id'
+                       ) = evaluation.id
+                       AND json_extract(
+                           exemption.payload_json, '$.attempt_id'
+                       ) = evaluation.attempt_id
+                       AND json_extract(
+                           exemption.payload_json, '$.command_hash'
+                       ) = evaluation.command_hash
+                       AND json_extract(
+                           exemption.payload_json, '$.reason'
+                       ) = 'schema_v14_predates_callback_claims'
+                 )
+               ORDER BY evaluation.id"""
+        ).fetchall()
+        if unclaimed_registered and starting_version >= 15:
+            raise ConflictError(
+                "Schema v15 contains a registered-provider evaluation without "
+                "its required scoring claim; migration fails closed."
+            )
+        for row in unclaimed_registered:
+            self.append_event(
+                connection,
+                stream_id=f"learner:{row['learner_id']}",
+                event_type="PerformanceScoringLegacyExempted",
+                schema_version=1,
+                payload={
+                    "evaluation_id": row["evaluation_id"],
+                    "attempt_id": row["attempt_id"],
+                    "command_hash": row["command_hash"],
+                    "reason": "schema_v14_predates_callback_claims",
+                },
+                metadata={
+                    "migration_from_schema_version": 14,
+                    "shadow_only": True,
+                },
+                learner_id=row["learner_id"],
+                # The exception records a schema migration fact. Binding it
+                # to an ended historical session would put a new event after
+                # SessionEnded and invalidate the immutable lifecycle.
+                session_id=None,
+                idempotency_key=(
+                    "performance-score-legacy:v1:" + row["evaluation_id"]
+                ),
+                correlation_id=row["attempt_id"],
+                causation_id=row["evaluation_id"],
+            )
+
+    @staticmethod
+    def _validate_v16_migration_lifecycle(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Reject v16 migration observations already appended after session end."""
+
+        invalid = connection.execute(
+            """SELECT observation.event_id
+               FROM events observation
+               JOIN events ended
+                 ON ended.session_id=observation.session_id
+                AND ended.event_type='SessionEnded'
+               WHERE observation.event_type IN (
+                   'PerformanceScoringClaimMigrated',
+                   'PerformanceScoringLegacyExempted'
+               )
+                 AND observation.session_id IS NOT NULL
+                 AND observation.stream_id=ended.stream_id
+                 AND observation.stream_version > ended.stream_version
+               ORDER BY observation.event_id LIMIT 1"""
+        ).fetchone()
+        if invalid is not None:
+            raise ConflictError(
+                "Schema v16 contains a migration observation after "
+                "SessionEnded; immutable event history requires explicit "
+                f"repair before v17 ({invalid['event_id']})."
+            )
+
+    @classmethod
+    def _migrate_v16_to_v17(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Move migration-only scoring observations outside session envelopes."""
+
+        # Exact v16 structure was checked read-only before any migration write.
+        # Existing session-bound migration observations remain valid only when
+        # they precede a later SessionEnded (or the session is still active).
+        # New v15/v14 migrations already emit unbound observations.
+        cls._validate_v16_migration_lifecycle(connection)
+
+    @staticmethod
+    def _install_current_performance_scoring_triggers(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Install the event/projection bijection for callback admissions."""
+
+        _execute_sql_script(
+            connection,
+            """
+            DROP TRIGGER IF EXISTS performance_scoring_claims_validate_insert;
+            DROP TRIGGER IF EXISTS performance_scoring_claims_no_update;
+            DROP TRIGGER IF EXISTS performance_scoring_claims_no_delete;
+            DROP TRIGGER IF EXISTS events_respect_performance_scoring_claim;
+            DROP TRIGGER IF EXISTS task_evaluations_validate_scoring_claim;
+            DROP TRIGGER IF EXISTS task_evaluations_validate_insert;
+
+            CREATE TRIGGER performance_scoring_claims_validate_insert
+            BEFORE INSERT ON performance_scoring_claims BEGIN
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM events event
+                    WHERE event.idempotency_key = NEW.idempotency_key
+                      AND event.event_id != NEW.event_id
+                ) THEN RAISE(
+                    ABORT, 'scoring claim idempotency key already has an event'
+                ) END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM performance_attempts attempt
+                    JOIN performance_actions submission
+                      ON submission.attempt_id = attempt.id
+                     AND submission.sequence = NEW.through_sequence
+                     AND submission.action_type = 'submitted'
+                    WHERE attempt.id = NEW.attempt_id
+                ) THEN RAISE(
+                    ABORT, 'scoring claim lacks its submitted trace boundary'
+                ) END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM events claim_event
+                    JOIN performance_attempts attempt
+                      ON attempt.id = NEW.attempt_id
+                    WHERE claim_event.event_id = NEW.event_id
+                      AND claim_event.event_type IN (
+                          'PerformanceScoringClaimed',
+                          'PerformanceScoringClaimMigrated'
+                      )
+                      AND claim_event.schema_version = 1
+                      AND claim_event.stream_id =
+                          'learner:' || attempt.learner_id
+                      AND claim_event.learner_id = attempt.learner_id
+                      AND (
+                          (
+                              claim_event.event_type =
+                                  'PerformanceScoringClaimed'
+                              AND claim_event.session_id = attempt.session_id
+                          )
+                          OR (
+                              claim_event.event_type =
+                                  'PerformanceScoringClaimMigrated'
+                              AND (
+                                  claim_event.session_id IS NULL
+                                  OR claim_event.session_id =
+                                      attempt.session_id
+                              )
+                          )
+                      )
+                      AND claim_event.idempotency_key =
+                          'performance-score-claim:v1:' || NEW.command_hash
+                      AND claim_event.correlation_id = NEW.attempt_id
+                      AND claim_event.causation_id = NEW.attempt_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.claim_id'
+                      ) = NEW.id
+                      AND json_extract(
+                          claim_event.payload_json,
+                          '$.caller_idempotency_key'
+                      ) IS NEW.idempotency_key
+                      AND json_extract(
+                          claim_event.payload_json, '$.attempt_id'
+                      ) = NEW.attempt_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.evaluation_id'
+                      ) = NEW.evaluation_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.through_sequence'
+                      ) = NEW.through_sequence
+                      AND json_extract(
+                          claim_event.payload_json, '$.provider_id'
+                      ) = NEW.provider_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.provider_version'
+                      ) = NEW.provider_version
+                      AND json_extract(
+                          claim_event.payload_json, '$.action_trace_digest'
+                      ) = NEW.action_trace_digest
+                      AND json_extract(
+                          claim_event.payload_json, '$.command_hash'
+                      ) = NEW.command_hash
+                      AND json_extract(
+                          claim_event.payload_json, '$.claimed_at'
+                      ) = NEW.claimed_at
+                ) THEN RAISE(
+                    ABORT, 'scoring claim does not match its event'
+                ) END;
+            END;
+
+            CREATE TRIGGER performance_scoring_claims_no_update
+            BEFORE UPDATE ON performance_scoring_claims BEGIN
+                SELECT RAISE(ABORT, 'performance scoring claims are immutable');
+            END;
+
+            CREATE TRIGGER performance_scoring_claims_no_delete
+            BEFORE DELETE ON performance_scoring_claims BEGIN
+                SELECT RAISE(ABORT, 'performance scoring claims are immutable');
+            END;
+
+            CREATE TRIGGER events_respect_performance_scoring_claim
+            BEFORE INSERT ON events
+            WHEN NEW.idempotency_key IS NOT NULL
+             AND EXISTS (
+                 SELECT 1 FROM performance_scoring_claims claim
+                 WHERE claim.idempotency_key = NEW.idempotency_key
+             )
+            BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM performance_scoring_claims claim
+                    WHERE claim.idempotency_key = NEW.idempotency_key
+                      AND NEW.event_type = 'TaskEvaluationRecorded'
+                      AND json_extract(
+                          NEW.metadata_json, '$.command_hash'
+                      ) = claim.command_hash
+                      AND json_extract(
+                          NEW.payload_json, '$.attempt_id'
+                      ) = claim.attempt_id
+                      AND json_extract(
+                          NEW.payload_json, '$.through_sequence'
+                      ) = claim.through_sequence
+                      AND json_extract(
+                          NEW.payload_json, '$.evaluation.id'
+                      ) = claim.evaluation_id
+                ) THEN RAISE(
+                    ABORT, 'event does not complete its performance scoring claim'
+                ) END;
+            END;
+
+            CREATE TRIGGER task_evaluations_validate_scoring_claim
+            BEFORE INSERT ON task_evaluations BEGIN
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM performance_scoring_claims claim
+                    JOIN events evaluation_event
+                      ON evaluation_event.event_id = NEW.event_id
+                    WHERE claim.command_hash = NEW.command_hash
+                      AND (
+                          claim.attempt_id != NEW.attempt_id
+                          OR claim.evaluation_id != NEW.id
+                          OR claim.through_sequence != NEW.through_sequence
+                          OR evaluation_event.idempotency_key
+                             IS NOT claim.idempotency_key
+                      )
+                ) THEN RAISE(
+                    ABORT, 'task evaluation does not complete its scoring claim'
+                ) END;
+                SELECT CASE WHEN json_extract(
+                    NEW.authority_json,
+                    '$.normalized_result.normalization_mode'
+                ) = 'registered_provider' AND NOT EXISTS (
+                    SELECT 1 FROM performance_scoring_claims claim
+                    WHERE claim.command_hash = NEW.command_hash
+                      AND claim.attempt_id = NEW.attempt_id
+                      AND claim.evaluation_id = NEW.id
+                      AND claim.through_sequence = NEW.through_sequence
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM events exemption
+                    WHERE exemption.event_type =
+                          'PerformanceScoringLegacyExempted'
+                      AND exemption.schema_version = 1
+                      AND json_extract(
+                          exemption.payload_json, '$.evaluation_id'
+                      ) = NEW.id
+                      AND json_extract(
+                          exemption.payload_json, '$.attempt_id'
+                      ) = NEW.attempt_id
+                      AND json_extract(
+                          exemption.payload_json, '$.command_hash'
+                      ) = NEW.command_hash
+                ) THEN RAISE(
+                    ABORT, 'registered evaluation lacks its scoring claim'
+                ) END;
+            END;
+
+            CREATE TRIGGER task_evaluations_validate_insert
+            BEFORE INSERT ON task_evaluations BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM performance_actions submission
+                    WHERE submission.attempt_id = NEW.attempt_id
+                      AND submission.action_type = 'submitted'
+                      AND submission.sequence = NEW.through_sequence
+                ) THEN RAISE(
+                    ABORT, 'task evaluation lacks its submitted trace boundary'
+                ) END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM performance_attempts attempt
+                    JOIN events evaluation_event
+                      ON evaluation_event.event_id = NEW.event_id
+                    WHERE attempt.id = NEW.attempt_id
+                      AND evaluation_event.event_type = 'TaskEvaluationRecorded'
+                      AND evaluation_event.schema_version = 1
+                      AND evaluation_event.stream_id =
+                          'learner:' || attempt.learner_id
+                      AND evaluation_event.learner_id = attempt.learner_id
+                      AND evaluation_event.session_id = attempt.session_id
+                      AND (
+                          evaluation_event.causation_id = NEW.attempt_id
+                          OR EXISTS (
+                              SELECT 1
+                              FROM performance_scoring_claims claim
+                              WHERE claim.event_id =
+                                    evaluation_event.causation_id
+                                AND claim.attempt_id = NEW.attempt_id
+                                AND claim.evaluation_id = NEW.id
+                                AND claim.command_hash = NEW.command_hash
+                          )
+                      )
+                      AND evaluation_event.recorded_at = NEW.recorded_at
+                      AND json_extract(
+                          evaluation_event.payload_json, '$.evaluation.id'
+                      ) = NEW.id
+                      AND json_extract(
+                          evaluation_event.payload_json, '$.evaluation_digest'
+                      ) = NEW.evaluation_digest
+                      AND json_extract(
+                          evaluation_event.payload_json, '$.through_sequence'
+                      ) = NEW.through_sequence
+                ) THEN RAISE(
+                    ABORT, 'task evaluation does not match its event'
+                ) END;
+            END;
+            """,
+        )
 
     @staticmethod
     def _install_v8_learning_action_triggers(
         connection: sqlite3.Connection,
     ) -> None:
         """Bind immutable action projections to their semantic events."""
-        connection.executescript(
+        _execute_sql_script(
+            connection,
             """
             DROP TRIGGER IF EXISTS learning_artifacts_no_update;
             DROP TRIGGER IF EXISTS learning_artifacts_no_delete;
@@ -3760,7 +5855,7 @@ class Database:
             BEFORE DELETE ON learning_actions BEGIN
                 SELECT RAISE(ABORT, 'learning actions are immutable');
             END;
-            """
+            """,
         )
 
     @staticmethod
@@ -3779,7 +5874,8 @@ class Database:
     def _install_v6_authoring_triggers(connection: sqlite3.Connection) -> None:
         """Constrain job state transitions and make completed runs immutable."""
 
-        connection.executescript(
+        _execute_sql_script(
+            connection,
             """
             DROP TRIGGER IF EXISTS generation_jobs_validate_insert;
             DROP TRIGGER IF EXISTS generation_jobs_validate_update;
@@ -3881,12 +5977,13 @@ class Database:
             BEFORE DELETE ON generation_job_runs BEGIN
                 SELECT RAISE(ABORT, 'generation runs are immutable');
             END;
-            """
+            """,
         )
 
     @staticmethod
     def _drop_v6_authoring_triggers(connection: sqlite3.Connection) -> None:
-        connection.executescript(
+        _execute_sql_script(
+            connection,
             """
             DROP TRIGGER IF EXISTS generation_jobs_validate_insert;
             DROP TRIGGER IF EXISTS generation_jobs_validate_update;
@@ -3894,7 +5991,7 @@ class Database:
             DROP TRIGGER IF EXISTS generation_job_runs_validate_insert;
             DROP TRIGGER IF EXISTS generation_job_runs_validate_update;
             DROP TRIGGER IF EXISTS generation_job_runs_no_delete;
-            """
+            """,
         )
 
     @contextmanager
@@ -3983,6 +6080,15 @@ class Database:
             for topic in topics
             for concept_id in topic.concept_ids
         }
+        legacy_unreviewed_generated_ids = tuple(
+            sorted(
+                question.id
+                for question in questions
+                if question.provenance.get("generated") is True
+                and question.provenance.get("human_review") is not True
+                and not question.status.eligible_for_adaptation
+            )
+        )
         question_topic_rows: list[tuple[str, str, str]] = []
         for question in questions:
             relations: dict[str, str] = {}
@@ -4617,30 +6723,49 @@ class Database:
                 )
                 if sealed.rowcount != 1:
                     raise ConflictError("Corpus release could not be sealed atomically.")
-            connection.execute(
-                """INSERT INTO meta(key, value)
-                   VALUES('active_corpus_release', ?)
-                   ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
-                (release_id,),
+            legacy_generated_revocations = (
+                self._revoke_historically_active_unreviewed_generated_questions(
+                    connection,
+                    legacy_unreviewed_generated_ids,
+                )
             )
-            self.append_event(
-                connection,
-                stream_id="corpus:main",
-                event_type="CorpusImported",
-                payload={
-                    "concept_count": len(concepts),
-                    "misconception_count": len(misconceptions),
-                    "question_count": len(questions),
-                    "domain_count": len(domains),
-                    "topic_count": len(topics),
-                    "learning_objective_count": len(objectives),
-                    "objective_edge_count": len(objective_edges),
-                    "objective_graph_version": objective_graph_version,
-                    "corpus_release_id": release_id,
-                    "bundle_hash": bundle_hash,
-                },
-                metadata={"schema_version": SCHEMA_VERSION, "corpus_release_id": release_id},
+            legacy_generated_evidence_quarantines = (
+                self._quarantine_historical_generated_evidence(connection)
             )
+            active_release = connection.execute(
+                "SELECT value FROM meta WHERE key='active_corpus_release'"
+            ).fetchone()
+            activation_changed = (
+                active_release is None or active_release["value"] != release_id
+            )
+            if activation_changed:
+                connection.execute(
+                    """INSERT INTO meta(key, value)
+                       VALUES('active_corpus_release', ?)
+                       ON CONFLICT(key) DO UPDATE SET value=excluded.value""",
+                    (release_id,),
+                )
+                self.append_event(
+                    connection,
+                    stream_id="corpus:main",
+                    event_type="CorpusImported",
+                    payload={
+                        "concept_count": len(concepts),
+                        "misconception_count": len(misconceptions),
+                        "question_count": len(questions),
+                        "domain_count": len(domains),
+                        "topic_count": len(topics),
+                        "learning_objective_count": len(objectives),
+                        "objective_edge_count": len(objective_edges),
+                        "objective_graph_version": objective_graph_version,
+                        "corpus_release_id": release_id,
+                        "bundle_hash": bundle_hash,
+                    },
+                    metadata={
+                        "schema_version": SCHEMA_VERSION,
+                        "corpus_release_id": release_id,
+                    },
+                )
         return {
             "concepts": len(concepts),
             "edges": len(edges),
@@ -4652,7 +6777,208 @@ class Database:
             "learning_objectives": len(objectives),
             "objective_edges": len(objective_edges),
             "release_id": release_id,
+            "legacy_generated_revocations": legacy_generated_revocations,
+            "legacy_generated_evidence_quarantines": (
+                legacy_generated_evidence_quarantines
+            ),
         }
+
+    def _revoke_historically_active_unreviewed_generated_questions(
+        self,
+        connection: sqlite3.Connection,
+        question_ids: Sequence[str],
+    ) -> int:
+        """Globally revoke quarantined generated IDs that an old release served."""
+
+        created = 0
+        active = connection.execute(
+            "SELECT value FROM meta WHERE key = 'active_corpus_release'"
+        ).fetchone()
+        for question_id in question_ids:
+            historical_active = connection.execute(
+                """SELECT 1
+                   FROM release_questions
+                   WHERE question_id = ?
+                     AND status IN ('approved', 'calibrated')
+                   LIMIT 1""",
+                (question_id,),
+            ).fetchone()
+            if historical_active is None:
+                continue
+            existing = connection.execute(
+                "SELECT event_id FROM question_revocations WHERE question_id = ?",
+                (question_id,),
+            ).fetchone()
+            if existing is not None:
+                continue
+
+            reason = LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON
+            payload = {"question_id": question_id, "reason": reason}
+            idempotency_key = _legacy_unreviewed_generated_revocation_key(
+                question_id
+            )
+            prior_event = connection.execute(
+                "SELECT * FROM events WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            if prior_event is not None:
+                if (
+                    prior_event["event_type"] != "QuestionEmergencyRevoked"
+                    or json.loads(prior_event["payload_json"]) != payload
+                ):
+                    raise ConflictError(
+                        "Legacy generated-question revocation key was reused "
+                        "for a different safety event."
+                    )
+                raise ConflictError(
+                    "Legacy generated-question revocation event has no matching "
+                    "projection; database needs repair."
+                )
+
+            revoked_at = datetime.now(timezone.utc)
+            event = self.append_event(
+                connection,
+                stream_id="corpus:safety",
+                event_type="QuestionEmergencyRevoked",
+                payload=payload,
+                metadata={
+                    "schema_version": SCHEMA_VERSION,
+                    "active_corpus_release_id": (
+                        active["value"] if active is not None else None
+                    ),
+                    "migration": "legacy-unreviewed-generated-v1",
+                },
+                idempotency_key=idempotency_key,
+                occurred_at=revoked_at,
+            )
+            connection.execute(
+                """INSERT INTO question_revocations(
+                       question_id, reason, revoked_at, event_id
+                   ) VALUES (?, ?, ?, ?)""",
+                (
+                    question_id,
+                    reason,
+                    to_timestamp(revoked_at),
+                    event["event_id"],
+                ),
+            )
+            created += 1
+        return created
+
+    def _historically_contaminated_generated_attempts(
+        self,
+        connection: sqlite3.Connection,
+        learner_id: str | None = None,
+    ) -> tuple[sqlite3.Row, ...]:
+        """Return responses to independently classified unsafe generation."""
+
+        unsafe_question_ids = (
+            self._historically_active_unsafe_generated_ids(connection)
+        )
+        if not unsafe_question_ids:
+            return ()
+        placeholders = ", ".join("?" for _item in unsafe_question_ids)
+        parameters: list[object] = list(unsafe_question_ids)
+        learner_clause = ""
+        if learner_id is not None:
+            learner_clause = " AND attempt.learner_id = ?"
+            parameters.append(learner_id)
+        return tuple(
+            connection.execute(
+                f"""SELECT attempt.id AS attempt_id,
+                           attempt.event_id AS response_event_id,
+                           attempt.learner_id,
+                           attempt.question_id
+                    FROM attempts attempt
+                    WHERE attempt.question_id IN ({placeholders})
+                    {learner_clause}
+                    ORDER BY attempt.learner_id, attempt.id""",
+                tuple(parameters),
+            ).fetchall()
+        )
+
+    def _quarantine_historical_generated_evidence(
+        self,
+        connection: sqlite3.Connection,
+    ) -> int:
+        """Mark contaminated responses without rewriting immutable history."""
+
+        created = 0
+        reason = LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON
+        metadata = {
+            "safety_policy": HISTORICAL_GENERATED_EVIDENCE_POLICY,
+            "requires_explicit_rebuild": True,
+        }
+        for row in self._historically_contaminated_generated_attempts(
+            connection
+        ):
+            payload = {
+                "attempt_id": row["attempt_id"],
+                "response_event_id": row["response_event_id"],
+                "learner_id": row["learner_id"],
+                "question_id": row["question_id"],
+                "reason": reason,
+                "projection_applied": False,
+            }
+            idempotency_key = _historical_generated_evidence_key(
+                row["attempt_id"]
+            )
+            prior = connection.execute(
+                "SELECT * FROM events WHERE idempotency_key=?",
+                (idempotency_key,),
+            ).fetchone()
+            if prior is not None:
+                if (
+                    prior["event_type"] != "ResponseEvidenceQuarantined"
+                    or prior["schema_version"] != 1
+                    or prior["stream_id"]
+                    != f"learner:{row['learner_id']}"
+                    or prior["learner_id"] != row["learner_id"]
+                    or prior["session_id"] is not None
+                    or prior["correlation_id"] != row["attempt_id"]
+                    or prior["causation_id"] != row["response_event_id"]
+                    or json.loads(prior["payload_json"]) != payload
+                    or json.loads(prior["metadata_json"]) != metadata
+                ):
+                    raise ConflictError(
+                        "Historical generated-evidence quarantine key was "
+                        "reused for a different safety event."
+                    )
+                continue
+            self.append_event(
+                connection,
+                stream_id=f"learner:{row['learner_id']}",
+                event_type="ResponseEvidenceQuarantined",
+                schema_version=1,
+                payload=payload,
+                metadata=metadata,
+                learner_id=row["learner_id"],
+                session_id=None,
+                idempotency_key=idempotency_key,
+                correlation_id=row["attempt_id"],
+                causation_id=row["response_event_id"],
+                occurred_at=datetime.now(timezone.utc),
+            )
+            created += 1
+        return created
+
+    def require_learner_evidence_safe(
+        self,
+        learner_id: str,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Fail closed while revoked generated evidence remains projected."""
+
+        contaminated = self._historically_contaminated_generated_attempts(
+            connection,
+            learner_id,
+        )
+        if contaminated:
+            raise ConflictError(
+                f"Learner {learner_id} has {len(contaminated)} response(s) "
+                "with quarantined generated-question evidence; adaptive use "
+                "and reporting require an explicit audited projection rebuild."
+            )
 
     @staticmethod
     def _validate_corpus_activation(
@@ -4902,6 +7228,24 @@ class Database:
                     f"{misconception.concept_id}"
                 )
         for question in questions:
+            legacy_unattested_compatible = bool(
+                type(question.provenance) is dict
+                and "generated" not in question.provenance
+                and legacy_unattested_member_compatible(
+                    _legacy_question_identity(question)
+                )
+            )
+            for issue in question_provenance_issues(
+                question.provenance,
+                status=question.status.value,
+                legacy_unattested_compatible=(
+                    legacy_unattested_compatible
+                ),
+            ):
+                violations.append(
+                    f"question {question.id} provenance [{issue.code}]: "
+                    f"{issue.message}"
+                )
             mapped = {mapping.concept_id for mapping in question.concepts}
             unknown_concepts = mapped - concept_ids
             if unknown_concepts:
@@ -5042,6 +7386,29 @@ class Database:
                 if prior["event_type"] != event_type or json.loads(prior["payload_json"]) != payload:
                     raise ConflictError("Idempotency key was already used for a different command.")
                 return prior
+            scoring_claim = connection.execute(
+                """SELECT * FROM performance_scoring_claims
+                   WHERE idempotency_key=?""",
+                (idempotency_key,),
+            ).fetchone()
+            if scoring_claim is not None:
+                evaluation = payload.get("evaluation")
+                if not (
+                    event_type == "TaskEvaluationRecorded"
+                    and (metadata or {}).get("command_hash")
+                    == scoring_claim["command_hash"]
+                    and payload.get("attempt_id")
+                    == scoring_claim["attempt_id"]
+                    and payload.get("through_sequence")
+                    == scoring_claim["through_sequence"]
+                    and type(evaluation) is dict
+                    and evaluation.get("id")
+                    == scoring_claim["evaluation_id"]
+                ):
+                    raise ConflictError(
+                        "Idempotency key is reserved by an unfinished "
+                        "performance scoring claim."
+                    )
         head = connection.execute(
             "SELECT stream_version, payload_hash FROM stream_heads WHERE stream_id = ?",
             (stream_id,),
@@ -5858,9 +8225,14 @@ class Database:
                     ),
                 ).fetchall()
                 question_ids = [row["id"] for row in id_rows]
-                return self._questions_by_ids(
+                questions = self._questions_by_ids(
                     connection, question_ids, release_id=release_id
                 )
+                return [
+                    question
+                    for question in questions
+                    if question_runtime_activation_safe(question)
+                ]
             connection.execute("CREATE TEMP TABLE requested_scope(id TEXT PRIMARY KEY)")
             connection.executemany(
                 "INSERT INTO requested_scope(id) VALUES (?)",
@@ -5884,9 +8256,14 @@ class Database:
                     FAMILY_DIVERSE_CANDIDATE_POOL_SQL, parameters
                 ).fetchall()
             question_ids = [row["id"] for row in id_rows]
-            return self._questions_by_ids(
+            questions = self._questions_by_ids(
                 connection, question_ids, release_id=release_id
             )
+            return [
+                question
+                for question in questions
+                if question_runtime_activation_safe(question)
+            ]
 
     def _questions_by_ids(
         self,
@@ -6557,12 +8934,34 @@ class Database:
             for row in rows
         ]
 
-    def independent_evidence_summary(self, learner_id: str, concept_id: str) -> dict[str, int]:
-        return self.independent_evidence_summaries(learner_id, {concept_id})[concept_id]
+    def independent_evidence_summary(
+        self,
+        learner_id: str,
+        concept_id: str,
+        *,
+        release_id: str | None = None,
+    ) -> dict[str, int]:
+        return self.independent_evidence_summaries(
+            learner_id,
+            {concept_id},
+            release_id=release_id,
+        )[concept_id]
 
     def independent_evidence_summaries(
-        self, learner_id: str, concept_ids: set[str]
+        self,
+        learner_id: str,
+        concept_ids: set[str],
+        *,
+        release_id: str | None = None,
     ) -> dict[str, dict[str, int]]:
+        """Summarize certificate evidence accepted by one corpus release.
+
+        The family ledgers are lifetime projections and remain immutable
+        historical evidence.  A current certificate count is narrower: the
+        release must still contain an approved or calibrated, non-revoked
+        primary item from that family for the same concept.
+        """
+
         summaries = {
             concept_id: {"families": 0, "delayed": 0, "operation_kinds": 0}
             for concept_id in concept_ids
@@ -6570,6 +8969,9 @@ class Database:
         if not concept_ids:
             return summaries
         with self.read() as connection:
+            resolved_release = release_id or self.get_active_release_id(
+                connection
+            )
             rows = connection.execute(
                 """SELECT evidence.concept_id, COUNT(*) AS families,
                           COUNT(DISTINCT CASE WHEN evidence.kind != 'unknown'
@@ -6579,7 +8981,26 @@ class Database:
                    FROM learner_skill_families evidence
                    JOIN json_each(?) scope
                      ON scope.value = evidence.concept_id
-                   WHERE evidence.learner_id = ? GROUP BY evidence.concept_id""",
+                   WHERE evidence.learner_id = ?
+                     AND EXISTS (
+                         SELECT 1
+                         FROM release_questions released
+                         JOIN questions question
+                           ON question.id = released.question_id
+                         JOIN question_concepts mapping
+                           ON mapping.question_id = question.id
+                          AND mapping.role = 'primary'
+                         WHERE released.release_id = ?
+                           AND released.status IN (?, ?)
+                           AND mapping.concept_id = evidence.concept_id
+                           AND question.family_id = evidence.family_id
+                           AND NOT EXISTS (
+                               SELECT 1
+                               FROM question_revocations revoked
+                               WHERE revoked.question_id = question.id
+                           )
+                     )
+                   GROUP BY evidence.concept_id""",
                 (
                     json.dumps(
                         sorted(concept_ids),
@@ -6587,6 +9008,9 @@ class Database:
                         separators=(",", ":"),
                     ),
                     learner_id,
+                    resolved_release,
+                    QuestionStatus.APPROVED.value,
+                    QuestionStatus.CALIBRATED.value,
                 ),
             ).fetchall()
         for row in rows:
@@ -6659,6 +9083,7 @@ class Database:
                 "SELECT 1 FROM learners WHERE id = ?", (learner_id,)
             ).fetchone():
                 raise NotFoundError(f"Unknown learner: {learner_id}")
+            self.require_learner_evidence_safe(learner_id, connection)
             release_id = self.get_active_release_id(connection)
             requested_root_concept_id = root_concept_id
             if topic_id is not None:
@@ -6783,6 +9208,7 @@ class Database:
         status: str = "completed",
         reason: str | None = None,
         idempotency_key: str | None = None,
+        now: datetime | None = None,
     ) -> dict[str, Any]:
         if status not in {"completed", "abandoned"}:
             raise ValidationError("Session status must be completed or abandoned.")
@@ -6800,6 +9226,12 @@ class Database:
             raise ValidationError(
                 "idempotency_key must be a non-blank string of at most 200 characters."
             )
+        if now is not None and not isinstance(now, datetime):
+            raise ValidationError("now must be a timezone-aware datetime.")
+        close_time = now or datetime.now(timezone.utc)
+        if close_time.tzinfo is None or close_time.utcoffset() is None:
+            raise ValidationError("now must be a timezone-aware datetime.")
+        close_time = close_time.astimezone(timezone.utc)
         with self.transaction() as connection:
             session = self.get_session(session_id, connection)
             payload = {
@@ -6827,7 +9259,72 @@ class Database:
                 raise ConflictError(
                     f"Session is already {session['status']} and cannot become {status}."
                 )
-            now = datetime.now(timezone.utc)
+            open_performance_attempt = connection.execute(
+                """SELECT attempt.id
+                   FROM performance_attempts attempt
+                   WHERE attempt.session_id = ?
+                     AND NOT EXISTS (
+                         SELECT 1 FROM performance_actions terminal
+                         WHERE terminal.attempt_id = attempt.id
+                           AND terminal.action_type IN ('submitted', 'abandoned')
+                     )
+                   ORDER BY attempt.started_at, attempt.id LIMIT 1""",
+                (session_id,),
+            ).fetchone()
+            if open_performance_attempt is not None:
+                raise ConflictError(
+                    "Session has an active performance task "
+                    f"{open_performance_attempt['id']}; submit or abandon it "
+                    "before ending the session."
+                )
+            try:
+                session_started_at = datetime.fromisoformat(
+                    session["created_at"]
+                )
+                if (
+                    session_started_at.tzinfo is None
+                    or session_started_at.utcoffset() is None
+                ):
+                    raise ValueError("timezone-naive timestamp")
+                session_started_at = session_started_at.astimezone(
+                    timezone.utc
+                )
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ConflictError(
+                    "Session has an invalid start timestamp; run integrity "
+                    "verification before ending it."
+                ) from exc
+            if close_time < session_started_at:
+                raise ValidationError(
+                    "A session cannot end before it started."
+                )
+            for prior_event in connection.execute(
+                """SELECT event_id, event_type, occurred_at
+                   FROM events WHERE session_id = ?
+                   ORDER BY stream_version, event_id""",
+                (session_id,),
+            ).fetchall():
+                try:
+                    prior_time = datetime.fromisoformat(
+                        prior_event["occurred_at"]
+                    )
+                    if (
+                        prior_time.tzinfo is None
+                        or prior_time.utcoffset() is None
+                    ):
+                        raise ValueError("timezone-naive timestamp")
+                    prior_time = prior_time.astimezone(timezone.utc)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ConflictError(
+                        f"Session event {prior_event['event_id']} has an "
+                        "invalid occurrence timestamp; run integrity "
+                        "verification before ending the session."
+                    ) from exc
+                if close_time < prior_time:
+                    raise ValidationError(
+                        "A session cannot end before its latest recorded "
+                        f"event ({prior_event['event_type']})."
+                    )
             invalidation_reason = f"session_{status}"
             pending_decisions = connection.execute(
                 """SELECT * FROM decisions
@@ -6893,7 +9390,7 @@ class Database:
                        WHERE id = ? AND session_id = ?
                          AND consumed_at IS NULL AND invalidated_at IS NULL""",
                     (
-                        to_timestamp(now),
+                        to_timestamp(close_time),
                         invalidation_reason,
                         decision["id"],
                         session_id,
@@ -6925,7 +9422,7 @@ class Database:
                     learner_id=session["learner_id"],
                     session_id=session_id,
                     causation_id=decision["id"],
-                    occurred_at=now,
+                    occurred_at=close_time,
                 )
 
             still_pending = connection.execute(
@@ -6948,12 +9445,17 @@ class Database:
                 learner_id=session["learner_id"],
                 session_id=session_id,
                 idempotency_key=idempotency_key,
-                occurred_at=now,
+                occurred_at=close_time,
             )
             updated = connection.execute(
                 """UPDATE sessions SET status = ?, revision = revision + 1, updated_at = ?
                    WHERE id = ? AND status = 'active' AND revision = ?""",
-                (status, to_timestamp(now), session_id, session["revision"]),
+                (
+                    status,
+                    to_timestamp(close_time),
+                    session_id,
+                    session["revision"],
+                ),
             )
             if updated.rowcount != 1:
                 raise ConflictError("Session changed while it was being ended.")
@@ -7185,6 +9687,8 @@ class Database:
                     f"Decision {row['id']} references a question outside its corpus release."
                 )
             question = questions[0]
+            if not question_runtime_activation_safe(question):
+                return None
             terms = json.loads(row["selected_score_json"])
             score = CandidateScore(question_id=question.id, **terms)
             return Presentation(
@@ -7483,6 +9987,292 @@ class Database:
                     projection_versions_by_stream.setdefault(
                         boundary["stream_id"], []
                     ).append(boundary["stream_version"])
+
+            # A session row is a projection of two immutable lifecycle
+            # boundaries.  Validate that projection directly even when the
+            # session has no questions or productive-skill actions: relying on
+            # action checks alone would let an impossible empty session pass.
+            session_rows = {
+                row["id"]: row
+                for row in connection.execute(
+                    """SELECT id, learner_id, root_concept_id,
+                              corpus_release_id, mode, status, revision,
+                              created_at, updated_at, topic_id,
+                              exploration_mode
+                       FROM sessions ORDER BY id"""
+                ).fetchall()
+            }
+            session_events: dict[str, list[sqlite3.Row]] = {}
+            for event in connection.execute(
+                """SELECT * FROM events WHERE session_id IS NOT NULL
+                   ORDER BY stream_id, stream_version"""
+            ).fetchall():
+                session_events.setdefault(event["session_id"], []).append(
+                    event
+                )
+
+            for session_id, session in session_rows.items():
+                prefix = f"session {session_id}"
+                status = session["status"]
+                if status not in {"active", "completed", "abandoned"}:
+                    errors.append(f"{prefix}: invalid status {status!r}")
+                created_at = aware_timestamp(
+                    session["created_at"], f"{prefix} creation time"
+                )
+                updated_at = aware_timestamp(
+                    session["updated_at"], f"{prefix} update time"
+                )
+                if (
+                    created_at is not None
+                    and updated_at is not None
+                    and updated_at < created_at
+                ):
+                    errors.append(f"{prefix}: updated_at precedes created_at")
+
+                events_for_session = session_events.get(session_id, [])
+                expected_stream = f"learner:{session['learner_id']}"
+                for event in events_for_session:
+                    if (
+                        event["stream_id"] != expected_stream
+                        or event["learner_id"] != session["learner_id"]
+                        or event["session_id"] != session_id
+                    ):
+                        errors.append(
+                            f"{prefix}: event {event['event_id']} envelope "
+                            "does not match session"
+                        )
+
+                bounds = session_boundaries.get(
+                    session_id, {"started": [], "ended": []}
+                )
+                started_events = bounds["started"]
+                ended_events = bounds["ended"]
+                started_event = (
+                    started_events[0] if len(started_events) == 1 else None
+                )
+                ended_event = (
+                    ended_events[0] if len(ended_events) == 1 else None
+                )
+                if len(started_events) != 1:
+                    errors.append(
+                        f"{prefix}: expected one SessionStarted boundary, "
+                        f"found {len(started_events)}"
+                    )
+                if len(ended_events) > 1:
+                    errors.append(
+                        f"{prefix}: expected at most one SessionEnded "
+                        f"boundary, found {len(ended_events)}"
+                    )
+                if status == "active" and ended_events:
+                    errors.append(
+                        f"{prefix}: active status has a SessionEnded boundary"
+                    )
+                elif status in {"completed", "abandoned"} and len(
+                    ended_events
+                ) != 1:
+                    errors.append(
+                        f"{prefix}: {status} status requires one "
+                        "SessionEnded boundary"
+                    )
+
+                started_at: datetime | None = None
+                if started_event is not None:
+                    started_payload = event_object(
+                        started_event, "payload_json", payload_cache
+                    )
+                    started_metadata = event_object(
+                        started_event, "metadata_json", metadata_cache
+                    )
+                    started_at = aware_timestamp(
+                        started_event["occurred_at"],
+                        f"{prefix} SessionStarted occurrence time",
+                    )
+                    aware_timestamp(
+                        started_event["recorded_at"],
+                        f"{prefix} SessionStarted recording time",
+                    )
+                    if (
+                        started_event["schema_version"] != 1
+                        or started_event["stream_id"] != expected_stream
+                        or started_event["learner_id"]
+                        != session["learner_id"]
+                        or started_event["session_id"] != session_id
+                        or started_event["causation_id"] is not None
+                    ):
+                        errors.append(
+                            f"{prefix}: SessionStarted event envelope mismatch"
+                        )
+                    if started_payload is not None:
+                        compare_payload(
+                            started_payload,
+                            {
+                                "session_id": session_id,
+                                "root_concept_id": session[
+                                    "root_concept_id"
+                                ],
+                                "corpus_release_id": session[
+                                    "corpus_release_id"
+                                ],
+                                "mode": session["mode"],
+                            },
+                            f"{prefix} SessionStarted payload",
+                        )
+                    if (
+                        started_metadata is not None
+                        and started_metadata.get("corpus_release_id")
+                        != session["corpus_release_id"]
+                    ):
+                        errors.append(
+                            f"{prefix}: SessionStarted metadata corpus "
+                            "release mismatch"
+                        )
+                    if (
+                        created_at is not None
+                        and started_at is not None
+                        and session["created_at"]
+                        != started_event["occurred_at"]
+                    ):
+                        errors.append(
+                            f"{prefix}: created_at does not match "
+                            "SessionStarted occurrence"
+                        )
+                    if events_for_session and (
+                        started_event["stream_version"]
+                        != min(
+                            event["stream_version"]
+                            for event in events_for_session
+                        )
+                    ):
+                        errors.append(
+                            f"{prefix}: SessionStarted is not the first "
+                            "session event"
+                        )
+
+                ended_at: datetime | None = None
+                if ended_event is not None:
+                    ended_payload = event_object(
+                        ended_event, "payload_json", payload_cache
+                    )
+                    ended_metadata = event_object(
+                        ended_event, "metadata_json", metadata_cache
+                    )
+                    ended_at = aware_timestamp(
+                        ended_event["occurred_at"],
+                        f"{prefix} SessionEnded occurrence time",
+                    )
+                    aware_timestamp(
+                        ended_event["recorded_at"],
+                        f"{prefix} SessionEnded recording time",
+                    )
+                    if (
+                        ended_event["schema_version"] != 1
+                        or ended_event["stream_id"] != expected_stream
+                        or ended_event["learner_id"] != session["learner_id"]
+                        or ended_event["session_id"] != session_id
+                        or ended_event["causation_id"] is not None
+                    ):
+                        errors.append(
+                            f"{prefix}: SessionEnded event envelope mismatch"
+                        )
+                    if ended_payload is not None:
+                        require_exact_fields(
+                            ended_payload,
+                            frozenset({"session_id", "status", "reason"}),
+                            f"{prefix} SessionEnded payload",
+                        )
+                        compare_payload(
+                            ended_payload,
+                            {
+                                "session_id": session_id,
+                                "status": status,
+                            },
+                            f"{prefix} SessionEnded payload",
+                        )
+                        end_reason = ended_payload.get("reason")
+                        if end_reason is not None and (
+                            not isinstance(end_reason, str)
+                            or not end_reason.strip()
+                            or len(end_reason) > 500
+                        ):
+                            errors.append(
+                                f"{prefix}: SessionEnded reason is invalid"
+                            )
+                    if ended_metadata is not None:
+                        require_exact_fields(
+                            ended_metadata,
+                            frozenset({"corpus_release_id"}),
+                            f"{prefix} SessionEnded metadata",
+                        )
+                        if (
+                            ended_metadata.get("corpus_release_id")
+                            != session["corpus_release_id"]
+                        ):
+                            errors.append(
+                                f"{prefix}: SessionEnded metadata corpus "
+                                "release mismatch"
+                            )
+                    if (
+                        updated_at is not None
+                        and ended_at is not None
+                        and session["updated_at"]
+                        != ended_event["occurred_at"]
+                    ):
+                        errors.append(
+                            f"{prefix}: updated_at does not match "
+                            "SessionEnded occurrence"
+                        )
+                    if (
+                        started_at is not None
+                        and ended_at is not None
+                        and ended_at < started_at
+                    ):
+                        errors.append(
+                            f"{prefix}: SessionEnded occurred before "
+                            "SessionStarted"
+                        )
+                    if events_for_session and (
+                        ended_event["stream_version"]
+                        != max(
+                            event["stream_version"]
+                            for event in events_for_session
+                        )
+                    ):
+                        errors.append(
+                            f"{prefix}: SessionEnded is not the final "
+                            "session event"
+                        )
+
+                for event in events_for_session:
+                    event_at = aware_timestamp(
+                        event["occurred_at"],
+                        f"{prefix} event {event['event_id']} occurrence time",
+                    )
+                    if (
+                        started_at is not None
+                        and event_at is not None
+                        and event_at < started_at
+                    ):
+                        errors.append(
+                            f"{prefix}: event {event['event_id']} occurred "
+                            "before SessionStarted"
+                        )
+                    if (
+                        ended_at is not None
+                        and event_at is not None
+                        and event_at > ended_at
+                    ):
+                        errors.append(
+                            f"{prefix}: event {event['event_id']} occurred "
+                            "after SessionEnded"
+                        )
+
+            for unknown_session_id in sorted(
+                set(session_events) - set(session_rows)
+            ):
+                errors.append(
+                    f"session {unknown_session_id}: events have no session "
+                    "projection"
+                )
             revocation_boundaries = {
                 row["question_id"]: row
                 for row in connection.execute(
@@ -8268,6 +11058,7 @@ class Database:
                 source_ids_in_release = {row["source_id"] for row in source_rows}
                 question_rows = connection.execute(
                     """SELECT membership.question_id, question.content_hash,
+                              question.provenance_json,
                               membership.status, membership.evidence_weight
                        FROM release_questions membership
                        JOIN questions question ON question.id = membership.question_id
@@ -8275,6 +11066,34 @@ class Database:
                        ORDER BY membership.question_id""",
                     (release_id,),
                 ).fetchall()
+                for question_row in question_rows:
+                    if question_row["status"] not in {
+                        QuestionStatus.APPROVED.value,
+                        QuestionStatus.CALIBRATED.value,
+                    }:
+                        continue
+                    try:
+                        provenance = json.loads(
+                            question_row["provenance_json"]
+                        )
+                    except (TypeError, json.JSONDecodeError):
+                        provenance = None
+                    if generated_question_runtime_safe(
+                        provenance,
+                        status=question_row["status"],
+                    ):
+                        continue
+                    revoked = connection.execute(
+                        """SELECT 1 FROM question_revocations
+                           WHERE question_id=?""",
+                        (question_row["question_id"],),
+                    ).fetchone()
+                    if revoked is None:
+                        errors.append(
+                            f"{prefix}: active question "
+                            f"{question_row['question_id']} fails the generated-content "
+                            "activation gate and is not emergency-revoked"
+                        )
                 objective_rows = connection.execute(
                     """SELECT membership.objective_id, objective.content_hash,
                               objective.primary_concept_id,
@@ -9416,6 +12235,131 @@ class Database:
                     for event in matching:
                         errors.append(
                             f"event {event['event_id']}: safety event has no revocation projection"
+                        )
+
+            quarantine_events_by_attempt: dict[
+                str, list[sqlite3.Row]
+            ] = {}
+            for event in connection.execute(
+                """SELECT * FROM events
+                   WHERE event_type='ResponseEvidenceQuarantined'
+                   ORDER BY stream_id, stream_version"""
+            ).fetchall():
+                label = (
+                    "historical generated-evidence quarantine "
+                    f"{event['event_id']}"
+                )
+                payload = event_object(
+                    event,
+                    "payload_json",
+                    payload_cache,
+                )
+                metadata = event_object(
+                    event,
+                    "metadata_json",
+                    metadata_cache,
+                )
+                if payload is None or metadata is None:
+                    continue
+                require_exact_fields(
+                    payload,
+                    frozenset(
+                        {
+                            "attempt_id",
+                            "response_event_id",
+                            "learner_id",
+                            "question_id",
+                            "reason",
+                            "projection_applied",
+                        }
+                    ),
+                    f"{label} payload",
+                )
+                require_exact_fields(
+                    metadata,
+                    frozenset(
+                        {
+                            "safety_policy",
+                            "requires_explicit_rebuild",
+                        }
+                    ),
+                    f"{label} metadata",
+                )
+                attempt_id = payload.get("attempt_id")
+                if isinstance(attempt_id, str) and attempt_id:
+                    quarantine_events_by_attempt.setdefault(
+                        attempt_id,
+                        [],
+                    ).append(event)
+                attempt = (
+                    connection.execute(
+                        """SELECT * FROM attempts WHERE id=?""",
+                        (attempt_id,),
+                    ).fetchone()
+                    if isinstance(attempt_id, str)
+                    else None
+                )
+                if (
+                    attempt is None
+                    or event["schema_version"] != 1
+                    or event["stream_id"]
+                    != f"learner:{attempt['learner_id']}"
+                    or event["learner_id"] != attempt["learner_id"]
+                    or event["session_id"] is not None
+                    or event["correlation_id"] != attempt["id"]
+                    or event["causation_id"] != attempt["event_id"]
+                    or payload.get("response_event_id")
+                    != attempt["event_id"]
+                    or payload.get("learner_id")
+                    != attempt["learner_id"]
+                    or payload.get("question_id")
+                    != attempt["question_id"]
+                    or payload.get("reason")
+                    != LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON
+                    or payload.get("projection_applied") is not False
+                    or metadata.get("safety_policy")
+                    != HISTORICAL_GENERATED_EVIDENCE_POLICY
+                    or metadata.get("requires_explicit_rebuild")
+                    is not True
+                    or event["idempotency_key"]
+                    != _historical_generated_evidence_key(
+                        attempt["id"] if attempt is not None else ""
+                    )
+                ):
+                    errors.append(f"{label}: invalid safety boundary")
+
+            contaminated_attempts = (
+                self._historically_contaminated_generated_attempts(
+                    connection
+                )
+            )
+            contaminated_ids = {
+                row["attempt_id"] for row in contaminated_attempts
+            }
+            for row in contaminated_attempts:
+                matching = quarantine_events_by_attempt.get(
+                    row["attempt_id"],
+                    [],
+                )
+                if len(matching) != 1:
+                    errors.append(
+                        "historical generated-evidence attempt "
+                        f"{row['attempt_id']}: expected one quarantine event, "
+                        f"found {len(matching)}"
+                    )
+                errors.append(
+                    f"learner {row['learner_id']}: projection contains "
+                    "quarantined generated-question evidence from attempt "
+                    f"{row['attempt_id']}; explicit audited rebuild required"
+                )
+            for attempt_id, matching in (
+                quarantine_events_by_attempt.items()
+            ):
+                if attempt_id not in contaminated_ids:
+                    for event in matching:
+                        errors.append(
+                            f"event {event['event_id']}: generated-evidence "
+                            "quarantine has no contaminated attempt"
                         )
 
             # The latest projection event commits to all mutable learner-model
@@ -11137,12 +14081,34 @@ class Database:
                         errors.append(
                             f"event {event['event_id']}: DecisionInvalidated has no decision"
                         )
+            # Productive-skill observations live in a separate shadow-only
+            # projection, but they share this event stream and integrity
+            # boundary.  Import locally to avoid a store/service import cycle.
+            from .performance_ledger import performance_integrity_errors
+
+            errors.extend(performance_integrity_errors(connection))
+            performance_attempt_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM performance_attempts"
+            ).fetchone()["n"]
+            performance_action_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM performance_actions"
+            ).fetchone()["n"]
+            task_evaluation_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM task_evaluations"
+            ).fetchone()["n"]
+            shadow_evidence_bundle_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM shadow_evidence_bundles"
+            ).fetchone()["n"]
         return {
             "ok": not errors,
             "event_count": len(events),
             "stream_count": len(expected_version),
             "learning_action_count": len(action_rows),
             "learning_artifact_count": len(artifact_rows),
+            "performance_attempt_count": performance_attempt_count,
+            "performance_action_count": performance_action_count,
+            "task_evaluation_count": task_evaluation_count,
+            "shadow_evidence_bundle_count": shadow_evidence_bundle_count,
             "errors": errors,
             "foreign_key_failures": foreign_key_failures,
             "quick_check": quick_check,

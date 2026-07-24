@@ -30,6 +30,11 @@ from .models import (
     Topic,
 )
 from .quality import audit_corpus
+from .provenance import (
+    legacy_question_identity_payload,
+    legacy_unattested_member_compatible,
+    question_provenance_issues,
+)
 
 
 def _relation(value: str) -> RelationType:
@@ -170,6 +175,66 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
             add("row_type", "List entry must be an object.", path)
             return None
         return value
+
+    def raw_legacy_identity(row: dict[str, Any]) -> dict[str, object]:
+        objective_id = row.get("learning_objective_id")
+        return legacy_question_identity_payload(
+            question_id=row["id"],
+            version=row.get("version", 1),
+            family_id=row["family_id"],
+            stem=row["stem"],
+            kind=row["kind"],
+            difficulty=row["difficulty"],
+            discrimination=row["discrimination"],
+            guess_rate=row.get("guess_rate", 0.25),
+            slip_rate=row.get("slip_rate", 0.05),
+            concepts=(
+                (
+                    mapping["concept_id"],
+                    mapping["weight"],
+                    mapping.get("role", ConceptRole.SECONDARY.value),
+                )
+                for mapping in row["concepts"]
+            ),
+            options=(
+                (
+                    option["id"],
+                    option["text"],
+                    option["correct"],
+                    option["rationale"],
+                    option.get("misconception_id"),
+                    option.get("diagnostic_objective_id")
+                    or (
+                        objective_id
+                        if option.get("correct") is False
+                        else None
+                    ),
+                )
+                for option in row["options"]
+            ),
+            source_ids=row["source_ids"],
+            provenance=row.get("provenance", {}),
+            tags=row.get("tags", []),
+            revision_of=row.get("revision_of"),
+            learning_objective_id=objective_id,
+        )
+
+    legacy_unattested_compatible_ids: set[str] = set()
+    for legacy_row in rows("questions"):
+        if (
+            not isinstance(legacy_row, dict)
+            or not isinstance(legacy_row.get("provenance", {}), dict)
+            or "generated" in legacy_row.get("provenance", {})
+        ):
+            continue
+        try:
+            compatible = legacy_unattested_member_compatible(
+                raw_legacy_identity(legacy_row)
+            )
+        except (KeyError, TypeError, ValueError):
+            compatible = False
+        if compatible and isinstance(legacy_row.get("id"), str):
+            legacy_unattested_compatible_ids.add(legacy_row["id"])
 
     def string_field(
         row: dict[str, Any],
@@ -638,6 +703,21 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
         provenance = row.get("provenance", {})
         if not isinstance(provenance, dict):
             add("field_type", "Field 'provenance' must be an object.", f"{path}.provenance", question_id)
+        else:
+            for issue in question_provenance_issues(
+                provenance,
+                status=row.get("status"),
+                legacy_unattested_compatible=(
+                    row.get("id") in legacy_unattested_compatible_ids
+                    and "generated" not in provenance
+                ),
+            ):
+                field_path = (
+                    f"{path}.provenance.{issue.field}"
+                    if issue.field
+                    else f"{path}.provenance"
+                )
+                add(issue.code, issue.message, field_path, question_id)
         tags = row.get("tags", [])
         if not isinstance(tags, list):
             add("field_type", "Field 'tags' must be a list.", f"{path}.tags", question_id)

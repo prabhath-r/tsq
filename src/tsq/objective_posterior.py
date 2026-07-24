@@ -190,8 +190,16 @@ def _scaled_density(log_density: tuple[float, ...]) -> tuple[tuple[float, ...], 
     return density, normalizer
 
 
-def _edge_mass(log_density: tuple[float, ...]) -> float:
-    density, normalizer = _scaled_density(log_density)
+def _edge_mass(
+    log_density: tuple[float, ...],
+    *,
+    scaled_density: tuple[tuple[float, ...], float] | None = None,
+) -> float:
+    density, normalizer = (
+        _scaled_density(log_density)
+        if scaled_density is None
+        else scaled_density
+    )
     edge_indexes = tuple(range(EDGE_BAND_NODES)) + tuple(
         range(GRID_SIZE - EDGE_BAND_NODES, GRID_SIZE)
     )
@@ -417,6 +425,17 @@ class ExpectedInformation:
     incorrect_mastery_probability: float
 
 
+@dataclass(frozen=True, slots=True)
+class _ExpectedInformationBranches:
+    power: float
+    current: tuple[float, ...]
+    predicted_correct: float
+    correct_density: tuple[float, ...]
+    incorrect_density: tuple[float, ...]
+    correct_scaled_density: tuple[tuple[float, ...], float]
+    incorrect_scaled_density: tuple[tuple[float, ...], float]
+
+
 def _canonical_observations(
     observations: Iterable[LikelihoodObservation],
 ) -> tuple[LikelihoodObservation, ...]:
@@ -464,8 +483,48 @@ def _apply_observations(
     return _normalize_log_density(updated)
 
 
+def _apply_observation_probabilities(
+    anchor: tuple[float, ...],
+    observation: LikelihoodObservation,
+    response_probabilities: tuple[float, ...],
+) -> tuple[float, ...]:
+    """Apply one observation using its already-materialized response curve.
+
+    Expected-information scoring evaluates the same hypothetical item under
+    correct and incorrect outcomes. The response curve is independent of that
+    outcome, so recomputing all fixed-grid logistic probabilities for each
+    branch is pure duplicate work. This helper deliberately retains the
+    single-observation ``math.fsum`` and normalization sequence used by
+    ``_apply_observations`` so the resulting tuples remain bit-for-bit equal.
+    """
+
+    if len(response_probabilities) != GRID_SIZE:
+        raise ObjectivePosteriorError(
+            "A response-probability curve must cover the complete grid."
+        )
+    updated: list[float] = []
+    for index, probability in enumerate(response_probabilities):
+        likelihood = (
+            probability if observation.correct else 1.0 - probability
+        )
+        if not 0.0 < likelihood < 1.0 or not math.isfinite(likelihood):
+            raise ObjectivePosteriorError(
+                "A response likelihood left the finite open unit interval."
+            )
+        updated.append(
+            anchor[index]
+            + math.fsum(
+                [observation.evidence_power * math.log(likelihood)]
+            )
+        )
+    return _normalize_log_density(updated)
+
+
 def _integrate_function(
-    log_density: tuple[float, ...], values: Iterable[float]
+    log_density: tuple[float, ...],
+    values: Iterable[float],
+    *,
+    scaled_density: tuple[tuple[float, ...], float] | None = None,
 ) -> float:
     function_values = tuple(float(value) for value in values)
     if len(function_values) != GRID_SIZE or any(
@@ -474,7 +533,11 @@ def _integrate_function(
         raise ObjectivePosteriorError(
             "A posterior integrand must be finite on the complete grid."
         )
-    density, normalizer = _scaled_density(log_density)
+    density, normalizer = (
+        _scaled_density(log_density)
+        if scaled_density is None
+        else scaled_density
+    )
     numerator = math.fsum(
         0.5
         * GRID_STEP
@@ -491,7 +554,10 @@ def _integrate_function(
 
 
 def _kl_divergence(
-    posterior: tuple[float, ...], prior: tuple[float, ...]
+    posterior: tuple[float, ...],
+    prior: tuple[float, ...],
+    *,
+    scaled_density: tuple[tuple[float, ...], float] | None = None,
 ) -> float:
     result = _integrate_function(
         posterior,
@@ -499,6 +565,7 @@ def _kl_divergence(
             posterior[index] - prior[index]
             for index in range(GRID_SIZE)
         ),
+        scaled_density=scaled_density,
     )
     if result < -METRIC_TOLERANCE:
         raise ObjectivePosteriorError(
@@ -508,7 +575,11 @@ def _kl_divergence(
 
 
 def _probability_above_theta_on_stride(
-    log_density: tuple[float, ...], threshold: float, *, stride: int
+    log_density: tuple[float, ...],
+    threshold: float,
+    *,
+    stride: int,
+    scaled_density: tuple[tuple[float, ...], float] | None = None,
 ) -> float:
     if not math.isfinite(threshold):
         raise ObjectivePosteriorError("A posterior threshold must be finite.")
@@ -521,15 +592,24 @@ def _probability_above_theta_on_stride(
     if threshold >= GRID_UPPER:
         return 0.0
     indexes = tuple(range(0, GRID_SIZE, stride))
-    peak = max(log_density[index] for index in indexes)
-    density = tuple(math.exp(log_density[index] - peak) for index in indexes)
     step = GRID_STEP * stride
-    normalizer = math.fsum(
-        density[index]
-        * step
-        * (0.5 if index in {0, len(indexes) - 1} else 1.0)
-        for index in range(len(indexes))
-    )
+    if scaled_density is not None:
+        if stride != 1:
+            raise ObjectivePosteriorError(
+                "A cached scaled density is valid only at full grid stride."
+            )
+        density, normalizer = scaled_density
+    else:
+        peak = max(log_density[index] for index in indexes)
+        density = tuple(
+            math.exp(log_density[index] - peak) for index in indexes
+        )
+        normalizer = math.fsum(
+            density[index]
+            * step
+            * (0.5 if index in {0, len(indexes) - 1} else 1.0)
+            for index in range(len(indexes))
+        )
     if not math.isfinite(normalizer) or normalizer <= 0.0:
         raise ObjectivePosteriorError("Posterior tail integral is not finite.")
     interval = int((threshold - GRID_LOWER) // step)
@@ -554,10 +634,16 @@ def _probability_above_theta_on_stride(
 
 
 def _probability_above_theta(
-    log_density: tuple[float, ...], threshold: float
+    log_density: tuple[float, ...],
+    threshold: float,
+    *,
+    scaled_density: tuple[tuple[float, ...], float] | None = None,
 ) -> float:
     return _probability_above_theta_on_stride(
-        log_density, threshold, stride=1
+        log_density,
+        threshold,
+        stride=1,
+        scaled_density=scaled_density,
     )
 
 
@@ -1004,7 +1090,7 @@ class ObjectivePosterior:
         )
         return max(0.0, min(1.0, result))
 
-    def expected_information(
+    def _expected_information_branches(
         self,
         *,
         difficulty: float,
@@ -1013,16 +1099,7 @@ class ObjectivePosterior:
         slip_rate: float,
         evidence_power: float,
         option_count: int = DEFAULT_OPTION_COUNT,
-    ) -> ExpectedInformation:
-        """Integrate both hypothetical response posteriors on the full grid.
-
-        Outcome probabilities use the untempered predictive model.  The two
-        posterior branches use the caller-declared evidence power, matching the
-        generalized likelihood update that would be applied after observation.
-        The result is therefore exact for this fixed-grid representation and
-        does not use a local Fisher or Gaussian approximation.
-        """
-
+    ) -> _ExpectedInformationBranches:
         (
             difficulty_value,
             discrimination_value,
@@ -1040,19 +1117,20 @@ class ObjectivePosterior:
         if not 0.0 <= power <= 1.0:
             raise ObjectivePosteriorError("Evidence power must be in [0, 1].")
         current = self.log_density
+        response_probabilities = tuple(
+            _response_probability(
+                theta,
+                difficulty=difficulty_value,
+                discrimination=discrimination_value,
+                guess_rate=guess_value,
+                slip_rate=slip_value,
+                option_count=option_count_value,
+            )
+            for theta in THETA_GRID
+        )
         predicted_correct = _integrate_function(
             current,
-            (
-                _response_probability(
-                    theta,
-                    difficulty=difficulty_value,
-                    discrimination=discrimination_value,
-                    guess_rate=guess_value,
-                    slip_rate=slip_value,
-                    option_count=option_count_value,
-                )
-                for theta in THETA_GRID
-            ),
+            response_probabilities,
         )
         correct_factor = LikelihoodObservation(
             observation_id="expected_information_correct",
@@ -1076,28 +1154,126 @@ class ObjectivePosterior:
             correct=False,
             evidence_power=power,
         )
-        correct_density = _apply_observations(current, (correct_factor,))
-        incorrect_density = _apply_observations(current, (incorrect_factor,))
+        correct_density = _apply_observation_probabilities(
+            current,
+            correct_factor,
+            response_probabilities,
+        )
+        incorrect_density = _apply_observation_probabilities(
+            current,
+            incorrect_factor,
+            response_probabilities,
+        )
+        correct_scaled_density = _scaled_density(correct_density)
+        incorrect_scaled_density = _scaled_density(incorrect_density)
+        return _ExpectedInformationBranches(
+            power=power,
+            current=current,
+            predicted_correct=predicted_correct,
+            correct_density=correct_density,
+            incorrect_density=incorrect_density,
+            correct_scaled_density=correct_scaled_density,
+            incorrect_scaled_density=incorrect_scaled_density,
+        )
+
+    def expected_information_nats(
+        self,
+        *,
+        difficulty: float,
+        discrimination: float,
+        guess_rate: float,
+        slip_rate: float,
+        evidence_power: float,
+        option_count: int = DEFAULT_OPTION_COUNT,
+    ) -> float:
+        """Return the exact policy score without unused branch diagnostics."""
+
+        branches = self._expected_information_branches(
+            difficulty=difficulty,
+            discrimination=discrimination,
+            guess_rate=guess_rate,
+            slip_rate=slip_rate,
+            evidence_power=evidence_power,
+            option_count=option_count,
+        )
+        correct_kl = _kl_divergence(
+            branches.correct_density,
+            branches.current,
+            scaled_density=branches.correct_scaled_density,
+        )
+        incorrect_kl = _kl_divergence(
+            branches.incorrect_density,
+            branches.current,
+            scaled_density=branches.incorrect_scaled_density,
+        )
+        expected_information = (
+            branches.predicted_correct * correct_kl
+            + (1.0 - branches.predicted_correct) * incorrect_kl
+        )
+        if expected_information < -METRIC_TOLERANCE:
+            raise ObjectivePosteriorError(
+                "Expected information became materially negative."
+            )
+        return max(0.0, expected_information)
+
+    def expected_information(
+        self,
+        *,
+        difficulty: float,
+        discrimination: float,
+        guess_rate: float,
+        slip_rate: float,
+        evidence_power: float,
+        option_count: int = DEFAULT_OPTION_COUNT,
+    ) -> ExpectedInformation:
+        """Integrate both hypothetical response posteriors on the full grid.
+
+        Outcome probabilities use the untempered predictive model.  The two
+        posterior branches use the caller-declared evidence power, matching the
+        generalized likelihood update that would be applied after observation.
+        The result is therefore exact for this fixed-grid representation and
+        does not use a local Fisher or Gaussian approximation.
+        """
+
+        branches = self._expected_information_branches(
+            difficulty=difficulty,
+            discrimination=discrimination,
+            guess_rate=guess_rate,
+            slip_rate=slip_rate,
+            evidence_power=evidence_power,
+            option_count=option_count,
+        )
         correct_metrics = _metrics_for_density(
-            correct_density,
-            evidence_mass=self.evidence_mass + power,
+            branches.correct_density,
+            evidence_mass=self.evidence_mass + branches.power,
             acquisition_mass=self.acquisition_mass,
+            scaled_density=branches.correct_scaled_density,
         )
         incorrect_metrics = _metrics_for_density(
-            incorrect_density,
-            evidence_mass=self.evidence_mass + power,
+            branches.incorrect_density,
+            evidence_mass=self.evidence_mass + branches.power,
             acquisition_mass=self.acquisition_mass,
+            scaled_density=branches.incorrect_scaled_density,
         )
-        correct_kl = _kl_divergence(correct_density, current)
-        incorrect_kl = _kl_divergence(incorrect_density, current)
+        correct_kl = _kl_divergence(
+            branches.correct_density,
+            branches.current,
+            scaled_density=branches.correct_scaled_density,
+        )
+        incorrect_kl = _kl_divergence(
+            branches.incorrect_density,
+            branches.current,
+            scaled_density=branches.incorrect_scaled_density,
+        )
         expected_information = (
-            predicted_correct * correct_kl
-            + (1.0 - predicted_correct) * incorrect_kl
+            branches.predicted_correct * correct_kl
+            + (1.0 - branches.predicted_correct) * incorrect_kl
         )
         current_variance = self.metrics().variance
         expected_variance = (
-            predicted_correct * correct_metrics.variance
-            + (1.0 - predicted_correct) * incorrect_metrics.variance
+            branches.predicted_correct * correct_metrics.variance
+            + (1.0 - branches.predicted_correct)
+            * incorrect_metrics.variance
         )
         variance_reduction = current_variance - expected_variance
         if expected_information < -METRIC_TOLERANCE:
@@ -1105,7 +1281,9 @@ class ObjectivePosterior:
                 "Expected information became materially negative."
             )
         return ExpectedInformation(
-            predicted_correct=max(0.0, min(1.0, predicted_correct)),
+            predicted_correct=max(
+                0.0, min(1.0, branches.predicted_correct)
+            ),
             expected_information_nats=max(0.0, expected_information),
             expected_variance=max(0.0, expected_variance),
             # Fractional generalized likelihoods can make variance reduction
@@ -1268,14 +1446,29 @@ def _metrics_for_density(
     *,
     evidence_mass: float,
     acquisition_mass: float,
+    scaled_density: tuple[tuple[float, ...], float] | None = None,
 ) -> PosteriorMetrics:
-    mean = _integrate_function(log_density, THETA_GRID)
+    # All integrations below consume the same immutable density. Materializing
+    # its stable exponential scale once is exactly equivalent to recomputing it
+    # for every moment, tail, and edge integral, while avoiding several full
+    # fixed-grid exponentiation passes.
+    if scaled_density is None:
+        scaled_density = _scaled_density(log_density)
+    mean = _integrate_function(
+        log_density,
+        THETA_GRID,
+        scaled_density=scaled_density,
+    )
     second_moment = _integrate_function(
-        log_density, (theta * theta for theta in THETA_GRID)
+        log_density,
+        (theta * theta for theta in THETA_GRID),
+        scaled_density=scaled_density,
     )
     variance = max(0.0, second_moment - mean * mean)
     mastery = _probability_above_theta(
-        log_density, _logit(DEFAULT_MASTERY_THRESHOLD)
+        log_density,
+        _logit(DEFAULT_MASTERY_THRESHOLD),
+        scaled_density=scaled_density,
     )
     coarse_mastery = _probability_above_theta_on_stride(
         log_density,
@@ -1290,9 +1483,11 @@ def _metrics_for_density(
         ),
     )
     competence = _integrate_function(
-        log_density, (_sigmoid(theta) for theta in THETA_GRID)
+        log_density,
+        (_sigmoid(theta) for theta in THETA_GRID),
+        scaled_density=scaled_density,
     )
-    edge = _edge_mass(log_density)
+    edge = _edge_mass(log_density, scaled_density=scaled_density)
     for label, value in (
         ("mean", mean),
         ("variance", variance),

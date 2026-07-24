@@ -14,6 +14,8 @@ The laboratory currently probes:
 - confident named-misconception choices and persistent failure;
 - explicit abstention with low confidence;
 - a repeated fixed-option response bias;
+- a broad-curriculum fixed-position probe that crosses the exact family-wise
+  diagnostic threshold while remaining observational only;
 - successful repair followed by independent verification;
 - a learner who repairs but repeatedly fails verification;
 - oscillating answer behavior;
@@ -120,7 +122,9 @@ Its ignored artifact includes every selected family, phase transition, objective
 snapshot, detection rank, recovery path, durable episode spend, interleaving
 audit, and independent-family certificate check. This is a deterministic
 identifiability falsification probe, not human calibration or evidence of a
-causal teaching effect.
+causal teaching effect. The dual-gap profile deliberately uses a longer spaced
+horizon so both weak targets and the strong controls have at least two
+independent observed families before localization is judged.
 
 The multimodal evidence laboratory exercises the pure task, rubric, action,
 evaluation, dependence-cap, and evidence-reduction contracts without executing
@@ -135,3 +139,34 @@ It writes an ignored canonical artifact to
 rerun. The laboratory includes implementation, debugging, explanation, and
 design scenarios; assisted and post-feedback work; missing evidence; restricted
 tool use; and shadow-only model/imported scores.
+
+The productive-probe laboratory drives the complete mixed path through two
+fresh databases: a real wrong MCQ answer localizes an objective and named
+misconception, reviewed release-pinned debugging and explanation tasks are
+ranked, one productive attempt records assisted semantic actions, an imported
+evaluation is reduced into shadow evidence, and a fresh family is recommended
+next. It also proves that MCQ and productive attempts cannot overlap, the
+selected-response projection does not change, and the performance projection
+replays exactly:
+
+```sh
+python experiments/productive_probe_lab.py --stdout
+```
+
+The ignored artifact is written to
+`experiments/results/productive_probe_lab.json`. The fixture tasks exist only
+inside disposable laboratory databases; TSQ does not ship them as reviewed
+curriculum content.
+
+The family-independence laboratory nominates active cross-family pairs through
+documented token-overlap signals, then counterfactually collapses each review
+cluster before running the exact capacity analyzer:
+
+```sh
+python experiments/family_independence_lab.py --fail-on-critical
+```
+
+Its deterministic artifact distinguishes lexical review candidates from proven
+dependence. Exit status `3` means a candidate would reduce exact repair or
+verification capacity if semantic review confirmed that its families collapse;
+it is not a dependence verdict and the laboratory never edits the corpus.

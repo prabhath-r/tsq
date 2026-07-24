@@ -16,11 +16,11 @@ from math import exp, sqrt
 from typing import Mapping
 
 from .graph import KnowledgeGraph
-from .learner import LearnerModel
+from .learner import LearnerModel, ObjectiveReadinessFloor
 from .models import SkillState
 
 
-BOUNDARY_ALGORITHM_VERSION = "recursive-evidence-boundary-v3"
+BOUNDARY_ALGORITHM_VERSION = "recursive-evidence-boundary-v4"
 
 
 def _clamp(value: float) -> float:
@@ -46,6 +46,7 @@ class ConceptReadiness:
     uncertainty: float
     evidence_mass: float
     exposures: int
+    objective_floor_source_id: str | None
     bottleneck_concept_id: str | None
 
     def terms(self) -> dict[str, object]:
@@ -119,12 +120,20 @@ class RecursiveEvidenceBoundary:
         stored_states: Mapping[str, SkillState],
         now: datetime,
         concept_ids: set[str] | None = None,
+        intrinsic_overrides: Mapping[str, ObjectiveReadinessFloor] | None = None,
     ) -> dict[str, ConceptReadiness]:
         requested = set(concept_ids or graph.concepts)
         unknown = requested - set(graph.concepts)
         if unknown:
             raise ValueError(
                 "Unknown readiness concepts: " + ", ".join(sorted(unknown))
+            )
+        overrides = intrinsic_overrides or {}
+        unknown_overrides = set(overrides) - set(graph.concepts)
+        if unknown_overrides:
+            raise ValueError(
+                "Unknown objective readiness overrides: "
+                + ", ".join(sorted(unknown_overrides))
             )
         memo: dict[str, ConceptReadiness] = {}
 
@@ -137,8 +146,17 @@ class RecursiveEvidenceBoundary:
                 learner_id, concept
             )
             state = self.learner_model.project_state(state, concept, now)
-            mastery = state.mastery_probability
-            competence = state.expected_competence
+            exact_floor = overrides.get(concept_id)
+            mastery = (
+                exact_floor.mastery_probability
+                if exact_floor is not None
+                else state.mastery_probability
+            )
+            competence = (
+                exact_floor.expected_competence
+                if exact_floor is not None
+                else state.expected_competence
+            )
             # Certification probability is deliberately prominent while the
             # posterior mean prevents a cold learner from collapsing to zero.
             intrinsic = _clamp(0.55 * mastery + 0.45 * competence)
@@ -180,6 +198,11 @@ class RecursiveEvidenceBoundary:
                 uncertainty=sqrt(state.variance),
                 evidence_mass=state.evidence_mass,
                 exposures=state.exposures,
+                objective_floor_source_id=(
+                    exact_floor.source_objective_id
+                    if exact_floor is not None
+                    else None
+                ),
                 bottleneck_concept_id=bottleneck,
             )
             memo[concept_id] = result
@@ -199,6 +222,7 @@ class RecursiveEvidenceBoundary:
         now: datetime,
         recent_performance: Mapping[str, tuple[int, int]] | None = None,
         excluded_concept_ids: set[str] | None = None,
+        intrinsic_overrides: Mapping[str, ObjectiveReadinessFloor] | None = None,
     ) -> BoundaryDecision | None:
         excluded = excluded_concept_ids or set()
         direct = [
@@ -215,6 +239,7 @@ class RecursiveEvidenceBoundary:
             stored_states=stored_states,
             now=now,
             concept_ids=relevant,
+            intrinsic_overrides=intrinsic_overrides,
         )
         performance = recent_performance or {}
         candidates: list[BoundaryCandidate] = []
