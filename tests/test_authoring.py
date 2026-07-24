@@ -421,8 +421,8 @@ class AuthoringTestCase(unittest.TestCase):
                 gap.blueprint.concept_id == "c_agent_tool_use"
                 and gap.blueprint.learning_objective_id
                 == "lo_agent_tool_authorization"
-                and gap.blueprint.target_misconception_id
-                == "m_agent_tool_availability_is_authorization"
+                and "m_agent_tool_availability_is_authorization"
+                in gap.blueprint.misconception_ids
                 for gap in gaps
             )
         )
