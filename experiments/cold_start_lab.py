@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import statistics
 import sys
 import tempfile
@@ -35,23 +36,31 @@ from tsq.corpus import read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.models import Presentation  # noqa: E402
 from tsq.objective_posterior import decode_objective_posterior  # noqa: E402
-from tsq.policy import POLICY_VERSION  # noqa: E402
+from tsq.policy import (  # noqa: E402
+    CANDIDATE_AUDIT_PREFIX_LIMIT,
+    CANDIDATE_SAMPLING_FRONTIER_LIMIT,
+    POLICY_VERSION,
+)
 from tsq.simulation import (  # noqa: E402
     BehavioralSimulator,
     SIMULATION_FEEDBACK_PROTOCOL_VERSION,
     SyntheticAnswer,
     SyntheticLearner,
 )
-from tsq.store import Database  # noqa: E402
+from tsq.store import (  # noqa: E402
+    Database,
+    question_runtime_activation_safe,
+)
 
 
-LAB_VERSION = "cold-start-lab-v2"
+LAB_VERSION = "cold-start-lab-v3"
 SEMANTIC_PROJECTION_SIGNATURE_SCHEMA = 1
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "cold_start_lab.json"
 DEFAULT_TOPICS = (
     "t_large_language_models",
     "t_transformers",
+    "t_retrieval_augmented_generation",
     "t_llm_agents",
 )
 DEFAULT_SEEDS = (0, 1, 2)
@@ -62,6 +71,33 @@ START = datetime(2110, 1, 5, 9, 0, tzinfo=timezone.utc)
 LEARN_PHASE_REFERENCE_SUCCESS = 0.68
 INTRODUCTORY_DIFFICULTY_CEILING = -0.50
 ADVANCED_DIFFICULTY_FLOOR = 0.75
+CANDIDATE_PREFIX_LIMIT = CANDIDATE_AUDIT_PREFIX_LIMIT
+SAMPLING_FRONTIER_LIMIT = CANDIDATE_SAMPLING_FRONTIER_LIMIT
+CANDIDATE_SCORE_TERM_KEYS = frozenset(
+    {
+        "total",
+        "predicted_correct",
+        "information_gain",
+        "learning_fit",
+        "concept_need",
+        "misconception_value",
+        "prerequisite_value",
+        "review_value",
+        "novelty",
+        "kind_fit",
+        "continuity",
+        "boundary_fit",
+        "coverage_raw_exposures",
+        "coverage_diagnostic_information",
+        "coverage_successful_retrieval_families",
+    }
+)
+CANDIDATE_INTEGER_TERM_KEYS = frozenset(
+    {
+        "coverage_raw_exposures",
+        "coverage_successful_retrieval_families",
+    }
+)
 
 
 class ColdStartInvariantError(RuntimeError):
@@ -436,6 +472,436 @@ def _transition_reasons(
     return reasons
 
 
+def _validated_score_terms(
+    value: object, *, label: str
+) -> dict[str, float | int]:
+    if not isinstance(value, dict) or set(value) != CANDIDATE_SCORE_TERM_KEYS:
+        raise ColdStartInvariantError(
+            f"{label} does not contain the exact candidate-score terms."
+        )
+    result: dict[str, float | int] = {}
+    for key in sorted(CANDIDATE_SCORE_TERM_KEYS):
+        item = value[key]
+        if key in CANDIDATE_INTEGER_TERM_KEYS:
+            if type(item) is not int or item < 0:
+                raise ColdStartInvariantError(
+                    f"{label} term {key} must be a non-negative integer."
+                )
+        elif (
+            isinstance(item, bool)
+            or not isinstance(item, (int, float))
+            or not math.isfinite(float(item))
+        ):
+            raise ColdStartInvariantError(
+                f"{label} term {key} must be a finite number."
+            )
+        result[key] = item
+    if (
+        result["coverage_successful_retrieval_families"]
+        > result["coverage_raw_exposures"]
+    ):
+        raise ColdStartInvariantError(
+            f"{label} has more successful families than raw exposures."
+        )
+    if result["coverage_diagnostic_information"] < 0:
+        raise ColdStartInvariantError(
+            f"{label} has negative diagnostic information."
+        )
+    return result
+
+
+def _ranked_candidate_digest(
+    ranked: Sequence[tuple[str, Mapping[str, float | int]]],
+) -> str:
+    material = "|".join(
+        (
+            f"{question_id}:{float(score['total']):.8f}:"
+            f"{score['coverage_raw_exposures']}:"
+            f"{float(score['coverage_diagnostic_information']):.12f}:"
+            f"{score['coverage_successful_retrieval_families']}"
+        )
+        for question_id, score in ranked
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _candidate_inventory_from_row(
+    *,
+    row: Mapping[str, Any],
+    step: Any,
+    question_metadata: Mapping[str, Mapping[str, Any]],
+    trace_label: str,
+) -> dict[str, Any]:
+    expected_question_id = step.question_id
+    expected_release_id = row["corpus_release_id"]
+    selected_evidence_weight = row["selected_evidence_weight"]
+    if (
+        row["attempted_question_id"] != expected_question_id
+        or row["selected_question_id"] != expected_question_id
+        or row["selected_family_id"] != step.family_id
+        or row["selected_question_kind"] != step.question_kind
+        or row["selected_objective_id"]
+        != step.learning_objective_id
+        or row["phase"] != step.phase_before.value
+        or row["pedagogical_role"] != step.pedagogical_role
+        or row["selected_at"] != step.selected_at.isoformat()
+        or row["answered_at"] != step.answered_at.isoformat()
+        or row["selected_question_status"] not in {
+            "approved",
+            "calibrated",
+        }
+        or isinstance(selected_evidence_weight, bool)
+        or not isinstance(selected_evidence_weight, (int, float))
+        or not math.isfinite(float(selected_evidence_weight))
+        or float(selected_evidence_weight) <= 0.0
+    ):
+        raise ColdStartInvariantError(
+            f"{trace_label} does not align with its committed simulation step."
+        )
+
+    candidate_count = row["candidate_count"]
+    if type(candidate_count) is not int or candidate_count <= 0:
+        raise ColdStartInvariantError(
+            f"{trace_label} has an invalid candidate count."
+        )
+    candidate_digest = row["candidate_digest"]
+    if (
+        not isinstance(candidate_digest, str)
+        or len(candidate_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in candidate_digest
+        )
+    ):
+        raise ColdStartInvariantError(
+            f"{trace_label} has an invalid candidate digest."
+        )
+    try:
+        top_candidates = json.loads(row["top_candidates_json"])
+        selected_score_value = json.loads(row["selected_score_json"])
+    except (TypeError, ValueError) as exc:
+        raise ColdStartInvariantError(
+            f"{trace_label} has invalid candidate JSON."
+        ) from exc
+    selected_score = _validated_score_terms(
+        selected_score_value,
+        label=f"{trace_label} selected score",
+    )
+    if selected_score["predicted_correct"] != step.predicted_correct:
+        raise ColdStartInvariantError(
+            f"{trace_label} predicted success differs from the simulation step."
+        )
+    expected_prefix_count = min(CANDIDATE_PREFIX_LIMIT, candidate_count)
+    if (
+        not isinstance(top_candidates, list)
+        or len(top_candidates) != expected_prefix_count
+    ):
+        raise ColdStartInvariantError(
+            f"{trace_label} has an incomplete ranked prefix."
+        )
+
+    ranked_for_digest: list[tuple[str, Mapping[str, float | int]]] = []
+    ranked_candidates: list[dict[str, Any]] = []
+    seen_question_ids: set[str] = set()
+    previous_key: tuple[float, str] | None = None
+    for rank, candidate in enumerate(top_candidates, start=1):
+        if not isinstance(candidate, dict):
+            raise ColdStartInvariantError(
+                f"{trace_label} contains a non-object candidate."
+            )
+        question_id = candidate.get("question_id")
+        if (
+            not isinstance(question_id, str)
+            or question_id not in question_metadata
+            or question_id in seen_question_ids
+        ):
+            raise ColdStartInvariantError(
+                f"{trace_label} has invalid ranked candidate identity."
+            )
+        score = _validated_score_terms(
+            {
+                key: value
+                for key, value in candidate.items()
+                if key != "question_id"
+            },
+            label=f"{trace_label} candidate {rank}",
+        )
+        rank_key = (-float(score["total"]), question_id)
+        if previous_key is not None and rank_key < previous_key:
+            raise ColdStartInvariantError(
+                f"{trace_label} is not stored in production rank order."
+            )
+        previous_key = rank_key
+        seen_question_ids.add(question_id)
+        ranked_for_digest.append((question_id, score))
+        metadata = question_metadata[question_id]
+        required_metadata = {
+            "corpus_release_id",
+            "family_id",
+            "learning_objective_id",
+            "primary_concept_id",
+            "question_kind",
+            "difficulty",
+            "global_status",
+            "release_status",
+            "evidence_weight",
+            "revoked",
+            "runtime_activation_safe",
+        }
+        if (
+            not isinstance(metadata, Mapping)
+            or not required_metadata.issubset(metadata)
+        ):
+            raise ColdStartInvariantError(
+                f"{trace_label} has incomplete candidate metadata."
+            )
+        evidence_weight = metadata["evidence_weight"]
+        if (
+            metadata["corpus_release_id"] != expected_release_id
+            or metadata["global_status"] not in {
+                "approved",
+                "calibrated",
+            }
+            or metadata["release_status"] not in {
+                "approved",
+                "calibrated",
+            }
+            or isinstance(evidence_weight, bool)
+            or not isinstance(evidence_weight, (int, float))
+            or not math.isfinite(float(evidence_weight))
+            or float(evidence_weight) <= 0.0
+            or metadata["revoked"] is not False
+            or metadata["runtime_activation_safe"] is not True
+        ):
+            raise ColdStartInvariantError(
+                f"{trace_label} contains a runtime-ineligible candidate."
+            )
+        ranked_candidates.append(
+            {
+                "rank": rank,
+                "question_id": question_id,
+                "family_id": metadata["family_id"],
+                "learning_objective_id": metadata[
+                    "learning_objective_id"
+                ],
+                "primary_concept_id": metadata["primary_concept_id"],
+                "question_kind": metadata["question_kind"],
+                "difficulty": metadata["difficulty"],
+                "score": score,
+            }
+        )
+
+    selected = [
+        candidate
+        for candidate in ranked_candidates
+        if candidate["question_id"] == expected_question_id
+    ]
+    if (
+        len(selected) != 1
+        or selected[0]["rank"]
+        > min(SAMPLING_FRONTIER_LIMIT, candidate_count)
+    ):
+        raise ColdStartInvariantError(
+            f"{trace_label} selected outside the production sampling frontier."
+        )
+    if (
+        selected[0]["family_id"] != step.family_id
+        or selected[0]["learning_objective_id"]
+        != step.learning_objective_id
+        or selected[0]["question_kind"] != step.question_kind
+        or selected[0]["primary_concept_id"]
+        != step.surface_primary_concept_id
+    ):
+        raise ColdStartInvariantError(
+            f"{trace_label} selected corpus metadata differs from its "
+            "committed simulation step."
+        )
+    if selected[0]["score"] != selected_score:
+        raise ColdStartInvariantError(
+            f"{trace_label} selected score differs from its ranked prefix."
+        )
+
+    inventory_complete = candidate_count <= CANDIDATE_PREFIX_LIMIT
+    rank_quantized_coverage_digest_verified: bool | None = None
+    if inventory_complete:
+        if _ranked_candidate_digest(ranked_for_digest) != candidate_digest:
+            raise ColdStartInvariantError(
+                f"{trace_label} complete rank-and-quantized-coverage digest "
+                "does not verify."
+            )
+        rank_quantized_coverage_digest_verified = True
+    selected_difficulty = float(selected[0]["difficulty"])
+    prefix_difficulties = [
+        float(candidate["difficulty"])
+        for candidate in ranked_candidates
+    ]
+    prefix_difficulty = {
+        "minimum": min(prefix_difficulties),
+        "maximum": max(prefix_difficulties),
+        "introductory_count": sum(
+            difficulty < INTRODUCTORY_DIFFICULTY_CEILING
+            for difficulty in prefix_difficulties
+        ),
+        "easier_than_selected_count": sum(
+            difficulty < selected_difficulty
+            for difficulty in prefix_difficulties
+        ),
+        "selected_minus_minimum": (
+            selected_difficulty - min(prefix_difficulties)
+        ),
+    }
+    return {
+        "eligible_scored_candidate_count": candidate_count,
+        "stored_ranked_prefix_count": len(ranked_candidates),
+        "ranked_inventory_complete": inventory_complete,
+        "unobserved_candidate_count": (
+            candidate_count - len(ranked_candidates)
+        ),
+        "sampling_frontier_count": min(
+            SAMPLING_FRONTIER_LIMIT, candidate_count
+        ),
+        "selected_rank": selected[0]["rank"],
+        "candidate_digest": candidate_digest,
+        "rank_and_quantized_coverage_digest_verified": (
+            rank_quantized_coverage_digest_verified
+        ),
+        "stored_ranked_prefix_sha256": canonical_hash(top_candidates),
+        "ranked_prefix_difficulty": prefix_difficulty,
+        "complete_inventory_difficulty": (
+            prefix_difficulty if inventory_complete else None
+        ),
+        "ranked_candidates": ranked_candidates,
+    }
+
+
+def _candidate_inventories(
+    database: Database,
+    learner_id: str,
+    steps: Sequence[Any],
+    question_metadata: Mapping[str, Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    with database.read() as connection:
+        session_rows = connection.execute(
+            """SELECT id FROM sessions
+               WHERE learner_id = ? ORDER BY created_at, id""",
+            (learner_id,),
+        ).fetchall()
+        if len(session_rows) != 1:
+            raise ColdStartInvariantError(
+                f"Learner {learner_id} must have exactly one disposable "
+                "cold-start session."
+            )
+        rows = connection.execute(
+            """SELECT attempts.question_id AS attempted_question_id,
+                      attempts.answered_at,
+                      decisions.question_id AS selected_question_id,
+                      question.family_id AS selected_family_id,
+                      question.kind AS selected_question_kind,
+                      decisions.question_objective_id
+                          AS selected_objective_id,
+                      decisions.phase,
+                      decisions.pedagogical_role,
+                      decisions.created_at AS selected_at,
+                      decisions.candidate_count,
+                      decisions.candidate_digest,
+                      decisions.top_candidates_json,
+                      decisions.selected_score_json,
+                      decisions.corpus_release_id,
+                      decisions.question_status
+                          AS selected_question_status,
+                      decisions.evidence_weight
+                          AS selected_evidence_weight
+               FROM attempts
+               JOIN decisions ON decisions.id = attempts.decision_id
+               JOIN questions question
+                 ON question.id = decisions.question_id
+               WHERE attempts.learner_id = ?
+                 AND attempts.session_id = ?
+               ORDER BY attempts.answered_at, decisions.created_at,
+                        attempts.question_id""",
+            (learner_id, session_rows[0]["id"]),
+        ).fetchall()
+    if len(rows) != len(steps):
+        raise ColdStartInvariantError(
+            f"Learner {learner_id} has {len(rows)} candidate traces for "
+            f"{len(steps)} simulation steps."
+        )
+    return [
+        _candidate_inventory_from_row(
+            row=row,
+            step=step,
+            question_metadata=question_metadata,
+            trace_label=f"Learner {learner_id} candidate trace {index}",
+        )
+        for index, (row, step) in enumerate(
+            zip(rows, steps, strict=True),
+            start=1,
+        )
+    ]
+
+
+def _release_question_metadata(
+    database: Database,
+) -> dict[str, dict[str, Any]]:
+    with database.read() as connection:
+        release_id = database.get_active_release_id(connection)
+        rows = connection.execute(
+            """SELECT question.id, question.family_id,
+                      question.kind AS question_kind,
+                      question.difficulty,
+                      question.status AS global_status,
+                      membership.status AS release_status,
+                      membership.evidence_weight,
+                      primary_mapping.concept_id
+                          AS primary_concept_id,
+                      objective_mapping.objective_id
+                          AS learning_objective_id,
+                      revocation.question_id IS NOT NULL AS revoked
+               FROM release_questions membership
+               JOIN questions question
+                 ON question.id = membership.question_id
+               JOIN question_concepts primary_mapping
+                 ON primary_mapping.question_id = question.id
+                AND primary_mapping.role = 'primary'
+               LEFT JOIN release_question_objectives objective_mapping
+                 ON objective_mapping.release_id = membership.release_id
+                AND objective_mapping.question_id = question.id
+               LEFT JOIN question_revocations revocation
+                 ON revocation.question_id = question.id
+               WHERE membership.release_id = ?
+               ORDER BY question.id""",
+            (release_id,),
+        ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            question = database.get_question(
+                row["id"],
+                connection,
+                release_id=release_id,
+            )
+            result[row["id"]] = {
+                "corpus_release_id": release_id,
+                "family_id": row["family_id"],
+                "learning_objective_id": row[
+                    "learning_objective_id"
+                ],
+                "primary_concept_id": row["primary_concept_id"],
+                "question_kind": row["question_kind"],
+                "difficulty": float(row["difficulty"]),
+                "global_status": row["global_status"],
+                "release_status": row["release_status"],
+                "evidence_weight": float(row["evidence_weight"]),
+                "revoked": bool(row["revoked"]),
+                "runtime_activation_safe": (
+                    question_runtime_activation_safe(
+                        question,
+                        status=row["release_status"],
+                    )
+                ),
+            }
+    return result
+
+
 def _unlabeled_scope_excursions(report: Any) -> dict[str, list[str]]:
     """Separate deliberate exploration from accidental scope leakage."""
 
@@ -508,6 +974,7 @@ def _run_payload(
     report: Any,
     database: Database,
     question_difficulty: Mapping[str, float],
+    question_metadata: Mapping[str, Mapping[str, Any]],
     objective_depth: Mapping[str, int],
 ) -> dict[str, Any]:
     difficulties = [
@@ -521,6 +988,12 @@ def _run_payload(
     ]
     reasons = _transition_reasons(database, report.learner_id)
     unlabeled_scope_excursions = _unlabeled_scope_excursions(report)
+    candidate_inventories = _candidate_inventories(
+        database,
+        report.learner_id,
+        report.steps,
+        question_metadata,
+    )
     steps = [
         {
             "index": step.index,
@@ -542,8 +1015,32 @@ def _run_payload(
             "correct": step.actual_correct,
             "focus_objective_before": step.focus_objective_before,
             "focus_objective_after": step.focus_objective_after,
+            "candidate_inventory": candidate_inventory,
         }
-        for step in report.steps
+        for step, candidate_inventory in zip(
+            report.steps,
+            candidate_inventories,
+            strict=True,
+        )
+    ]
+    candidate_counts = [
+        inventory["eligible_scored_candidate_count"]
+        for inventory in candidate_inventories
+    ]
+    complete_inventory_difficulties = [
+        inventory["complete_inventory_difficulty"]
+        for inventory in candidate_inventories
+        if inventory["complete_inventory_difficulty"] is not None
+    ]
+    focused_complete_inventory_difficulties = [
+        inventory["complete_inventory_difficulty"]
+        for step, inventory in zip(
+            report.steps,
+            candidate_inventories,
+            strict=True,
+        )
+        if step.pedagogical_role != "exploration_probe"
+        and inventory["complete_inventory_difficulty"] is not None
     ]
     return {
         "profile": report.profile_name,
@@ -588,6 +1085,46 @@ def _run_payload(
             ),
             "learn_phase_reference": LEARN_PHASE_REFERENCE_SUCCESS,
         },
+        "candidate_inventory": {
+            "minimum_eligible_scored_candidates": (
+                min(candidate_counts) if candidate_counts else None
+            ),
+            "mean_eligible_scored_candidates": (
+                statistics.fmean(candidate_counts)
+                if candidate_counts
+                else None
+            ),
+            "maximum_eligible_scored_candidates": (
+                max(candidate_counts) if candidate_counts else None
+            ),
+            "complete_ranked_inventory_steps": sum(
+                inventory["ranked_inventory_complete"]
+                for inventory in candidate_inventories
+            ),
+            "complete_inventory_steps_without_introductory_candidate": sum(
+                difficulty["introductory_count"] == 0
+                for difficulty in complete_inventory_difficulties
+            ),
+            "focused_complete_inventory_steps_without_introductory_candidate": sum(
+                difficulty["introductory_count"] == 0
+                for difficulty in focused_complete_inventory_difficulties
+            ),
+            "mean_selected_difficulty_above_complete_inventory_minimum": (
+                statistics.fmean(
+                    difficulty["selected_minus_minimum"]
+                    for difficulty in complete_inventory_difficulties
+                )
+                if complete_inventory_difficulties
+                else None
+            ),
+            "below_full_sampling_frontier_steps": sum(
+                count < SAMPLING_FRONTIER_LIMIT
+                for count in candidate_counts
+            ),
+            "singleton_candidate_steps": sum(
+                count == 1 for count in candidate_counts
+            ),
+        },
         "maximum_objective_depth": max(
             (
                 objective_depth[step.learning_objective_id]
@@ -620,6 +1157,11 @@ def _run_payload(
                 "category": gap.category,
                 "focus_objective_id": gap.focus_objective_id,
                 "message": gap.message,
+                "candidate_inventory": None,
+                "candidate_inventory_note": (
+                    "No decision was committed for this failed selection; "
+                    "candidate count is unknown, not zero."
+                ),
             }
             for gap in report.gaps
         ],
@@ -648,6 +1190,34 @@ def _aggregate(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
             row["difficulty"]["first"]
             for row in rows
             if row["difficulty"]["first"] is not None
+        ]
+        candidate_counts = [
+            int(
+                step["candidate_inventory"][
+                    "eligible_scored_candidate_count"
+                ]
+            )
+            for step in all_steps
+        ]
+        complete_inventory_difficulties = [
+            step["candidate_inventory"][
+                "complete_inventory_difficulty"
+            ]
+            for step in all_steps
+            if step["candidate_inventory"][
+                "complete_inventory_difficulty"
+            ]
+            is not None
+        ]
+        focused_complete_inventory_difficulties = [
+            step["candidate_inventory"][
+                "complete_inventory_difficulty"
+            ]
+            for step in focused_steps
+            if step["candidate_inventory"][
+                "complete_inventory_difficulty"
+            ]
+            is not None
         ]
         result.append(
             {
@@ -683,6 +1253,47 @@ def _aggregate(runs: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                     )
                     if all_steps
                     else None
+                ),
+                "minimum_eligible_scored_candidates": (
+                    min(candidate_counts) if candidate_counts else None
+                ),
+                "mean_eligible_scored_candidates": (
+                    statistics.fmean(candidate_counts)
+                    if candidate_counts
+                    else None
+                ),
+                "complete_ranked_inventory_steps": sum(
+                    bool(
+                        step["candidate_inventory"][
+                            "ranked_inventory_complete"
+                        ]
+                    )
+                    for step in all_steps
+                ),
+                "complete_inventory_steps_without_introductory_candidate": sum(
+                    difficulty["introductory_count"] == 0
+                    for difficulty in complete_inventory_difficulties
+                ),
+                "focused_complete_inventory_steps_without_introductory_candidate": sum(
+                    difficulty["introductory_count"] == 0
+                    for difficulty in (
+                        focused_complete_inventory_difficulties
+                    )
+                ),
+                "mean_selected_difficulty_above_complete_inventory_minimum": (
+                    statistics.fmean(
+                        difficulty["selected_minus_minimum"]
+                        for difficulty in complete_inventory_difficulties
+                    )
+                    if complete_inventory_difficulties
+                    else None
+                ),
+                "below_full_sampling_frontier_steps": sum(
+                    count < SAMPLING_FRONTIER_LIMIT
+                    for count in candidate_counts
+                ),
+                "singleton_candidate_steps": sum(
+                    count == 1 for count in candidate_counts
                 ),
                 "introductory_served": sum(
                     float(step["difficulty"])
@@ -737,6 +1348,7 @@ def _run_once(
     database.import_corpus(
         *read_and_parse(corpus, include_catalog=True)
     )
+    question_metadata = _release_question_metadata(database)
     engine = AdaptiveEngine(database)
     simulator = BehavioralSimulator(engine)
     runs: list[dict[str, Any]] = []
@@ -763,6 +1375,7 @@ def _run_once(
                         report=report,
                         database=database,
                         question_difficulty=question_difficulty,
+                        question_metadata=question_metadata,
                         objective_depth=objective_depth,
                     )
                 )
@@ -858,6 +1471,46 @@ def run_cold_start_audit(
         "policy_seeds": list(seeds),
         "max_steps": max_steps,
         "profiles": [profile.name for profile in _profiles()],
+        "candidate_inventory_contract": {
+            "stage": (
+                "Production-ranked scored candidates remaining after runtime "
+                "eligibility and routing constraints, before randomized "
+                f"top-{SAMPLING_FRONTIER_LIMIT} sampling."
+            ),
+            "raw_release_inventory": False,
+            "stored_ranked_prefix_limit": CANDIDATE_PREFIX_LIMIT,
+            "sampling_frontier_limit": SAMPLING_FRONTIER_LIMIT,
+            "full_inventory_commitment": (
+                "When the stored prefix is complete, the durable SHA-256 "
+                "commits ordered question IDs, total scores rendered to 8 "
+                "decimal places, raw exposure counts, diagnostic information "
+                "rendered to 12 decimal places, and successful-family counts. "
+                "It does not commit exact binary floats or every component "
+                "score."
+            ),
+            "durable_candidate_digest_fields": [
+                "question_id",
+                "total",
+                "coverage_raw_exposures",
+                "coverage_diagnostic_information",
+                "coverage_successful_retrieval_families",
+            ],
+            "durable_candidate_digest_encoding": {
+                "total_decimal_places": 8,
+                "coverage_diagnostic_information_decimal_places": 12,
+                "integer_terms": "exact base-10 integers",
+                "delimiter": "colon-separated fields; pipe-separated ranks",
+            },
+            "stored_prefix_artifact_hash": (
+                "The lab separately hashes every stored prefix field for "
+                "artifact replication; this is not a prior database "
+                "commitment."
+            ),
+            "filter_attribution_boundary": (
+                "This trace cannot identify which individual eligibility "
+                "constraint removed a raw corpus item."
+            ),
+        },
         "replication_checked": replicate,
         "deterministic_replication": deterministic,
         "measurement_boundary": (

@@ -57,6 +57,8 @@ PERSISTENT_GAP_COMPARISON_EPSILON = 1e-12
 PERSISTENT_GAP_EPISODE_BUDGET = 2
 ACTIVE_MISCONCEPTION_REVISIT_THRESHOLD = 0.35
 HYBRID_COVERAGE_RAW_BURDEN_SLACK = 1
+CANDIDATE_SAMPLING_FRONTIER_LIMIT = 5
+CANDIDATE_AUDIT_PREFIX_LIMIT = 10
 _PERSISTENT_GAP_BASE_MARKERS = frozenset(
     {
         "persistent_gap_revisit",
@@ -2164,7 +2166,9 @@ class AdaptivePolicy:
                 )
             raise ExhaustedError("Corpus gap: the policy found no eligible question.")
 
-        top_k = scores[: min(5, len(scores))]
+        top_k = scores[
+            : min(CANDIDATE_SAMPLING_FRONTIER_LIMIT, len(scores))
+        ]
         chosen_score, propensity = self._sample_top_k(
             top_k, seed=session["rng_seed"], step=session["step"]
         )
@@ -2315,7 +2319,9 @@ class AdaptivePolicy:
                         json.dumps(
                             [
                                 {"question_id": score.question_id, **score.terms()}
-                                for score in scores[:10]
+                                for score in scores[
+                                    :CANDIDATE_AUDIT_PREFIX_LIMIT
+                                ]
                             ],
                             sort_keys=True,
                         ),

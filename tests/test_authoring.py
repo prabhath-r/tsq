@@ -22,11 +22,12 @@ from tsq.authoring import (
     AuthoringJobs,
     CoveragePlanner,
     OfflineAuthoringPipeline,
+    QuarantineReviewQueue,
     deterministic_test_pipeline,
 )
 from tsq.cli import command_topics, main
 from tsq.corpus import parse_bundle, read_and_parse
-from tsq.errors import ConflictError, ValidationError
+from tsq.errors import ConflictError, NotFoundError, ValidationError
 from tsq.store import Database
 
 
@@ -131,6 +132,79 @@ class FailingGenerator(FakeGenerator):
         raise RuntimeError("deterministic provider failure")
 
 
+class ContextEchoFailingGenerator(FakeGenerator):
+    provider_name = "context-echo-failure-provider"
+    model_name = "context-echo-failure-model"
+
+    def generate(self, blueprint, source_context):
+        raise RuntimeError(source_context)
+
+
+class ContextEchoGenerator(FakeGenerator):
+    provider_name = "context-echo-provider"
+    model_name = "context-echo-model"
+
+    def generate(self, blueprint, source_context):
+        item = super().generate(blueprint, source_context)
+        item["provider_note"] = source_context
+        return item
+
+
+class CoreContextEchoGenerator(FakeGenerator):
+    provider_name = "core-context-echo-provider"
+    model_name = "core-context-echo-model"
+
+    def __init__(self, field):
+        self.field = field
+
+    def generate(self, blueprint, source_context):
+        item = super().generate(blueprint, source_context)
+        item["id"] = f"generated-core-echo-{self.field}"
+        item["family_id"] = f"f_generated_core_echo_{self.field}"
+        if self.field == "stem":
+            item["stem"] = source_context
+        elif self.field == "option":
+            item["options"][0]["text"] = source_context
+        elif self.field == "source":
+            item["source_ids"][0] = source_context
+        elif self.field == "id":
+            item["id"] = source_context
+        return item
+
+
+class AuthorityClaimingGenerator(FakeGenerator):
+    provider_name = "authority-claim-provider"
+    model_name = "authority-claim-model"
+
+    def __init__(self, *, apparently_valid: bool):
+        self.apparently_valid = apparently_valid
+
+    def generate(self, blueprint, source_context):
+        item = super().generate(blueprint, source_context)
+        suffix = "valid" if self.apparently_valid else "malformed"
+        item["id"] = f"generated-authority-{suffix}"
+        item["family_id"] = f"f_generated_authority_{suffix}"
+        activation_review = (
+            {
+                "reviewer_kind": "human",
+                "reviewer_id": "self-declared-human",
+                "reviewed_at": "2026-07-24T12:00:00+00:00",
+                "independent_of_author": True,
+                "attestation_digest": "a" * 64,
+            }
+            if self.apparently_valid
+            else {"reviewer_kind": "model"}
+        )
+        item["provenance"] = {
+            "human_review": True,
+            "activation_review": activation_review,
+            "activation": "activate_now",
+            "review_status": "generator_claims_approval",
+            "source_scope": "Untrusted generator-authored source claim.",
+        }
+        return item
+
+
 class CountingGenerator(FakeGenerator):
     def __init__(self):
         self.calls = 0
@@ -157,6 +231,48 @@ class NonObjectGenerator(FakeGenerator):
         return ["not", "an", "item"]
 
 
+class InvalidProvenanceGenerator(FakeGenerator):
+    provider_name = "invalid-provenance-provider"
+    model_name = "invalid-provenance-model"
+
+    def __init__(self, variant):
+        self.variant = variant
+
+    def generate(self, blueprint, source_context):
+        item = super().generate(blueprint, source_context)
+        if self.variant == "cyclic":
+            provenance = {}
+            provenance["self"] = provenance
+        else:
+            provenance = {"nonfinite": float("nan")}
+        item["provenance"] = provenance
+        return item
+
+
+class ImportabilityAttackGenerator(FakeGenerator):
+    provider_name = "importability-attack-provider"
+    model_name = "importability-attack-model"
+
+    def __init__(self, variant):
+        self.variant = variant
+
+    def generate(self, blueprint, source_context):
+        item = super().generate(blueprint, source_context)
+        item["id"] = f"generated-importability-{self.variant}"
+        item["family_id"] = f"f_generated_importability_{self.variant}"
+        if self.variant == "blank_tag":
+            item["tags"] = [""]
+        elif self.variant == "blank_option_id":
+            item["options"][0]["id"] = ""
+        elif self.variant == "duplicate_source":
+            item["source_ids"].append(item["source_ids"][0])
+        elif self.variant == "unknown_revision":
+            item["revision_of"] = "q_does_not_exist"
+        elif self.variant == "self_revision":
+            item["revision_of"] = item["id"]
+        return item
+
+
 class MetadataLeakGenerator(FakeGenerator):
     def generate(self, blueprint, source_context):
         item = super().generate(blueprint, source_context)
@@ -173,6 +289,17 @@ class AcceptingReviewer:
 
     def review(self, item, source_context):
         return {"verdict": "accept", "independent": True}
+
+
+class ContextEchoReviewer(AcceptingReviewer):
+    reviewer_name = "context-echo-reviewer"
+
+    def review(self, item, source_context):
+        return {
+            "verdict": "accept",
+            "independent": True,
+            "source_quote": source_context,
+        }
 
 
 class NamedReviewer(AcceptingReviewer):
@@ -271,6 +398,401 @@ class AuthoringTestCase(unittest.TestCase):
         self.assertNotIn("c_ai_learning_systems", concept_ids)
         self.assertTrue(concept_ids)
         self.assertTrue(all(gap.target_count > gap.current_count for gap in gaps))
+
+    def test_coverage_plan_supports_narrow_operational_filters(self) -> None:
+        planner = CoveragePlanner(self.database)
+        gaps = planner.gaps(
+            limit=1000,
+            topic_filter="LLM Agents",
+            objective_filter="lo_agent_tool_authorization",
+            misconception_filter=(
+                "m_agent_tool_availability_is_authorization"
+            ),
+            goal_filter="objective_misconception_serviceability",
+            maximum_difficulty=-0.35,
+        )
+
+        self.assertEqual(
+            [gap.blueprint.target_difficulty for gap in gaps],
+            [-1.0, -0.35],
+        )
+        self.assertTrue(
+            all(
+                gap.blueprint.concept_id == "c_agent_tool_use"
+                and gap.blueprint.learning_objective_id
+                == "lo_agent_tool_authorization"
+                and gap.blueprint.target_misconception_id
+                == "m_agent_tool_availability_is_authorization"
+                for gap in gaps
+            )
+        )
+        with self.assertRaisesRegex(ValidationError, "Unknown coverage goal"):
+            CoveragePlanner(self.database).gaps(
+                goal_filter="inflate_the_corpus"
+            )
+        for field, value in (
+            ("concept_filter", "c_not_in_release"),
+            ("objective_filter", "lo_not_in_release"),
+            ("misconception_filter", "m_not_in_release"),
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(NotFoundError):
+                    planner.gaps(**{field: value})
+
+        multi_target = next(
+            gap
+            for gap in planner.gaps(limit=1000)
+            if len(gap.blueprint.misconception_ids) > 1
+        )
+        non_lead = multi_target.blueprint.misconception_ids[-1]
+        self.assertNotEqual(
+            non_lead, multi_target.blueprint.target_misconception_id
+        )
+        self.assertIn(
+            multi_target,
+            planner.gaps(
+                limit=1000,
+                misconception_filter=non_lead,
+            ),
+        )
+
+    def test_cli_coverage_filters_are_visible_and_do_not_enqueue(self) -> None:
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "coverage",
+                    "--topic",
+                    "LLM Agents",
+                    "--objective",
+                    "lo_agent_tool_authorization",
+                    "--misconception",
+                    "m_agent_tool_availability_is_authorization",
+                    "--goal",
+                    "objective_misconception_serviceability",
+                    "--maximum-difficulty",
+                    "-0.35",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["gap_count"], 2)
+        self.assertEqual(payload["enqueued_job_ids"], [])
+        self.assertEqual(payload["filters"]["topic"], "LLM Agents")
+        self.assertTrue(
+            all(
+                gap["blueprint"]["target_difficulty"] <= -0.35
+                for gap in payload["gaps"]
+            )
+        )
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) AS n FROM generation_jobs"
+                ).fetchone()["n"],
+                0,
+            )
+
+    def test_quarantine_queue_exposes_content_bound_review_packets(self) -> None:
+        queue = QuarantineReviewQueue(self.database)
+        rows = queue.list(
+            topic="LLM Agents",
+            learning_objective_id="lo_agent_tool_authorization",
+        )
+        question_id = "q_agent_approval_argument_binding_001"
+        self.assertIn(
+            question_id,
+            {row["question_id"] for row in rows},
+        )
+        self.assertTrue(
+            all(
+                not row["runtime_eligible"]
+                and row["activation_ceiling"] == "quarantined"
+                for row in rows
+            )
+        )
+
+        detail = queue.show(question_id)
+        self.assertEqual(detail["question"]["status"], "quarantined")
+        self.assertEqual(detail["release_evidence_weight"], 0.0)
+        self.assertEqual(len(detail["question"]["options"]), 4)
+        self.assertTrue(
+            all(option["rationale"] for option in detail["question"]["options"])
+        )
+        self.assertTrue(detail["sources"])
+        self.assertTrue(detail["concepts"])
+        self.assertEqual(
+            detail["learning_objective"]["id"],
+            "lo_agent_tool_authorization",
+        )
+        self.assertEqual(
+            [row["id"] for row in detail["diagnostic_objectives"]],
+            ["lo_agent_tool_authorization"],
+        )
+        self.assertEqual(
+            {row["id"] for row in detail["misconceptions"]},
+            {
+                option["misconception_id"]
+                for option in detail["question"]["options"]
+                if option["misconception_id"] is not None
+            },
+        )
+        self.assertTrue(detail["local_family_comparison"])
+        self.assertTrue(detail["local_comparison_scope_complete"])
+        self.assertFalse(
+            detail["local_comparison_scope"][
+                "secondary_concept_only_matches_included"
+            ]
+        )
+        self.assertTrue(
+            all(
+                comparison["same_learning_objective"]
+                or comparison["same_primary_concept"]
+                for comparison in detail["local_family_comparison"]
+            )
+        )
+        self.assertIs(
+            detail["provenance_claims"]["human_review"],
+            False,
+        )
+
+        packet = queue.packet(question_id)
+        packet_core = dict(packet)
+        packet_digest = packet_core.pop("packet_sha256")
+        self.assertEqual(packet_digest, canonical_sha256(packet_core))
+        self.assertFalse(
+            packet["review_contract"]["automatic_activation_permitted"]
+        )
+        self.assertTrue(
+            packet["review_contract"]["human_activation_review_required"]
+        )
+        self.assertTrue(
+            packet["review_contract"][
+                "blind_solver_must_not_receive_critic_material"
+            ]
+        )
+        self.assertFalse(
+            packet["review_contract"][
+                "combined_packet_itself_enforces_stage_isolation"
+            ]
+        )
+        self.assertFalse(
+            packet["review_contract"]["family_independence_claim_resolved"]
+        )
+        self.assertIn("critic_material", packet)
+        forbidden_blind_fields = {
+            "correct",
+            "rationale",
+            "misconception_id",
+            "diagnostic_objective_id",
+            "provenance",
+            "recorded_item_reviews",
+        }
+        self.assertTrue(
+            forbidden_blind_fields.isdisjoint(
+                set(nested_keys(packet["blind_solver_material"]))
+            )
+        )
+        self.assertEqual(packet, queue.packet(question_id))
+        blind = queue.packet(question_id, stage="blind")
+        critic = queue.packet(question_id, stage="critic")
+        self.assertEqual(blind["stage"], "blind")
+        self.assertEqual(critic["stage"], "critic")
+        self.assertEqual(
+            blind["coordinator_packet_sha256"],
+            packet["packet_sha256"],
+        )
+        self.assertEqual(
+            critic["coordinator_packet_sha256"],
+            packet["packet_sha256"],
+        )
+        self.assertEqual(
+            blind["material_sha256"],
+            packet["blind_solver_material_sha256"],
+        )
+        self.assertEqual(
+            critic["material_sha256"],
+            packet["critic_material_sha256"],
+        )
+        self.assertTrue(
+            forbidden_blind_fields.isdisjoint(
+                set(nested_keys(blind["material"]))
+            )
+        )
+        with self.assertRaises(ValidationError):
+            queue.packet(question_id, stage="keyed-and-blind")
+        with tempfile.TemporaryDirectory() as directory:
+            replica = Database(Path(directory) / "replica.db")
+            replica.initialize()
+            replica.import_corpus(
+                *read_and_parse(CORPUS, include_catalog=True)
+            )
+            replica_queue = QuarantineReviewQueue(replica)
+            self.assertEqual(packet, replica_queue.packet(question_id))
+            self.assertEqual(
+                blind,
+                replica_queue.packet(question_id, stage="blind"),
+            )
+        with self.assertRaises(NotFoundError):
+            queue.show("q_agent_tool_execution_boundary_001")
+
+    def test_quarantine_queue_uses_release_topics_and_all_concept_mappings(
+        self,
+    ) -> None:
+        queue = QuarantineReviewQueue(self.database)
+        foundation_ids = {
+            row["question_id"]
+            for row in queue.list(topic="t_ml_foundations", limit=500)
+        }
+        self.assertEqual(len(foundation_ids), 8)
+        self.assertIn(
+            "q_conditional_independence_common_cause_001",
+            foundation_ids,
+        )
+        transformer_ids = {
+            row["question_id"]
+            for row in queue.list(concept_id="c_transformers", limit=500)
+        }
+        self.assertIn("q_causal_mask_matrix_001", transformer_ids)
+        self.assertIn(
+            "q_causal_cross_attention_mask_scope_001",
+            transformer_ids,
+        )
+        for kwargs in (
+            {"concept_id": "c_not_in_release"},
+            {"learning_objective_id": "lo_not_in_release"},
+            {"topic": "Topic That Does Not Exist"},
+        ):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(NotFoundError):
+                    queue.list(**kwargs)
+
+    def test_revoked_quarantine_packet_preserves_revocation_ceiling(
+        self,
+    ) -> None:
+        question_id = "q_agent_approval_argument_binding_001"
+        reason = "Review found a superseding content concern."
+        self.database.revoke_question(question_id, reason)
+
+        queue = QuarantineReviewQueue(self.database)
+        listed = next(
+            row
+            for row in queue.list(topic="LLM Agents")
+            if row["question_id"] == question_id
+        )
+        self.assertTrue(listed["revoked"])
+        self.assertEqual(listed["activation_ceiling"], "revoked")
+        self.assertEqual(listed["revocation_reason"], reason)
+
+        detail = queue.show(question_id)
+        self.assertEqual(detail["activation_ceiling"], "revoked")
+        self.assertEqual(detail["revocation"]["reason"], reason)
+        packet = queue.packet(question_id)
+        self.assertEqual(packet["activation_ceiling"], "revoked")
+        self.assertFalse(
+            packet["review_contract"]["human_activation_review_required"]
+        )
+        self.assertTrue(
+            packet["review_contract"]["revoked_identity_must_not_be_promoted"]
+        )
+        self.assertTrue(
+            packet["review_contract"][
+                "new_immutable_revision_required_if_reconsidered"
+            ]
+        )
+
+    def test_filtered_cli_enqueue_is_idempotent(self) -> None:
+        arguments = [
+            "--db",
+            str(self.database.path),
+            "coverage",
+            "--topic",
+            "LLM Agents",
+            "--objective",
+            "lo_agent_tool_authorization",
+            "--misconception",
+            "m_agent_tool_availability_is_authorization",
+            "--goal",
+            "objective_misconception_serviceability",
+            "--maximum-difficulty",
+            "-0.35",
+            "--enqueue",
+            "--json",
+        ]
+        payloads = []
+        for _ in range(2):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(main(arguments), 0)
+            payloads.append(json.loads(output.getvalue()))
+        self.assertEqual(
+            payloads[0]["enqueued_job_ids"],
+            payloads[1]["enqueued_job_ids"],
+        )
+        self.assertEqual(len(payloads[0]["enqueued_job_ids"]), 2)
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) AS n FROM generation_jobs"
+                ).fetchone()["n"],
+                2,
+            )
+
+    def test_cli_quarantine_commands_are_read_only(self) -> None:
+        question_id = "q_agent_approval_argument_binding_001"
+        before = hashlib.sha256(self.database.path.read_bytes()).hexdigest()
+        commands = (
+            (
+                "list",
+                "--topic",
+                "LLM Agents",
+                "--objective",
+                "lo_agent_tool_authorization",
+            ),
+            ("show", question_id),
+            ("packet", question_id, "--stage", "combined"),
+            ("packet", question_id, "--stage", "blind"),
+            ("packet", question_id, "--stage", "critic"),
+        )
+        for command in commands:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                exit_code = main(
+                    [
+                        "--db",
+                        str(self.database.path),
+                        "quarantine",
+                        *command,
+                        "--json",
+                    ]
+                )
+            self.assertEqual(exit_code, 0)
+            json.loads(output.getvalue())
+        self.assertEqual(
+            hashlib.sha256(self.database.path.read_bytes()).hexdigest(),
+            before,
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "quarantine",
+                    "packet",
+                    question_id,
+                    "--stage",
+                    "blind",
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        self.assertIn(question_id, output.getvalue())
+        self.assertIn("stage: blind", output.getvalue())
 
     def test_objective_blueprints_are_release_pinned_and_semantically_complete(self) -> None:
         gap = next(
@@ -757,6 +1279,59 @@ class AuthoringTestCase(unittest.TestCase):
             result["deterministic_issues"][0]["message"],
         )
 
+    def test_invalid_generator_provenance_is_inertly_rejected(
+        self,
+    ) -> None:
+        for variant in ("cyclic", "nonfinite"):
+            with self.subTest(variant=variant):
+                gap = next(
+                    gap
+                    for gap in CoveragePlanner(self.database).gaps(
+                        limit=1000
+                    )
+                    if gap.blueprint.misconception_ids
+                )
+                job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+                result = OfflineAuthoringPipeline(
+                    self.database,
+                    InvalidProvenanceGenerator(variant),
+                    (AcceptingReviewer(),),
+                ).run_job(job_id, "approved source excerpt")
+                self.assertEqual(result["status"], "rejected")
+                self.assertTrue(result["item"]["generator_output_rejected"])
+                shown = AuthoringJobs(self.database).show(job_id)
+                self.assertEqual(shown["status"], "rejected")
+                self.assertEqual(shown["runs"][-1]["status"], "rejected")
+
+    def test_non_importable_generator_fields_are_rejected(self) -> None:
+        variants = (
+            "blank_tag",
+            "blank_option_id",
+            "duplicate_source",
+            "unknown_revision",
+            "self_revision",
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                gap = next(
+                    gap
+                    for gap in CoveragePlanner(self.database).gaps(
+                        limit=1000
+                    )
+                    if gap.blueprint.misconception_ids
+                )
+                job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+                result = OfflineAuthoringPipeline(
+                    self.database,
+                    ImportabilityAttackGenerator(variant),
+                    (AcceptingReviewer(),),
+                ).run_job(job_id, "approved source excerpt")
+                self.assertEqual(result["status"], "rejected")
+                self.assertTrue(result["deterministic_issues"])
+                self.assertFalse(
+                    result["accepted_for_reviewed_quarantine"]
+                )
+
     def test_reviewers_receive_blinded_isolated_copies(self) -> None:
         planner = CoveragePlanner(self.database)
         gap = next(gap for gap in planner.gaps(limit=1000) if gap.blueprint.misconception_ids)
@@ -851,6 +1426,164 @@ class AuthoringTestCase(unittest.TestCase):
         )
         self.assertNotIn(context, row["raw_output_json"])
         self.assertNotIn(context, row["validation_json"])
+
+    def test_generator_cannot_self_attest_human_activation(self) -> None:
+        for apparently_valid in (False, True):
+            with self.subTest(apparently_valid=apparently_valid):
+                gap = next(
+                    gap
+                    for gap in CoveragePlanner(self.database).gaps(
+                        limit=1000
+                    )
+                    if gap.blueprint.misconception_ids
+                )
+                job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+                result = OfflineAuthoringPipeline(
+                    self.database,
+                    AuthorityClaimingGenerator(
+                        apparently_valid=apparently_valid
+                    ),
+                    (AcceptingReviewer(),),
+                ).run_job(job_id, "approved source excerpt")
+
+                self.assertEqual(result["status"], "reviewed")
+                provenance = result["item"]["provenance"]
+                self.assertIs(provenance["human_review"], False)
+                self.assertNotIn("activation_review", provenance)
+                self.assertEqual(
+                    provenance["human_review_status"],
+                    "required_before_activation",
+                )
+                self.assertEqual(
+                    set(
+                        provenance[
+                            "stripped_generator_authority_fields"
+                        ]
+                    ),
+                    {
+                        "activation",
+                        "activation_review",
+                        "human_review",
+                        "review_status",
+                    },
+                )
+                self.assertEqual(
+                    len(
+                        provenance[
+                            "generator_declared_provenance_sha256"
+                        ]
+                    ),
+                    64,
+                )
+
+                bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+                bundle["questions"].append(result["item"])
+                parsed = parse_bundle(bundle)[4]
+                self.assertIn(
+                    result["item"]["id"],
+                    {question.id for question in parsed},
+                )
+
+    def test_exact_source_context_is_redacted_from_persisted_outputs(
+        self,
+    ) -> None:
+        context = "private approved source context unique-marker-94817"
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        result = OfflineAuthoringPipeline(
+            self.database,
+            ContextEchoGenerator(),
+            (ContextEchoReviewer(),),
+        ).run_job(job_id, context)
+        self.assertEqual(result["status"], "rejected")
+        self.assertIn(
+            "source_context_echo_in_generator_output",
+            {
+                issue["code"]
+                for issue in result["deterministic_issues"]
+            },
+        )
+        self.assertGreater(
+            result["exact_source_context_redactions"][
+                "generator_output"
+            ],
+            0,
+        )
+        self.assertGreater(
+            result["exact_source_context_redactions"][
+                "reviewer_outputs"
+            ],
+            0,
+        )
+        persisted = json.dumps(
+            AuthoringJobs(self.database).show(job_id),
+            sort_keys=True,
+        )
+        self.assertNotIn(context, persisted)
+
+    def test_core_item_echo_is_revalidated_after_context_redaction(
+        self,
+    ) -> None:
+        for field in ("stem", "option", "source", "id"):
+            with self.subTest(field=field):
+                context = (
+                    "private exact source material for redaction field "
+                    f"{field} unique-marker-75241"
+                )
+                gap = next(
+                    gap
+                    for gap in CoveragePlanner(self.database).gaps(
+                        limit=1000
+                    )
+                    if gap.blueprint.misconception_ids
+                )
+                job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+                result = OfflineAuthoringPipeline(
+                    self.database,
+                    CoreContextEchoGenerator(field),
+                    (AcceptingReviewer(),),
+                ).run_job(job_id, context)
+                self.assertEqual(result["status"], "rejected")
+                self.assertIn(
+                    "source_context_echo_in_generator_output",
+                    {
+                        issue["code"]
+                        for issue in result["deterministic_issues"]
+                    },
+                )
+                persisted = json.dumps(
+                    AuthoringJobs(self.database).show(job_id),
+                    sort_keys=True,
+                )
+                self.assertNotIn(context, persisted)
+
+    def test_provider_exception_cannot_persist_source_context(self) -> None:
+        context = "private failure context unique-marker-51729"
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.misconception_ids
+        )
+        job_id = CoveragePlanner(self.database).enqueue([gap])[0]
+        with self.assertRaisesRegex(RuntimeError, context):
+            OfflineAuthoringPipeline(
+                self.database,
+                ContextEchoFailingGenerator(),
+                (AcceptingReviewer(),),
+            ).run_job(job_id, context)
+        persisted = json.dumps(
+            AuthoringJobs(self.database).show(job_id),
+            sort_keys=True,
+        )
+        self.assertNotIn(context, persisted)
+        self.assertIn(
+            "raw exception text and source context were not persisted",
+            persisted,
+        )
 
     def test_non_string_reviewer_verdict_cannot_authorize_quarantine(self) -> None:
         planner = CoveragePlanner(self.database)
@@ -950,6 +1683,40 @@ class AuthoringTestCase(unittest.TestCase):
             [run["status"] for run in after["runs"]], ["rejected", "reviewed"]
         )
         self.assertEqual(after["runs"][0]["raw_output"], first_raw)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(
+                main(
+                    [
+                        "--db",
+                        str(self.database.path),
+                        "jobs",
+                        "show",
+                        job_id,
+                    ]
+                ),
+                0,
+            )
+        rendered = output.getvalue()
+        for issue in first["deterministic_issues"]:
+            self.assertIn(issue["code"], rendered)
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(
+                main(
+                    [
+                        "--db",
+                        str(self.database.path),
+                        "reviews",
+                        "show",
+                        job_id,
+                    ]
+                ),
+                0,
+            )
+        rendered_reviews = output.getvalue()
+        self.assertIn("attempt 1 [run rejected]", rendered_reviews)
+        self.assertIn("attempt 2 [run reviewed]", rendered_reviews)
         self.assertTrue(self.database.verify_integrity()["ok"])
 
     def test_failed_job_requires_explicit_retry(self) -> None:
@@ -1012,6 +1779,14 @@ class AuthoringTestCase(unittest.TestCase):
         run_result = json.loads(output.getvalue())
         self.assertEqual(run_result["status"], "reviewed")
         self.assertEqual(run_result["item"]["status"], "quarantined")
+        with self.assertRaisesRegex(
+            ConflictError,
+            "reviewed jobs are terminal",
+        ):
+            deterministic_test_pipeline(self.database).run_job(
+                job_id,
+                "Approved context for a forbidden terminal rerun.",
+            )
 
         for arguments, expected_type in (
             (["jobs", "list", "--status", "reviewed", "--json"], list),

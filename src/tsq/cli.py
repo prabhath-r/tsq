@@ -24,7 +24,12 @@ from .capacity import (
     topic_target,
 )
 from .corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
-from .authoring import AuthoringJobs, CoveragePlanner, deterministic_test_pipeline
+from .authoring import (
+    AuthoringJobs,
+    CoveragePlanner,
+    QuarantineReviewQueue,
+    deterministic_test_pipeline,
+)
 from .engine import AdaptiveEngine
 from .evidence import (
     ACTION_PAYLOAD_CONTRACTS,
@@ -1612,10 +1617,31 @@ def command_coverage(args: argparse.Namespace) -> None:
         _database(args) if args.enqueue else _inspection_database(args)
     )
     planner = CoveragePlanner(database)
-    gaps = planner.gaps(limit=args.limit)
+    filters = {
+        "topic": args.topic,
+        "concept": args.concept,
+        "objective": args.objective,
+        "misconception": args.misconception,
+        "kind": args.kind,
+        "goal": args.goal,
+        "maximum_difficulty": args.maximum_difficulty,
+    }
+    gaps = planner.gaps(
+        limit=args.limit,
+        topic_filter=args.topic,
+        concept_filter=args.concept,
+        objective_filter=args.objective,
+        misconception_filter=args.misconception,
+        kind_filter=args.kind,
+        goal_filter=args.goal,
+        maximum_difficulty=args.maximum_difficulty,
+    )
     job_ids = planner.enqueue(gaps) if args.enqueue else []
     payload = {
         "gap_count": len(gaps),
+        "filters": {
+            key: value for key, value in filters.items() if value is not None
+        },
         "enqueued_job_ids": job_ids,
         "gaps": [
             {
@@ -1630,7 +1656,8 @@ def command_coverage(args: argparse.Namespace) -> None:
     if args.json:
         _emit(payload, as_json=True)
         return
-    print(f"Top {len(gaps)} corpus coverage gaps")
+    qualifier = " matching the requested scope" if payload["filters"] else ""
+    print(f"Top {len(gaps)} corpus coverage gaps{qualifier}")
     for gap in gaps:
         blueprint = gap.blueprint
         target = blueprint.learning_objective_id or blueprint.concept_id
@@ -1704,28 +1731,35 @@ def command_jobs_show(args: argparse.Namespace) -> None:
             error_type = error.get("error_type", "provider_error")
             message = error.get("error", "No provider error message was recorded.")
             print(f"      error [{error_type}]: {message}")
+        validation = run.get("validation")
+        if validation is not None:
+            issues = validation.get("deterministic_issues", ())
+            error_count = sum(
+                issue.get("severity") == "error" for issue in issues
+            )
+            warning_count = sum(
+                issue.get("severity") == "warning" for issue in issues
+            )
+            review_count = len(validation.get("reviews", ()))
+            print(
+                "      validation: "
+                f"{error_count} error(s), {warning_count} warning(s); "
+                f"{review_count} independent review(s)"
+            )
+            for issue in issues:
+                severity = issue.get("severity", "unknown")
+                code = issue.get("code", "unspecified")
+                message = issue.get(
+                    "message",
+                    "No validation detail was recorded.",
+                )
+                print(f"        [{severity}] {code}: {message}")
     if job["raw_output"] is not None:
         print(
             f"  artifact: {job['raw_output'].get('id', '<unknown>')} "
             f"[{job['raw_output'].get('status', '<missing>')}]"
         )
         print("  activation: none (reviewed artifacts remain quarantined)")
-    if job["validation"] is not None:
-        issues = job["validation"].get("deterministic_issues", ())
-        error_count = sum(issue.get("severity") == "error" for issue in issues)
-        warning_count = sum(issue.get("severity") == "warning" for issue in issues)
-        review_count = len(job["validation"].get("reviews", ()))
-        print(
-            f"  validation: {error_count} error(s), {warning_count} warning(s); "
-            f"{review_count} independent review(s)"
-        )
-        for issue in issues:
-            severity = issue.get("severity", "unknown")
-            code = issue.get("code", "unspecified")
-            message = issue.get("message", "No validation detail was recorded.")
-            print(f"    [{severity}] {code}: {message}")
-
-
 def _read_source_context(path: Path) -> str:
     try:
         raw = path.read_bytes()
@@ -1789,10 +1823,109 @@ def command_reviews_show(args: argparse.Namespace) -> None:
             reviewer = review.get("reviewer", {})
             output = review.get("output", {})
             print(
-                f"  attempt {attempt['attempt']}: "
+                f"  attempt {attempt['attempt']} "
+                f"[run {attempt['status']}]: "
                 f"{reviewer.get('reviewer_name', '<unknown>')} -> "
                 f"{output.get('verdict', '<invalid>')}"
             )
+
+
+def command_quarantine_list(args: argparse.Namespace) -> None:
+    rows = QuarantineReviewQueue(_inspection_database(args)).list(
+        topic=args.topic,
+        concept_id=args.concept,
+        learning_objective_id=args.objective,
+        limit=args.limit,
+    )
+    if args.json:
+        _emit(rows, as_json=True)
+        return
+    if not rows:
+        print("No quarantined questions matched.")
+        return
+    for row in rows:
+        target = (
+            row["learning_objective_id"]
+            or row["primary_concept_id"]
+        )
+        review_claim = row["provenance_claims"].get(
+            "human_review_status"
+        )
+        print(
+            f"{row['question_id']} "
+            f"[{row['activation_ceiling']}/{row['kind']}] "
+            f"difficulty={row['difficulty']:+.2f}  {target}"
+        )
+        print(
+            f"  sources={row['source_count']} "
+            f"recorded-reviews={row['recorded_item_review_count']} "
+            f"human-review-claim={review_claim or 'unspecified'}"
+        )
+        if row["revoked"]:
+            print(
+                "  permanently revoked: "
+                f"{row['revocation_reason']}"
+            )
+    print("All listed questions remain quarantined and runtime-ineligible.")
+
+
+def command_quarantine_show(args: argparse.Namespace) -> None:
+    detail = QuarantineReviewQueue(
+        _inspection_database(args)
+    ).show(args.question)
+    if args.json:
+        _emit(detail, as_json=True)
+        return
+    question = detail["question"]
+    print(
+        f"Question {question['id']} [{detail['activation_ceiling']}] "
+        f"{question['kind']} difficulty={question['difficulty']:+.2f}"
+    )
+    if question["learning_objective_id"]:
+        print(f"  objective: {question['learning_objective_id']}")
+    print(f"  family: {question['family_id']}")
+    print(f"  content: {detail['question_content_sha256']}")
+    print(f"\n{question['stem']}")
+    for option in question["options"]:
+        marker = "best" if option["correct"] else "distractor"
+        print(f"  {option['id']}. [{marker}] {option['text']}")
+        if option["misconception_id"]:
+            print(
+                f"     misconception: {option['misconception_id']}"
+            )
+        print(f"     rationale: {option['rationale']}")
+    print("Sources:")
+    for source in detail["sources"]:
+        locator = f" · {source['uri']}" if source["uri"] else ""
+        print(f"  {source['id']}: {source['title']}{locator}")
+    if detail["revocation"] is not None:
+        print(
+            "Revocation: this immutable question ID must not be promoted; "
+            f"{detail['revocation']['reason']}"
+        )
+    print(
+        "Activation: none; provenance review labels are inspection claims, "
+        "not human authority."
+    )
+
+
+def command_quarantine_packet(args: argparse.Namespace) -> None:
+    packet = QuarantineReviewQueue(
+        _inspection_database(args)
+    ).packet(args.question, stage=args.stage)
+    if args.json:
+        _emit(packet, as_json=True)
+        return
+    print(
+        f"Review packet {packet['schema']} for "
+        f"{packet['question_id']}"
+    )
+    print(f"  packet sha256: {packet['packet_sha256']}")
+    print(f"  stage: {args.stage}")
+    print(
+        "  activation: none; use --json to export the content-bound "
+        f"{args.stage} inspection packet"
+    )
 
 
 def command_task_import(args: argparse.Namespace) -> None:
@@ -2759,6 +2892,42 @@ def build_parser() -> argparse.ArgumentParser:
         "coverage", help="Plan corpus growth from explicit concept/kind coverage debt"
     )
     coverage.add_argument("--limit", type=int, default=25)
+    coverage_scope = coverage.add_mutually_exclusive_group()
+    coverage_scope.add_argument(
+        "--topic",
+        help="restrict to a curriculum topic ID or exact topic name",
+    )
+    coverage_scope.add_argument(
+        "--concept",
+        help="restrict to one stable concept ID",
+    )
+    coverage.add_argument(
+        "--objective",
+        help="restrict to one stable learning-objective ID",
+    )
+    coverage.add_argument(
+        "--misconception",
+        help="restrict to an exact targeted misconception ID",
+    )
+    coverage.add_argument(
+        "--kind",
+        choices=sorted(CoveragePlanner.KIND_TARGETS),
+        help="restrict to one planned question kind",
+    )
+    coverage.add_argument(
+        "--goal",
+        choices=(
+            "concept_kind",
+            "objective_misconception_serviceability",
+            "objective_serviceability",
+        ),
+        help="restrict to one structural authoring goal",
+    )
+    coverage.add_argument(
+        "--maximum-difficulty",
+        type=float,
+        help="restrict to authored-prior difficulty at or below this value",
+    )
     coverage.add_argument("--enqueue", action="store_true")
     coverage.add_argument("--json", action="store_true")
     coverage.set_defaults(func=command_coverage)
@@ -2795,7 +2964,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--source-context",
         type=Path,
         required=True,
-        help="UTF-8 file containing approved source context (content is not persisted)",
+        help=(
+            "UTF-8 approved source file; the file is not stored directly, "
+            "while generated/reviewer artifacts are retained with exact-context "
+            "redaction"
+        ),
     )
     jobs_run.add_argument("--json", action="store_true")
     jobs_run.set_defaults(func=command_jobs_run)
@@ -2820,6 +2993,59 @@ def build_parser() -> argparse.ArgumentParser:
     reviews_show.add_argument("job")
     reviews_show.add_argument("--json", action="store_true")
     reviews_show.set_defaults(func=command_reviews_show)
+
+    quarantine = subparsers.add_parser(
+        "quarantine",
+        help="Inspect release-pinned questions awaiting human review",
+    )
+    quarantine_sub = quarantine.add_subparsers(
+        dest="quarantine_command",
+        required=True,
+    )
+    quarantine_list = quarantine_sub.add_parser(
+        "list",
+        help="List quarantined review candidates",
+    )
+    quarantine_scope = quarantine_list.add_mutually_exclusive_group()
+    quarantine_scope.add_argument(
+        "--topic",
+        help="restrict to a curriculum topic ID or exact topic name",
+    )
+    quarantine_scope.add_argument(
+        "--concept",
+        help="restrict to one stable concept ID",
+    )
+    quarantine_list.add_argument(
+        "--objective",
+        help="restrict to one stable learning-objective ID",
+    )
+    quarantine_list.add_argument("--limit", type=int, default=50)
+    quarantine_list.add_argument("--json", action="store_true")
+    quarantine_list.set_defaults(func=command_quarantine_list)
+
+    quarantine_show = quarantine_sub.add_parser(
+        "show",
+        help="Show a full quarantined item, rationales, and sources",
+    )
+    quarantine_show.add_argument("question")
+    quarantine_show.add_argument("--json", action="store_true")
+    quarantine_show.set_defaults(func=command_quarantine_show)
+
+    quarantine_packet = quarantine_sub.add_parser(
+        "packet",
+        help="Build a content-bound, non-activating review packet",
+    )
+    quarantine_packet.add_argument("question")
+    quarantine_packet.add_argument(
+        "--stage",
+        choices=("combined", "blind", "critic"),
+        default="combined",
+        help=(
+            "export coordinator-combined material or one isolated review stage"
+        ),
+    )
+    quarantine_packet.add_argument("--json", action="store_true")
+    quarantine_packet.set_defaults(func=command_quarantine_packet)
 
     task = subparsers.add_parser(
         "task",
