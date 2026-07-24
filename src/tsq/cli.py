@@ -3038,7 +3038,7 @@ def build_parser() -> argparse.ArgumentParser:
     quarantine_packet.add_argument("question")
     quarantine_packet.add_argument(
         "--stage",
-        choices=("combined", "blind", "critic"),
+        choices=("combined", "blind", "family", "critic"),
         default="combined",
         help=(
             "export coordinator-combined material or one isolated review stage"

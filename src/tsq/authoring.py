@@ -39,7 +39,8 @@ from .store import (
 
 PROMPT_VERSION = "item-blueprint-v2"
 SUPPORTED_PROMPT_VERSIONS = frozenset({"item-blueprint-v1", PROMPT_VERSION})
-QUARANTINE_REVIEW_PACKET_SCHEMA = "tsq-quarantine-review-packet-v2"
+QUARANTINE_REVIEW_PACKET_SCHEMA = "tsq-quarantine-review-packet-v3"
+QUARANTINE_REVIEW_STAGE_SCHEMA = "tsq-quarantine-review-stage-v2"
 GENERATOR_AUTHORITY_PROVENANCE_FIELDS = frozenset(
     {
         "activation",
@@ -236,6 +237,15 @@ def _blind_for_review(
             "operation": blueprint.learning_objective_operation,
             "evidence_type": blueprint.learning_objective_evidence_type,
         }
+    return blinded
+
+
+def _blind_for_family_review(item: dict[str, Any]) -> dict[str, Any]:
+    """Remove answer, provenance, source-selection, and family declarations."""
+
+    blinded = _blind_for_review(item)
+    blinded.pop("family_id", None)
+    blinded.pop("source_ids", None)
     return blinded
 
 
@@ -1582,8 +1592,11 @@ class QuarantineReviewQueue:
                                AND mapping.role = 'primary'
                                AND mapping.concept_id = ?
                          )
+                         OR candidate.family_id = ?
                      )
-                   ORDER BY candidate_membership.status,
+                   ORDER BY CASE WHEN candidate.family_id = ?
+                                      THEN 0 ELSE 1 END,
+                            candidate_membership.status,
                             candidate.difficulty, candidate.id
                    LIMIT 101""",
                 (
@@ -1593,8 +1606,26 @@ class QuarantineReviewQueue:
                     release_id,
                     question.objective_id,
                     question.primary_concept_id,
+                    question.family_id,
+                    question.family_id,
                 ),
             ).fetchall()
+            same_family_total = int(
+                connection.execute(
+                    """SELECT COUNT(*) AS n
+                       FROM release_questions candidate_membership
+                       JOIN questions candidate
+                         ON candidate.id = candidate_membership.question_id
+                       WHERE candidate_membership.release_id = ?
+                         AND candidate.id != ?
+                         AND candidate.family_id = ?""",
+                    (
+                        release_id,
+                        question_id,
+                        question.family_id,
+                    ),
+                ).fetchone()["n"]
+            )
         if (
             question.status is not QuestionStatus.QUARANTINED
             or float(membership["evidence_weight"]) != 0.0
@@ -1796,6 +1827,9 @@ class QuarantineReviewQueue:
                 {
                     "question_content_sha256": row["content_hash"],
                     "release_status": row["status"],
+                    "same_family": (
+                        row["family_id"] == question.family_id
+                    ),
                     "same_learning_objective": (
                         question.objective_id is not None
                         and row["objective_id"] == question.objective_id
@@ -1810,6 +1844,13 @@ class QuarantineReviewQueue:
                     "question": self._question_payload(candidate),
                 }
             )
+        same_family_included = sum(
+            comparison["same_family"]
+            for comparison in local_family_comparison
+        )
+        same_family_scope_complete = (
+            same_family_included == same_family_total
+        )
         return {
             "release": {
                 "release_id": release["id"],
@@ -1835,17 +1876,22 @@ class QuarantineReviewQueue:
             "misconceptions": misconceptions,
             "local_family_comparison": local_family_comparison,
             "local_comparison_scope": {
+                "included_if_same_family": True,
                 "included_if_same_direct_learning_objective": True,
                 "included_if_same_primary_concept": True,
                 "secondary_concept_only_matches_included": False,
                 "cross_topic_only_matches_included": False,
                 "unrelated_objective_matches_included": False,
+                "same_family_rows_prioritized": True,
                 "maximum_rows": 100,
             },
             "local_comparison_scope_complete": (
                 not local_comparison_truncated
             ),
             "local_comparison_total_lower_bound": len(comparison_rows),
+            "same_family_comparison_total": same_family_total,
+            "same_family_comparison_included": same_family_included,
+            "same_family_scope_complete": same_family_scope_complete,
             "recorded_item_reviews": reviews,
             "revocation": (
                 {
@@ -1871,7 +1917,7 @@ class QuarantineReviewQueue:
         *,
         stage: str = "combined",
     ) -> dict[str, Any]:
-        if stage not in {"combined", "blind", "critic"}:
+        if stage not in {"combined", "blind", "family", "critic"}:
             raise ValidationError(
                 f"Unknown quarantine review packet stage: {stage!r}."
             )
@@ -1881,6 +1927,41 @@ class QuarantineReviewQueue:
             blind_solver_material["learning_objective"] = copy.deepcopy(
                 detail["learning_objective"]
             )
+        family_candidate = _blind_for_family_review(detail["question"])
+        if detail["learning_objective"] is not None:
+            family_candidate["learning_objective"] = copy.deepcopy(
+                detail["learning_objective"]
+            )
+        family_reviewer_material = {
+            "review_task": (
+                "Independently infer each item's solution operation from the "
+                "answer-redacted text. Cluster solely by inferred operation "
+                "and record rationale and confidence before key reveal; the "
+                "coordinator maps sealed clusters to family declarations "
+                "later."
+            ),
+            "candidate_question": family_candidate,
+            "comparison_questions": sorted(
+                [
+                    {
+                        "question_content_sha256": comparison[
+                            "question_content_sha256"
+                        ],
+                        "question": _blind_for_family_review(
+                            comparison["question"]
+                        ),
+                    }
+                    for comparison in detail["local_family_comparison"]
+                ],
+                key=lambda comparison: comparison["question"]["id"],
+            ),
+            "comparison_scope_complete": detail[
+                "local_comparison_scope_complete"
+            ],
+            "comparison_total_lower_bound": detail[
+                "local_comparison_total_lower_bound"
+            ],
+        }
         critic_material = {
             "question": detail["question"],
             "topics": detail["topics"],
@@ -1904,6 +1985,15 @@ class QuarantineReviewQueue:
             "local_comparison_total_lower_bound": detail[
                 "local_comparison_total_lower_bound"
             ],
+            "same_family_comparison_total": detail[
+                "same_family_comparison_total"
+            ],
+            "same_family_comparison_included": detail[
+                "same_family_comparison_included"
+            ],
+            "same_family_scope_complete": detail[
+                "same_family_scope_complete"
+            ],
         }
         release_identity = {
             "release_id": detail["release"]["release_id"],
@@ -1921,11 +2011,17 @@ class QuarantineReviewQueue:
             ],
             "review_sequence": (
                 "Complete the blind solver stage using only "
-                "blind_solver_material before revealing critic_material."
+                "blind_solver_material, then complete the answer-redacted "
+                "family reviewer stage using only family_reviewer_material, "
+                "before revealing critic_material."
             ),
             "blind_solver_material": blind_solver_material,
             "blind_solver_material_sha256": _sha256_json(
                 blind_solver_material
+            ),
+            "family_reviewer_material": family_reviewer_material,
+            "family_reviewer_material_sha256": _sha256_json(
+                family_reviewer_material
             ),
             "critic_material": critic_material,
             "critic_material_sha256": _sha256_json(critic_material),
@@ -1934,13 +2030,28 @@ class QuarantineReviewQueue:
                 "source_claim_review_required": True,
                 "blind_solver_review_required": True,
                 "blind_solver_must_not_receive_critic_material": True,
+                "blind_solver_must_not_receive_family_material": True,
+                "family_reviewer_review_required": True,
+                "family_material_answer_blind": True,
+                "family_material_authored_provenance_blind": True,
+                "family_material_source_selection_blind": True,
+                "family_material_family_assignment_fields_blind": True,
+                "family_material_selection_family_enriched": True,
+                "family_reviewer_must_not_receive_critic_material": True,
+                "stage_sequence_advisory_only": True,
+                "stage_exports_are_not_access_control": True,
+                "packet_records_no_stage_attestation": True,
+                "coordinator_must_seal_blind_result_before_family": True,
+                "coordinator_must_seal_family_result_before_critic": True,
                 "combined_packet_itself_enforces_stage_isolation": False,
-                "keyed_critic_follows_blind_solver": True,
                 "one_best_answer_review_required": True,
                 "named_misconception_review_required": True,
                 "family_independence_review_required": True,
                 "local_comparison_scope_complete": detail[
                     "local_comparison_scope_complete"
+                ],
+                "same_family_scope_complete": detail[
+                    "same_family_scope_complete"
                 ],
                 "family_independence_claim_resolved": False,
                 "human_activation_review_required": (
@@ -1971,8 +2082,19 @@ class QuarantineReviewQueue:
                     "review inputs, not proof of family independence."
                 ),
                 (
+                    "Family-stage selection is enriched with declared "
+                    "same-family neighbors, but assignment fields are hidden. "
+                    "Inclusion is not evidence of semantic dependence."
+                ),
+                (
                     "The combined packet is coordinator-only. Use a blind "
-                    "stage export when handing material to a blind solver."
+                    "stage export for the solver, then a family stage export "
+                    "for answer-redacted comparison, before the critic stage."
+                ),
+                (
+                    "Stage order is a coordinator procedure, not access "
+                    "control: exports record no completion attestation and "
+                    "the CLI can produce any stage directly."
                 ),
                 (
                     "Authored difficulty is an uncalibrated prior until "
@@ -1986,14 +2108,14 @@ class QuarantineReviewQueue:
         }
         if stage == "combined":
             return combined
-        material_key = (
-            "blind_solver_material"
-            if stage == "blind"
-            else "critic_material"
-        )
+        material_key = {
+            "blind": "blind_solver_material",
+            "family": "family_reviewer_material",
+            "critic": "critic_material",
+        }[stage]
         material = combined[material_key]
         stage_core = {
-            "schema": "tsq-quarantine-review-stage-v1",
+            "schema": QUARANTINE_REVIEW_STAGE_SCHEMA,
             "stage": stage,
             "question_id": detail["question"]["id"],
             "activation_ceiling": detail["activation_ceiling"],
@@ -2006,11 +2128,18 @@ class QuarantineReviewQueue:
             "material_sha256": _sha256_json(material),
             "coordinator_packet_sha256": combined["packet_sha256"],
             "stage_boundary": (
-                "This export contains no keyed critic material."
+                "This export contains neither family-comparison nor keyed "
+                "critic material."
                 if stage == "blind"
                 else (
-                    "Reveal this keyed material only after the blind solver "
-                    "stage is complete."
+                    "Reveal this answer-redacted comparison material only "
+                    "after the blind solver stage is complete; it contains no "
+                    "keyed critic material."
+                    if stage == "family"
+                    else (
+                        "Reveal this keyed material only after the blind "
+                        "solver and family reviewer stages are complete."
+                    )
                 )
             ),
         }
