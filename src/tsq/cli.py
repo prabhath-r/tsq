@@ -351,6 +351,7 @@ def command_start(args: argparse.Namespace) -> None:
             seed=args.seed,
             ask_confidence=args.ask_confidence,
             explain_policy=args.explain_policy,
+            details=args.details,
         )
     )
 
@@ -829,6 +830,8 @@ def command_session_list(args: argparse.Namespace) -> None:
     for row in rows:
         answered = int(row["questions_answered"])
         correct = int(row["correct"])
+        abstained = int(row["abstained"])
+        selected_answers = answered - abstained
         sessions.append(
             {
                 "id": row["id"],
@@ -844,8 +847,15 @@ def command_session_list(args: argparse.Namespace) -> None:
                 "step": int(row["step"]),
                 "questions_answered": answered,
                 "correct": correct,
-                "abstained": int(row["abstained"]),
+                "abstained": abstained,
                 "accuracy": correct / answered if answered else None,
+                "selected_answers": selected_answers,
+                "selected_incorrect": selected_answers - correct,
+                "selected_accuracy": (
+                    correct / selected_answers
+                    if selected_answers
+                    else None
+                ),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
             }
@@ -857,15 +867,17 @@ def command_session_list(args: argparse.Namespace) -> None:
         print("No sessions matched.")
         return
     for session in sessions:
-        accuracy = (
-            f"{session['accuracy'] * 100:.1f}%"
-            if session["accuracy"] is not None
-            else "n/a"
+        selected_summary = (
+            f"{session['correct']}/{session['selected_answers']} selected "
+            "correct"
+            if session["selected_answers"]
+            else "0 selected answers"
         )
         print(
             f"{session['id']} [{session['status']}] {session['learner_id']} · "
             f"{session['target_name']} · {session['mode']} · "
-            f"{session['questions_answered']} answered ({accuracy}) · "
+            f"{session['questions_answered']} completed · "
+            f"{selected_summary} · {session['abstained']} skipped · "
             f"updated {session['updated_at']}"
         )
 
@@ -938,9 +950,6 @@ def command_session_report(args: argparse.Namespace) -> None:
         return
     topic = report["topic"]
     target = topic["name"] if topic else report["root_concept_id"]
-    accuracy = (
-        f"{report['accuracy'] * 100:.1f}%" if report["accuracy"] is not None else "n/a"
-    )
     response = report["response_time"]
     difficulty = report["difficulty"]
     print(f"Session {report['session_id']} · {target} · {report['status']}")
@@ -956,9 +965,17 @@ def command_session_report(args: argparse.Namespace) -> None:
         "approximation only"
     )
     print(
-        f"  {report['questions_answered']} answered · {report['correct']} correct "
-        f"({accuracy}) · {report['abstained']} unsure"
+        f"  {report['questions_answered']} completed · "
+        f"{report['correct']} correct · "
+        f"{report['selected_incorrect']} incorrect · "
+        f"{report['abstained']} skipped"
     )
+    if report["selected_answers"]:
+        print(
+            "    among selected answers: "
+            f"{report['correct']}/{report['selected_answers']} correct "
+            f"({report['selected_accuracy'] * 100:.1f}%)"
+        )
     print(
         f"  active response time {response['active_seconds']:.1f}s · "
         f"wall time {response['wall_seconds']:.1f}s"
@@ -984,7 +1001,8 @@ def command_session_report(args: argparse.Namespace) -> None:
         print(
             f"  continuity {continuity['average_score']:.2f} average · "
             f"{report['exploration']['questions']} deliberate exploration probe(s) · "
-            f"{report['remediation_questions']} repair/verification question(s)"
+            f"{report['remediation_questions']} targeted-practice/"
+            "transfer-check question(s)"
         )
     if report["topic_distribution"]:
         rendered = ", ".join(
@@ -1041,10 +1059,21 @@ def command_session_report(args: argparse.Namespace) -> None:
         "change mastery or selection"
     )
     if report["objective_performance"]:
-        print("  fine-grained objective evidence:")
+        print("  fine-grained selected-response evidence:")
         for objective in report["objective_performance"]:
             observed = objective["session"]
             projection = objective["current_projection"]
+            selection_summary = (
+                f"{observed['correct']}/{observed['selected_answers']} "
+                "selected correct"
+                if observed["selected_answers"]
+                else "0 selected answers"
+            )
+            skipped = (
+                f" · {observed['abstained']} skipped"
+                if observed["abstained"]
+                else ""
+            )
             flags = (
                 ", ".join(
                     reason.replace("_", " ")
@@ -1054,7 +1083,7 @@ def command_session_report(args: argparse.Namespace) -> None:
             )
             print(
                 f"    {objective['name']} ({objective['operation']}): "
-                f"{observed['correct']}/{observed['attempted']} correct · "
+                f"{selection_summary}{skipped} · "
                 f"mastery {projection['mastery_probability'] * 100:.1f}% · "
                 f"uncertainty {projection['uncertainty']:.2f} · "
                 f"{projection['independent_families']} independent family/families"
@@ -1141,9 +1170,15 @@ def command_next(args: argparse.Namespace) -> None:
 def _submission_dict(
     result, objective_names: dict[str, str] | None = None
 ) -> dict[str, Any]:
+    outcome = (
+        "abstained"
+        if result.selected_option is None
+        else "correct" if result.correct else "incorrect"
+    )
     payload = {
         "interaction_id": result.interaction_id,
         "correct": result.correct,
+        "outcome": outcome,
         "selected_option_id": result.selected_option.id if result.selected_option else None,
         "correct_option_id": result.correct_option.id,
         "selected_rationale": result.selected_option.rationale if result.selected_option else None,
@@ -1245,21 +1280,48 @@ def command_answer(args: argparse.Namespace) -> None:
     database = _database(args)
     engine = AdaptiveEngine(database)
     option_id = None if args.option in {"?", "unknown", "none"} else args.option
-    result = engine.submit_answer(
-        args.decision,
-        option_id,
-        confidence=args.confidence,
-        response_ms=args.response_ms,
-        hint_count=args.hints,
-        feedback_shown=False,
-        idempotency_key=args.idempotency_key,
-    )
+    confidence = None if option_id is None else args.confidence
+    try:
+        result = engine.submit_answer(
+            args.decision,
+            option_id,
+            confidence=confidence,
+            response_ms=args.response_ms,
+            hint_count=args.hints,
+            feedback_shown=False,
+            idempotency_key=args.idempotency_key,
+        )
+    except ConflictError as exc:
+        legacy_abstention_retry = bool(
+            option_id is None
+            and args.confidence is not None
+            and args.idempotency_key
+            and str(exc)
+            == "Idempotency key was reused with different answer inputs."
+        )
+        if not legacy_abstention_retry:
+            raise
+        # Older CLI versions persisted a supplied confidence with an
+        # abstention. New submissions normalize it away, but an exact retry
+        # must still reproduce the old immutable command payload.
+        result = engine.submit_answer(
+            args.decision,
+            option_id,
+            confidence=args.confidence,
+            response_ms=args.response_ms,
+            hint_count=args.hints,
+            feedback_shown=False,
+            idempotency_key=args.idempotency_key,
+        )
     objective_names = _decision_objective_names(database, args.decision)
     payload = _submission_dict(result, objective_names)
     if args.json:
         _emit(payload, as_json=True)
     else:
-        print("Correct." if result.correct else "Not correct.")
+        if result.selected_option is None:
+            print("Skipped — you chose 'I do not know'.")
+        else:
+            print("Correct." if result.correct else "Not correct.")
         if result.selected_option:
             print(f"Your choice: {result.selected_option.rationale}")
         print(f"Answer: {result.correct_option.text}")
@@ -2091,6 +2153,80 @@ def command_verify(args: argparse.Namespace) -> None:
         raise TSQError("Integrity verification found errors.")
 
 
+_PEDAGOGICAL_ROLE_LABELS = {
+    "main": "PRACTICE",
+    "exploration_probe": "EXPLORE",
+    "remediation_probe": "TARGETED PRACTICE",
+    "verification": "TRANSFER CHECK",
+}
+
+
+def _pedagogical_role_label(role: str) -> str:
+    """Translate a stable internal role into a learner-facing cue."""
+
+    return _PEDAGOGICAL_ROLE_LABELS.get(
+        role,
+        role.replace("_", " ").upper(),
+    )
+
+
+def _print_compact_study_completion(report: dict[str, Any]) -> None:
+    """Render a useful study summary without exposing model internals."""
+
+    topic = report["topic"]
+    target = topic["name"] if topic else report["root_concept_id"]
+    print(
+        f"Session {report['session_id']} · {target} · {report['status']}"
+    )
+    print(
+        f"  {report['questions_answered']} completed · "
+        f"{report['correct']} correct · "
+        f"{report['selected_incorrect']} incorrect · "
+        f"{report['abstained']} skipped"
+    )
+    if report["selected_answers"]:
+        print(
+            "  Among selected answers: "
+            f"{report['correct']}/{report['selected_answers']} correct "
+            f"({report['selected_accuracy'] * 100:.1f}%)"
+        )
+    if report["remediation_questions"]:
+        print(
+            f"  {report['remediation_questions']} targeted practice or "
+            "transfer check question(s)"
+        )
+    objective_performance = report["objective_performance"]
+    if objective_performance:
+        print("  Session evidence:")
+        for objective in objective_performance[:4]:
+            observed = objective["session"]
+            selected_evidence = (
+                f"{observed['correct']}/{observed['selected_answers']} "
+                "selected answers correct"
+                if observed["selected_answers"]
+                else "0 selected answers"
+            )
+            skipped = (
+                f" · {observed['abstained']} skipped"
+                if observed["abstained"]
+                else ""
+            )
+            print(f"    {objective['name']}: {selected_evidence}{skipped}")
+        if len(objective_performance) > 4:
+            print(
+                f"    +{len(objective_performance) - 4} additional "
+                "objective(s)"
+            )
+    print(
+        "  These are provisional session signals, not a final skill rating; "
+        "independent and delayed checks are still needed."
+    )
+    print(
+        "  For full evidence on future sessions, add --details. This session "
+        f"remains available as {report['session_id']} in the same database."
+    )
+
+
 def command_study(args: argparse.Namespace) -> None:
     if args.limit < 1:
         raise ValidationError("Study limit must be a positive integer.")
@@ -2118,19 +2254,30 @@ def command_study(args: argparse.Namespace) -> None:
             )
             print(f"Session complete: {exc}\n")
             break
-        print(f"[{presentation.phase.value.upper()}] {presentation.question.kind.value.replace('_', ' ')}")
+        role_label = _pedagogical_role_label(presentation.pedagogical_role)
+        print(
+            f"[{role_label}] "
+            f"{presentation.question.kind.value.replace('_', ' ')}"
+        )
         if presentation.question.objective is not None:
             objective = presentation.question.objective
-            print(
-                f"Objective: {objective.name} ({objective.id}) · "
-                f"{objective.operation.value} / {objective.evidence_type}"
-            )
+            print(f"Focus: {objective.name}")
+            if args.explain_policy:
+                print(
+                    f"  objective internals: id={objective.id}; "
+                    f"operation={objective.operation.value}; "
+                    f"evidence_type={objective.evidence_type}"
+                )
         print(presentation.question.stem)
         ordered = presentation.ordered_options
         for index, option in enumerate(ordered, start=1):
             print(f"  {index}. {option.text}")
         if args.explain_policy:
-            print(f"  policy: {presentation.rationale}")
+            print(
+                f"  policy: phase={presentation.phase.value}; "
+                f"pedagogical_role={presentation.pedagogical_role}; "
+                f"{presentation.rationale}"
+            )
         started = time.perf_counter()
         while True:
             try:
@@ -2161,7 +2308,7 @@ def command_study(args: argparse.Namespace) -> None:
             print("Enter 1-4, ?, or q.")
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         confidence = None
-        if args.ask_confidence:
+        if args.ask_confidence and selected_id is not None:
             while True:
                 try:
                     raw_confidence = input(
@@ -2197,13 +2344,25 @@ def command_study(args: argparse.Namespace) -> None:
             feedback_shown=False,
             idempotency_key=new_id("cli"),
         )
-        print("\n✓ Correct" if result.correct else "\n✗ Not correct")
+        if selected_id is None:
+            print("\n— Skipped — you chose 'I do not know'")
+        else:
+            print("\n✓ Correct" if result.correct else "\n✗ Not correct")
         if result.selected_option and not result.correct:
             print(f"Why that choice fails: {result.selected_option.rationale}")
         print(f"Best answer: {result.correct_option.text}")
         print(f"Why: {result.correct_option.rationale}")
         if result.focus_misconception_id:
-            print(f"Next probe targets hypothesis: {result.focus_misconception_id}")
+            if args.explain_policy:
+                print(
+                    "Next probe targets hypothesis: "
+                    f"{result.focus_misconception_id}"
+                )
+            else:
+                print(
+                    "Next practice will check the interpretation behind "
+                    "that choice."
+                )
         objective_names = {
             objective.id: objective.name
             for objective in database.get_learning_objectives(
@@ -2220,19 +2379,28 @@ def command_study(args: argparse.Namespace) -> None:
         )
         if assessed_change is not None:
             objective_id = assessed_change["objective_id"]
-            print(
-                "Objective evidence: "
-                f"{objective_names.get(objective_id, objective_id)} "
-                f"({objective_id}) · "
-                f"{assessed_change['prior_mastery'] * 100:.1f}% → "
-                f"{assessed_change['posterior_mastery'] * 100:.1f}%"
-            )
+            objective_name = objective_names.get(objective_id, objective_id)
+            if args.explain_policy:
+                print(
+                    "Objective projection: "
+                    f"{objective_name} ({objective_id}) · "
+                    f"{assessed_change['prior_mastery'] * 100:.1f}% → "
+                    f"{assessed_change['posterior_mastery'] * 100:.1f}%"
+                )
+            else:
+                print(f"Evidence recorded for: {objective_name}")
         if result.focus_objective_id:
-            print(
-                "Next probe objective: "
-                f"{objective_names.get(result.focus_objective_id, result.focus_objective_id)} "
-                f"({result.focus_objective_id})"
+            focus_name = objective_names.get(
+                result.focus_objective_id,
+                result.focus_objective_id,
             )
+            if args.explain_policy:
+                print(
+                    f"Next probe objective: {focus_name} "
+                    f"({result.focus_objective_id})"
+                )
+            else:
+                print(f"Next focus: {focus_name}")
         if result.transition_reason == "descend_to_evidence_boundary":
             focus_name = (
                 database.get_graph(session["corpus_release_id"])
@@ -2269,14 +2437,22 @@ def command_study(args: argparse.Namespace) -> None:
             status="completed",
             reason="question_limit_reached",
         )
-    print(f"Completed {completed} questions.\n")
-    command_session_report(
-        argparse.Namespace(db=args.db, session=session["id"], json=False)
-    )
-    print()
-    command_profile(
-        argparse.Namespace(db=args.db, learner=args.learner, topic=args.topic, json=False)
-    )
+    if args.details:
+        print(f"Completed {completed} questions.\n")
+        command_session_report(
+            argparse.Namespace(db=args.db, session=session["id"], json=False)
+        )
+        print()
+        command_profile(
+            argparse.Namespace(
+                db=args.db,
+                learner=args.learner,
+                topic=args.topic,
+                json=False,
+            )
+        )
+    else:
+        _print_compact_study_completion(engine.session_report(session["id"]))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -2319,6 +2495,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip confidence collection; answers remain lower-certainty evidence",
     )
     start.add_argument("--explain-policy", action="store_true")
+    start.add_argument(
+        "--details",
+        action="store_true",
+        help="show the full session and learner evidence reports on completion",
+    )
     start.set_defaults(func=command_start)
 
     init = subparsers.add_parser("init", help="Initialize a database and import a corpus")
@@ -2473,7 +2654,14 @@ def build_parser() -> argparse.ArgumentParser:
     answer = subparsers.add_parser("answer", help="Submit one immutable response event")
     answer.add_argument("decision")
     answer.add_argument("option", help="Stable option ID, or ? for I do not know")
-    answer.add_argument("--confidence", type=float)
+    answer.add_argument(
+        "--confidence",
+        type=float,
+        help=(
+            "Confidence from 0 to 1; ignored for a new abstention because no "
+            "option was selected"
+        ),
+    )
     answer.add_argument("--response-ms", type=int)
     answer.add_argument("--hints", type=int, default=0)
     answer.add_argument("--idempotency-key")
@@ -2549,6 +2737,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="skip confidence collection; answers remain lower-certainty evidence",
     )
     study.add_argument("--explain-policy", action="store_true")
+    study.add_argument(
+        "--details",
+        action="store_true",
+        help="show the full session and learner evidence reports on completion",
+    )
     study.set_defaults(func=command_study)
 
     profile = subparsers.add_parser("profile", help="Show the probabilistic learner projection")
