@@ -543,6 +543,14 @@ class AuthoringTestCase(unittest.TestCase):
         )
         self.assertTrue(detail["local_family_comparison"])
         self.assertTrue(detail["local_comparison_scope_complete"])
+        self.assertTrue(
+            detail["local_comparison_scope"]["included_if_same_family"]
+        )
+        self.assertTrue(
+            detail["local_comparison_scope"][
+                "same_family_rows_prioritized"
+            ]
+        )
         self.assertFalse(
             detail["local_comparison_scope"][
                 "secondary_concept_only_matches_included"
@@ -550,7 +558,8 @@ class AuthoringTestCase(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                comparison["same_learning_objective"]
+                comparison["same_family"]
+                or comparison["same_learning_objective"]
                 or comparison["same_primary_concept"]
                 for comparison in detail["local_family_comparison"]
             )
@@ -575,9 +584,35 @@ class AuthoringTestCase(unittest.TestCase):
                 "blind_solver_must_not_receive_critic_material"
             ]
         )
+        self.assertTrue(
+            packet["review_contract"][
+                "blind_solver_must_not_receive_family_material"
+            ]
+        )
+        self.assertTrue(
+            packet["review_contract"][
+                "family_reviewer_must_not_receive_critic_material"
+            ]
+        )
         self.assertFalse(
             packet["review_contract"][
                 "combined_packet_itself_enforces_stage_isolation"
+            ]
+        )
+        self.assertTrue(
+            packet["review_contract"]["stage_sequence_advisory_only"]
+        )
+        self.assertTrue(
+            packet["review_contract"]["stage_exports_are_not_access_control"]
+        )
+        self.assertTrue(
+            packet["review_contract"][
+                "family_material_family_assignment_fields_blind"
+            ]
+        )
+        self.assertTrue(
+            packet["review_contract"][
+                "family_material_selection_family_enriched"
             ]
         )
         self.assertFalse(
@@ -592,18 +627,46 @@ class AuthoringTestCase(unittest.TestCase):
             "provenance",
             "recorded_item_reviews",
         }
+        forbidden_family_fields = forbidden_blind_fields | {
+            "family_id",
+            "independence_note",
+            "release_status",
+            "same_family",
+            "same_learning_objective",
+            "same_primary_concept",
+            "source_ids",
+        }
         self.assertTrue(
             forbidden_blind_fields.isdisjoint(
                 set(nested_keys(packet["blind_solver_material"]))
             )
         )
+        self.assertTrue(
+            forbidden_family_fields.isdisjoint(
+                set(nested_keys(packet["family_reviewer_material"]))
+            )
+        )
         self.assertEqual(packet, queue.packet(question_id))
         blind = queue.packet(question_id, stage="blind")
+        family = queue.packet(question_id, stage="family")
         critic = queue.packet(question_id, stage="critic")
+        self.assertEqual(
+            packet["schema"],
+            "tsq-quarantine-review-packet-v3",
+        )
         self.assertEqual(blind["stage"], "blind")
+        self.assertEqual(family["stage"], "family")
         self.assertEqual(critic["stage"], "critic")
         self.assertEqual(
+            {blind["schema"], family["schema"], critic["schema"]},
+            {"tsq-quarantine-review-stage-v2"},
+        )
+        self.assertEqual(
             blind["coordinator_packet_sha256"],
+            packet["packet_sha256"],
+        )
+        self.assertEqual(
+            family["coordinator_packet_sha256"],
             packet["packet_sha256"],
         )
         self.assertEqual(
@@ -615,6 +678,10 @@ class AuthoringTestCase(unittest.TestCase):
             packet["blind_solver_material_sha256"],
         )
         self.assertEqual(
+            family["material_sha256"],
+            packet["family_reviewer_material_sha256"],
+        )
+        self.assertEqual(
             critic["material_sha256"],
             packet["critic_material_sha256"],
         )
@@ -622,6 +689,18 @@ class AuthoringTestCase(unittest.TestCase):
             forbidden_blind_fields.isdisjoint(
                 set(nested_keys(blind["material"]))
             )
+        )
+        self.assertTrue(
+            forbidden_family_fields.isdisjoint(
+                set(nested_keys(family["material"]))
+            )
+        )
+        self.assertNotIn(
+            "local_family_comparison",
+            blind["material"],
+        )
+        self.assertTrue(
+            family["material"]["comparison_questions"],
         )
         with self.assertRaises(ValidationError):
             queue.packet(question_id, stage="keyed-and-blind")
@@ -637,8 +716,201 @@ class AuthoringTestCase(unittest.TestCase):
                 blind,
                 replica_queue.packet(question_id, stage="blind"),
             )
+            self.assertEqual(
+                family,
+                replica_queue.packet(question_id, stage="family"),
+            )
         with self.assertRaises(NotFoundError):
             queue.show("q_agent_tool_execution_boundary_001")
+
+    def test_family_review_prioritizes_reused_transformer_family(
+        self,
+    ) -> None:
+        queue = QuarantineReviewQueue(self.database)
+        cases = (
+            (
+                "q_attention_runtime_workspace_boundary_001",
+                "f_transformer_sequence_shape_audit",
+                "q_transformer_sequence_shape_audit_001",
+                "approved",
+            ),
+            (
+                "q_transformer_unexpected_cross_token_path_001",
+                "f_transformer_axis_mixing",
+                "q_transformer_token_mixing_001",
+                "quarantined",
+            ),
+            (
+                "q_generative_prior_shift_001",
+                "f_label_shift_prior_odds",
+                "q_shift_prior_odds_correction_001",
+                "quarantined",
+            ),
+        )
+        forbidden_fields = {
+            "correct",
+            "rationale",
+            "misconception_id",
+            "diagnostic_objective_id",
+            "provenance",
+            "independence_note",
+            "recorded_item_reviews",
+            "family_id",
+            "release_status",
+            "same_family",
+            "same_learning_objective",
+            "same_primary_concept",
+            "source_ids",
+        }
+        for question_id, family_id, neighbor_id, release_status in cases:
+            with self.subTest(question_id=question_id):
+                detail = queue.show(question_id)
+                [same_family] = [
+                    comparison
+                    for comparison in detail["local_family_comparison"]
+                    if comparison["same_family"]
+                ]
+                self.assertIs(
+                    detail["local_family_comparison"][0],
+                    same_family,
+                )
+                self.assertEqual(
+                    same_family["question"]["id"],
+                    neighbor_id,
+                )
+                self.assertEqual(
+                    same_family["question"]["family_id"],
+                    family_id,
+                )
+                self.assertEqual(
+                    same_family["release_status"],
+                    release_status,
+                )
+                self.assertEqual(
+                    detail["same_family_comparison_total"],
+                    1,
+                )
+                self.assertEqual(
+                    detail["same_family_comparison_included"],
+                    1,
+                )
+                self.assertTrue(
+                    detail["same_family_scope_complete"],
+                )
+
+                family_packet = queue.packet(
+                    question_id,
+                    stage="family",
+                )
+                [redacted_neighbor] = [
+                    comparison
+                    for comparison in family_packet["material"][
+                        "comparison_questions"
+                    ]
+                    if comparison["question"]["id"] == neighbor_id
+                ]
+                self.assertEqual(
+                    redacted_neighbor["question"]["id"],
+                    neighbor_id,
+                )
+                self.assertTrue(
+                    forbidden_fields.isdisjoint(
+                        set(nested_keys(family_packet["material"]))
+                    )
+                )
+
+    def test_family_review_reports_same_family_truncation(self) -> None:
+        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        candidate = next(
+            question
+            for question in bundle["questions"]
+            if question["id"]
+            == "q_attention_runtime_workspace_boundary_001"
+        )
+        for index in range(100):
+            comparison = copy.deepcopy(candidate)
+            comparison["id"] = (
+                f"q_packet_same_family_fixture_{index:03d}"
+            )
+            comparison["stem"] = (
+                candidate["stem"][:-1]
+                + f" Same-family scope fixture {index:03d}?"
+            )
+            bundle["questions"].append(comparison)
+        cross_scope = copy.deepcopy(candidate)
+        cross_scope["id"] = "q_aaa_packet_cross_scope_fixture_001"
+        cross_scope["stem"] = (
+            candidate["stem"][:-1] + " Cross-scope fixture?"
+        )
+        cross_scope["learning_objective_id"] = (
+            "lo_transformer_information_paths"
+        )
+        cross_scope["concepts"] = [
+            {
+                "concept_id": "c_transformers",
+                "weight": 0.6,
+                "role": "primary",
+            },
+            {
+                "concept_id": "c_attention",
+                "weight": 0.4,
+                "role": "supporting",
+            },
+        ]
+        bundle["questions"].append(cross_scope)
+
+        parsed = parse_bundle(bundle)
+        catalog = read_and_parse(CORPUS, include_catalog=True)[5:]
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "comparison.db")
+            database.initialize()
+            database.import_corpus(*parsed, *catalog)
+            queue = QuarantineReviewQueue(database)
+            detail = queue.show(candidate["id"])
+            packet = queue.packet(candidate["id"])
+            family_stage = queue.packet(
+                candidate["id"],
+                stage="family",
+            )
+
+        self.assertEqual(
+            detail["same_family_comparison_total"],
+            102,
+        )
+        self.assertEqual(
+            detail["same_family_comparison_included"],
+            100,
+        )
+        self.assertFalse(detail["same_family_scope_complete"])
+        self.assertFalse(detail["local_comparison_scope_complete"])
+        self.assertFalse(
+            packet["review_contract"]["same_family_scope_complete"]
+        )
+        self.assertFalse(
+            packet["review_contract"][
+                "family_independence_claim_resolved"
+            ]
+        )
+        self.assertNotIn(
+            "same_family_scope_complete",
+            family_stage["material"],
+        )
+        self.assertEqual(len(detail["local_family_comparison"]), 100)
+        self.assertTrue(
+            all(
+                comparison["same_family"]
+                for comparison in detail["local_family_comparison"]
+            )
+        )
+        cross_scope_detail = next(
+            comparison
+            for comparison in detail["local_family_comparison"]
+            if comparison["question"]["id"] == cross_scope["id"]
+        )
+        self.assertFalse(
+            cross_scope_detail["same_learning_objective"]
+        )
+        self.assertFalse(cross_scope_detail["same_primary_concept"])
 
     def test_quarantine_queue_uses_release_topics_and_all_concept_mappings(
         self,
@@ -756,6 +1028,7 @@ class AuthoringTestCase(unittest.TestCase):
             ("show", question_id),
             ("packet", question_id, "--stage", "combined"),
             ("packet", question_id, "--stage", "blind"),
+            ("packet", question_id, "--stage", "family"),
             ("packet", question_id, "--stage", "critic"),
         )
         for command in commands:
