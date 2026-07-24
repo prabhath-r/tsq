@@ -460,8 +460,18 @@ class AdaptiveEngine:
                            FROM release_question_objectives direct
                            JOIN question_sources source
                              ON source.question_id = direct.question_id
+                           JOIN release_questions membership
+                             ON membership.release_id = direct.release_id
+                            AND membership.question_id = direct.question_id
                            WHERE direct.release_id = ?
                              AND direct.objective_id = ?
+                             AND membership.status
+                                 IN ('approved', 'calibrated')
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM question_revocations revoked
+                                 WHERE revoked.question_id = direct.question_id
+                             )
                            ORDER BY source.source_id LIMIT 8""",
                         (
                             current["corpus_release_id"],
@@ -469,6 +479,34 @@ class AdaptiveEngine:
                         ),
                     )
                 )
+                if not source_ids:
+                    source_ids = tuple(
+                        row["source_id"]
+                        for row in connection.execute(
+                            """SELECT DISTINCT source.source_id
+                               FROM question_sources source
+                               JOIN question_concepts mapping
+                                 ON mapping.question_id = source.question_id
+                               JOIN release_questions membership
+                                 ON membership.question_id = source.question_id
+                               WHERE membership.release_id = ?
+                                 AND mapping.concept_id = ?
+                                 AND mapping.role = 'primary'
+                                 AND membership.status
+                                     IN ('approved', 'calibrated')
+                                 AND NOT EXISTS (
+                                     SELECT 1
+                                     FROM question_revocations revoked
+                                     WHERE revoked.question_id =
+                                           source.question_id
+                                 )
+                               ORDER BY source.source_id LIMIT 8""",
+                            (
+                                current["corpus_release_id"],
+                                focus_objective.primary_concept_id,
+                            ),
+                        )
+                    )
             else:
                 source_ids = tuple(
                     row["source_id"]
@@ -480,6 +518,12 @@ class AdaptiveEngine:
                            JOIN release_questions rq
                              ON rq.question_id = qs.question_id
                            WHERE qc.concept_id = ? AND rq.release_id = ?
+                             AND rq.status IN ('approved', 'calibrated')
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM question_revocations revoked
+                                 WHERE revoked.question_id = qs.question_id
+                             )
                            ORDER BY qs.source_id LIMIT 8""",
                         (focus_concept_id, current["corpus_release_id"]),
                     )
@@ -502,11 +546,24 @@ class AdaptiveEngine:
                     for row in connection.execute(
                         """SELECT DISTINCT option.misconception_id
                            FROM release_option_objectives diagnostic
+                           JOIN release_questions membership
+                             ON membership.release_id =
+                                diagnostic.release_id
+                            AND membership.question_id =
+                                diagnostic.question_id
                            JOIN options option
                              ON option.question_id = diagnostic.question_id
                             AND option.option_id = diagnostic.option_id
                            WHERE diagnostic.release_id = ?
                              AND diagnostic.objective_id = ?
+                             AND membership.status
+                                 IN ('approved', 'calibrated')
+                             AND NOT EXISTS (
+                                 SELECT 1
+                                 FROM question_revocations revoked
+                                 WHERE revoked.question_id =
+                                       diagnostic.question_id
+                             )
                              AND option.misconception_id IS NOT NULL
                            ORDER BY option.misconception_id LIMIT 3""",
                         (

@@ -883,6 +883,55 @@ class CapacityCliTestCase(unittest.TestCase):
             result["achievable_main_capacity"],
         )
 
+    def test_quarantined_transformer_bridges_do_not_inflate_live_capacity(
+        self,
+    ) -> None:
+        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        topic = next(
+            item for item in bundle["topics"] if item["id"] == "t_transformers"
+        )
+        owned_concepts = set(topic["concept_ids"])
+        active_questions = [
+            question
+            for question in bundle["questions"]
+            if question["status"] == "approved"
+            and any(
+                concept["concept_id"] in owned_concepts
+                and concept["role"] == "primary"
+                for concept in question["concepts"]
+            )
+        ]
+        quarantined_bridge_ids = {
+            "q_attention_runtime_workspace_boundary_001",
+            "q_transformer_unexpected_cross_token_path_001",
+        }
+
+        self.assertEqual(len(active_questions), 48)
+        self.assertEqual(
+            len({question["family_id"] for question in active_questions}),
+            48,
+        )
+        self.assertTrue(
+            quarantined_bridge_ids.isdisjoint(
+                {question["id"] for question in active_questions}
+            )
+        )
+
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_transformers",
+                "--json",
+            ]
+        )
+        payload = json.loads(output)
+        self.assertEqual(code, 0, errors)
+        [result] = payload["targets"]
+        self.assertEqual(result["order_robust_main_capacity"], 26)
+        self.assertEqual(result["achievable_main_capacity"], 26)
+
     def test_default_scope_analyzes_all_topics(self) -> None:
         code, output, errors = self.run_cli(
             ["capacity", str(CORPUS), "--json"]

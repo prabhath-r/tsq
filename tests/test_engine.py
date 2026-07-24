@@ -1166,6 +1166,119 @@ class EngineTestCase(unittest.TestCase):
             generated["item"]["learning_objective_id"], objective.id
         )
 
+    def test_live_gap_sources_exclude_quarantined_and_revoked_evidence(
+        self,
+    ) -> None:
+        objective = next(
+            objective
+            for objective in self.database.get_learning_objectives()
+            if objective.id == "lo_attention_resource_scaling"
+        )
+        self.database.revoke_question(
+            "q_attention_sequence_scaling_001",
+            "Live-gap regression: source is no longer backed by live evidence.",
+        )
+        session = self.engine.start_session(
+            "learner-1", "Transformers", mode="learn", seed=193
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE sessions
+                   SET phase = 'verify', focus_concept_id = ?,
+                       focus_misconception_id = NULL,
+                       focus_objective_id = ?
+                   WHERE id = ?""",
+                (
+                    objective.primary_concept_id,
+                    objective.id,
+                    session["id"],
+                ),
+            )
+
+        self.engine._record_corpus_gap(
+            session["id"],
+            message="Corpus gap: quarantine source-boundary regression.",
+            now=datetime.now(timezone.utc),
+        )
+
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT blueprint_json FROM generation_jobs"
+            ).fetchone()
+        blueprint = json.loads(row["blueprint_json"])
+        self.assertEqual(blueprint["learning_objective_id"], objective.id)
+        self.assertIn("src_vaswani_attention_2017", blueprint["source_ids"])
+        self.assertNotIn(
+            "src_goodfellow_dl_2016",
+            blueprint["source_ids"],
+        )
+
+    def test_live_gap_sources_fall_back_to_live_primary_concept(self) -> None:
+        objective = next(
+            objective
+            for objective in self.database.get_learning_objectives()
+            if objective.id == "lo_attention_resource_scaling"
+        )
+        with self.database.read() as connection:
+            direct_question_ids = tuple(
+                row["question_id"]
+                for row in connection.execute(
+                    """SELECT direct.question_id
+                       FROM release_question_objectives direct
+                       JOIN release_questions membership
+                         ON membership.release_id = direct.release_id
+                        AND membership.question_id = direct.question_id
+                       WHERE direct.release_id = ?
+                         AND direct.objective_id = ?
+                         AND membership.status IN ('approved', 'calibrated')
+                       ORDER BY direct.question_id""",
+                    (
+                        self.database.get_active_release_id(connection),
+                        objective.id,
+                    ),
+                )
+            )
+        self.assertTrue(direct_question_ids)
+        for question_id in direct_question_ids:
+            self.database.revoke_question(
+                question_id,
+                "Live-gap regression: exhaust direct objective evidence.",
+            )
+
+        session = self.engine.start_session(
+            "learner-1", "Transformers", mode="learn", seed=197
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                """UPDATE sessions
+                   SET phase = 'verify', focus_concept_id = ?,
+                       focus_misconception_id = NULL,
+                       focus_objective_id = ?
+                   WHERE id = ?""",
+                (
+                    objective.primary_concept_id,
+                    objective.id,
+                    session["id"],
+                ),
+            )
+
+        self.engine._record_corpus_gap(
+            session["id"],
+            message="Corpus gap: primary-concept source fallback regression.",
+            now=datetime.now(timezone.utc),
+        )
+
+        with self.database.read() as connection:
+            row = connection.execute(
+                "SELECT blueprint_json FROM generation_jobs"
+            ).fetchone()
+        blueprint = json.loads(row["blueprint_json"])
+        self.assertEqual(blueprint["learning_objective_id"], objective.id)
+        self.assertEqual(
+            blueprint["source_ids"],
+            ["src_expert_synthesis_2026", "src_vaswani_attention_2017"],
+        )
+
     def test_session_end_is_durable_idempotent_and_blocks_pending_work(self) -> None:
         session = self.start(seed=13)
         presentation = self.engine.next_question(session["id"])

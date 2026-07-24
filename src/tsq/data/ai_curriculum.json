@@ -14620,6 +14620,170 @@
         "introductory",
         "diagnostic"
       ]
+    },
+    {
+      "id": "q_attention_runtime_workspace_boundary_001",
+      "version": 1,
+      "family_id": "f_transformer_sequence_shape_audit",
+      "learning_objective_id": "lo_attention_resource_scaling",
+      "status": "quarantined",
+      "stem": "A service using standard dense full self-attention keeps one checkpoint resident. A long request exhausts temporary memory, but after the request is released the process returns to the same model-memory baseline and serves a short request without reloading weights. Monitoring shows that the checkpoint hash and learned tensor shapes never change. Which diagnosis best fits?",
+      "kind": "diagnostic",
+      "difficulty": -0.65,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_attention",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The failure is in request-local activation or workspace capacity; longer inputs increase dense pairwise attention work without adding learned parameters.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The stable model-memory baseline and unchanged checkpoint identify fixed parameters, while the request lifecycle localizes the exhausted memory to input-dependent runtime state."
+        },
+        {
+          "id": "b",
+          "text": "The long request adds work in direct proportion to token count, because full attention forms one query-key score for each input token.",
+          "correct": false,
+          "misconception_id": "m_full_attention_is_linear_in_length",
+          "diagnostic_objective_id": "lo_attention_resource_scaling",
+          "rationale": "Full attention forms a score for each permitted query-key pair, so its request-scoped work is not limited to one score per token."
+        },
+        {
+          "id": "c",
+          "text": "The service temporarily creates learned token-specific parameter rows for the long request and discards them when the request ends.",
+          "correct": false,
+          "misconception_id": "m_parameter_count_scales_with_tokens",
+          "diagnostic_objective_id": "lo_attention_resource_scaling",
+          "rationale": "Applying fixed learned tensors at more positions creates additional activations, not hidden token-specific parameters."
+        },
+        {
+          "id": "d",
+          "text": "The inference failure is unrelated to pairwise attention, because its quadratic cost is a training artifact caused by retained gradients.",
+          "correct": false,
+          "misconception_id": "m_quadratic_attention_only_during_training",
+          "diagnostic_objective_id": "lo_attention_resource_scaling",
+          "rationale": "Inference removes gradient storage but still performs the forward query-key interactions required by full attention."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_transformer_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Vaswani et al. support shared learned projection tensors and dense pairwise self-attention over an input sequence; Goodfellow et al. support the distinction between learned parameters and input-dependent computation. The request lifecycle, checkpoint hash, learned tensor shapes, and memory observations are stipulated original scenario facts; the keyed diagnosis is the authored inference being tested. Neither source validates this service or the authored difficulty.",
+        "independence_note": "This item intentionally reuses f_transformer_sequence_shape_audit because it requires the same fixed-parameters-versus-input-dependent-runtime-resources inference as q_transformer_sequence_shape_audit_001. It is an easier operational presentation, not an independent evidence opportunity, and responses to the two items must not be counted as separate-family verification."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "attention",
+        "parameters",
+        "runtime_workspace",
+        "introductory",
+        "diagnostic"
+      ]
+    },
+    {
+      "id": "q_transformer_unexpected_cross_token_path_001",
+      "version": 1,
+      "family_id": "f_transformer_axis_mixing",
+      "learning_objective_id": "lo_transformer_information_paths",
+      "status": "quarantined",
+      "stem": "In deterministic evaluation, a test sets one standard Transformer encoder layer's self-attention branch output to zero before its residual addition. The position-wise feed-forward map, per-token normalization, and residual additions remain. Two runs differ in the first input token while holding the second input token fixed, yet the second token's output also differs. Which diagnosis matches the specified layer?",
+      "kind": "diagnostic",
+      "difficulty": -0.7,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_transformers",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "A position-wise feed-forward map reads all token rows and can transmit the first-token change to the second row.",
+          "correct": false,
+          "misconception_id": "m_feedforward_layers_mix_token_positions",
+          "diagnostic_objective_id": "lo_transformer_information_paths",
+          "rationale": "A position-wise feed-forward map applies the same feature transformation separately to each token row."
+        },
+        {
+          "id": "b",
+          "text": "An unlisted cross-token dependency or implementation fault is present; each specified remaining operation acts separately on the second position.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "With the attention contribution clamped away, the listed feed-forward, normalization, and residual operations cannot transmit the first token's intervention to the second."
+        },
+        {
+          "id": "c",
+          "text": "Residual connections make the order and presence of attention and feed-forward sublayers irrelevant, so the feed-forward branch substitutes for the zeroed attention route.",
+          "correct": false,
+          "misconception_id": "m_residuals_make_sublayer_order_irrelevant",
+          "diagnostic_objective_id": "lo_transformer_sublayer_composition",
+          "rationale": "A residual addition preserves information already present at a position; it does not create a route from a different token row."
+        },
+        {
+          "id": "d",
+          "text": "Calling the layer an encoder preserves a bidirectional route after its listed sequence-mixing attention branch is disabled.",
+          "correct": false,
+          "misconception_id": "m_transformers_are_inherently_bidirectional",
+          "diagnostic_objective_id": "lo_causal_visibility",
+          "rationale": "Directionality follows enabled information paths; the architecture label cannot restore a disabled cross-token contribution."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_transformer_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Vaswani et al. support self-attention as the sequence-interaction path, position-wise feed-forward processing, residual addition, and LayerNorm within Transformer layers. Deterministic evaluation, the branch intervention, the per-token normalization boundary, and the observed output change are stipulated original test facts; the keyed fault diagnosis is the authored inference being tested. The paper does not validate this implementation or item.",
+        "independence_note": "This item intentionally reuses f_transformer_axis_mixing because it is the diagnostic inversion of q_transformer_token_mixing_001: both require recognizing that the listed position-wise and residual paths cannot replace disabled attention as a cross-token route. It is an easier test surface, not an independent evidence opportunity, and the two responses must remain family-collapsed."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "information_paths",
+        "cross_token",
+        "fault_localization",
+        "introductory",
+        "diagnostic"
+      ]
     }
   ]
 }
