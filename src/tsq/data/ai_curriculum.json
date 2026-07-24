@@ -14520,6 +14520,168 @@
         "introductory",
         "counterfactual"
       ]
+    },
+    {
+      "id": "q_rag_claim_citation_alignment_revision_001",
+      "version": 1,
+      "family_id": "f_rag_claim_citation_alignment_revision",
+      "learning_objective_id": "lo_rag_claim_grounding",
+      "status": "quarantined",
+      "stem": "Retrieved passage A states, \"The public archive opens at 09:00,\" and provides no admission information. Passage B states, \"Admission is free on Sundays,\" and provides no opening-time information. A draft says, \"The archive opens at 09:00, and admission is free on Sundays [B].\" No other evidence may be used. Which handling is justified before publication?",
+      "kind": "application",
+      "difficulty": -0.75,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Move [B] to the start of the draft and publish both claims, because a visible citation makes the combined sentence supported.",
+          "correct": false,
+          "misconception_id": "m_rag_citation_proves_entailment",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Moving citation B cannot make a passage with no opening-time information support the opening-time claim."
+        },
+        {
+          "id": "b",
+          "text": "Remove [B] and publish both claims, because having A and B in retrieved context is sufficient evidence that the draft used them faithfully.",
+          "correct": false,
+          "misconception_id": "m_rag_context_guarantees_use",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Context availability does not establish faithful claim-level use or provide the missing attribution."
+        },
+        {
+          "id": "c",
+          "text": "Split and revise it to: \"The archive opens at 09:00 [A]. Admission is free on Sundays [B].\"",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The revision preserves both supported claims and pairs each one with the passage that directly entails it."
+        },
+        {
+          "id": "d",
+          "text": "Remove [B] and publish both claims, because retrieving A and B updated the generator weights with the two facts.",
+          "correct": false,
+          "misconception_id": "m_rag_retrieval_updates_weights",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Ordinary retrieval supplies inference context; it does not itself update model parameters or replace claim-to-passage attribution."
+        }
+      ],
+      "source_ids": [
+        "src_alce_2023",
+        "src_ragas_2024",
+        "src_lewis_rag_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "provider": "openai_codex",
+        "batch_id": "batch_rag_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "ALCE supports evaluating citation quality by whether cited passages entail generated statements; RAGAS supports treating faithful exploitation of retrieved context as a separate RAG evaluation dimension; Lewis distinguishes parametric memory from retrieved non-parametric memory. The archive statements, passage labels, draft, and required revision are stipulated original content. No source is claimed to establish real archive hours or empirical item quality.",
+        "independence_note": "The keyed operation rewrites a two-claim draft by splitting it and aligning each claim to a different entailing passage. It is not scoring a single scope mismatch, classifying several claims against one document, comparing external correctness with citation support, changing context in an ablation, checking derived arithmetic, or decomposing an unsupported causal bridge."
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "grounding",
+        "answer_revision",
+        "citation_alignment",
+        "introductory"
+      ]
+    },
+    {
+      "id": "q_rag_conjunctive_facet_coverage_001",
+      "version": 1,
+      "family_id": "f_rag_conjunctive_facet_coverage",
+      "learning_objective_id": "lo_rag_retrieval_evidence_quality",
+      "status": "quarantined",
+      "stem": "A travel-policy question asks, \"Which meal limit applies to contractors on international trips?\" Retrieval returns a current contractor policy covering domestic trips and a current international-travel policy covering employees. Neither passage says its rule extends to international contractors, and no retrieved passage covers that combination. What is the most precise retrieval diagnosis and next step?",
+      "kind": "diagnostic",
+      "difficulty": -0.85,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Treat retrieval as complete because contractor and international rules both appear somewhere in the set, then combine the two limits.",
+          "correct": false,
+          "misconception_id": "m_rag_recall_alone_sufficient",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Marginal presence of both facets does not establish coverage of the required contractor-and-international combination."
+        },
+        {
+          "id": "b",
+          "text": "Apply the highest-scoring passage's limit because similarity rank determines which policy governs the missing combination.",
+          "correct": false,
+          "misconception_id": "m_rag_top_score_is_truth",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Rank cannot create applicability or direct support for an uncovered case."
+        },
+        {
+          "id": "c",
+          "text": "Expand the context with more loosely related travel-policy passages and let the generator infer the combination without a targeted coverage check.",
+          "correct": false,
+          "misconception_id": "m_rag_more_context_monotonic",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Additional untargeted context does not repair the identified coverage hole and can add distraction or conflict."
+        },
+        {
+          "id": "d",
+          "text": "Mark the international-contractor case as uncovered, retrieve an authoritative passage addressing that combination, and withhold the limit until it is supported.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The operation diagnoses conjunctive facet coverage instead of treating separately covered marginals as evidence for their intersection."
+        }
+      ],
+      "source_ids": [
+        "src_lewis_rag_2020",
+        "src_ragas_2024",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "provider": "openai_codex",
+        "batch_id": "batch_rag_intro_bridges_20260724_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Lewis supports retrieval-conditioned generation over external passages, and RAGAS supports evaluating retrieved-context relevance separately from answer faithfulness. The travel policies, conjunctive facet-coverage diagnosis, missing intersection, and targeted follow-up are stipulated original scenario and diagnostic design; neither paper validates this exact policy example or procedure.",
+        "independence_note": "The keyed operation detects an uncovered conjunction when separate passages cover each marginal query facet but none covers their required intersection. It does not discover an intermediate entity for a second hop, choose between conflicting or temporal source versions, tune context volume, localize candidate-to-reranker loss, or score generated claims."
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "retrieval",
+        "facet_coverage",
+        "conjunctive_query",
+        "introductory",
+        "diagnostic"
+      ]
     }
   ]
 }
