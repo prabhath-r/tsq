@@ -26,10 +26,15 @@ NEW_AGENT_INTRO_QUESTIONS = {
     "q_agent_dry_run_effect_boundary_001",
     "q_agent_completion_predicate_counterfactual_001",
 }
+NEW_RAG_INTRO_QUESTIONS = {
+    "q_rag_claim_citation_alignment_revision_001",
+    "q_rag_conjunctive_facet_coverage_001",
+}
 GENERATED_BATCH_ID = "batch_rag_agent_headroom_20260723_c"
 AGENT_INTRO_BATCH_ID = "batch_agent_intro_bridges_20260724_a"
+RAG_INTRO_BATCH_ID = "batch_rag_intro_bridges_20260724_a"
 LEGACY_GENERATED_MIGRATION_COUNT = 39
-TOTAL_UNREVIEWED_GENERATED_COUNT = 57
+TOTAL_UNREVIEWED_GENERATED_COUNT = 59
 
 
 class CorpusMisconceptionRouteTests(unittest.TestCase):
@@ -135,6 +140,9 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                     and question.provenance.get("human_review") is False
                     and question.provenance.get("human_review_status")
                     == "required_before_activation"
+                    and question.provenance.get("review_status")
+                    == "internal_ai_critique_pending_quarantined"
+                    and bool(question.provenance.get("source_scope"))
                     and question.provenance.get("activation")
                     == "manual_only_after_human_review_and_new_immutable_release"
                     for question in batch.values()
@@ -243,6 +251,88 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                 )
             )
 
+    def test_rag_intro_candidates_are_quarantined_and_independently_routed(
+        self,
+    ) -> None:
+        expected_routes = {
+            "q_rag_claim_citation_alignment_revision_001": {
+                "m_rag_citation_proves_entailment",
+                "m_rag_context_guarantees_use",
+                "m_rag_retrieval_updates_weights",
+            },
+            "q_rag_conjunctive_facet_coverage_001": {
+                "m_rag_more_context_monotonic",
+                "m_rag_recall_alone_sufficient",
+                "m_rag_top_score_is_truth",
+            },
+        }
+        for questions in (
+            self.canonical_questions,
+            self.packaged_questions,
+        ):
+            batch = {
+                question.id: question
+                for question in questions.values()
+                if question.provenance.get("batch_id") == RAG_INTRO_BATCH_ID
+            }
+            self.assertEqual(set(batch), NEW_RAG_INTRO_QUESTIONS)
+            self.assertEqual(
+                len({question.family_id for question in batch.values()}),
+                2,
+            )
+            self.assertTrue(
+                all(
+                    question.status.value == "quarantined"
+                    and not question.status.eligible_for_adaptation
+                    and question.difficulty < -0.5
+                    and question.provenance.get("generated") is True
+                    and question.provenance.get("human_review") is False
+                    and question.provenance.get("human_review_status")
+                    == "required_before_activation"
+                    and question.provenance.get("review_status")
+                    == "internal_ai_critique_pending_quarantined"
+                    and bool(question.provenance.get("source_scope"))
+                    and question.provenance.get("activation")
+                    == "manual_only_after_human_review_and_new_immutable_release"
+                    for question in batch.values()
+                )
+            )
+            for question_id, routes in expected_routes.items():
+                question = batch[question_id]
+                self.assertEqual(
+                    {
+                        option.misconception_id
+                        for option in question.options
+                        if not option.correct
+                    },
+                    routes,
+                )
+                self.assertTrue(
+                    all(
+                        option.diagnostic_objective_id
+                        == question.objective_id
+                        for option in question.options
+                        if not option.correct
+                    )
+                )
+            grounding = batch[
+                "q_rag_claim_citation_alignment_revision_001"
+            ]
+            retrieval = batch["q_rag_conjunctive_facet_coverage_001"]
+            self.assertEqual(
+                grounding.objective_id,
+                "lo_rag_claim_grounding",
+            )
+            self.assertEqual(
+                retrieval.objective_id,
+                "lo_rag_retrieval_evidence_quality",
+            )
+            self.assertEqual(grounding.kind.value, "application")
+            self.assertEqual(retrieval.kind.value, "diagnostic")
+            self.assertIn("src_alce_2023", grounding.source_ids)
+            self.assertNotIn("src_ircot_2023", retrieval.source_ids)
+            self.assertNotIn("src_mrag_2025", retrieval.source_ids)
+
     def test_generated_without_human_review_is_never_adaptation_eligible(
         self,
     ) -> None:
@@ -262,6 +352,7 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                 if question.provenance.get("batch_id") != GENERATED_BATCH_ID
                 and question.id not in NEW_TRANSFORMER_QUESTIONS
                 and question.id not in NEW_AGENT_INTRO_QUESTIONS
+                and question.id not in NEW_RAG_INTRO_QUESTIONS
             ]
 
             self.assertEqual(
