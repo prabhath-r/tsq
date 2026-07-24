@@ -122,10 +122,18 @@ python experiments/cold_start_lab.py
 
 Its ignored artifact juxtaposes static inventory with routed traces to help
 distinguish corpus scarcity from routing behavior without retuning the policy.
-It does not capture every ranked candidate at each step, so this is diagnostic
-rather than causal attribution. Difficulty and predicted success remain
-uncalibrated diagnostics; the laboratory is not human ability or efficacy
-evidence.
+Each served step includes the production decision's final scored candidate
+count and ranked top-ten prefix. A complete prefix has its durable ordered
+rank-and-quantized-coverage digest verified; a truncated prefix explicitly
+reports how many candidates remain unobserved. The durable digest covers
+ordered question IDs, total scores rendered to 8 decimal places, exact integer
+coverage counts, and diagnostic-information values rendered to 12 decimal
+places—not exact binary floats or every component score. The artifact
+separately hashes the complete stored prefix for deterministic replication.
+These are post-eligibility traces, not raw release inventory, and they cannot
+attribute an exclusion to one specific filter. Difficulty and predicted
+success remain uncalibrated diagnostics; the laboratory is not human ability
+or efficacy evidence.
 
 The objective-discovery laboratory asks the production policy to identify one
 stark, objective-localized weakness over several 45-day-spaced sessions. It

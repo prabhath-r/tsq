@@ -8,25 +8,53 @@ import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from math import isfinite
-from typing import Any, Protocol
+from typing import Any, Mapping, Protocol
 
 from .models import (
+    Concept,
     ConceptRole,
     ConceptWeight,
     LearningObjective,
+    Misconception,
     ObjectiveOperation,
     Option,
     Question,
     QuestionKind,
     QuestionStatus,
+    Source,
 )
 from .errors import ConflictError, NotFoundError, ValidationError
+from .provenance import question_provenance_issues
 from .quality import validate_question
-from .store import Database, new_id
+from .store import (
+    Database,
+    concept_content_hash,
+    misconception_content_hash,
+    new_id,
+    objective_content_hash,
+    question_content_hash,
+    source_content_hash,
+)
 
 
 PROMPT_VERSION = "item-blueprint-v2"
 SUPPORTED_PROMPT_VERSIONS = frozenset({"item-blueprint-v1", PROMPT_VERSION})
+QUARANTINE_REVIEW_PACKET_SCHEMA = "tsq-quarantine-review-packet-v2"
+GENERATOR_AUTHORITY_PROVENANCE_FIELDS = frozenset(
+    {
+        "activation",
+        "activation_review",
+        "human_review",
+        "human_review_status",
+        "independent_review",
+        "review_chain_sha256",
+        "review_payload_sha256",
+        "review_sha256",
+        "review_status",
+        "reviewed_on",
+    }
+)
+SOURCE_CONTEXT_REDACTION = "[REDACTED_EXACT_SOURCE_CONTEXT]"
 
 
 def _canonical_json(value: Any) -> str:
@@ -47,6 +75,61 @@ def _sha256_json(value: Any) -> str:
 
 def _sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _redact_exact_source_context(
+    value: Any,
+    source_context: str,
+) -> tuple[Any, int]:
+    """Remove exact source-context copies from JSON-safe persisted artifacts."""
+
+    if not source_context:
+        return copy.deepcopy(value), 0
+    if type(value) is str:
+        if len(source_context) < 32:
+            count = int(value == source_context)
+            redacted_value = (
+                SOURCE_CONTEXT_REDACTION if count else value
+            )
+        else:
+            count = value.count(source_context)
+            redacted_value = value.replace(
+                source_context,
+                SOURCE_CONTEXT_REDACTION,
+            )
+        return (
+            redacted_value,
+            count,
+        )
+    if type(value) is list:
+        redacted: list[Any] = []
+        count = 0
+        for entry in value:
+            sanitized, entry_count = _redact_exact_source_context(
+                entry, source_context
+            )
+            redacted.append(sanitized)
+            count += entry_count
+        return redacted, count
+    if type(value) is dict:
+        redacted_dict: dict[str, Any] = {}
+        count = 0
+        for key, entry in value.items():
+            sanitized_key, key_count = _redact_exact_source_context(
+                key, source_context
+            )
+            sanitized_entry, entry_count = _redact_exact_source_context(
+                entry, source_context
+            )
+            if sanitized_key in redacted_dict:
+                sanitized_key = (
+                    f"{sanitized_key}:"
+                    f"{_sha256_text(key)[:16]}"
+                )
+            redacted_dict[sanitized_key] = sanitized_entry
+            count += key_count + entry_count
+        return redacted_dict, count
+    return copy.deepcopy(value), 0
 
 
 def _strict_json_issues(
@@ -433,9 +516,65 @@ class CoveragePlanner:
     def __init__(self, database: Database):
         self.database = database
 
-    def gaps(self, *, limit: int = 100, source_ids: tuple[str, ...] = ()) -> list[CoverageGap]:
+    def gaps(
+        self,
+        *,
+        limit: int = 100,
+        source_ids: tuple[str, ...] = (),
+        topic_filter: str | None = None,
+        concept_filter: str | None = None,
+        objective_filter: str | None = None,
+        misconception_filter: str | None = None,
+        kind_filter: str | None = None,
+        goal_filter: str | None = None,
+        maximum_difficulty: float | None = None,
+    ) -> list[CoverageGap]:
+        for label, value in (
+            ("topic", topic_filter),
+            ("concept_id", concept_filter),
+            ("learning_objective_id", objective_filter),
+            ("target_misconception_id", misconception_filter),
+            ("kind", kind_filter),
+            ("coverage_goal", goal_filter),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValidationError(
+                    f"Coverage filter {label} must be a non-blank string."
+                )
+        if kind_filter is not None and kind_filter not in self.KIND_TARGETS:
+            raise ValidationError(
+                f"Unknown coverage question kind: {kind_filter!r}."
+            )
+        if goal_filter is not None and goal_filter not in {
+            "concept_kind",
+            "objective_misconception_serviceability",
+            "objective_serviceability",
+        }:
+            raise ValidationError(
+                f"Unknown coverage goal: {goal_filter!r}."
+            )
+        if maximum_difficulty is not None and (
+            isinstance(maximum_difficulty, bool)
+            or not isinstance(maximum_difficulty, (int, float))
+            or not isfinite(float(maximum_difficulty))
+        ):
+            raise ValidationError(
+                "Coverage maximum difficulty must be a finite number."
+            )
         with self.database.read() as connection:
             release_id = self.database.get_active_release_id(connection)
+        topic_concepts: set[str] | None = None
+        if topic_filter is not None:
+            resolved_topic = self.database.resolve_topic(
+                topic_filter, release_id
+            )
+            topic_concepts = self.database.topic_owned_concepts(
+                resolved_topic["id"],
+                release_id,
+                include_descendants=True,
+            )
         graph = self.database.get_graph(release_id)
         with self.database.read() as connection:
             verification_placeholders = ",".join(
@@ -680,10 +819,10 @@ class CoveragePlanner:
                         key=lambda pair: (-pair[1], pair[0]),
                     )[:3]
                 )
-                target_misconception_id = misconception_ids[0]
+                planned_target_misconception_id = misconception_ids[0]
                 current_capacity = (
                     self.SERVICEABILITY_TARGET
-                    - remaining[target_misconception_id]
+                    - remaining[planned_target_misconception_id]
                 )
                 blueprint = self._blueprint(
                     release_id=release_id,
@@ -696,7 +835,9 @@ class CoveragePlanner:
                     misconception_ids=misconception_ids,
                     source_ids=chosen_sources,
                     objective=objective,
-                    target_misconception_id=target_misconception_id,
+                    target_misconception_id=(
+                        planned_target_misconception_id
+                    ),
                     coverage_goal="objective_misconception_serviceability",
                     family_constraint=(
                         "Create an independent transfer family that directly assesses "
@@ -868,6 +1009,67 @@ class CoveragePlanner:
                 gap.blueprint.target_difficulty,
             )
         )
+        if (
+            concept_filter is not None
+            and concept_filter not in graph.concepts
+        ):
+            raise NotFoundError(
+                f"Unknown concept in active corpus release: {concept_filter}"
+            )
+        if (
+            objective_filter is not None
+            and objective_filter not in objective_by_id
+        ):
+            raise NotFoundError(
+                "Unknown learning objective in active corpus release: "
+                f"{objective_filter}"
+            )
+        known_misconception_ids = {
+            row["id"] for row in misconception_rows
+        }
+        if (
+            misconception_filter is not None
+            and misconception_filter not in known_misconception_ids
+        ):
+            raise NotFoundError(
+                "Unknown misconception in active corpus release: "
+                f"{misconception_filter}"
+            )
+        gaps = [
+            gap
+            for gap in gaps
+            if (
+                topic_concepts is None
+                or gap.blueprint.concept_id in topic_concepts
+            )
+            and (
+                concept_filter is None
+                or gap.blueprint.concept_id == concept_filter
+            )
+            and (
+                objective_filter is None
+                or gap.blueprint.learning_objective_id
+                == objective_filter
+            )
+            and (
+                misconception_filter is None
+                or misconception_filter
+                in gap.blueprint.misconception_ids
+            )
+            and (
+                kind_filter is None
+                or gap.blueprint.kind == kind_filter
+            )
+            and (
+                goal_filter is None
+                or gap.blueprint.coverage_goal == goal_filter
+            )
+            and (
+                maximum_difficulty is None
+                or gap.blueprint.target_difficulty
+                <= float(maximum_difficulty)
+            )
+        ]
         return gaps[: max(0, limit)]
 
     @staticmethod
@@ -947,6 +1149,873 @@ class CoveragePlanner:
                 job_ids.append(job_id)
                 existing[blueprint_json] = job_id
         return job_ids
+
+
+class QuarantineReviewQueue:
+    """Inspect release-pinned candidates without creating an activation path."""
+
+    def __init__(self, database: Database):
+        self.database = database
+
+    @staticmethod
+    def _question_payload(question: Question) -> dict[str, Any]:
+        return {
+            "id": question.id,
+            "version": question.version,
+            "family_id": question.family_id,
+            "status": question.status.value,
+            "stem": question.stem,
+            "kind": question.kind.value,
+            "difficulty": float(question.difficulty),
+            "discrimination": float(question.discrimination),
+            "guess_rate": float(question.guess_rate),
+            "slip_rate": float(question.slip_rate),
+            "learning_objective_id": question.objective_id,
+            "concepts": [
+                {
+                    "concept_id": mapping.concept_id,
+                    "weight": float(mapping.weight),
+                    "role": mapping.role.value,
+                }
+                for mapping in question.concepts
+            ],
+            "options": [
+                {
+                    "id": option.id,
+                    "text": option.text,
+                    "correct": option.correct,
+                    "rationale": option.rationale,
+                    "misconception_id": option.misconception_id,
+                    "diagnostic_objective_id": (
+                        option.diagnostic_objective_id
+                    ),
+                }
+                for option in question.options
+            ],
+            "source_ids": list(question.source_ids),
+            "provenance": copy.deepcopy(question.provenance),
+            "tags": list(question.tags),
+            "revision_of": question.revision_of,
+        }
+
+    @staticmethod
+    def _provenance_summary(
+        provenance: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "generated": provenance.get("generated"),
+            "provider": provenance.get("provider"),
+            "batch_id": provenance.get("batch_id"),
+            "review_status": provenance.get("review_status"),
+            "independent_review": provenance.get("independent_review"),
+            "human_review": provenance.get("human_review"),
+            "human_review_status": provenance.get(
+                "human_review_status"
+            ),
+            "activation": provenance.get("activation"),
+            "source_gap_id": provenance.get("source_gap_id"),
+        }
+
+    @staticmethod
+    def _objective_payload(
+        objective: LearningObjective,
+        content_hash: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": objective.id,
+            "content_sha256": content_hash,
+            "name": objective.name,
+            "description": objective.description,
+            "primary_concept_id": objective.primary_concept_id,
+            "supporting_concept_ids": list(
+                objective.supporting_concept_ids
+            ),
+            "operation": objective.operation.value,
+            "evidence_type": objective.evidence_type,
+            "prior_mastery": float(objective.prior_mastery),
+        }
+
+    @staticmethod
+    def _concept_payload(
+        concept: Concept,
+        content_hash: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": concept.id,
+            "content_sha256": content_hash,
+            "name": concept.name,
+            "description": concept.description,
+            "domain": concept.domain,
+            "prior_mastery": float(concept.prior_mastery),
+        }
+
+    @staticmethod
+    def _misconception_payload(
+        misconception: Misconception,
+        content_hash: str,
+    ) -> dict[str, Any]:
+        return {
+            "id": misconception.id,
+            "content_sha256": content_hash,
+            "concept_id": misconception.concept_id,
+            "name": misconception.name,
+            "description": misconception.description,
+        }
+
+    def list(
+        self,
+        *,
+        topic: str | None = None,
+        concept_id: str | None = None,
+        learning_objective_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        if type(limit) is not int or not 1 <= limit <= 500:
+            raise ValidationError(
+                "Quarantine list limit must be an integer from 1 to 500."
+            )
+        for label, value in (
+            ("topic", topic),
+            ("concept", concept_id),
+            ("objective", learning_objective_id),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value.strip()
+            ):
+                raise ValidationError(
+                    f"Quarantine {label} filter must be a non-blank string."
+                )
+        with self.database.read() as connection:
+            release_id = self.database.get_active_release_id(connection)
+            if concept_id is not None and connection.execute(
+                """SELECT 1 FROM release_concepts
+                   WHERE release_id = ? AND concept_id = ?""",
+                (release_id, concept_id),
+            ).fetchone() is None:
+                raise NotFoundError(
+                    f"Unknown concept in active corpus release: {concept_id}"
+                )
+            if learning_objective_id is not None and connection.execute(
+                """SELECT 1 FROM release_learning_objectives
+                   WHERE release_id = ? AND objective_id = ?""",
+                (release_id, learning_objective_id),
+            ).fetchone() is None:
+                raise NotFoundError(
+                    "Unknown learning objective in active corpus release: "
+                    f"{learning_objective_id}"
+                )
+        topic_ids: set[str] | None = None
+        if topic is not None:
+            resolved = self.database.resolve_topic(topic, release_id)
+            catalog = self.database.get_catalog(release_id)
+            topic_ids = {resolved["id"]}
+            changed = True
+            while changed:
+                changed = False
+                for candidate in catalog["topics"]:
+                    if (
+                        candidate["parent_id"] in topic_ids
+                        and candidate["id"] not in topic_ids
+                    ):
+                        topic_ids.add(candidate["id"])
+                        changed = True
+
+        where = [
+            "membership.release_id = ?",
+            "membership.status = 'quarantined'",
+            "question.status = 'quarantined'",
+        ]
+        parameters: list[Any] = [release_id]
+        if topic_ids is not None:
+            where.append(
+                "EXISTS (SELECT 1 FROM release_question_topics "
+                "topic_mapping WHERE topic_mapping.release_id = "
+                "membership.release_id AND topic_mapping.question_id = "
+                "question.id AND topic_mapping.topic_id IN "
+                "(SELECT value FROM json_each(?)))"
+            )
+            parameters.append(_canonical_json(sorted(topic_ids)))
+        if concept_id is not None:
+            where.append(
+                "EXISTS (SELECT 1 FROM question_concepts "
+                "concept_filter_mapping WHERE "
+                "concept_filter_mapping.question_id = question.id "
+                "AND concept_filter_mapping.concept_id = ?)"
+            )
+            parameters.append(concept_id)
+        if learning_objective_id is not None:
+            where.append("objective_mapping.objective_id = ?")
+            parameters.append(learning_objective_id)
+        parameters.append(limit)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                f"""SELECT question.id AS question_id,
+                           question.version,
+                           question.content_hash,
+                           question.family_id,
+                           question.kind,
+                           question.difficulty,
+                           question.provenance_json,
+                           primary_mapping.concept_id
+                               AS primary_concept_id,
+                           objective_mapping.objective_id,
+                           COUNT(DISTINCT source.source_id)
+                               AS source_count,
+                           COUNT(DISTINCT review.id) AS review_count,
+                           revocation.question_id IS NOT NULL AS revoked,
+                           revocation.reason AS revocation_reason,
+                           revocation.revoked_at
+                    FROM release_questions membership
+                    JOIN questions question
+                      ON question.id = membership.question_id
+                    JOIN question_concepts primary_mapping
+                      ON primary_mapping.question_id = question.id
+                     AND primary_mapping.role = 'primary'
+                    LEFT JOIN release_question_objectives objective_mapping
+                      ON objective_mapping.release_id = membership.release_id
+                     AND objective_mapping.question_id = question.id
+                    LEFT JOIN question_sources source
+                      ON source.question_id = question.id
+                    LEFT JOIN item_reviews review
+                      ON review.question_id = question.id
+                    LEFT JOIN question_revocations revocation
+                      ON revocation.question_id = question.id
+                    WHERE {' AND '.join(where)}
+                    GROUP BY question.id, primary_mapping.concept_id,
+                             objective_mapping.objective_id
+                    ORDER BY question.difficulty, question.id
+                    LIMIT ?""",
+                tuple(parameters),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            provenance = _decode_json(
+                row["provenance_json"],
+                label=(
+                    f"Quarantined question {row['question_id']} provenance"
+                ),
+                expected_type=dict,
+            )
+            result.append(
+                {
+                    "question_id": row["question_id"],
+                    "version": row["version"],
+                    "question_content_sha256": row["content_hash"],
+                    "family_id": row["family_id"],
+                    "kind": row["kind"],
+                    "difficulty": row["difficulty"],
+                    "primary_concept_id": row["primary_concept_id"],
+                    "learning_objective_id": row["objective_id"],
+                    "source_count": int(row["source_count"]),
+                    "recorded_item_review_count": int(
+                        row["review_count"]
+                    ),
+                    "revoked": bool(row["revoked"]),
+                    "revocation_reason": row["revocation_reason"],
+                    "revoked_at": row["revoked_at"],
+                    "runtime_eligible": False,
+                    "activation_ceiling": (
+                        "revoked" if row["revoked"] else "quarantined"
+                    ),
+                    "provenance_claims": self._provenance_summary(
+                        provenance
+                    ),
+                }
+            )
+        return result
+
+    def show(self, question_id: str) -> dict[str, Any]:
+        if not isinstance(question_id, str) or not question_id.strip():
+            raise ValidationError(
+                "Quarantined question ID must be a non-blank string."
+            )
+        with self.database.read() as connection:
+            release_id = self.database.get_active_release_id(connection)
+            release = connection.execute(
+                """SELECT id, bundle_hash, created_at, sealed_at
+                   FROM corpus_releases WHERE id = ?""",
+                (release_id,),
+            ).fetchone()
+            membership = connection.execute(
+                """SELECT question.content_hash, membership.status,
+                          membership.evidence_weight
+                   FROM release_questions membership
+                   JOIN questions question
+                     ON question.id = membership.question_id
+                   WHERE membership.release_id = ?
+                     AND membership.question_id = ?""",
+                (release_id, question_id),
+            ).fetchone()
+            if (
+                membership is None
+                or membership["status"] != "quarantined"
+            ):
+                raise NotFoundError(
+                    f"Question {question_id} is not quarantined in the "
+                    f"active release {release_id}."
+                )
+            source_rows = connection.execute(
+                """SELECT source.id, source.content_hash, source.title,
+                          source.uri, source.license, source.metadata_json
+                   FROM question_sources mapping
+                   JOIN sources source ON source.id = mapping.source_id
+                   JOIN release_sources release_source
+                     ON release_source.release_id = ?
+                    AND release_source.source_id = source.id
+                   WHERE mapping.question_id = ?
+                   ORDER BY source.id""",
+                (release_id, question_id),
+            ).fetchall()
+            review_rows = connection.execute(
+                """SELECT * FROM item_reviews
+                   WHERE question_id = ?
+                   ORDER BY created_at, id""",
+                (question_id,),
+            ).fetchall()
+            revocation = connection.execute(
+                """SELECT reason, revoked_at, event_id
+                   FROM question_revocations WHERE question_id = ?""",
+                (question_id,),
+            ).fetchone()
+            question = self.database.get_question(
+                question_id,
+                connection,
+                release_id=release_id,
+            )
+            referenced_objective_ids = sorted(
+                {
+                    objective_id
+                    for objective_id in (
+                        question.objective_id,
+                        *(
+                            option.diagnostic_objective_id
+                            for option in question.options
+                        ),
+                    )
+                    if objective_id is not None
+                }
+            )
+            concept_rows = connection.execute(
+                """SELECT concept.* FROM concepts concept
+                   JOIN release_concepts membership
+                     ON membership.concept_id = concept.id
+                   WHERE membership.release_id = ?
+                     AND concept.id IN (SELECT value FROM json_each(?))
+                   ORDER BY concept.id""",
+                (
+                    release_id,
+                    _canonical_json(
+                        sorted(
+                            mapping.concept_id
+                            for mapping in question.concepts
+                        )
+                    ),
+                ),
+            ).fetchall()
+            misconception_rows = connection.execute(
+                """SELECT misconception.* FROM misconceptions misconception
+                   JOIN release_misconceptions membership
+                     ON membership.misconception_id = misconception.id
+                   WHERE membership.release_id = ?
+                     AND misconception.id IN (
+                         SELECT value FROM json_each(?)
+                     )
+                   ORDER BY misconception.id""",
+                (
+                    release_id,
+                    _canonical_json(
+                        sorted(question.misconception_ids)
+                    ),
+                ),
+            ).fetchall()
+            objective_rows = connection.execute(
+                """SELECT objective.*
+                   FROM learning_objectives objective
+                   JOIN release_learning_objectives membership
+                     ON membership.objective_id = objective.id
+                   WHERE membership.release_id = ?
+                     AND objective.id IN (
+                         SELECT value FROM json_each(?)
+                     )
+                   ORDER BY objective.id""",
+                (
+                    release_id,
+                    _canonical_json(referenced_objective_ids),
+                ),
+            ).fetchall()
+            comparison_rows = connection.execute(
+                """SELECT candidate.id, candidate.content_hash,
+                          candidate.family_id, candidate.kind,
+                          candidate.difficulty, candidate.stem,
+                          candidate.provenance_json, candidate.revision_of,
+                          candidate_membership.status,
+                          (
+                              SELECT mapping.objective_id
+                              FROM release_question_objectives mapping
+                              WHERE mapping.release_id = ?
+                                AND mapping.question_id = candidate.id
+                          ) AS objective_id,
+                          (
+                              SELECT mapping.concept_id
+                              FROM question_concepts mapping
+                              WHERE mapping.question_id = candidate.id
+                                AND mapping.role = 'primary'
+                          ) AS primary_concept_id
+                   FROM release_questions candidate_membership
+                   JOIN questions candidate
+                     ON candidate.id = candidate_membership.question_id
+                   WHERE candidate_membership.release_id = ?
+                     AND candidate.id != ?
+                     AND (
+                         EXISTS (
+                             SELECT 1
+                             FROM release_question_objectives mapping
+                             WHERE mapping.release_id = ?
+                               AND mapping.question_id = candidate.id
+                               AND mapping.objective_id = ?
+                         )
+                         OR EXISTS (
+                             SELECT 1 FROM question_concepts mapping
+                             WHERE mapping.question_id = candidate.id
+                               AND mapping.role = 'primary'
+                               AND mapping.concept_id = ?
+                         )
+                     )
+                   ORDER BY candidate_membership.status,
+                            candidate.difficulty, candidate.id
+                   LIMIT 101""",
+                (
+                    release_id,
+                    release_id,
+                    question_id,
+                    release_id,
+                    question.objective_id,
+                    question.primary_concept_id,
+                ),
+            ).fetchall()
+        if (
+            question.status is not QuestionStatus.QUARANTINED
+            or float(membership["evidence_weight"]) != 0.0
+        ):
+            raise ValidationError(
+                f"Question {question_id} has an inconsistent quarantine "
+                "status or nonzero release evidence weight."
+            )
+        computed_hash = question_content_hash(question)
+        if computed_hash != membership["content_hash"]:
+            raise ValidationError(
+                f"Quarantined question {question_id} content hash does not "
+                "match its stored immutable identity."
+            )
+        if (
+            len(source_rows) != len(question.source_ids)
+            or {row["id"] for row in source_rows}
+            != set(question.source_ids)
+        ):
+            raise ValidationError(
+                f"Quarantined question {question_id} source registry is "
+                "incomplete for its release."
+            )
+        expected_concept_ids = sorted(
+            mapping.concept_id for mapping in question.concepts
+        )
+        if (
+            len(concept_rows) != len(expected_concept_ids)
+            or [row["id"] for row in concept_rows] != expected_concept_ids
+        ):
+            raise ValidationError(
+                f"Quarantined question {question_id} concept registry is "
+                "incomplete for its release."
+            )
+        concepts: list[dict[str, Any]] = []
+        for row in concept_rows:
+            concept = Concept(
+                id=row["id"],
+                name=row["name"],
+                description=row["description"],
+                domain=row["domain"],
+                prior_mastery=row["prior_mastery"],
+            )
+            if concept_content_hash(concept) != row["content_hash"]:
+                raise ValidationError(
+                    f"Concept {row['id']} content hash does not match its "
+                    "stored immutable identity."
+                )
+            concepts.append(
+                self._concept_payload(concept, row["content_hash"])
+            )
+        if (
+            len(objective_rows) != len(referenced_objective_ids)
+            or [row["id"] for row in objective_rows]
+            != referenced_objective_ids
+        ):
+            raise ValidationError(
+                f"Quarantined question {question_id} objective registry is "
+                "incomplete for its release."
+            )
+        objective_payloads: dict[str, dict[str, Any]] = {}
+        for objective_row in objective_rows:
+            objective = LearningObjective(
+                id=objective_row["id"],
+                name=objective_row["name"],
+                description=objective_row["description"],
+                primary_concept_id=objective_row["primary_concept_id"],
+                supporting_concept_ids=tuple(
+                    _decode_json(
+                        objective_row["supporting_concept_ids_json"],
+                        label=(
+                            f"Learning objective {objective_row['id']} "
+                            "supporting concepts"
+                        ),
+                        expected_type=list,
+                    )
+                ),
+                operation=ObjectiveOperation(objective_row["operation"]),
+                evidence_type=objective_row["evidence_type"],
+                prior_mastery=objective_row["prior_mastery"],
+            )
+            if (
+                objective_content_hash(objective)
+                != objective_row["content_hash"]
+            ):
+                raise ValidationError(
+                    f"Learning objective {objective.id} content hash does not "
+                    "match its stored immutable identity."
+                )
+            objective_payloads[objective.id] = self._objective_payload(
+                objective, objective_row["content_hash"]
+            )
+        learning_objective = (
+            objective_payloads[question.objective_id]
+            if question.objective_id is not None
+            else None
+        )
+        diagnostic_objectives = [
+            objective_payloads[objective_id]
+            for objective_id in sorted(
+                {
+                    option.diagnostic_objective_id
+                    for option in question.options
+                    if option.diagnostic_objective_id is not None
+                }
+            )
+        ]
+        expected_misconception_ids = sorted(question.misconception_ids)
+        if (
+            len(misconception_rows) != len(expected_misconception_ids)
+            or [row["id"] for row in misconception_rows]
+            != expected_misconception_ids
+        ):
+            raise ValidationError(
+                f"Quarantined question {question_id} misconception registry "
+                "is incomplete for its release."
+            )
+        misconceptions: list[dict[str, Any]] = []
+        for row in misconception_rows:
+            misconception = Misconception(
+                id=row["id"],
+                concept_id=row["concept_id"],
+                name=row["name"],
+                description=row["description"],
+            )
+            if (
+                misconception_content_hash(misconception)
+                != row["content_hash"]
+            ):
+                raise ValidationError(
+                    f"Misconception {row['id']} content hash does not match "
+                    "its stored immutable identity."
+                )
+            misconceptions.append(
+                self._misconception_payload(
+                    misconception, row["content_hash"]
+                )
+            )
+        sources: list[dict[str, Any]] = []
+        for row in source_rows:
+            metadata = _decode_json(
+                row["metadata_json"],
+                label=f"Source {row['id']} metadata",
+                expected_type=dict,
+            )
+            source = Source(
+                id=row["id"],
+                title=row["title"],
+                uri=row["uri"],
+                license=row["license"],
+                metadata=metadata,
+            )
+            if source_content_hash(source) != row["content_hash"]:
+                raise ValidationError(
+                    f"Source {row['id']} content hash does not match its "
+                    "stored immutable identity."
+                )
+            sources.append(
+                {
+                    "id": row["id"],
+                    "content_sha256": row["content_hash"],
+                    "title": row["title"],
+                    "uri": row["uri"],
+                    "license": row["license"],
+                    "metadata": metadata,
+                }
+            )
+        reviews = [
+            {
+                "review_id": row["id"],
+                "reviewer_kind": row["reviewer_kind"],
+                "verdict": row["verdict"],
+                "issues": _decode_json(
+                    row["issues_json"],
+                    label=f"Item review {row['id']} issues",
+                    expected_type=list,
+                ),
+                "metadata": _decode_json(
+                    row["metadata_json"],
+                    label=f"Item review {row['id']} metadata",
+                    expected_type=dict,
+                ),
+                "created_at": row["created_at"],
+            }
+            for row in review_rows
+        ]
+        local_comparison_truncated = len(comparison_rows) > 100
+        local_family_comparison: list[dict[str, Any]] = []
+        for row in comparison_rows[:100]:
+            candidate = self.database.get_question(
+                row["id"], release_id=release_id
+            )
+            if question_content_hash(candidate) != row["content_hash"]:
+                raise ValidationError(
+                    f"Comparison question {row['id']} content hash does not "
+                    "match its stored immutable identity."
+                )
+            local_family_comparison.append(
+                {
+                    "question_content_sha256": row["content_hash"],
+                    "release_status": row["status"],
+                    "same_learning_objective": (
+                        question.objective_id is not None
+                        and row["objective_id"] == question.objective_id
+                    ),
+                    "same_primary_concept": (
+                        row["primary_concept_id"]
+                        == question.primary_concept_id
+                    ),
+                    "independence_note": candidate.provenance.get(
+                        "independence_note"
+                    ),
+                    "question": self._question_payload(candidate),
+                }
+            )
+        return {
+            "release": {
+                "release_id": release["id"],
+                "bundle_sha256": release["bundle_hash"],
+                "created_at": release["created_at"],
+                "sealed_at": release["sealed_at"],
+            },
+            "question_content_sha256": membership["content_hash"],
+            "release_status": membership["status"],
+            "release_evidence_weight": membership["evidence_weight"],
+            "runtime_eligible": False,
+            "activation_ceiling": (
+                "revoked" if revocation is not None else "quarantined"
+            ),
+            "question": self._question_payload(question),
+            "topics": self.database.question_topics(
+                question_id, release_id
+            ),
+            "concepts": concepts,
+            "learning_objective": learning_objective,
+            "diagnostic_objectives": diagnostic_objectives,
+            "sources": sources,
+            "misconceptions": misconceptions,
+            "local_family_comparison": local_family_comparison,
+            "local_comparison_scope": {
+                "included_if_same_direct_learning_objective": True,
+                "included_if_same_primary_concept": True,
+                "secondary_concept_only_matches_included": False,
+                "cross_topic_only_matches_included": False,
+                "unrelated_objective_matches_included": False,
+                "maximum_rows": 100,
+            },
+            "local_comparison_scope_complete": (
+                not local_comparison_truncated
+            ),
+            "local_comparison_total_lower_bound": len(comparison_rows),
+            "recorded_item_reviews": reviews,
+            "revocation": (
+                {
+                    "reason": revocation["reason"],
+                    "revoked_at": revocation["revoked_at"],
+                    "event_id": revocation["event_id"],
+                }
+                if revocation is not None
+                else None
+            ),
+            "provenance_claims": self._provenance_summary(
+                question.provenance
+            ),
+            "review_boundary": (
+                "Stored provenance and AI-review labels are claims to inspect, "
+                "not human activation authority."
+            ),
+        }
+
+    def packet(
+        self,
+        question_id: str,
+        *,
+        stage: str = "combined",
+    ) -> dict[str, Any]:
+        if stage not in {"combined", "blind", "critic"}:
+            raise ValidationError(
+                f"Unknown quarantine review packet stage: {stage!r}."
+            )
+        detail = self.show(question_id)
+        blind_solver_material = _blind_for_review(detail["question"])
+        if detail["learning_objective"] is not None:
+            blind_solver_material["learning_objective"] = copy.deepcopy(
+                detail["learning_objective"]
+            )
+        critic_material = {
+            "question": detail["question"],
+            "topics": detail["topics"],
+            "concepts": detail["concepts"],
+            "learning_objective": detail["learning_objective"],
+            "diagnostic_objectives": detail["diagnostic_objectives"],
+            "source_registry": detail["sources"],
+            "misconceptions": detail["misconceptions"],
+            "recorded_item_reviews": detail[
+                "recorded_item_reviews"
+            ],
+            "local_family_comparison": detail[
+                "local_family_comparison"
+            ],
+            "local_comparison_scope": detail[
+                "local_comparison_scope"
+            ],
+            "local_comparison_scope_complete": detail[
+                "local_comparison_scope_complete"
+            ],
+            "local_comparison_total_lower_bound": detail[
+                "local_comparison_total_lower_bound"
+            ],
+        }
+        release_identity = {
+            "release_id": detail["release"]["release_id"],
+            "bundle_sha256": detail["release"]["bundle_sha256"],
+        }
+        packet_core = {
+            "schema": QUARANTINE_REVIEW_PACKET_SCHEMA,
+            "packet_audience": "review_coordinator",
+            "question_id": detail["question"]["id"],
+            "activation_ceiling": detail["activation_ceiling"],
+            "runtime_eligible": False,
+            "release": release_identity,
+            "question_content_sha256": detail[
+                "question_content_sha256"
+            ],
+            "review_sequence": (
+                "Complete the blind solver stage using only "
+                "blind_solver_material before revealing critic_material."
+            ),
+            "blind_solver_material": blind_solver_material,
+            "blind_solver_material_sha256": _sha256_json(
+                blind_solver_material
+            ),
+            "critic_material": critic_material,
+            "critic_material_sha256": _sha256_json(critic_material),
+            "revocation": detail["revocation"],
+            "review_contract": {
+                "source_claim_review_required": True,
+                "blind_solver_review_required": True,
+                "blind_solver_must_not_receive_critic_material": True,
+                "combined_packet_itself_enforces_stage_isolation": False,
+                "keyed_critic_follows_blind_solver": True,
+                "one_best_answer_review_required": True,
+                "named_misconception_review_required": True,
+                "family_independence_review_required": True,
+                "local_comparison_scope_complete": detail[
+                    "local_comparison_scope_complete"
+                ],
+                "family_independence_claim_resolved": False,
+                "human_activation_review_required": (
+                    detail["revocation"] is None
+                ),
+                "new_immutable_revision_required_if_reconsidered": (
+                    detail["revocation"] is not None
+                ),
+                "human_review_required_for_new_revision": (
+                    detail["revocation"] is not None
+                ),
+                "automatic_activation_permitted": False,
+                "revoked_identity_must_not_be_promoted": (
+                    detail["revocation"] is not None
+                ),
+            },
+            "evidence_boundaries": [
+                (
+                    "Source registry hashes bind this packet to registered "
+                    "metadata, not to unpersisted source excerpts."
+                ),
+                (
+                    "The packet is an inspection artifact and carries no "
+                    "signature, attestation, promotion, or activation effect."
+                ),
+                (
+                    "The stored independence note and comparison set are "
+                    "review inputs, not proof of family independence."
+                ),
+                (
+                    "The combined packet is coordinator-only. Use a blind "
+                    "stage export when handing material to a blind solver."
+                ),
+                (
+                    "Authored difficulty is an uncalibrated prior until "
+                    "reviewed pilot evidence exists."
+                ),
+            ],
+        }
+        combined = {
+            **packet_core,
+            "packet_sha256": _sha256_json(packet_core),
+        }
+        if stage == "combined":
+            return combined
+        material_key = (
+            "blind_solver_material"
+            if stage == "blind"
+            else "critic_material"
+        )
+        material = combined[material_key]
+        stage_core = {
+            "schema": "tsq-quarantine-review-stage-v1",
+            "stage": stage,
+            "question_id": detail["question"]["id"],
+            "activation_ceiling": detail["activation_ceiling"],
+            "runtime_eligible": False,
+            "release": release_identity,
+            "question_content_sha256": detail[
+                "question_content_sha256"
+            ],
+            "material": material,
+            "material_sha256": _sha256_json(material),
+            "coordinator_packet_sha256": combined["packet_sha256"],
+            "stage_boundary": (
+                "This export contains no keyed critic material."
+                if stage == "blind"
+                else (
+                    "Reveal this keyed material only after the blind solver "
+                    "stage is complete."
+                )
+            ),
+        }
+        return {
+            **stage_core,
+            "packet_sha256": _sha256_json(stage_core),
+        }
 
 
 class AuthoringJobs:
@@ -1500,6 +2569,8 @@ class OfflineAuthoringPipeline:
                 for field in ("id", "text", "rationale"):
                     if type(option.get(field)) is not str:
                         add(f"{prefix}.{field} must be a string.")
+                    elif not option[field].strip():
+                        add(f"{prefix}.{field} must not be blank.")
                 if type(option.get("correct")) is not bool:
                     add(f"{prefix}.correct must be a JSON boolean.")
                 misconception_id = option.get("misconception_id")
@@ -1520,16 +2591,31 @@ class OfflineAuthoringPipeline:
             add("Field 'source_ids' must be a JSON array.")
         elif any(type(source_id) is not str for source_id in source_ids):
             add("Every source_ids entry must be a string.")
+        elif any(not source_id.strip() for source_id in source_ids):
+            add("Every source_ids entry must be non-blank.")
+        elif len(source_ids) != len(set(source_ids)):
+            add("Field 'source_ids' must not contain duplicates.")
 
         provenance = item.get("provenance", {})
         if type(provenance) is not dict:
             add("Field 'provenance' must be a JSON object.")
         tags = item.get("tags", [])
-        if type(tags) is not list or any(type(tag) is not str for tag in tags):
-            add("Field 'tags' must be a JSON array of strings.")
+        if type(tags) is not list or any(
+            type(tag) is not str or not tag.strip() for tag in tags
+        ):
+            add(
+                "Field 'tags' must be a JSON array of non-blank strings."
+            )
         revision_of = item.get("revision_of")
-        if revision_of is not None and type(revision_of) is not str:
-            add("Field 'revision_of' must be a string or null.")
+        if revision_of is not None and (
+            type(revision_of) is not str or not revision_of.strip()
+        ):
+            add("Field 'revision_of' must be a non-blank string or null.")
+        elif revision_of is not None:
+            add(
+                "Coverage-generation jobs require revision_of to be null; "
+                "immutable revisions need a separate reviewed workflow."
+            )
         return issues
 
     def _collect_review(
@@ -1545,6 +2631,12 @@ class OfflineAuthoringPipeline:
         blinded_hash = _sha256_json(blinded_copy)
         output = reviewer.review(blinded_copy, source_context)
         output_issues = _strict_json_issues(output, "$.review.")
+        output_issues, issue_redaction_count = (
+            _redact_exact_source_context(
+                output_issues,
+                source_context,
+            )
+        )
         if type(output) is not dict:
             output_issues.insert(0, "Reviewer output must be a JSON object.")
 
@@ -1554,8 +2646,14 @@ class OfflineAuthoringPipeline:
                 "validation_errors": output_issues,
             }
             valid = False
+            output_redaction_count = issue_redaction_count
         else:
-            persisted_output = copy.deepcopy(output)
+            persisted_output, output_redaction_count = (
+                _redact_exact_source_context(
+                    output,
+                    source_context,
+                )
+            )
             verdict = persisted_output.get("verdict")
             valid = type(verdict) is str and verdict in {"accept", "reject", "revise"}
             if not valid:
@@ -1570,6 +2668,9 @@ class OfflineAuthoringPipeline:
             "reviewer_output_sha256": _sha256_json(persisted_output),
             "blinded_item_sha256": blinded_hash,
             "source_context_sha256": source_context_sha256,
+            "exact_source_context_redaction_count": (
+                output_redaction_count
+            ),
             "valid": valid,
             "validation_errors": output_issues,
         }
@@ -1989,9 +3090,23 @@ class OfflineAuthoringPipeline:
             if not row:
                 raise NotFoundError(f"Unknown generation job: {job_id}")
             if row["status"] != "planned":
+                if row["status"] in {"failed", "rejected"}:
+                    guidance = (
+                        "use `jobs retry` before another execution"
+                    )
+                elif row["status"] == "running":
+                    guidance = (
+                        "a worker may still own it; use `jobs retry "
+                        "--recover-running` only after confirming that worker "
+                        "has stopped"
+                    )
+                else:
+                    guidance = (
+                        "reviewed jobs are terminal; author a new coverage job "
+                        "for any revision"
+                    )
                 raise ConflictError(
-                    f"Generation job {job_id} is {row['status']}; retry it explicitly "
-                    "before another execution."
+                    f"Generation job {job_id} is {row['status']}; {guidance}."
                 )
             if row["prompt_version"] not in SUPPORTED_PROMPT_VERSIONS:
                 raise ConflictError(
@@ -2047,9 +3162,6 @@ class OfflineAuthoringPipeline:
             )
         try:
             raw_output = self.generator.generate(blueprint, source_context)
-            deterministic_issues = self._deterministic_validation(
-                raw_output, blueprint, job_id=job_id
-            )
             raw_json_issues = _strict_json_issues(raw_output)
             if not raw_json_issues:
                 generator_output_sha256 = _sha256_json(raw_output)
@@ -2065,13 +3177,35 @@ class OfflineAuthoringPipeline:
             # A malformed output is represented only by an inert quarantine
             # record, while its deterministic errors make acceptance impossible.
             if type(raw_output) is dict and not raw_json_issues:
-                item = copy.deepcopy(raw_output)
+                item, generator_output_redaction_count = (
+                    _redact_exact_source_context(
+                        raw_output,
+                        source_context,
+                    )
+                )
             else:
                 item = {"generator_output_rejected": True}
+                generator_output_redaction_count = 0
             item["status"] = "quarantined"
             declared_provenance = item.get("provenance")
             if type(declared_provenance) is not dict:
                 declared_provenance = {}
+            raw_declared_provenance = (
+                raw_output.get("provenance", {})
+                if type(raw_output) is dict
+                and not raw_json_issues
+                and type(raw_output.get("provenance", {})) is dict
+                else {}
+            )
+            stripped_authority_fields = sorted(
+                set(raw_declared_provenance)
+                & GENERATOR_AUTHORITY_PROVENANCE_FIELDS
+            )
+            declared_provenance = {
+                key: copy.deepcopy(value)
+                for key, value in declared_provenance.items()
+                if key not in GENERATOR_AUTHORITY_PROVENANCE_FIELDS
+            }
             generator_provenance = {
                 "provider_name": self.generator_provider_name,
                 "model_name": self.generator_model_name,
@@ -2085,6 +3219,11 @@ class OfflineAuthoringPipeline:
             item["provenance"].update(
                 {
                     "generated": True,
+                    "human_review": False,
+                    "human_review_status": "required_before_activation",
+                    "activation": (
+                        "manual_only_after_human_review_and_new_immutable_release"
+                    ),
                     "provider": self.generator_provider_name,
                     "model": self.generator_model_name,
                     "prompt_version": row["prompt_version"],
@@ -2094,8 +3233,56 @@ class OfflineAuthoringPipeline:
                     "source_context_sha256": source_context_sha256,
                     "generator_output_sha256": generator_output_sha256,
                     "generator_provenance_sha256": generator_provenance_sha256,
+                    "generator_declared_provenance_sha256": (
+                        _sha256_json(raw_declared_provenance)
+                    ),
+                    "stripped_generator_authority_fields": (
+                        stripped_authority_fields
+                    ),
                 }
             )
+            if type(raw_output) is not dict or raw_json_issues:
+                deterministic_issues = self._item_shape_issues(
+                    raw_output
+                )
+            else:
+                deterministic_issues = self._deterministic_validation(
+                    item,
+                    blueprint,
+                    job_id=job_id,
+                )
+            if generator_output_redaction_count:
+                deterministic_issues.append(
+                    {
+                        "code": "source_context_echo_in_generator_output",
+                        "severity": "error",
+                        "message": (
+                            "Generator output contained an exact source-context "
+                            "copy; the persisted artifact was redacted and must "
+                            "not enter reviewed quarantine."
+                        ),
+                    }
+                )
+            deterministic_issues, deterministic_redaction_count = (
+                _redact_exact_source_context(
+                    deterministic_issues,
+                    source_context,
+                )
+            )
+            for provenance_issue in question_provenance_issues(
+                item["provenance"],
+                status="quarantined",
+            ):
+                deterministic_issues.append(
+                    {
+                        "code": (
+                            "finalized_provenance_"
+                            f"{provenance_issue.code}"
+                        ),
+                        "severity": "error",
+                        "message": provenance_issue.message,
+                    }
+                )
 
             blinded_item = _blind_for_review(item, blueprint)
             reviews = [
@@ -2114,6 +3301,14 @@ class OfflineAuthoringPipeline:
                 review["valid"] and review["output"].get("verdict") == "accept"
                 for review in reviews
             )
+            item["provenance"]["authoring_review_state"] = (
+                "independent_model_reviews_accepted"
+                if accepted_by_critics
+                else "independent_model_reviews_not_accepted"
+            )
+            item["provenance"]["independent_model_review_count"] = len(
+                reviews
+            )
             deterministic_errors = [
                 issue for issue in deterministic_issues if issue["severity"] == "error"
             ]
@@ -2131,6 +3326,20 @@ class OfflineAuthoringPipeline:
                 "generator_provenance": generator_provenance,
                 "generator_provenance_sha256": generator_provenance_sha256,
                 "reviews_sha256": reviews_sha256,
+                "exact_source_context_redactions": {
+                    "generator_output": (
+                        generator_output_redaction_count
+                    ),
+                    "deterministic_validation": (
+                        deterministic_redaction_count
+                    ),
+                    "reviewer_outputs": sum(
+                        review[
+                            "exact_source_context_redaction_count"
+                        ]
+                        for review in reviews
+                    ),
+                },
                 "accepted_by_critics": accepted_by_critics,
                 "accepted_for_reviewed_quarantine": accepted,
             }
@@ -2144,6 +3353,9 @@ class OfflineAuthoringPipeline:
                 "generator_provenance_sha256": generator_provenance_sha256,
                 "reviews": reviews,
                 "reviews_sha256": reviews_sha256,
+                "exact_source_context_redactions": result[
+                    "exact_source_context_redactions"
+                ],
             }
             with self.database.transaction() as connection:
                 # Generation and review run outside the write lock. Recheck
@@ -2252,7 +3464,10 @@ class OfflineAuthoringPipeline:
             completed_at = datetime.now(timezone.utc).isoformat()
             error_record = {
                 "error_type": f"{type(exc).__module__}.{type(exc).__qualname__}",
-                "error": str(exc)[:4000],
+                "error": (
+                    "Generation provider or reviewer failed; raw exception "
+                    "text and source context were not persisted."
+                ),
             }
             error_json = _canonical_json(error_record)
             try:
