@@ -633,6 +633,7 @@ class CoveragePlanner:
                    JOIN question_sources qs ON qs.question_id = qc.question_id
                    JOIN release_questions rq ON rq.question_id = qc.question_id
                    WHERE qc.role = 'primary' AND rq.release_id = ?
+                     AND rq.status IN ('approved', 'calibrated')
                      AND NOT EXISTS (
                          SELECT 1 FROM question_revocations revoked
                          WHERE revoked.question_id = qc.question_id
@@ -685,6 +686,7 @@ class CoveragePlanner:
                      ON rq.release_id = direct.release_id
                     AND rq.question_id = direct.question_id
                    WHERE direct.release_id = ?
+                     AND rq.status IN ('approved', 'calibrated')
                      AND NOT EXISTS (
                          SELECT 1 FROM question_revocations revoked
                          WHERE revoked.question_id = direct.question_id

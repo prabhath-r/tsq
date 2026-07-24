@@ -30,11 +30,16 @@ NEW_RAG_INTRO_QUESTIONS = {
     "q_rag_claim_citation_alignment_revision_001",
     "q_rag_conjunctive_facet_coverage_001",
 }
+NEW_TRANSFORMER_INTRO_QUESTIONS = {
+    "q_attention_runtime_workspace_boundary_001",
+    "q_transformer_unexpected_cross_token_path_001",
+}
 GENERATED_BATCH_ID = "batch_rag_agent_headroom_20260723_c"
 AGENT_INTRO_BATCH_ID = "batch_agent_intro_bridges_20260724_a"
 RAG_INTRO_BATCH_ID = "batch_rag_intro_bridges_20260724_a"
+TRANSFORMER_INTRO_BATCH_ID = "batch_transformer_intro_bridges_20260724_a"
 LEGACY_GENERATED_MIGRATION_COUNT = 39
-TOTAL_UNREVIEWED_GENERATED_COUNT = 59
+TOTAL_UNREVIEWED_GENERATED_COUNT = 61
 
 
 class CorpusMisconceptionRouteTests(unittest.TestCase):
@@ -333,6 +338,132 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
             self.assertNotIn("src_ircot_2023", retrieval.source_ids)
             self.assertNotIn("src_mrag_2025", retrieval.source_ids)
 
+    def test_transformer_intro_candidates_are_quarantined_and_exactly_routed(
+        self,
+    ) -> None:
+        expected_routes = {
+            "q_attention_runtime_workspace_boundary_001": {
+                "m_full_attention_is_linear_in_length": (
+                    "lo_attention_resource_scaling"
+                ),
+                "m_parameter_count_scales_with_tokens": (
+                    "lo_attention_resource_scaling"
+                ),
+                "m_quadratic_attention_only_during_training": (
+                    "lo_attention_resource_scaling"
+                ),
+            },
+            "q_transformer_unexpected_cross_token_path_001": {
+                "m_feedforward_layers_mix_token_positions": (
+                    "lo_transformer_information_paths"
+                ),
+                "m_residuals_make_sublayer_order_irrelevant": (
+                    "lo_transformer_sublayer_composition"
+                ),
+                "m_transformers_are_inherently_bidirectional": (
+                    "lo_causal_visibility"
+                ),
+            },
+        }
+        for questions in (
+            self.canonical_questions,
+            self.packaged_questions,
+        ):
+            batch = {
+                question.id: question
+                for question in questions.values()
+                if question.provenance.get("batch_id")
+                == TRANSFORMER_INTRO_BATCH_ID
+            }
+            self.assertEqual(set(batch), NEW_TRANSFORMER_INTRO_QUESTIONS)
+            self.assertEqual(
+                len({question.family_id for question in batch.values()}),
+                2,
+            )
+            self.assertEqual(
+                {
+                    question_id: question.family_id
+                    for question_id, question in batch.items()
+                },
+                {
+                    "q_attention_runtime_workspace_boundary_001": (
+                        "f_transformer_sequence_shape_audit"
+                    ),
+                    "q_transformer_unexpected_cross_token_path_001": (
+                        "f_transformer_axis_mixing"
+                    ),
+                },
+            )
+            self.assertEqual(
+                {question.kind.value for question in batch.values()},
+                {"diagnostic"},
+            )
+            self.assertEqual(
+                {question.objective_id for question in batch.values()},
+                {
+                    "lo_attention_resource_scaling",
+                    "lo_transformer_information_paths",
+                },
+            )
+            resource = batch[
+                "q_attention_runtime_workspace_boundary_001"
+            ]
+            path = batch[
+                "q_transformer_unexpected_cross_token_path_001"
+            ]
+            self.assertEqual(
+                resource.source_ids,
+                (
+                    "src_vaswani_attention_2017",
+                    "src_goodfellow_dl_2016",
+                    "src_expert_synthesis_2026",
+                ),
+            )
+            self.assertEqual(
+                path.source_ids,
+                (
+                    "src_vaswani_attention_2017",
+                    "src_expert_synthesis_2026",
+                ),
+            )
+            self.assertIn(
+                "q_transformer_sequence_shape_audit_001",
+                resource.provenance["independence_note"],
+            )
+            self.assertIn(
+                "q_transformer_token_mixing_001",
+                path.provenance["independence_note"],
+            )
+            self.assertTrue(
+                all(
+                    question.status.value == "quarantined"
+                    and not question.status.eligible_for_adaptation
+                    and question.difficulty < -0.5
+                    and question.provenance.get("generated") is True
+                    and question.provenance.get("human_review") is False
+                    and question.provenance.get("human_review_status")
+                    == "required_before_activation"
+                    and question.provenance.get("review_status")
+                    == "internal_ai_critique_pending_quarantined"
+                    and bool(question.provenance.get("source_scope"))
+                    and bool(question.provenance.get("independence_note"))
+                    and question.provenance.get("psychometrics")
+                    == "uncalibrated_author_prior"
+                    and question.provenance.get("activation")
+                    == (
+                        "manual_only_after_human_review_and_new_immutable_release"
+                    )
+                    for question in batch.values()
+                )
+            )
+            for question_id, routes in expected_routes.items():
+                observed = {
+                    option.misconception_id: option.diagnostic_objective_id
+                    for option in batch[question_id].options
+                    if not option.correct
+                }
+                self.assertEqual(observed, routes)
+
     def test_generated_without_human_review_is_never_adaptation_eligible(
         self,
     ) -> None:
@@ -353,6 +484,7 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                 and question.id not in NEW_TRANSFORMER_QUESTIONS
                 and question.id not in NEW_AGENT_INTRO_QUESTIONS
                 and question.id not in NEW_RAG_INTRO_QUESTIONS
+                and question.id not in NEW_TRANSFORMER_INTRO_QUESTIONS
             ]
 
             self.assertEqual(
