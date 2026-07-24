@@ -1533,6 +1533,11 @@ class BehavioralSimulator:
                      ON objective.id = direct.objective_id
                    WHERE membership.release_id = ?
                      AND membership.status IN ('approved', 'calibrated')
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM question_revocations revoked
+                         WHERE revoked.question_id = q.id
+                     )
                    ORDER BY q.id""",
                 (release_id,),
             ).fetchall()

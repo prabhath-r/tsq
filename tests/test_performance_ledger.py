@@ -16,7 +16,7 @@ from pathlib import Path
 from tsq.corpus import read_and_parse
 from tsq.cli import main
 from tsq.engine import AdaptiveEngine
-from tsq.errors import ConflictError, ValidationError
+from tsq.errors import ConflictError, NotFoundError, ValidationError
 from tsq.evidence import (
     ActionKind,
     ActionPhase,
@@ -37,6 +37,7 @@ from tsq.performance import (
     ScoringProviderRegistry,
     SyntheticDeterministicProvider,
 )
+from tsq.models import QuestionStatus
 from tsq.performance_ledger import (
     PerformanceLedger,
     PerformanceTaskRelease,
@@ -44,6 +45,7 @@ from tsq.performance_ledger import (
     performance_integrity_errors,
     read_task_release,
 )
+from tsq.performance_selection import recommend_performance_tasks
 from tsq.replay import ProjectionReplay
 from tsq.store import Database, performance_scoring_claim_event_key
 
@@ -1327,6 +1329,291 @@ class PerformanceLedgerTestCase(unittest.TestCase):
                 ),
                 now=START + timedelta(seconds=4),
             )
+
+    def test_release_rejects_quarantine_only_objective_misconception_binding(
+        self,
+    ) -> None:
+        objective_id = "lo_agent_state_reconciliation"
+        misconception_id = "m_agent_any_required_condition_suffices"
+        parsed = read_and_parse(CORPUS, include_catalog=True)
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """SELECT membership.question_id, membership.status,
+                          revocation.question_id IS NOT NULL AS revoked
+                   FROM release_option_objectives mapping
+                   JOIN release_questions membership
+                     ON membership.release_id = mapping.release_id
+                    AND membership.question_id = mapping.question_id
+                   JOIN options option
+                     ON option.question_id = mapping.question_id
+                    AND option.option_id = mapping.option_id
+                   LEFT JOIN question_revocations revocation
+                     ON revocation.question_id = mapping.question_id
+                   WHERE mapping.release_id = ?
+                     AND mapping.objective_id = ?
+                     AND option.misconception_id = ?
+                   ORDER BY membership.question_id""",
+                (
+                    self.corpus_release_id,
+                    objective_id,
+                    misconception_id,
+                ),
+            ).fetchall()
+        self.assertGreater(len(rows), 0)
+        mapping_question_ids = {row["question_id"] for row in rows}
+        isolated_questions = tuple(
+            replace(question, status=QuestionStatus.QUARANTINED)
+            if question.id in mapping_question_ids
+            else question
+            for question in parsed[4]
+        )
+        isolated_release = self.database.import_corpus(
+            parsed[0],
+            parsed[1],
+            parsed[2],
+            parsed[3],
+            isolated_questions,
+            parsed[5],
+            parsed[6],
+        )["release_id"]
+        with self.database.read() as connection:
+            isolated_rows = connection.execute(
+                """SELECT membership.question_id, membership.status,
+                          revocation.question_id IS NOT NULL AS revoked
+                   FROM release_option_objectives mapping
+                   JOIN release_questions membership
+                     ON membership.release_id = mapping.release_id
+                    AND membership.question_id = mapping.question_id
+                   JOIN options option
+                     ON option.question_id = mapping.question_id
+                    AND option.option_id = mapping.option_id
+                   LEFT JOIN question_revocations revocation
+                     ON revocation.question_id = mapping.question_id
+                   WHERE mapping.release_id = ?
+                     AND mapping.objective_id = ?
+                     AND option.misconception_id = ?
+                   ORDER BY membership.question_id""",
+                (isolated_release, objective_id, misconception_id),
+            ).fetchall()
+        self.assertEqual(
+            {row["question_id"] for row in isolated_rows},
+            mapping_question_ids,
+        )
+        self.assertTrue(
+            all(
+                row["status"] == QuestionStatus.QUARANTINED.value
+                and not row["revoked"]
+                for row in isolated_rows
+            )
+        )
+
+        terms = self.task.terms()
+        terms["id"] = "task_quarantine_only_misconception"
+        terms["criteria"][0]["concept_weights"] = [
+            ["c_agent_observation_loop", 1.0]
+        ]
+        terms["criteria"][0]["objective_weights"] = [
+            [objective_id, 1.0]
+        ]
+        terms["criteria"][0]["misconception_ids"] = [misconception_id]
+        task = LearningTask.from_terms(terms)
+
+        quarantined = self.ledger.publish_release(
+            PerformanceTaskRelease(
+                title="Quarantine-only misconception draft fixture",
+                corpus_release_id=isolated_release,
+                review=self.release.review,
+                tasks=(("quarantined", task),),
+            ),
+            now=START + timedelta(seconds=4),
+        )
+        self.assertEqual(quarantined["status_counts"]["quarantined"], 1)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+        with self.assertRaisesRegex(
+            ValidationError, "misconception.*not mapped.*objectives"
+        ):
+            self.ledger.publish_release(
+                PerformanceTaskRelease(
+                    title="Quarantine-only misconception fixture",
+                    corpus_release_id=isolated_release,
+                    review=self.release.review,
+                    tasks=(("pilot", task),),
+                ),
+                now=START + timedelta(seconds=5),
+            )
+
+    def test_release_rejects_already_revoked_misconception_binding(
+        self,
+    ) -> None:
+        objective_id = "lo_attention_value_routing"
+        misconception_id = "m_attention_is_hard_selection"
+        terms = self.task.terms()
+        terms["id"] = "task_revoked_misconception_binding"
+        terms["criteria"][0]["concept_weights"] = [["c_attention", 1.0]]
+        terms["criteria"][0]["objective_weights"] = [
+            [objective_id, 1.0]
+        ]
+        terms["criteria"][0]["misconception_ids"] = [misconception_id]
+        task = LearningTask.from_terms(terms)
+        with self.database.read() as connection:
+            supporting_rows = connection.execute(
+                """SELECT DISTINCT mapping.question_id
+                   FROM release_option_objectives mapping
+                   JOIN release_questions membership
+                     ON membership.release_id = mapping.release_id
+                    AND membership.question_id = mapping.question_id
+                   JOIN options option
+                     ON option.question_id = mapping.question_id
+                    AND option.option_id = mapping.option_id
+                   WHERE mapping.release_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                     AND mapping.objective_id = ?
+                     AND option.misconception_id = ?
+                   ORDER BY mapping.question_id""",
+                (
+                    self.corpus_release_id,
+                    objective_id,
+                    misconception_id,
+                ),
+            ).fetchall()
+        self.assertGreater(len(supporting_rows), 0)
+
+        for index, row in enumerate(supporting_rows):
+            self.database.revoke_question(
+                row["question_id"],
+                "Pre-publication productive-task binding revocation fixture.",
+                idempotency_key=f"task-prepublish-revocation:{index}",
+            )
+        with self.assertRaisesRegex(
+            ValidationError, "misconception.*not mapped.*objectives"
+        ):
+            self.ledger.publish_release(
+                PerformanceTaskRelease(
+                    title="Already-revoked misconception binding fixture",
+                    corpus_release_id=self.corpus_release_id,
+                    review=self.release.review,
+                    tasks=(("pilot", task),),
+                ),
+                now=START + timedelta(seconds=6),
+            )
+
+    def test_revocation_withdraws_new_serviceability_not_history(
+        self,
+    ) -> None:
+        objective_id = "lo_attention_value_routing"
+        misconception_id = "m_attention_is_hard_selection"
+        terms = self.task.terms()
+        terms["id"] = "task_later_revoked_misconception_binding"
+        terms["criteria"][0]["concept_weights"] = [["c_attention", 1.0]]
+        terms["criteria"][0]["objective_weights"] = [
+            [objective_id, 1.0]
+        ]
+        terms["criteria"][0]["misconception_ids"] = [misconception_id]
+        task = LearningTask.from_terms(terms)
+        published = self.ledger.publish_release(
+            PerformanceTaskRelease(
+                title="Later-revoked misconception binding fixture",
+                corpus_release_id=self.corpus_release_id,
+                review=self.release.review,
+                tasks=(("pilot", task),),
+            ),
+            now=START,
+        )
+        recommendations_before = recommend_performance_tasks(
+            self.database,
+            self.session["id"],
+            limit=50,
+            now=START + timedelta(seconds=1),
+        )
+        self.assertIn(
+            task.id,
+            {
+                item["task_id"]
+                for item in recommendations_before["recommendations"]
+            },
+        )
+
+        self.engine.create_learner("fresh-after-task-revocation")
+        fresh_session = self.engine.start_session(
+            "fresh-after-task-revocation",
+            "t_transformers",
+            seed=1403,
+            now=START,
+        )
+        started = self.ledger.start_attempt(
+            self.session["id"],
+            task.id,
+            task_version=task.version,
+            task_release_id=published["release_id"],
+            idempotency_key="task-revocation-started-before",
+            now=START + timedelta(minutes=1),
+        )
+        with self.database.read() as connection:
+            supporting_rows = connection.execute(
+                """SELECT DISTINCT mapping.question_id
+                   FROM release_option_objectives mapping
+                   JOIN release_questions membership
+                     ON membership.release_id = mapping.release_id
+                    AND membership.question_id = mapping.question_id
+                   JOIN options option
+                     ON option.question_id = mapping.question_id
+                    AND option.option_id = mapping.option_id
+                   WHERE mapping.release_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                     AND mapping.objective_id = ?
+                     AND option.misconception_id = ?
+                   ORDER BY mapping.question_id""",
+                (
+                    self.corpus_release_id,
+                    objective_id,
+                    misconception_id,
+                ),
+            ).fetchall()
+        self.assertGreater(len(supporting_rows), 0)
+        for index, row in enumerate(supporting_rows):
+            self.database.revoke_question(
+                row["question_id"],
+                "Post-publication productive-task binding revocation fixture.",
+                idempotency_key=f"task-postpublish-revocation:{index}",
+            )
+
+        replay = self.ledger.start_attempt(
+            self.session["id"],
+            task.id,
+            task_version=task.version,
+            task_release_id=published["release_id"],
+            idempotency_key="task-revocation-started-before",
+            now=START + timedelta(minutes=2),
+        )
+        self.assertEqual(replay["id"], started["id"])
+        self.assertTrue(replay["idempotent_replay"])
+        recommendations_after = recommend_performance_tasks(
+            self.database,
+            fresh_session["id"],
+            limit=50,
+            now=START + timedelta(minutes=2),
+        )
+        self.assertNotIn(
+            task.id,
+            {
+                item["task_id"]
+                for item in recommendations_after["recommendations"]
+            },
+        )
+        with self.assertRaisesRegex(
+            NotFoundError, "live diagnostic mapping was withdrawn"
+        ):
+            self.ledger.start_attempt(
+                fresh_session["id"],
+                task.id,
+                task_version=task.version,
+                task_release_id=published["release_id"],
+                idempotency_key="task-revocation-fresh-start",
+                now=START + timedelta(minutes=3),
+            )
+        integrity = self.database.verify_integrity()
+        self.assertTrue(integrity["ok"], integrity["errors"])
 
     def test_direct_imported_deterministic_claim_remains_shadow(self) -> None:
         attempt = self.start()

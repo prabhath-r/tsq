@@ -522,6 +522,160 @@ class ReleaseScopedEvidenceTestCase(unittest.TestCase):
         self.assertEqual(after["calibrated_question_count"], 9)
         self.assertEqual(after["calibrated_family_count"], 9)
 
+    def test_profile_gates_objective_misconceptions_on_live_mappings(
+        self,
+    ) -> None:
+        learner_id = "live-diagnostic-mapping-learner"
+        misconception_id = "m_release_history_equals_current"
+        self.engine.create_learner(learner_id)
+        current = self.profile_now + timedelta(days=1)
+        live_question_ids: set[str] = set()
+
+        for index in range(2):
+            started_at = current + timedelta(minutes=index)
+            session = self.engine.start_session(
+                learner_id,
+                CONCEPT_ID,
+                seed=787 + index,
+                now=started_at,
+            )
+            presentation = self.engine.next_question(
+                session["id"],
+                now=started_at + timedelta(seconds=1),
+            )
+            selected = next(
+                option
+                for option in presentation.question.options
+                if option.misconception_id == misconception_id
+            )
+            live_question_ids.add(presentation.question.id)
+            self.engine.submit_answer(
+                presentation.decision_id,
+                selected.id,
+                confidence=1.0,
+                response_ms=1_000,
+                hint_count=0,
+                feedback_shown=False,
+                idempotency_key=f"live-mapping-wrong:{index}",
+                now=started_at + timedelta(seconds=2),
+            )
+            self.engine.end_session(
+                session["id"],
+                status="completed",
+                reason="live_mapping_fixture",
+                idempotency_key=f"live-mapping-end:{index}",
+                now=started_at + timedelta(seconds=3),
+            )
+
+        self.assertEqual(len(live_question_ids), 2)
+        mixed_questions = tuple(
+            replace(
+                question,
+                status=(
+                    QuestionStatus.CALIBRATED
+                    if question.id in live_question_ids
+                    else QuestionStatus.QUARANTINED
+                ),
+            )
+            for question in self.corpus[4]
+        )
+        mixed_release = self.database.import_corpus(
+            self.corpus[0],
+            self.corpus[1],
+            self.corpus[2],
+            self.corpus[3],
+            mixed_questions,
+        )["release_id"]
+        profile_at = current + timedelta(minutes=3)
+        before = self.engine.profile(
+            learner_id,
+            root_concept_id=CONCEPT_ID,
+            now=profile_at,
+        )
+        before_objective = next(
+            row
+            for row in before["learning_objectives"]
+            if row["objective_id"] == OBJECTIVE_ID
+        )
+        before_hypothesis = next(
+            row
+            for row in before["misconception_hypotheses"]
+            if row["misconception_id"] == misconception_id
+        )
+        self.assertGreaterEqual(before_hypothesis["probability"], 0.35)
+        self.assertEqual(
+            before_objective["active_misconception_probability"],
+            before_hypothesis["probability"],
+        )
+        projection_hash = self.database.learner_projection_hash(learner_id)
+
+        with self.database.read() as connection:
+            mapping_rows = connection.execute(
+                """SELECT membership.question_id, membership.status
+                   FROM release_option_objectives mapping
+                   JOIN release_questions membership
+                     ON membership.release_id = mapping.release_id
+                    AND membership.question_id = mapping.question_id
+                   JOIN options option
+                     ON option.question_id = mapping.question_id
+                    AND option.option_id = mapping.option_id
+                   WHERE mapping.release_id = ?
+                     AND mapping.objective_id = ?
+                     AND option.misconception_id = ?
+                   ORDER BY membership.question_id""",
+                (mixed_release, OBJECTIVE_ID, misconception_id),
+            ).fetchall()
+        self.assertEqual(len(mapping_rows), len(mixed_questions))
+        self.assertEqual(
+            {
+                row["question_id"]
+                for row in mapping_rows
+                if row["status"] == QuestionStatus.CALIBRATED.value
+            },
+            live_question_ids,
+        )
+        self.assertEqual(
+            sum(
+                row["status"] == QuestionStatus.QUARANTINED.value
+                for row in mapping_rows
+            ),
+            len(mixed_questions) - len(live_question_ids),
+        )
+
+        for index, question_id in enumerate(sorted(live_question_ids)):
+            self.database.revoke_question(
+                question_id,
+                "Withdraw the last live diagnostic mapping fixture.",
+                idempotency_key=f"live-mapping-revocation:{index}",
+            )
+
+        after = self.engine.profile(
+            learner_id,
+            root_concept_id=CONCEPT_ID,
+            now=profile_at,
+        )
+        after_objective = next(
+            row
+            for row in after["learning_objectives"]
+            if row["objective_id"] == OBJECTIVE_ID
+        )
+        after_hypothesis = next(
+            row
+            for row in after["misconception_hypotheses"]
+            if row["misconception_id"] == misconception_id
+        )
+        self.assertEqual(
+            after_objective["active_misconception_probability"],
+            0.0,
+        )
+        self.assertEqual(after_hypothesis, before_hypothesis)
+        self.assertIn(after_hypothesis, after["active_misconceptions"])
+        self.assertEqual(
+            self.database.learner_projection_hash(learner_id),
+            projection_hash,
+        )
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
     def test_emergency_revocation_withdraws_family_from_current_claims(
         self,
     ) -> None:
