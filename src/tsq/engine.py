@@ -4454,6 +4454,22 @@ class AdaptiveEngine:
                 if type(change) is dict
             )
 
+        def credible_verification_failure(row: Any) -> bool:
+            response_class = response_class_by_attempt[row["attempt_id"]]
+            return bool(
+                row["pedagogical_role"] == "verification"
+                and response_class.supports_failure_localization
+            )
+
+        def inconclusive_verification(row: Any) -> bool:
+            if row["pedagogical_role"] != "verification":
+                return False
+            response_class = response_class_by_attempt[row["attempt_id"]]
+            return not (
+                response_class.certifies_retrieval
+                or response_class.supports_failure_localization
+            )
+
         state_by_concept: dict[str, dict[str, float]] = {}
         state_by_objective: dict[str, dict[str, float]] = {}
         total_evidence_delta = 0.0
@@ -4502,6 +4518,8 @@ class AdaptiveEngine:
         wall_seconds = max(0.0, (ended_at - started_at).total_seconds())
         correct_count = sum(bool(row["is_correct"]) for row in answered)
         abstained = sum(row["selected_option_id"] is None for row in answered)
+        selected_answers = len(answered) - abstained
+        selected_incorrect = selected_answers - correct_count
         exploration_rows = [
             row
             for row in answered
@@ -4762,9 +4780,12 @@ class AdaptiveEngine:
                     "attempted": 0,
                     "correct": 0,
                     "abstained": 0,
+                    "selected_answers": 0,
+                    "selected_incorrect": 0,
                     "uncertain_responses": 0,
                     "remediation_questions": 0,
                     "verification_failures": 0,
+                    "verification_inconclusive": 0,
                     "missing_response_time": 0,
                     "difficulties": [],
                     "misconception_signals": Counter(),
@@ -4776,6 +4797,13 @@ class AdaptiveEngine:
             summary["attempted"] += 1
             summary["correct"] += int(bool(row["is_correct"]))
             summary["abstained"] += int(row["selected_option_id"] is None)
+            summary["selected_answers"] += int(
+                row["selected_option_id"] is not None
+            )
+            summary["selected_incorrect"] += int(
+                row["selected_option_id"] is not None
+                and not bool(row["is_correct"])
+            )
             summary["uncertain_responses"] += int(
                 response_class_by_attempt[row["attempt_id"]]
                 in {
@@ -4788,8 +4816,10 @@ class AdaptiveEngine:
                 in {"remediation_probe", "verification"}
             )
             summary["verification_failures"] += int(
-                row["pedagogical_role"] == "verification"
-                and not bool(row["is_correct"])
+                credible_verification_failure(row)
+            )
+            summary["verification_inconclusive"] += int(
+                inconclusive_verification(row)
             )
             summary["missing_response_time"] += int(
                 row["response_ms"] is None
@@ -4819,9 +4849,12 @@ class AdaptiveEngine:
                     "attempted": 0,
                     "correct": 0,
                     "abstained": 0,
+                    "selected_answers": 0,
+                    "selected_incorrect": 0,
                     "uncertain_responses": 0,
                     "remediation_questions": 0,
                     "verification_failures": 0,
+                    "verification_inconclusive": 0,
                     "missing_response_time": 0,
                     "difficulties": [],
                     "misconception_signals": Counter(),
@@ -4869,12 +4902,16 @@ class AdaptiveEngine:
             )
             attention_reasons: list[str] = []
             incorrect = observed["attempted"] - observed["correct"]
-            if incorrect:
+            if observed["selected_incorrect"]:
                 attention_reasons.append("incorrect_responses")
             if observed["uncertain_responses"]:
                 attention_reasons.append("uncertain_or_noncredible_evidence")
             if observed["verification_failures"]:
                 attention_reasons.append("failed_independent_verification")
+            if observed["verification_inconclusive"]:
+                attention_reasons.append(
+                    "inconclusive_independent_verification"
+                )
             if concept_id in boundary_concepts:
                 attention_reasons.append("selected_prerequisite_boundary")
             if any(
@@ -4902,6 +4939,16 @@ class AdaptiveEngine:
                         "correct": observed["correct"],
                         "incorrect": incorrect,
                         "abstained": observed["abstained"],
+                        "selected_answers": observed["selected_answers"],
+                        "selected_incorrect": observed[
+                            "selected_incorrect"
+                        ],
+                        "selected_accuracy": (
+                            observed["correct"]
+                            / observed["selected_answers"]
+                            if observed["selected_answers"]
+                            else None
+                        ),
                         "uncertain_responses": observed[
                             "uncertain_responses"
                         ],
@@ -4910,6 +4957,9 @@ class AdaptiveEngine:
                         ],
                         "verification_failures": observed[
                             "verification_failures"
+                        ],
+                        "verification_inconclusive": observed[
+                            "verification_inconclusive"
                         ],
                         "missing_response_time": observed[
                             "missing_response_time"
@@ -5022,9 +5072,12 @@ class AdaptiveEngine:
                     "attempted": 0,
                     "correct": 0,
                     "abstained": 0,
+                    "selected_answers": 0,
+                    "selected_incorrect": 0,
                     "uncertain_responses": 0,
                     "remediation_questions": 0,
                     "verification_failures": 0,
+                    "verification_inconclusive": 0,
                     "missing_response_time": 0,
                     "difficulties": [],
                     "observed_families": set(),
@@ -5036,6 +5089,13 @@ class AdaptiveEngine:
             observed["correct"] += int(bool(row["is_correct"]))
             observed["abstained"] += int(
                 row["selected_option_id"] is None
+            )
+            observed["selected_answers"] += int(
+                row["selected_option_id"] is not None
+            )
+            observed["selected_incorrect"] += int(
+                row["selected_option_id"] is not None
+                and not bool(row["is_correct"])
             )
             observed["uncertain_responses"] += int(
                 response_class_by_attempt[row["attempt_id"]]
@@ -5049,8 +5109,10 @@ class AdaptiveEngine:
                 in {"remediation_probe", "verification"}
             )
             observed["verification_failures"] += int(
-                row["pedagogical_role"] == "verification"
-                and not bool(row["is_correct"])
+                credible_verification_failure(row)
+            )
+            observed["verification_inconclusive"] += int(
+                inconclusive_verification(row)
             )
             observed["missing_response_time"] += int(
                 row["response_ms"] is None
@@ -5084,7 +5146,7 @@ class AdaptiveEngine:
             family_count = objective_family_counts[objective_id]
             incorrect = observed["attempted"] - observed["correct"]
             attention_reasons: list[str] = []
-            if incorrect:
+            if observed["selected_incorrect"]:
                 attention_reasons.append("incorrect_responses")
             if observed["uncertain_responses"]:
                 attention_reasons.append(
@@ -5093,6 +5155,10 @@ class AdaptiveEngine:
             if observed["verification_failures"]:
                 attention_reasons.append(
                     "failed_independent_verification"
+                )
+            if observed["verification_inconclusive"]:
+                attention_reasons.append(
+                    "inconclusive_independent_verification"
                 )
             if (
                 projected.evidence_mass > 0
@@ -5117,6 +5183,16 @@ class AdaptiveEngine:
                         "correct": observed["correct"],
                         "incorrect": incorrect,
                         "abstained": observed["abstained"],
+                        "selected_answers": observed["selected_answers"],
+                        "selected_incorrect": observed[
+                            "selected_incorrect"
+                        ],
+                        "selected_accuracy": (
+                            observed["correct"]
+                            / observed["selected_answers"]
+                            if observed["selected_answers"]
+                            else None
+                        ),
                         "uncertain_responses": observed[
                             "uncertain_responses"
                         ],
@@ -5125,6 +5201,9 @@ class AdaptiveEngine:
                         ],
                         "verification_failures": observed[
                             "verification_failures"
+                        ],
+                        "verification_inconclusive": observed[
+                            "verification_inconclusive"
                         ],
                         "missing_response_time": observed[
                             "missing_response_time"
@@ -5194,7 +5273,7 @@ class AdaptiveEngine:
         diagnostic_findings.sort(
             key=lambda row: (
                 -len(row["attention_reasons"]),
-                -row["session"]["incorrect"],
+                -row["session"]["selected_incorrect"],
                 row["current_projection"]["effective_readiness"],
                 row["name"],
             )
@@ -5259,6 +5338,50 @@ class AdaptiveEngine:
             "correct": correct_count,
             "accuracy": correct_count / len(answered) if answered else None,
             "abstained": abstained,
+            "selected_answers": selected_answers,
+            "selected_incorrect": selected_incorrect,
+            "selected_accuracy": (
+                correct_count / selected_answers
+                if selected_answers
+                else None
+            ),
+            "response_count_definitions": {
+                "questions_answered": (
+                    "Submitted responses, including explicit abstentions."
+                ),
+                "accuracy": (
+                    "Compatibility metric: correct responses divided by all "
+                    "submitted responses, including abstentions."
+                ),
+                "incorrect": (
+                    "Compatibility field in concept and objective session "
+                    "summaries: submitted responses minus correct responses, "
+                    "including abstentions."
+                ),
+                "selected_answers": (
+                    "Submitted responses with an option selected."
+                ),
+                "selected_incorrect": (
+                    "Selected answers that were not correct; abstentions are "
+                    "excluded."
+                ),
+                "selected_accuracy": (
+                    "Correct selected answers divided by selected answers; "
+                    "null when no option was selected."
+                ),
+            },
+            "verification_evidence_definitions": {
+                "verification_failures": (
+                    "Independent verification responses that credibly support "
+                    "failure localization under their immutable response-model "
+                    "contract."
+                ),
+                "verification_inconclusive": (
+                    "Independent verification responses that neither certify "
+                    "retrieval nor credibly localize failure, including "
+                    "abstentions and low-credibility responses."
+                ),
+            },
             "unique_families": len({row["family_id"] for row in answered}),
             "unique_concepts": len(
                 {row["primary_concept_id"] for row in answered}

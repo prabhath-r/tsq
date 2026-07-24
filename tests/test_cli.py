@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tsq.authoring import CoveragePlanner
-from tsq.cli import build_parser, main
+from tsq.cli import _print_compact_study_completion, build_parser, main
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError
@@ -149,6 +149,221 @@ class CliJourneyTestCase(unittest.TestCase):
                 ]
             ).ask_confidence
         )
+        self.assertFalse(parser.parse_args(["start"]).details)
+        self.assertTrue(parser.parse_args(["start", "--details"]).details)
+        self.assertFalse(
+            parser.parse_args(
+                ["study", "--learner", "me", "--topic", "Transformers"]
+            ).details
+        )
+        self.assertTrue(
+            parser.parse_args(
+                [
+                    "study",
+                    "--learner",
+                    "me",
+                    "--topic",
+                    "Transformers",
+                    "--details",
+                ]
+            ).details
+        )
+
+    def test_interactive_abstention_skips_confidence_and_is_neutral(self) -> None:
+        prompts: list[str] = []
+
+        def answer(prompt: str) -> str:
+            prompts.append(prompt)
+            if prompt == "answer> ":
+                return "?"
+            self.fail(f"Unexpected prompt after abstention: {prompt}")
+
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch("builtins.input", side_effect=answer), redirect_stdout(
+            output
+        ), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "study",
+                    "--learner",
+                    "cli-abstention",
+                    "--topic",
+                    "LLM Agents",
+                    "--limit",
+                    "1",
+                    "--seed",
+                    "17",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0, error.getvalue())
+        self.assertEqual(prompts, ["answer> "])
+        rendered = output.getvalue()
+        self.assertIn("— Skipped — you chose 'I do not know'", rendered)
+        self.assertNotIn("✗ Not correct", rendered)
+        self.assertIn("[PRACTICE]", rendered)
+        self.assertNotIn("[LEARN]", rendered)
+        self.assertIn("Session evidence:", rendered)
+        self.assertIn("0 selected answers · 1 skipped", rendered)
+        self.assertIn("1 completed · 0 correct · 0 incorrect · 1 skipped", rendered)
+        self.assertIn(
+            "Evidence recorded for: Apply tool authorization boundaries",
+            rendered,
+        )
+        self.assertIn(
+            "Next focus: Apply tool authorization boundaries",
+            rendered,
+        )
+        self.assertNotIn("Objective projection:", rendered)
+        self.assertNotIn("(lo_", rendered)
+        self.assertNotIn("marked unsure", rendered)
+        self.assertNotIn("`tsq session report", rendered)
+        self.assertIn("in the same database", rendered)
+        self.assertIn("provisional session signals", rendered)
+        self.assertNotIn("fine-grained objective evidence:", rendered)
+        self.assertNotIn(
+            "fine-grained selected-response evidence:",
+            rendered,
+        )
+        self.assertNotIn("Assessed selected-response objectives:", rendered)
+        with self.database.read() as connection:
+            attempt = connection.execute(
+                """SELECT selected_option_id, confidence
+                   FROM attempts
+                   WHERE learner_id = 'cli-abstention'"""
+            ).fetchone()
+        self.assertIsNotNone(attempt)
+        self.assertIsNone(attempt["selected_option_id"])
+        self.assertIsNone(attempt["confidence"])
+
+    def test_interactive_selected_answer_still_requests_confidence(self) -> None:
+        prompts: list[str] = []
+        responses = iter(("1", ""))
+
+        def answer(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(responses)
+
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch("builtins.input", side_effect=answer), redirect_stdout(
+            output
+        ), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "study",
+                    "--learner",
+                    "cli-selected",
+                    "--topic",
+                    "LLM Agents",
+                    "--limit",
+                    "1",
+                    "--seed",
+                    "18",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0, error.getvalue())
+        self.assertEqual(
+            prompts,
+            [
+                "answer> ",
+                "confidence 0-100 (blank to skip)> ",
+            ],
+        )
+        with self.database.read() as connection:
+            attempt = connection.execute(
+                """SELECT selected_option_id, confidence
+                   FROM attempts WHERE learner_id = 'cli-selected'"""
+            ).fetchone()
+        self.assertIsNotNone(attempt["selected_option_id"])
+        self.assertIsNone(attempt["confidence"])
+
+    def test_interactive_details_preserve_internal_explanations(self) -> None:
+        output = io.StringIO()
+        error = io.StringIO()
+        with patch("builtins.input", return_value="?"), redirect_stdout(
+            output
+        ), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "study",
+                    "--learner",
+                    "cli-details",
+                    "--topic",
+                    "LLM Agents",
+                    "--limit",
+                    "1",
+                    "--seed",
+                    "19",
+                    "--explain-policy",
+                    "--details",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0, error.getvalue())
+        rendered = output.getvalue()
+        self.assertIn("policy: phase=", rendered)
+        self.assertIn("pedagogical_role=main", rendered)
+        self.assertIn("objective internals: id=", rendered)
+        self.assertIn("Objective projection:", rendered)
+        self.assertIn("Next probe objective:", rendered)
+        self.assertIn("inference boundary:", rendered)
+        self.assertIn("1 completed · 0 correct · 0 incorrect · 1 skipped", rendered)
+        self.assertIn("fine-grained selected-response evidence:", rendered)
+        self.assertIn("0 selected answers · 1 skipped", rendered)
+        self.assertIn("Learner: cli-details", rendered)
+
+    def test_compact_summary_separates_mixed_selected_answers_and_skips(
+        self,
+    ) -> None:
+        report = {
+            "session_id": "ses_mixed",
+            "topic": {"id": "t_example", "name": "Example"},
+            "root_concept_id": "c_example",
+            "status": "completed",
+            "questions_answered": 10,
+            "correct": 1,
+            "selected_answers": 3,
+            "selected_incorrect": 2,
+            "selected_accuracy": 1 / 3,
+            "abstained": 7,
+            "remediation_questions": 2,
+            "objective_performance": [
+                {
+                    "name": "Example objective",
+                    "session": {
+                        "correct": 1,
+                        "selected_answers": 3,
+                        "abstained": 7,
+                    },
+                }
+            ],
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            _print_compact_study_completion(report)
+        rendered = output.getvalue()
+        self.assertIn(
+            "10 completed · 1 correct · 2 incorrect · 7 skipped",
+            rendered,
+        )
+        self.assertIn(
+            "Among selected answers: 1/3 correct (33.3%)",
+            rendered,
+        )
+        self.assertIn(
+            "Example objective: 1/3 selected answers correct · 7 skipped",
+            rendered,
+        )
+        self.assertIn("For full evidence on future sessions", rendered)
 
     def test_session_list_recovers_history_with_filters_and_stable_order(self) -> None:
         engine = AdaptiveEngine(self.database)
@@ -193,6 +408,9 @@ class CliJourneyTestCase(unittest.TestCase):
         self.assertEqual(by_id[completed["id"]]["questions_answered"], 1)
         self.assertEqual(by_id[completed["id"]]["correct"], 1)
         self.assertEqual(by_id[completed["id"]]["accuracy"], 1.0)
+        self.assertEqual(by_id[completed["id"]]["selected_answers"], 1)
+        self.assertEqual(by_id[completed["id"]]["selected_incorrect"], 0)
+        self.assertEqual(by_id[completed["id"]]["selected_accuracy"], 1.0)
         self.assertEqual(by_id[active["id"]]["target_name"], "LLM Agents")
         self.assertNotIn(other["id"], by_id)
 
@@ -251,6 +469,7 @@ class CliJourneyTestCase(unittest.TestCase):
         second = self.run_json(*arguments)
 
         self.assertTrue(first["correct"])
+        self.assertEqual(first["outcome"], "correct")
         self.assertTrue(second["idempotent_replay"])
         self.assertEqual(second["interaction_id"], first["interaction_id"])
         with self.database.read() as connection:
@@ -273,6 +492,122 @@ class CliJourneyTestCase(unittest.TestCase):
             len(json.loads(actions[0]["payload_json"])["feedback_digest"]),
             64,
         )
+
+        next_presentation = engine.next_question(session["id"])
+        wrong_option = next(
+            option
+            for option in next_presentation.question.options
+            if not option.correct
+        )
+        incorrect = self.run_json(
+            "answer",
+            next_presentation.decision_id,
+            wrong_option.id,
+            "--confidence",
+            "0.9",
+            "--response-ms",
+            "0",
+            "--idempotency-key",
+            "cli-feedback-incorrect",
+        )
+        self.assertFalse(incorrect["correct"])
+        self.assertEqual(incorrect["outcome"], "incorrect")
+
+    def test_answer_command_preserves_abstention_as_a_distinct_outcome(self) -> None:
+        engine = AdaptiveEngine(self.database)
+        engine.create_learner("answer-abstention")
+        session = engine.start_session(
+            "answer-abstention", "LLM Agents", seed=23
+        )
+        presentation = engine.next_question(session["id"])
+
+        payload = self.run_json(
+            "answer",
+            presentation.decision_id,
+            "?",
+            "--confidence",
+            "0.99",
+            "--response-ms",
+            "0",
+            "--idempotency-key",
+            "answer-abstention-json",
+        )
+
+        self.assertEqual(payload["outcome"], "abstained")
+        self.assertFalse(payload["correct"])
+        self.assertIsNone(payload["selected_option_id"])
+        with self.database.read() as connection:
+            attempt = connection.execute(
+                """SELECT selected_option_id, confidence
+                   FROM attempts WHERE decision_id = ?""",
+                (presentation.decision_id,),
+            ).fetchone()
+        self.assertIsNotNone(attempt)
+        self.assertIsNone(attempt["selected_option_id"])
+        self.assertIsNone(attempt["confidence"])
+
+        second = engine.next_question(session["id"])
+        output = io.StringIO()
+        error = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "answer",
+                    second.decision_id,
+                    "unknown",
+                    "--confidence",
+                    "0.75",
+                    "--response-ms",
+                    "0",
+                    "--idempotency-key",
+                    "answer-abstention-text",
+                ]
+            )
+        self.assertEqual(exit_code, 0, error.getvalue())
+        rendered = output.getvalue()
+        self.assertIn("Skipped — you chose 'I do not know'.", rendered)
+        self.assertNotIn("Not correct.", rendered)
+
+    def test_answer_command_replays_legacy_abstention_confidence(self) -> None:
+        engine = AdaptiveEngine(self.database)
+        engine.create_learner("legacy-abstention")
+        session = engine.start_session(
+            "legacy-abstention", "LLM Agents", seed=29
+        )
+        presentation = engine.next_question(session["id"])
+        original = engine.submit_answer(
+            presentation.decision_id,
+            None,
+            confidence=0.99,
+            response_ms=0,
+            feedback_shown=False,
+            idempotency_key="legacy-abstention-retry",
+        )
+
+        replay = self.run_json(
+            "answer",
+            presentation.decision_id,
+            "?",
+            "--confidence",
+            "0.99",
+            "--response-ms",
+            "0",
+            "--idempotency-key",
+            "legacy-abstention-retry",
+        )
+
+        self.assertEqual(replay["outcome"], "abstained")
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(replay["interaction_id"], original.interaction_id)
+        with self.database.read() as connection:
+            attempt = connection.execute(
+                """SELECT confidence FROM attempts
+                   WHERE decision_id = ?""",
+                (presentation.decision_id,),
+            ).fetchone()
+        self.assertEqual(attempt["confidence"], 0.99)
 
     def test_topics_distinguish_graph_concepts_from_learning_objectives(self) -> None:
         catalog = self.run_json("topics")

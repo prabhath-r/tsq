@@ -355,6 +355,201 @@ class SessionReportingTests(unittest.TestCase):
             self.assertEqual(report["topic"]["id"], "t_large_language_models")
             self.assertEqual(report["outside_requested_topic_questions"], 0)
 
+    def test_abstention_is_not_reported_as_selected_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "report.db")
+            database.initialize()
+            database.import_corpus(
+                *read_and_parse(CORPUS, include_catalog=True)
+            )
+            engine = AdaptiveEngine(database)
+            learner_id = "abstention-reporting"
+            engine.create_learner(learner_id)
+            session = engine.start_session(
+                learner_id,
+                "c_agent_tool_use",
+                seed=0,
+                now=START,
+            )
+            presentation = engine.next_question(session["id"], now=START)
+            engine.submit_answer(
+                presentation.decision_id,
+                None,
+                confidence=0.20,
+                response_ms=4_000,
+                hint_count=0,
+                now=START + timedelta(seconds=4),
+            )
+
+            report = engine.session_report(
+                session["id"], now=START + timedelta(seconds=4)
+            )
+
+        self.assertEqual(report["questions_answered"], 1)
+        self.assertEqual(report["correct"], 0)
+        self.assertEqual(report["accuracy"], 0.0)
+        self.assertEqual(report["abstained"], 1)
+        self.assertEqual(report["selected_answers"], 0)
+        self.assertEqual(report["selected_incorrect"], 0)
+        self.assertIsNone(report["selected_accuracy"])
+        self.assertIn(
+            "including abstentions",
+            report["response_count_definitions"]["accuracy"],
+        )
+        objective = next(
+            row
+            for row in report["objective_performance"]
+            if row["objective_id"] == presentation.question.objective_id
+        )
+        concept = next(
+            row
+            for row in report["concept_performance"]
+            if row["concept_id"]
+            == presentation.question.primary_concept_id
+        )
+        for observed in (objective, concept):
+            session_counts = observed["session"]
+            # The compatibility count remains one non-correct submission.
+            self.assertEqual(session_counts["incorrect"], 1)
+            self.assertEqual(session_counts["abstained"], 1)
+            self.assertEqual(session_counts["selected_answers"], 0)
+            self.assertEqual(session_counts["selected_incorrect"], 0)
+            self.assertIsNone(session_counts["selected_accuracy"])
+            self.assertEqual(session_counts["verification_failures"], 0)
+            self.assertEqual(
+                session_counts["verification_inconclusive"], 0
+            )
+            self.assertNotIn(
+                "incorrect_responses", observed["attention_reasons"]
+            )
+            self.assertNotIn(
+                "failed_independent_verification",
+                observed["attention_reasons"],
+            )
+            self.assertIn(
+                "uncertain_or_noncredible_evidence",
+                observed["attention_reasons"],
+            )
+
+    def test_verification_reports_credible_failure_or_inconclusive_evidence(
+        self,
+    ) -> None:
+        cases = (
+            ("abstained", None, 0.20, 0, 1, False),
+            ("low-credibility", "wrong", 0.20, 0, 1, False),
+            ("credible-failure", "wrong", 0.90, 1, 0, True),
+        )
+        for (
+            label,
+            selection,
+            confidence,
+            expected_failures,
+            expected_inconclusive,
+            expects_failed_reason,
+        ) in cases:
+            with (
+                self.subTest(label=label),
+                tempfile.TemporaryDirectory() as directory,
+            ):
+                database = Database(Path(directory) / "report.db")
+                database.initialize()
+                database.import_corpus(
+                    *read_and_parse(CORPUS, include_catalog=True)
+                )
+                engine = AdaptiveEngine(database)
+                learner_id = f"verification-{label}"
+                engine.create_learner(learner_id)
+                session = engine.start_session(
+                    learner_id,
+                    "c_agent_tool_use",
+                    seed=313,
+                    now=START,
+                )
+                first = engine.next_question(session["id"], now=START)
+                engine.submit_answer(
+                    first.decision_id,
+                    first.question.correct_option.id,
+                    confidence=0.95,
+                    response_ms=0,
+                    hint_count=0,
+                    now=START + timedelta(seconds=1),
+                )
+                verification = engine.next_question(
+                    session["id"], now=START + timedelta(seconds=2)
+                )
+                self.assertEqual(
+                    verification.pedagogical_role, "verification"
+                )
+                self.assertEqual(
+                    verification.question.objective_id,
+                    first.question.objective_id,
+                )
+                selected_option_id = None
+                if selection == "wrong":
+                    selected_option_id = next(
+                        option.id
+                        for option in verification.question.options
+                        if not option.correct
+                    )
+                engine.submit_answer(
+                    verification.decision_id,
+                    selected_option_id,
+                    confidence=confidence,
+                    response_ms=900,
+                    hint_count=0,
+                    now=START + timedelta(seconds=3),
+                )
+
+                report = engine.session_report(
+                    session["id"], now=START + timedelta(seconds=3)
+                )
+
+                objective = next(
+                    row
+                    for row in report["objective_performance"]
+                    if row["objective_id"] == first.question.objective_id
+                )
+                concept = next(
+                    row
+                    for row in report["concept_performance"]
+                    if row["concept_id"]
+                    == first.question.primary_concept_id
+                )
+                for observed in (objective, concept):
+                    session_counts = observed["session"]
+                    self.assertEqual(
+                        session_counts["verification_failures"],
+                        expected_failures,
+                    )
+                    self.assertEqual(
+                        session_counts["verification_inconclusive"],
+                        expected_inconclusive,
+                    )
+                    self.assertEqual(
+                        "failed_independent_verification"
+                        in observed["attention_reasons"],
+                        expects_failed_reason,
+                    )
+                    self.assertEqual(
+                        "inconclusive_independent_verification"
+                        in observed["attention_reasons"],
+                        bool(expected_inconclusive),
+                    )
+                if label == "abstained":
+                    self.assertEqual(report["accuracy"], 0.5)
+                    self.assertEqual(report["selected_answers"], 1)
+                    self.assertEqual(report["selected_incorrect"], 0)
+                    self.assertEqual(report["selected_accuracy"], 1.0)
+                    for observed in (objective, concept):
+                        self.assertNotIn(
+                            "incorrect_responses",
+                            observed["attention_reasons"],
+                        )
+                elif label == "low-credibility":
+                    self.assertEqual(report["selected_answers"], 2)
+                    self.assertEqual(report["selected_incorrect"], 1)
+                    self.assertEqual(report["selected_accuracy"], 0.5)
+
     def test_wrong_family_is_reported_as_observed_not_successful(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database = Database(Path(directory) / "report.db")

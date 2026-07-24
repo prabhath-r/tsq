@@ -108,6 +108,25 @@ python experiments/learner_runtime_lab.py \
 It fingerprints the configured protected database before and after the run and
 fails if that database changes. Temporary benchmark copies are destroyed.
 
+The cold-start laboratory measures what fresh learners are actually served
+across broad LLM, Transformers, and LLM Agents topics. It uses deterministic
+credible-correct, credible-wrong, and explicit-abstention profiles, records
+authored difficulty, predicted success, objective depth, prerequisite descent,
+deliberate exploration, and categorized gap termination, then repeats the
+complete run on a second disposable database. Replication compares both the
+full stable behavior trace and learner-projection semantics:
+
+```sh
+python experiments/cold_start_lab.py
+```
+
+Its ignored artifact juxtaposes static inventory with routed traces to help
+distinguish corpus scarcity from routing behavior without retuning the policy.
+It does not capture every ranked candidate at each step, so this is diagnostic
+rather than causal attribution. Difficulty and predicted success remain
+uncalibrated diagnostics; the laboratory is not human ability or efficacy
+evidence.
+
 The objective-discovery laboratory asks the production policy to identify one
 stark, objective-localized weakness over several 45-day-spaced sessions. It
 checks localization, unrelated-objective separation, exact projection replay,
