@@ -68,6 +68,13 @@ class PolicyShadowComparisonLabTests(unittest.TestCase):
             signature["invariants"]["one_decision_per_fresh_learner"]
         )
         self.assertTrue(signature["invariants"]["all_profiles_observed"])
+        self.assertTrue(
+            signature["invariants"]["all_declared_phases_observed"]
+        )
+        self.assertEqual(
+            sorted(signature["stratified"]["phases"]),
+            ["diagnose", "learn", "review"],
+        )
         self.assertEqual(
             signature["assessments"]["uniform_safe_frontier_ips"][
                 "assessment"
@@ -88,6 +95,14 @@ class PolicyShadowComparisonLabTests(unittest.TestCase):
         self.assertEqual(
             assessment["assessment"],
             "not_falsified_within_predeclared_bound",
+        )
+        findings = result["stable_signature"]["findings"]
+        self.assertEqual(
+            len(findings["underpowered_greedy_profile_ids"]), 6
+        )
+        self.assertEqual(
+            findings["underpowered_greedy_phases"],
+            ["diagnose", "learn", "review"],
         )
 
 
