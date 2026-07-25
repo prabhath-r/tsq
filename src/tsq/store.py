@@ -108,7 +108,7 @@ from .versions import (
 )
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX = (
     "performance-score-claim:v1:"
 )
@@ -151,6 +151,7 @@ CURRENT_SCHEMA_TABLES = frozenset(
         "performance_actions",
         "performance_attempts",
         "performance_scoring_claims",
+        "policy_shadow_evaluations",
         "performance_task_releases",
         "performance_tasks",
         "question_concepts",
@@ -989,6 +990,62 @@ CREATE INDEX IF NOT EXISTS idx_decisions_pending ON decisions(session_id, consum
 CREATE INDEX IF NOT EXISTS idx_decisions_learner_question
 ON decisions(learner_id, question_id, created_at);
 
+CREATE TABLE IF NOT EXISTS policy_shadow_evaluations (
+    id TEXT PRIMARY KEY,
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    decision_id TEXT NOT NULL REFERENCES decisions(id),
+    challenger_policy_version TEXT NOT NULL
+        CHECK(length(trim(challenger_policy_version)) > 0),
+    challenger_definition_digest TEXT NOT NULL CHECK(
+        length(challenger_definition_digest) = 64
+        AND challenger_definition_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    logging_policy_version TEXT NOT NULL
+        CHECK(length(trim(logging_policy_version)) > 0),
+    learner_model_version TEXT NOT NULL
+        CHECK(length(trim(learner_model_version)) > 0),
+    corpus_release_id TEXT NOT NULL REFERENCES corpus_releases(id),
+    candidate_count INTEGER NOT NULL CHECK(candidate_count > 0),
+    candidate_digest TEXT NOT NULL CHECK(
+        length(candidate_digest) = 64
+        AND candidate_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    frontier_json TEXT NOT NULL CHECK(
+        length(frontier_json) <= 1048576
+        AND json_valid(frontier_json)
+        AND json_type(frontier_json) = 'array'
+        AND json_array_length(frontier_json) = min(5, candidate_count)
+    ),
+    frontier_digest TEXT NOT NULL CHECK(
+        length(frontier_digest) = 64
+        AND frontier_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    input_digest TEXT NOT NULL CHECK(
+        length(input_digest) = 64
+        AND input_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    output_digest TEXT NOT NULL CHECK(
+        length(output_digest) = 64
+        AND output_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    live_question_id TEXT NOT NULL REFERENCES questions(id),
+    challenger_question_id TEXT NOT NULL REFERENCES questions(id),
+    agreement INTEGER NOT NULL CHECK(
+        agreement IN (0, 1)
+        AND agreement = (live_question_id = challenger_question_id)
+    ),
+    evaluated_at TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    shadow_only INTEGER NOT NULL DEFAULT 1 CHECK(shadow_only = 1),
+    selection_applied INTEGER NOT NULL DEFAULT 0 CHECK(selection_applied = 0),
+    mastery_applied INTEGER NOT NULL DEFAULT 0 CHECK(mastery_applied = 0),
+    UNIQUE(
+        decision_id,
+        challenger_policy_version,
+        challenger_definition_digest
+    )
+);
+
 CREATE TABLE IF NOT EXISTS attempts (
     id TEXT PRIMARY KEY,
     event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
@@ -1440,6 +1497,229 @@ END;
 CREATE TRIGGER IF NOT EXISTS events_no_delete
 BEFORE DELETE ON events BEGIN
     SELECT RAISE(ABORT, 'events are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS policy_shadow_evaluations_validate_insert
+BEFORE INSERT ON policy_shadow_evaluations BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1
+        FROM json_each(NEW.frontier_json) candidate
+        WHERE json_type(candidate.value) != 'object'
+           OR json_type(candidate.value, '$.question_id') != 'text'
+    ) THEN RAISE(
+        ABORT, 'policy shadow frontier must contain identified candidate objects'
+    ) END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.frontier_json) candidate
+        WHERE json_extract(candidate.value, '$.question_id') =
+              NEW.live_question_id
+    ) THEN RAISE(
+        ABORT, 'policy shadow frontier omits the live question'
+    ) END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM json_each(NEW.frontier_json) candidate
+        WHERE json_extract(candidate.value, '$.question_id') =
+              NEW.challenger_question_id
+    ) THEN RAISE(
+        ABORT, 'policy shadow frontier omits the challenger question'
+    ) END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM decisions decision
+        JOIN sessions session ON session.id = decision.session_id
+        JOIN events shadow_event ON shadow_event.event_id = NEW.event_id
+        JOIN events selection_event
+          ON selection_event.event_id = shadow_event.causation_id
+        WHERE decision.id = NEW.decision_id
+          AND session.learner_id = decision.learner_id
+          AND decision.policy_version = NEW.logging_policy_version
+          AND decision.corpus_release_id = NEW.corpus_release_id
+          AND decision.candidate_count = NEW.candidate_count
+          AND decision.candidate_digest = NEW.candidate_digest
+          AND decision.question_id = NEW.live_question_id
+          AND decision.propensity = (
+              SELECT json_extract(
+                  candidate.value, '$.logging_probability'
+              )
+              FROM json_each(NEW.frontier_json) candidate
+              WHERE json_extract(
+                  candidate.value, '$.question_id'
+              ) = NEW.live_question_id
+          )
+          AND json(decision.selected_score_json) = (
+              SELECT json_remove(
+                  candidate.value,
+                  '$.question_id',
+                  '$.logging_probability'
+              )
+              FROM json_each(NEW.frontier_json) candidate
+              WHERE json_extract(
+                  candidate.value, '$.question_id'
+              ) = NEW.live_question_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM json_each(NEW.frontier_json) shadow_candidate
+              LEFT JOIN json_each(
+                  decision.top_candidates_json
+              ) logged_candidate
+                ON logged_candidate.key = shadow_candidate.key
+              WHERE json_extract(
+                        shadow_candidate.value, '$.question_id'
+                    ) IS NOT json_extract(
+                        logged_candidate.value, '$.question_id'
+                    )
+          )
+          AND shadow_event.event_type = 'PolicyShadowEvaluated'
+          AND shadow_event.schema_version = 1
+          AND shadow_event.stream_id =
+              'learner:' || decision.learner_id
+          AND shadow_event.learner_id = decision.learner_id
+          AND shadow_event.session_id = decision.session_id
+          AND shadow_event.correlation_id = NEW.decision_id
+          AND shadow_event.idempotency_key =
+              'policy-shadow:v1:' || NEW.decision_id || ':' ||
+              NEW.challenger_definition_digest
+          AND shadow_event.occurred_at = NEW.evaluated_at
+          AND shadow_event.recorded_at = NEW.recorded_at
+          AND selection_event.event_type = 'QuestionSelected'
+          AND selection_event.stream_id = shadow_event.stream_id
+          AND selection_event.learner_id = shadow_event.learner_id
+          AND selection_event.session_id = shadow_event.session_id
+          AND selection_event.stream_version + 1 =
+              shadow_event.stream_version
+          AND selection_event.occurred_at = shadow_event.occurred_at
+          AND json_extract(
+              selection_event.payload_json, '$.decision_id'
+          ) = NEW.decision_id
+          AND json_extract(
+              selection_event.payload_json, '$.question_id'
+          ) = NEW.live_question_id
+          AND json_extract(
+              selection_event.payload_json, '$.candidate_count'
+          ) = NEW.candidate_count
+          AND json_extract(
+              selection_event.payload_json, '$.candidate_digest'
+          ) = NEW.candidate_digest
+          AND json_extract(
+              selection_event.payload_json, '$.propensity'
+          ) = decision.propensity
+          AND json_extract(
+              selection_event.payload_json, '$.score'
+          ) = json(decision.selected_score_json)
+          AND json_extract(
+              selection_event.metadata_json, '$.policy_version'
+          ) = NEW.logging_policy_version
+          AND json_extract(
+              selection_event.metadata_json, '$.learner_model_version'
+          ) = NEW.learner_model_version
+          AND json_extract(
+              selection_event.metadata_json, '$.corpus_release_id'
+          ) = NEW.corpus_release_id
+          AND json_type(shadow_event.payload_json) = 'object'
+          AND (
+              SELECT COUNT(*) FROM json_each(shadow_event.payload_json)
+          ) = 20
+          AND json_extract(
+              shadow_event.payload_json, '$.evaluation_id'
+          ) = NEW.id
+          AND json_extract(
+              shadow_event.payload_json, '$.decision_id'
+          ) = NEW.decision_id
+          AND json_extract(
+              shadow_event.payload_json, '$.challenger_policy_version'
+          ) = NEW.challenger_policy_version
+          AND json_extract(
+              shadow_event.payload_json, '$.challenger_definition_digest'
+          ) = NEW.challenger_definition_digest
+          AND json_extract(
+              shadow_event.payload_json, '$.logging_policy_version'
+          ) = NEW.logging_policy_version
+          AND json_extract(
+              shadow_event.payload_json, '$.learner_model_version'
+          ) = NEW.learner_model_version
+          AND json_extract(
+              shadow_event.payload_json, '$.corpus_release_id'
+          ) = NEW.corpus_release_id
+          AND json_type(
+              shadow_event.payload_json, '$.candidate_count'
+          ) = 'integer'
+          AND json_extract(
+              shadow_event.payload_json, '$.candidate_count'
+          ) = NEW.candidate_count
+          AND json_extract(
+              shadow_event.payload_json, '$.candidate_digest'
+          ) = NEW.candidate_digest
+          AND json_type(
+              shadow_event.payload_json, '$.frontier'
+          ) = 'array'
+          AND json_extract(
+              shadow_event.payload_json, '$.frontier'
+          ) = json(NEW.frontier_json)
+          AND json_extract(
+              shadow_event.payload_json, '$.frontier_digest'
+          ) = NEW.frontier_digest
+          AND json_extract(
+              shadow_event.payload_json, '$.input_digest'
+          ) = NEW.input_digest
+          AND json_extract(
+              shadow_event.payload_json, '$.output_digest'
+          ) = NEW.output_digest
+          AND json_extract(
+              shadow_event.payload_json, '$.live_question_id'
+          ) = NEW.live_question_id
+          AND json_extract(
+              shadow_event.payload_json, '$.challenger_question_id'
+          ) = NEW.challenger_question_id
+          AND json_type(
+              shadow_event.payload_json, '$.agreement'
+          ) = CASE NEW.agreement WHEN 1 THEN 'true' ELSE 'false' END
+          AND json_extract(
+              shadow_event.payload_json, '$.agreement'
+          ) = NEW.agreement
+          AND json_extract(
+              shadow_event.payload_json, '$.evaluated_at'
+          ) = NEW.evaluated_at
+          AND json_type(
+              shadow_event.payload_json, '$.shadow_only'
+          ) = 'true'
+          AND json_type(
+              shadow_event.payload_json, '$.selection_applied'
+          ) = 'false'
+          AND json_type(
+              shadow_event.payload_json, '$.mastery_applied'
+          ) = 'false'
+          AND json_type(shadow_event.metadata_json) = 'object'
+          AND (
+              SELECT COUNT(*) FROM json_each(shadow_event.metadata_json)
+          ) = 4
+          AND json_extract(
+              shadow_event.metadata_json, '$.shadow_contract_version'
+          ) = 'policy-shadow-v1'
+          AND json_type(
+              shadow_event.metadata_json, '$.shadow_only'
+          ) = 'true'
+          AND json_type(
+              shadow_event.metadata_json, '$.selection_applied'
+          ) = 'false'
+          AND json_type(
+              shadow_event.metadata_json, '$.mastery_applied'
+          ) = 'false'
+    ) THEN RAISE(
+        ABORT, 'policy shadow evaluation does not match its decision/event'
+    ) END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS policy_shadow_evaluations_no_update
+BEFORE UPDATE ON policy_shadow_evaluations BEGIN
+    SELECT RAISE(ABORT, 'policy shadow evaluations are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS policy_shadow_evaluations_no_delete
+BEFORE DELETE ON policy_shadow_evaluations BEGIN
+    SELECT RAISE(ABORT, 'policy shadow evaluations are immutable');
 END;
 
 CREATE TRIGGER IF NOT EXISTS attempts_validate_insert
@@ -2462,6 +2742,35 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         connection.close()
 
 
+_POLICY_SHADOW_TABLE = "policy_shadow_evaluations"
+_POLICY_SHADOW_TRIGGER_NAMES = frozenset(
+    {
+        "policy_shadow_evaluations_validate_insert",
+        "policy_shadow_evaluations_no_update",
+        "policy_shadow_evaluations_no_delete",
+    }
+)
+
+
+@lru_cache(maxsize=1)
+def _expected_v17_schema_contract() -> _CurrentSchemaContract:
+    """Return the one exact v17 structure accepted as a migration source."""
+
+    current = _expected_current_schema_contract()
+    return _CurrentSchemaContract(
+        tables=tuple(
+            table
+            for table in current.tables
+            if table.name != _POLICY_SHADOW_TABLE
+        ),
+        triggers=tuple(
+            trigger
+            for trigger in current.triggers
+            if trigger[0] not in _POLICY_SHADOW_TRIGGER_NAMES
+        ),
+    )
+
+
 _CURRENT_CLAIM_SESSION_TRIGGER_FRAGMENT = (
     "and ( ( claim_event.event_type = 'PerformanceScoringClaimed' "
     "and claim_event.session_id = attempt.session_id ) or ( "
@@ -2478,7 +2787,7 @@ _V16_CLAIM_SESSION_TRIGGER_FRAGMENT = (
 def _expected_v16_schema_contract() -> _CurrentSchemaContract:
     """Return the one exact v16 structure accepted as a migration source."""
 
-    current = _expected_current_schema_contract()
+    current = _expected_v17_schema_contract()
     triggers: list[tuple[str, str, str]] = []
     replaced = False
     for name, table, sql in current.triggers:
@@ -3011,7 +3320,16 @@ class Database:
                             )
                             self._enforce_historical_generated_safety()
                             return
-                        if existing_version == 16:
+                        if existing_version == 17:
+                            actual_v17 = _capture_current_schema_contract(
+                                existing_connection
+                            )
+                            if actual_v17 != _expected_v17_schema_contract():
+                                raise ConflictError(
+                                    "Schema v17 structure is not the exact "
+                                    "supported v18 migration source."
+                                )
+                        elif existing_version == 16:
                             actual_v16 = _capture_current_schema_contract(
                                 existing_connection
                             )
@@ -3127,7 +3445,16 @@ class Database:
                 raise ConflictError(
                     f"Database schema is {current_version}; engine expects at most {SCHEMA_VERSION}."
                 )
-            if current_version == 16:
+            if current_version == 17:
+                if (
+                    _capture_current_schema_contract(connection)
+                    != _expected_v17_schema_contract()
+                ):
+                    raise ConflictError(
+                        "Schema v17 structure is not the exact supported "
+                        "v18 migration source."
+                    )
+            elif current_version == 16:
                 if (
                     _capture_current_schema_contract(connection)
                     != _expected_v16_schema_contract()
@@ -3222,6 +3549,11 @@ class Database:
             if current_version < 17:
                 self._migrate_v16_to_v17(connection)
                 current_version = 17
+            # v18 installs an empty event-backed policy-shadow projection.
+            # Historical choices are not assigned synthetic challenger results.
+            if current_version < 18:
+                self._migrate_v17_to_v18(connection)
+                current_version = 18
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -5343,6 +5675,81 @@ class Database:
         # they precede a later SessionEnded (or the session is still active).
         # New v15/v14 migrations already emit unbound observations.
         cls._validate_v16_migration_lifecycle(connection)
+
+    @staticmethod
+    def _migrate_v17_to_v18(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Install an empty prospective policy-shadow projection."""
+
+        # DDL creates the guarded projection before version dispatch. Historical
+        # decisions do not identify counterfactual challenger actions, so this
+        # migration must never backfill them or invent matching history.
+        projected = connection.execute(
+            "SELECT 1 FROM policy_shadow_evaluations LIMIT 1"
+        ).fetchone()
+        if projected is not None:
+            raise ConflictError(
+                "Schema v18 policy-shadow migration requires an empty "
+                "projection."
+            )
+        historical_event = connection.execute(
+            """SELECT event_id FROM events
+               WHERE event_type='PolicyShadowEvaluated'
+               ORDER BY event_id LIMIT 1"""
+        ).fetchone()
+        if historical_event is not None:
+            raise ConflictError(
+                "Schema v17 contains a PolicyShadowEvaluated event without an "
+                "event-backed projection; explicit repair is required before "
+                f"v18 ({historical_event['event_id']})."
+            )
+        shadow_required_decision = connection.execute(
+            """SELECT id FROM decisions
+               WHERE policy_version='recursive-evidence-graph-v18'
+               ORDER BY id LIMIT 1"""
+        ).fetchone()
+        if shadow_required_decision is not None:
+            raise ConflictError(
+                "Schema v17 contains a decision labeled with the v18 policy "
+                "without its required prospective shadow evidence; explicit "
+                "repair is required before v18 "
+                f"({shadow_required_decision['id']})."
+            )
+
+    @staticmethod
+    def _drop_policy_shadow_triggers(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Remove policy-shadow projection guards on an isolated rebuild copy."""
+
+        for trigger_name in sorted(_POLICY_SHADOW_TRIGGER_NAMES):
+            connection.execute(
+                "DROP TRIGGER IF EXISTS "
+                + _quote_sqlite_identifier(trigger_name)
+            )
+
+    @classmethod
+    def _install_policy_shadow_triggers(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Restore the exact policy-shadow event/projection guards."""
+
+        cls._drop_policy_shadow_triggers(connection)
+        expected = {
+            name: sql
+            for name, _table, sql in (
+                _expected_current_schema_contract().triggers
+            )
+            if name in _POLICY_SHADOW_TRIGGER_NAMES
+        }
+        if set(expected) != set(_POLICY_SHADOW_TRIGGER_NAMES):
+            raise RuntimeError(
+                "Current schema lacks a policy-shadow projection guard."
+            )
+        for trigger_name in sorted(expected):
+            connection.execute(expected[trigger_name])
 
     @staticmethod
     def _install_current_performance_scoring_triggers(
@@ -14085,8 +14492,10 @@ class Database:
             # projection, but they share this event stream and integrity
             # boundary.  Import locally to avoid a store/service import cycle.
             from .performance_ledger import performance_integrity_errors
+            from .policy_shadow import policy_shadow_integrity_errors
 
             errors.extend(performance_integrity_errors(connection))
+            errors.extend(policy_shadow_integrity_errors(connection))
             performance_attempt_count = connection.execute(
                 "SELECT COUNT(*) AS n FROM performance_attempts"
             ).fetchone()["n"]
@@ -14099,6 +14508,9 @@ class Database:
             shadow_evidence_bundle_count = connection.execute(
                 "SELECT COUNT(*) AS n FROM shadow_evidence_bundles"
             ).fetchone()["n"]
+            policy_shadow_evaluation_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM policy_shadow_evaluations"
+            ).fetchone()["n"]
         return {
             "ok": not errors,
             "event_count": len(events),
@@ -14109,6 +14521,7 @@ class Database:
             "performance_action_count": performance_action_count,
             "task_evaluation_count": task_evaluation_count,
             "shadow_evidence_bundle_count": shadow_evidence_bundle_count,
+            "policy_shadow_evaluation_count": policy_shadow_evaluation_count,
             "errors": errors,
             "foreign_key_failures": foreign_key_failures,
             "quick_check": quick_check,

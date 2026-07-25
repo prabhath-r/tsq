@@ -18,6 +18,8 @@ from tsq.errors import ConflictError, NotFoundError, ValidationError
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -200,6 +202,7 @@ class ActionLedgerTestCase(unittest.TestCase):
 
     def test_v7_to_current_migration_preserves_release_and_event_history(self) -> None:
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             for name in (
                 "learning_artifacts_no_update",
                 "learning_artifacts_no_delete",
@@ -252,7 +255,7 @@ class ActionLedgerTestCase(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        self.assertEqual(schema_version, "17")
+        self.assertEqual(schema_version, "18")
         self.assertEqual(after_events, before_events)
         self.assertEqual(after_releases, before_releases)
         self.assertIn("learning_actions", tables)

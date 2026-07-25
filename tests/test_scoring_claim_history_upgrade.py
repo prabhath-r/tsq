@@ -42,6 +42,104 @@ START = datetime(2116, 4, 5, 10, 0, tzinfo=timezone.utc)
 SUBMISSION_DIGEST = "9" * 64
 
 
+def restore_pre_shadow_schema(connection: sqlite3.Connection) -> None:
+    """Strip the prospective v18 shadow boundary from a legacy fixture."""
+
+    table = connection.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type='table' AND name='policy_shadow_evaluations'"""
+    ).fetchone()
+    if table is None:
+        return
+
+    shadow_events = connection.execute(
+        """SELECT event_id, stream_id FROM events
+           WHERE event_type='PolicyShadowEvaluated'
+           ORDER BY stream_id, stream_version"""
+    ).fetchall()
+    v18_policy_events = connection.execute(
+        """SELECT event_id, stream_id, metadata_json FROM events
+           WHERE json_extract(
+                 metadata_json, '$.policy_version'
+             )='recursive-evidence-graph-v18'
+           ORDER BY stream_id, stream_version"""
+    ).fetchall()
+    event_guards = []
+    if shadow_events or v18_policy_events:
+        event_guards = connection.execute(
+            """SELECT name, sql FROM sqlite_master
+               WHERE type='trigger'
+                 AND name IN ('events_no_update', 'events_no_delete')
+               ORDER BY name"""
+        ).fetchall()
+        for guard in event_guards:
+            connection.execute(f'DROP TRIGGER "{guard["name"]}"')
+
+    for trigger_name in (
+        "policy_shadow_evaluations_validate_insert",
+        "policy_shadow_evaluations_no_update",
+        "policy_shadow_evaluations_no_delete",
+    ):
+        connection.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
+    connection.execute("DELETE FROM policy_shadow_evaluations")
+    connection.execute("DROP TABLE policy_shadow_evaluations")
+
+    connection.execute(
+        """UPDATE decisions
+           SET policy_version='recursive-evidence-graph-v17'
+           WHERE policy_version='recursive-evidence-graph-v18'"""
+    )
+    for policy_event in v18_policy_events:
+        metadata = json.loads(policy_event["metadata_json"])
+        metadata["policy_version"] = "recursive-evidence-graph-v17"
+        connection.execute(
+            """UPDATE events SET metadata_json=? WHERE event_id=?""",
+            (
+                json.dumps(
+                    metadata,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ),
+                policy_event["event_id"],
+            ),
+        )
+
+    if shadow_events:
+        connection.execute(
+            "DELETE FROM events WHERE event_type='PolicyShadowEvaluated'"
+        )
+        for stream_id in sorted(
+            {row["stream_id"] for row in shadow_events}
+        ):
+            rows = connection.execute(
+                """SELECT event_id FROM events
+                   WHERE stream_id=? ORDER BY stream_version""",
+                (stream_id,),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    """UPDATE events
+                       SET stream_version=stream_version+1000000
+                       WHERE event_id=?""",
+                    (row["event_id"],),
+                )
+            for stream_version, row in enumerate(rows, start=1):
+                connection.execute(
+                    """UPDATE events SET stream_version=?
+                       WHERE event_id=?""",
+                    (stream_version, row["event_id"]),
+                )
+    if shadow_events or v18_policy_events:
+        rehash_event_streams(connection)
+        for guard in event_guards:
+            if not guard["sql"]:
+                raise AssertionError(
+                    f"Event guard {guard['name']} has no SQL."
+                )
+            connection.execute(guard["sql"])
+
+
 def _fingerprint_material(lines: list[str]) -> tuple[int, str]:
     material = "\n".join(lines).encode("utf-8")
     return len(material), hashlib.sha256(material).hexdigest()
@@ -120,6 +218,7 @@ def rehash_event_streams(connection: sqlite3.Connection) -> None:
         stream_id = stream["stream_id"]
         previous_hash = None
         tail_version = 0
+        tail_recorded_at = None
         for event in connection.execute(
             """SELECT * FROM events
                WHERE stream_id=? ORDER BY stream_version""",
@@ -151,11 +250,17 @@ def rehash_event_streams(connection: sqlite3.Connection) -> None:
             )
             previous_hash = payload_hash
             tail_version = event["stream_version"]
+            tail_recorded_at = event["recorded_at"]
         connection.execute(
             """UPDATE stream_heads
-               SET stream_version=?, payload_hash=?
+               SET stream_version=?, payload_hash=?, updated_at=?
                WHERE stream_id=?""",
-            (tail_version, previous_hash, stream_id),
+            (
+                tail_version,
+                previous_hash,
+                tail_recorded_at,
+                stream_id,
+            ),
         )
 
 
@@ -288,6 +393,7 @@ def _downgrade_exact_v15(database: Database) -> list[dict[str, object]]:
     """Remove v16-only claim events and restore the exact v15 claim shape."""
 
     with database.transaction() as connection:
+        restore_pre_shadow_schema(connection)
         claims = [
             dict(row)
             for row in connection.execute(
@@ -442,7 +548,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 17)
+            self.assertEqual(SCHEMA_VERSION, 18)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
@@ -451,7 +557,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
                     connection.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()["value"],
-                    "17",
+                    "18",
                 )
                 migrated = connection.execute(
                     """SELECT claim.*, event.event_type, event.stream_id,

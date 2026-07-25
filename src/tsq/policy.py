@@ -30,6 +30,12 @@ from .models import (
     Question,
     SessionPhase,
 )
+from .policy_shadow import (
+    GREEDY_POLICY_DEFINITION_DIGEST,
+    POLICY_SHADOW_EVENT_SCHEMA_VERSION,
+    POLICY_SHADOW_PROJECTION_COLUMNS,
+    build_policy_shadow_evaluation,
+)
 from .store import Database, new_id, question_runtime_activation_safe
 from .versions import (
     SUPPORTED_MODEL_VERSIONS,
@@ -42,7 +48,8 @@ ACTIVE_MISCONCEPTION_REVISIT_POLICY_VERSION = "recursive-evidence-graph-v14"
 EXACT_OBJECTIVE_READINESS_POLICY_VERSION = "recursive-evidence-graph-v15"
 EXPLORATION_FALLBACK_POLICY_VERSION = "recursive-evidence-graph-v16"
 HYBRID_COVERAGE_POLICY_VERSION = "recursive-evidence-graph-v17"
-POLICY_VERSION = HYBRID_COVERAGE_POLICY_VERSION
+SHADOW_EVALUATION_POLICY_VERSION = "recursive-evidence-graph-v18"
+POLICY_VERSION = SHADOW_EVALUATION_POLICY_VERSION
 PERSISTENT_GAP_EPISODE_POLICY_VERSIONS = frozenset(
     {
         PERSISTENT_GAP_EPISODE_POLICY_VERSION,
@@ -50,6 +57,7 @@ PERSISTENT_GAP_EPISODE_POLICY_VERSIONS = frozenset(
         EXACT_OBJECTIVE_READINESS_POLICY_VERSION,
         EXPLORATION_FALLBACK_POLICY_VERSION,
         HYBRID_COVERAGE_POLICY_VERSION,
+        SHADOW_EVALUATION_POLICY_VERSION,
     }
 )
 PERSISTENT_GAP_MIN_OBSERVED_FAMILIES = 2
@@ -2169,8 +2177,11 @@ class AdaptivePolicy:
         top_k = scores[
             : min(CANDIDATE_SAMPLING_FRONTIER_LIMIT, len(scores))
         ]
-        chosen_score, propensity = self._sample_top_k(
-            top_k, seed=session["rng_seed"], step=session["step"]
+        logging_distribution = self._top_k_distribution(top_k)
+        chosen_score, propensity = self._sample_distribution(
+            logging_distribution,
+            seed=session["rng_seed"],
+            step=session["step"],
         )
         question_by_id = {question.id: question for question in eligible}
         chosen = question_by_id[chosen_score.question_id]
@@ -2360,7 +2371,7 @@ class AdaptivePolicy:
                             "question_objective_id": chosen.objective_id,
                         }
                     )
-                self.database.append_event(
+                selection_event = self.database.append_event(
                     connection,
                     stream_id=f"learner:{session['learner_id']}",
                     event_type="QuestionSelected",
@@ -2377,6 +2388,49 @@ class AdaptivePolicy:
                     learner_id=session["learner_id"],
                     session_id=session_id,
                     occurred_at=now,
+                )
+                shadow_evaluation = build_policy_shadow_evaluation(
+                    decision_id=decision_id,
+                    logging_policy_version=POLICY_VERSION,
+                    learner_model_version=self.learner_model.model_version,
+                    corpus_release_id=release_id,
+                    candidate_count=len(scores),
+                    candidate_digest=candidate_digest,
+                    frontier=logging_distribution,
+                    live_question_id=chosen.id,
+                    evaluated_at=now,
+                )
+                shadow_event = self.database.append_event(
+                    connection,
+                    stream_id=f"learner:{session['learner_id']}",
+                    event_type="PolicyShadowEvaluated",
+                    schema_version=POLICY_SHADOW_EVENT_SCHEMA_VERSION,
+                    payload=shadow_evaluation.payload,
+                    metadata=shadow_evaluation.metadata,
+                    learner_id=session["learner_id"],
+                    session_id=session_id,
+                    idempotency_key=(
+                        f"policy-shadow:v1:{decision_id}:"
+                        f"{GREEDY_POLICY_DEFINITION_DIGEST}"
+                    ),
+                    correlation_id=decision_id,
+                    causation_id=selection_event["event_id"],
+                    occurred_at=now,
+                )
+                shadow_projection = shadow_evaluation.projection_row(
+                    event_id=shadow_event["event_id"],
+                    recorded_at=shadow_event["recorded_at"],
+                )
+                connection.execute(
+                    "INSERT INTO policy_shadow_evaluations("
+                    + ", ".join(POLICY_SHADOW_PROJECTION_COLUMNS)
+                    + ") VALUES ("
+                    + ", ".join(
+                        f":{column}"
+                        for column in POLICY_SHADOW_PROJECTION_COLUMNS
+                    )
+                    + ")",
+                    shadow_projection,
                 )
                 updated = connection.execute(
                     """UPDATE sessions SET step = step + 1, revision = revision + 1,
@@ -2706,23 +2760,54 @@ class AdaptivePolicy:
         )
 
     @staticmethod
-    def _sample_top_k(
-        scores: Iterable[CandidateScore], *, seed: int, step: int
-    ) -> tuple[CandidateScore, float]:
+    def _top_k_distribution(
+        scores: Iterable[CandidateScore],
+    ) -> tuple[tuple[CandidateScore, float], ...]:
+        """Return the exact logging distribution over one safe frontier."""
+
         candidates = list(scores)
+        if not candidates:
+            raise ValidationError(
+                "Candidate sampling requires a non-empty safe frontier."
+            )
         temperature = 0.10
         peak = max(score.total for score in candidates)
         weights = [math.exp((score.total - peak) / temperature) for score in candidates]
         total_weight = sum(weights)
         probabilities = [weight / total_weight for weight in weights]
+        return tuple(zip(candidates, probabilities, strict=True))
+
+    @staticmethod
+    def _sample_distribution(
+        distribution: tuple[tuple[CandidateScore, float], ...],
+        *,
+        seed: int,
+        step: int,
+    ) -> tuple[CandidateScore, float]:
+        if not distribution:
+            raise ValidationError(
+                "Candidate sampling requires a non-empty distribution."
+            )
         rng = random.Random(f"policy:{seed}:{step}")
         threshold = rng.random()
         cumulative = 0.0
-        for score, probability in zip(candidates, probabilities, strict=True):
+        for score, probability in distribution:
             cumulative += probability
             if threshold <= cumulative:
                 return score, probability
-        return candidates[-1], probabilities[-1]
+        return distribution[-1]
+
+    @staticmethod
+    def _sample_top_k(
+        scores: Iterable[CandidateScore], *, seed: int, step: int
+    ) -> tuple[CandidateScore, float]:
+        """Compatibility wrapper used by isolated sampler tests."""
+
+        return AdaptivePolicy._sample_distribution(
+            AdaptivePolicy._top_k_distribution(scores),
+            seed=seed,
+            step=step,
+        )
 
     @staticmethod
     def _rationale(

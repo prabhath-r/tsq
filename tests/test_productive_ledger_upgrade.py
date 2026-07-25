@@ -11,6 +11,8 @@ from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.store import SCHEMA_VERSION, Database
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -73,6 +75,7 @@ class ProductiveLedgerUpgradeTests(unittest.TestCase):
             )
 
             with database.transaction() as connection:
+                restore_pre_shadow_schema(connection)
                 connection.execute(
                     "DROP TRIGGER events_respect_performance_scoring_claim"
                 )
@@ -98,7 +101,7 @@ class ProductiveLedgerUpgradeTests(unittest.TestCase):
             before_learner = learner_fingerprint(database)
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 17)
+            self.assertEqual(SCHEMA_VERSION, 18)
             self.assertEqual(event_fingerprint(database), before_events)
             self.assertEqual(learner_fingerprint(database), before_learner)
             with database.read() as connection:
@@ -122,7 +125,7 @@ class ProductiveLedgerUpgradeTests(unittest.TestCase):
                        FROM performance_scoring_claims"""
                 ).fetchone()["n"]
 
-            self.assertEqual(version, "17")
+            self.assertEqual(version, "18")
             self.assertTrue(V14_PERFORMANCE_TABLES <= tables)
             self.assertEqual(set(counts.values()), {0})
             self.assertEqual(scoring_claim_count, 0)

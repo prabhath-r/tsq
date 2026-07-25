@@ -15,6 +15,8 @@ from tsq.errors import ValidationError
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -399,6 +401,7 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
             now=started + timedelta(minutes=1),
         )
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             connection.execute(
                 "UPDATE meta SET value = '9' WHERE key = 'schema_version'"
             )
@@ -421,7 +424,7 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
 
-        self.assertEqual(schema_version, "17")
+        self.assertEqual(schema_version, "18")
         self.assertEqual(
             decision["invalidation_reason"], "learner_projection_advanced"
         )

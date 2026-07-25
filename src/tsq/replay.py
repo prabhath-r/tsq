@@ -50,6 +50,10 @@ from .performance_ledger import (
     performance_projection_snapshot,
     rebuild_performance_projections,
 )
+from .policy_shadow import (
+    policy_shadow_projection_snapshot,
+    rebuild_policy_shadow_projections,
+)
 from .store import SCHEMA_VERSION, Database, question_content_hash
 from .versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
@@ -783,6 +787,7 @@ class ProjectionReplay:
                 or error.startswith(objective_projection_prefix)
                 or action_projection_error(error)
                 or performance_projection_error(error)
+                or error.startswith("policy shadow evaluation ")
             )
         ]
         blocking = [error for error in errors if error not in recoverable]
@@ -2114,6 +2119,16 @@ class ProjectionReplay:
             source_performance_projection_hash = _projection_digest(
                 source_performance_snapshot
             )
+            source_policy_shadow_snapshot = policy_shadow_projection_snapshot(
+                connection
+            )
+            source_policy_shadow_projection_hash = _projection_digest(
+                source_policy_shadow_snapshot
+            )
+            source_policy_shadow_event_count = connection.execute(
+                """SELECT COUNT(*) AS n FROM events
+                   WHERE event_type='PolicyShadowEvaluated'"""
+            ).fetchone()["n"]
         source_integrity = work_database.verify_integrity()
         recoverable, blocking = self._recoverable_projection_errors(
             source_integrity["errors"], learner_id
@@ -2127,6 +2142,29 @@ class ProjectionReplay:
         action_replay = self._rebuild_action_projections(work_database)
         with work_database.transaction() as connection:
             performance_replay = rebuild_performance_projections(connection)
+        policy_shadow_replay_error: str | None = None
+        try:
+            with work_database.transaction() as connection:
+                policy_shadow_replay = rebuild_policy_shadow_projections(
+                    connection
+                )
+        except (
+            sqlite3.DatabaseError,
+            TypeError,
+            ValueError,
+            ValidationError,
+            OverflowError,
+        ) as exc:
+            # Semantic event corruption is not a repairable projection
+            # mismatch.  Keep the check report bounded and explicit while
+            # withholding a reconstructed projection.
+            policy_shadow_replay_error = str(exc)
+            policy_shadow_replay = {
+                "snapshot": None,
+                "checkpoints": [],
+                "evaluation_count": None,
+                "projection_hash": None,
+            }
         rebuilt_integrity = work_database.verify_integrity()
         source_matches = (
             source_projection_hash == replay["reconstructed_projection_hash"]
@@ -2136,6 +2174,11 @@ class ProjectionReplay:
         )
         performance_source_matches = (
             source_performance_snapshot == performance_replay["snapshot"]
+        )
+        policy_shadow_source_matches = (
+            policy_shadow_replay_error is None
+            and source_policy_shadow_snapshot
+            == policy_shadow_replay["snapshot"]
         )
         commitment_matches = (
             committed_projection_hash is None
@@ -2163,6 +2206,18 @@ class ProjectionReplay:
             errors.append(
                 "stored performance projection differs from deterministic replay"
             )
+        if (
+            policy_shadow_replay_error is None
+            and not policy_shadow_source_matches
+        ):
+            errors.append(
+                "stored policy-shadow projection differs from deterministic replay"
+            )
+        if policy_shadow_replay_error is not None:
+            errors.append(
+                "policy-shadow projection replay failed closed: "
+                + policy_shadow_replay_error
+            )
         if not rebuilt_integrity["ok"]:
             errors.extend(
                 f"rebuilt copy integrity: {error}" for error in rebuilt_integrity["errors"]
@@ -2170,6 +2225,7 @@ class ProjectionReplay:
         rebuild_safe = (
             not blocking
             and not replay["replay_errors"]
+            and policy_shadow_replay_error is None
             and commitment_matches
             and rebuilt_integrity["ok"]
         )
@@ -2242,6 +2298,26 @@ class ProjectionReplay:
             ],
             "performance_projection_matches_replay": performance_source_matches,
             "performance_checkpoints": performance_replay["checkpoints"],
+            "policy_shadow_event_count": source_policy_shadow_event_count,
+            "source_policy_shadow_evaluation_count": len(
+                source_policy_shadow_snapshot["evaluations"]
+            ),
+            "reconstructed_policy_shadow_evaluation_count": (
+                policy_shadow_replay["evaluation_count"]
+            ),
+            "source_policy_shadow_projection_hash": (
+                source_policy_shadow_projection_hash
+            ),
+            "reconstructed_policy_shadow_projection_hash": (
+                policy_shadow_replay["projection_hash"]
+            ),
+            "policy_shadow_projection_matches_replay": (
+                policy_shadow_source_matches
+            ),
+            "policy_shadow_checkpoints": policy_shadow_replay[
+                "checkpoints"
+            ],
+            "policy_shadow_replay_error": policy_shadow_replay_error,
             "recoverable_source_integrity_errors": recoverable,
             "blocking_source_integrity_errors": blocking,
             "checkpoints": replay["checkpoints"],
@@ -2315,6 +2391,9 @@ class ProjectionReplay:
         ]
         report["source_performance_projection_was_repaired"] = not report[
             "performance_projection_matches_replay"
+        ]
+        report["source_policy_shadow_projection_was_repaired"] = not report[
+            "policy_shadow_projection_matches_replay"
         ]
         report["source_discrepancies"] = list(report["errors"])
         report["errors"] = []
