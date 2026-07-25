@@ -15,7 +15,13 @@ from tsq.cli import main
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ValidationError
-from tsq.policy_shadow_reporting import build_policy_shadow_report
+from tsq.policy_shadow_reporting import (
+    POLICY_SHADOW_REPORT_VERSION,
+    PROSPECTIVE_ONE_STEP_OPE_VERSION,
+    _Observation,
+    _deterministic_challenger_ope,
+    build_policy_shadow_report,
+)
 from tsq.store import Database
 
 
@@ -82,6 +88,9 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
         report = build_policy_shadow_report(self.database)
 
         self.assertEqual(self.database.path.read_bytes(), before)
+        self.assertEqual(
+            report["report_version"], POLICY_SHADOW_REPORT_VERSION
+        )
         self.assertEqual(report["decision_counts"]["total"], 0)
         self.assertEqual(report["behavior_calibration"]["count"], 0)
         self.assertIsNone(report["behavior_calibration"]["brier_score"])
@@ -91,6 +100,10 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
         self.assertEqual(uniform["weights"]["count"], 0)
         self.assertEqual(
             report["prospective_shadow"]["evaluation_count"], 0
+        )
+        self.assertEqual(
+            report["prospective_shadow"]["one_step_ope"]["status"],
+            "unavailable",
         )
         self.assertFalse(
             report["inference_boundary"]["counterfactual_trajectory"]
@@ -212,10 +225,15 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
         )
         with self.database.read() as connection:
             rows = connection.execute(
-                """SELECT decision_id, agreement
-                   FROM policy_shadow_evaluations
-                   WHERE decision_id IN (?, ?)
-                   ORDER BY decision_id""",
+                """SELECT shadow.decision_id, shadow.agreement,
+                          decision.propensity, attempt.is_correct
+                   FROM policy_shadow_evaluations shadow
+                   JOIN decisions decision
+                     ON decision.id=shadow.decision_id
+                   JOIN attempts attempt
+                     ON attempt.decision_id=shadow.decision_id
+                   WHERE shadow.decision_id IN (?, ?)
+                   ORDER BY shadow.decision_id""",
                 tuple(decision_ids),
             ).fetchall()
         agreements = {
@@ -230,6 +248,7 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
         }
         prospective = report["prospective_shadow"]
         outcomes = prospective["same_action_outcomes"]
+        ope = prospective["one_step_ope"]
 
         self.assertEqual(prospective["evaluation_count"], 2)
         self.assertEqual(prospective["agreement_count"], len(agreements))
@@ -241,6 +260,8 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
         self.assertEqual(
             outcomes["observed_same_action_count"], len(agreements)
         )
+        self.assertTrue(outcomes["selection_conditioned"])
+        self.assertFalse(outcomes["target_policy_estimate"])
         self.assertEqual(outcomes["raw_correct_count"], len(agreements))
         expected_credible = int(decision_ids[0] in agreements)
         self.assertEqual(
@@ -249,6 +270,36 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
         )
         self.assertEqual(len(prospective["challengers"]), 1)
         self.assertFalse(prospective["response_censoring_adjusted"])
+        self.assertEqual(
+            ope["contract_version"], PROSPECTIVE_ONE_STEP_OPE_VERSION
+        )
+        self.assertEqual(ope["observation_count"], 2)
+        self.assertEqual(
+            ope["target_action_supported_count"], len(agreements)
+        )
+        self.assertFalse(ope["divergent_live_rewards_used"])
+        self.assertFalse(ope["counterfactual_outcomes_imputed"])
+        target_weights = [
+            (1.0 / row["propensity"]) if row["agreement"] else 0.0
+            for row in rows
+        ]
+        weighted_correct = sum(
+            weight * row["is_correct"]
+            for weight, row in zip(target_weights, rows, strict=True)
+        )
+        if sum(target_weights) == 0.0:
+            self.assertEqual(ope["status"], "unavailable")
+            self.assertIsNone(ope["raw_correctness"]["ips"])
+            self.assertIsNone(ope["raw_correctness"]["snips"])
+        else:
+            self.assertAlmostEqual(
+                ope["raw_correctness"]["ips"],
+                weighted_correct / len(rows),
+            )
+            self.assertAlmostEqual(
+                ope["raw_correctness"]["snips"],
+                weighted_correct / sum(target_weights),
+            )
 
     def test_prospective_agreement_reports_the_observed_outcome(self) -> None:
         session_id, presentation = self._start(
@@ -400,6 +451,35 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
                 self.database, session_id=presentation.session_id
             )
 
+    def test_shadow_frontier_projection_mismatch_fails_closed(self) -> None:
+        session_id, presentation = self._start("shadow-mismatch")
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DROP TRIGGER policy_shadow_evaluations_no_update"
+            )
+            connection.execute(
+                """UPDATE policy_shadow_evaluations
+                   SET challenger_question_id=(
+                       SELECT id FROM questions
+                       WHERE id != (
+                           SELECT challenger_question_id
+                           FROM policy_shadow_evaluations
+                           WHERE decision_id=?
+                       )
+                       ORDER BY id
+                       LIMIT 1
+                   )
+                   WHERE decision_id=?""",
+                (presentation.decision_id, presentation.decision_id),
+            )
+
+        with self.assertRaisesRegex(
+            ValidationError, "event/projection integrity failed"
+        ):
+            build_policy_shadow_report(
+                self.database, session_id=session_id
+            )
+
     def test_cli_report_and_versions_expose_shadow_boundaries(self) -> None:
         session_id, _ = self._two_answered_decisions()
         output = io.StringIO()
@@ -431,6 +511,180 @@ class PolicyShadowReportingTestCase(unittest.TestCase):
         self.assertFalse(versions["inference_boundary"]["selection_applied"])
         self.assertFalse(versions["inference_boundary"]["mastery_applied"])
         self.assertFalse(versions["inference_boundary"]["causal_claim"])
+        self.assertEqual(
+            versions["prospective_ope_contract_version"],
+            PROSPECTIVE_ONE_STEP_OPE_VERSION,
+        )
+
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "policy",
+                    "report",
+                    "--session",
+                    session_id,
+                ]
+            )
+        self.assertEqual(exit_code, 0)
+        rendered = output.getvalue()
+        self.assertIn("deterministic-challenger OPE", rendered)
+        self.assertIn("not a policy estimate", rendered)
+
+
+class DeterministicChallengerEstimatorTests(unittest.TestCase):
+    @staticmethod
+    def _observation(
+        decision_id: str,
+        *,
+        propensity: float,
+        correct: int,
+        credible: int = 0,
+    ) -> _Observation:
+        return _Observation(
+            decision_id=decision_id,
+            prediction=0.5,
+            correct=correct,
+            credible_retrieval=credible,
+            propensity=propensity,
+            target_probability=0.0,
+        )
+
+    def test_hand_calculated_ips_snips_and_ess(self) -> None:
+        rows = [
+            {"decision_id": "d1", "agreement": 1},
+            {"decision_id": "d2", "agreement": 0},
+            {"decision_id": "d3", "agreement": 1},
+        ]
+        observations = {
+            "d1": self._observation(
+                "d1", propensity=0.5, correct=1, credible=1
+            ),
+            "d2": self._observation(
+                "d2", propensity=0.4, correct=1, credible=1
+            ),
+            "d3": self._observation(
+                "d3", propensity=0.25, correct=0, credible=0
+            ),
+        }
+
+        result = _deterministic_challenger_ope(rows, observations)
+
+        # Deterministic target weights are [1/.5, 0, 1/.25] = [2, 0, 4].
+        self.assertEqual(result["weights"]["sum"], 6.0)
+        self.assertAlmostEqual(
+            result["weights"]["effective_sample_size"],
+            36.0 / 20.0,
+        )
+        self.assertAlmostEqual(
+            result["weights"]["effective_sample_ratio"],
+            (36.0 / 20.0) / 3.0,
+        )
+        self.assertEqual(result["weights"]["zero_count"], 1)
+        self.assertAlmostEqual(
+            result["raw_correctness"]["ips"], 2.0 / 3.0
+        )
+        self.assertAlmostEqual(
+            result["raw_correctness"]["snips"], 2.0 / 6.0
+        )
+        self.assertAlmostEqual(
+            result["credible_retrieval"]["ips"], 2.0 / 3.0
+        )
+        self.assertAlmostEqual(
+            result["credible_retrieval"]["snips"], 2.0 / 6.0
+        )
+
+    def test_divergent_reward_cannot_change_target_estimate(self) -> None:
+        rows = [
+            {"decision_id": "agree", "agreement": 1},
+            {"decision_id": "diverge", "agreement": 0},
+        ]
+        common = {
+            "agree": self._observation(
+                "agree", propensity=0.5, correct=1
+            ),
+        }
+        wrong_divergence = {
+            **common,
+            "diverge": self._observation(
+                "diverge", propensity=0.5, correct=0
+            ),
+        }
+        correct_divergence = {
+            **common,
+            "diverge": self._observation(
+                "diverge", propensity=0.5, correct=1
+            ),
+        }
+
+        wrong = _deterministic_challenger_ope(rows, wrong_divergence)
+        correct = _deterministic_challenger_ope(rows, correct_divergence)
+
+        self.assertEqual(
+            wrong["raw_correctness"]["ips"],
+            correct["raw_correctness"]["ips"],
+        )
+        self.assertEqual(
+            wrong["raw_correctness"]["snips"],
+            correct["raw_correctness"]["snips"],
+        )
+        self.assertNotEqual(
+            wrong["raw_correctness"]["behavior_mean"],
+            correct["raw_correctness"]["behavior_mean"],
+        )
+
+    def test_all_divergence_and_no_answers_are_unavailable(self) -> None:
+        all_divergent = _deterministic_challenger_ope(
+            [{"decision_id": "d1", "agreement": 0}],
+            {
+                "d1": self._observation(
+                    "d1", propensity=0.2, correct=1
+                )
+            },
+        )
+        empty = _deterministic_challenger_ope(
+            [{"decision_id": "pending", "agreement": 1}],
+            {},
+        )
+
+        for result in (all_divergent, empty):
+            self.assertEqual(result["status"], "unavailable")
+            self.assertTrue(result["low_information"])
+            self.assertIsNone(result["raw_correctness"]["ips"])
+            self.assertIsNone(result["raw_correctness"]["snips"])
+        self.assertEqual(
+            all_divergent["low_information_reasons"],
+            ["no answered target-action agreements"],
+        )
+        self.assertEqual(
+            empty["low_information_reasons"],
+            ["no answered shadow-evaluated decisions"],
+        )
+
+    def test_challenger_groups_remain_isolated(self) -> None:
+        observations = {
+            "a": self._observation("a", propensity=0.5, correct=1),
+            "b": self._observation("b", propensity=0.5, correct=0),
+        }
+        first = _deterministic_challenger_ope(
+            [
+                {"decision_id": "a", "agreement": 1},
+                {"decision_id": "b", "agreement": 0},
+            ],
+            observations,
+        )
+        second = _deterministic_challenger_ope(
+            [
+                {"decision_id": "a", "agreement": 0},
+                {"decision_id": "b", "agreement": 1},
+            ],
+            observations,
+        )
+
+        self.assertEqual(first["raw_correctness"]["snips"], 1.0)
+        self.assertEqual(second["raw_correctness"]["snips"], 0.0)
 
 
 if __name__ == "__main__":

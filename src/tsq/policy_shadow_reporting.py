@@ -4,9 +4,10 @@
 
 The estimands in this module are intentionally narrow.  Historical
 off-policy estimates compare a one-step uniform policy over the *same* safe
-frontier visited by the logging policy.  Prospective challenger outcomes are
-reported only when the challenger selected the action that was actually
-served.  Neither analysis reconstructs an unobserved learner trajectory.
+frontier visited by the logging policy.  Prospective deterministic challengers
+use inverse-propensity weighting only when their action was actually served;
+divergent live rewards receive zero target-policy weight.  Neither analysis
+reconstructs an unobserved learner trajectory.
 """
 
 from __future__ import annotations
@@ -48,7 +49,8 @@ from .store import Database
 from .versions import SUPPORTED_MODEL_VERSIONS, question_selected_schema_for
 
 
-POLICY_SHADOW_REPORT_VERSION = "policy-shadow-report-v1"
+POLICY_SHADOW_REPORT_VERSION = "policy-shadow-report-v2"
+PROSPECTIVE_ONE_STEP_OPE_VERSION = "prospective-one-step-ope-v1"
 UNIFORM_SAFE_FRONTIER_POLICY_VERSION = "uniform-safe-frontier-v1"
 SUPPORTED_LOGGING_POLICY_VERSIONS = (
     "recursive-evidence-graph-v17",
@@ -741,34 +743,32 @@ def _weighted_reward(
         weight * reward
         for weight, reward in zip(weights, rewards, strict=True)
     )
+    weight_sum = sum(weights)
     return {
         "behavior_mean": sum(rewards) / len(rewards),
-        "ips": weighted_sum / len(rewards),
-        "snips": weighted_sum / sum(weights),
+        "ips": (
+            weighted_sum / len(rewards)
+            if weight_sum > 0.0
+            else None
+        ),
+        "snips": weighted_sum / weight_sum if weight_sum > 0.0 else None,
     }
 
 
-def _uniform_safe_frontier(
-    observations: list[_Observation],
-) -> dict[str, Any]:
-    if not observations:
-        return {
-            "policy_version": UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
-            "description": (
-                "Uniform random choice over the same logged safe frontier."
-            ),
-            "frontier_size_rule": "K = min(5, candidate_count)",
-            "observation_count": 0,
-            "status": "unavailable",
-            "low_information": True,
-            "low_information_rule": "ESS < 30 or ESS/N < 0.10",
-            "information_scope": (
-                "Importance-weight concentration only; does not assess "
-                "independent sample size, response censoring, serial "
-                "dependence, or transport to humans."
-            ),
-            "low_information_reasons": ["no answered logged decisions"],
-            "weights": {
+def _importance_weight_diagnostics(
+    weights: list[float],
+    *,
+    empty_reason: str,
+    zero_mass_reason: str,
+) -> tuple[dict[str, Any], str, list[str]]:
+    """Return stable overlap diagnostics without treating ESS as sample size."""
+
+    if any(not math.isfinite(weight) or weight < 0.0 for weight in weights):
+        raise ValidationError("Importance weights must be finite and non-negative.")
+    count = len(weights)
+    if not weights:
+        return (
+            {
                 "count": 0,
                 "sum": 0.0,
                 "mean": None,
@@ -783,48 +783,41 @@ def _uniform_safe_frontier(
                 "zero_count": 0,
                 "support_violations": 0,
             },
-            "raw_correctness": _weighted_reward([], "correct"),
-            "credible_retrieval": _weighted_reward(
-                [], "credible_retrieval"
-            ),
-        }
-    weights = [observation.importance_weight for observation in observations]
-    if any(not math.isfinite(weight) or weight < 0.0 for weight in weights):
-        raise ValidationError("Importance weights must be finite and non-negative.")
-    count = len(weights)
+            "unavailable",
+            [empty_reason],
+        )
     weight_sum = sum(weights)
     squared_sum = sum(weight * weight for weight in weights)
     if weight_sum <= 0.0 or squared_sum <= 0.0:
-        raise ValidationError(
-            "Logged decisions provide no supported target-policy mass."
+        return (
+            {
+                "count": count,
+                "sum": 0.0,
+                "mean": 0.0,
+                "effective_sample_size": 0.0,
+                "effective_sample_ratio": 0.0,
+                "effective_sample_size_kind": (
+                    "Kish importance-weight concentration diagnostic"
+                ),
+                "dependence_adjusted": False,
+                "maximum": 0.0,
+                "p95": 0.0,
+                "zero_count": count,
+                "support_violations": 0,
+            },
+            "unavailable",
+            [zero_mass_reason],
         )
     effective_sample_size = weight_sum * weight_sum / squared_sum
     effective_sample_ratio = effective_sample_size / count
     ordered = sorted(weights)
-    p95 = ordered[math.ceil(0.95 * count) - 1]
     reasons: list[str] = []
     if effective_sample_size < MIN_EFFECTIVE_SAMPLE_SIZE:
         reasons.append("effective sample size is below 30")
     if effective_sample_ratio < MIN_EFFECTIVE_SAMPLE_RATIO:
         reasons.append("effective sample ratio is below 0.10")
-    low_information = bool(reasons)
-    return {
-        "policy_version": UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
-        "description": (
-            "Uniform random choice over the same logged safe frontier."
-        ),
-        "frontier_size_rule": "K = min(5, candidate_count)",
-        "observation_count": count,
-        "status": "low_information" if low_information else "descriptive_only",
-        "low_information": low_information,
-        "low_information_rule": "ESS < 30 or ESS/N < 0.10",
-        "information_scope": (
-            "Importance-weight concentration only; does not assess "
-            "independent sample size, response censoring, serial dependence, "
-            "or transport to humans."
-        ),
-        "low_information_reasons": reasons,
-        "weights": {
+    return (
+        {
             "count": count,
             "sum": weight_sum,
             "mean": weight_sum / count,
@@ -835,10 +828,45 @@ def _uniform_safe_frontier(
             ),
             "dependence_adjusted": False,
             "maximum": max(weights),
-            "p95": p95,
+            "p95": ordered[math.ceil(0.95 * count) - 1],
             "zero_count": sum(weight == 0.0 for weight in weights),
             "support_violations": 0,
         },
+        "low_information" if reasons else "descriptive_only",
+        reasons,
+    )
+
+
+def _uniform_safe_frontier(
+    observations: list[_Observation],
+) -> dict[str, Any]:
+    weights = [observation.importance_weight for observation in observations]
+    diagnostics, status, reasons = _importance_weight_diagnostics(
+        weights,
+        empty_reason="no answered logged decisions",
+        zero_mass_reason="logged decisions provide no supported target-policy mass",
+    )
+    if observations and status == "unavailable":
+        raise ValidationError(
+            "Logged decisions provide no supported target-policy mass."
+        )
+    return {
+        "policy_version": UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
+        "description": (
+            "Uniform random choice over the same logged safe frontier."
+        ),
+        "frontier_size_rule": "K = min(5, candidate_count)",
+        "observation_count": len(observations),
+        "status": status,
+        "low_information": status != "descriptive_only",
+        "low_information_rule": "ESS < 30 or ESS/N < 0.10",
+        "information_scope": (
+            "Importance-weight concentration only; does not assess "
+            "independent sample size, response censoring, serial dependence, "
+            "or transport to humans."
+        ),
+        "low_information_reasons": reasons,
+        "weights": diagnostics,
         "raw_correctness": _weighted_reward(observations, "correct"),
         "credible_retrieval": _weighted_reward(
             observations, "credible_retrieval"
@@ -862,6 +890,70 @@ def _outcome_summary(
         "credible_retrieval_rate": (
             credible / observed if observed else None
         ),
+        "selection_conditioned": True,
+        "target_policy_estimate": False,
+    }
+
+
+def _deterministic_challenger_ope(
+    rows: list[dict[str, Any]],
+    observations_by_decision: Mapping[str, _Observation],
+) -> dict[str, Any]:
+    """Estimate one deterministic challenger on answered logged states only."""
+
+    target_observations: list[_Observation] = []
+    weights: list[float] = []
+    supported = 0
+    for row in rows:
+        observation = observations_by_decision.get(row["decision_id"])
+        if observation is None:
+            continue
+        agreement = row["agreement"] == 1
+        target_probability = 1.0 if agreement else 0.0
+        target_observation = _Observation(
+            decision_id=observation.decision_id,
+            prediction=observation.prediction,
+            correct=observation.correct,
+            credible_retrieval=observation.credible_retrieval,
+            propensity=observation.propensity,
+            target_probability=target_probability,
+        )
+        target_observations.append(target_observation)
+        weights.append(target_observation.importance_weight)
+        supported += int(agreement)
+    diagnostics, status, reasons = _importance_weight_diagnostics(
+        weights,
+        empty_reason="no answered shadow-evaluated decisions",
+        zero_mass_reason="no answered target-action agreements",
+    )
+    return {
+        "contract_version": PROSPECTIVE_ONE_STEP_OPE_VERSION,
+        "estimand": (
+            "one-step deterministic-challenger response outcome over answered "
+            "behavior-policy-visited decision states"
+        ),
+        "observation_count": len(target_observations),
+        "target_action_supported_count": supported,
+        "target_action_support_rate": (
+            supported / len(target_observations)
+            if target_observations
+            else None
+        ),
+        "status": status,
+        "low_information": status != "descriptive_only",
+        "low_information_rule": "ESS < 30 or ESS/N < 0.10",
+        "low_information_reasons": reasons,
+        "weights": diagnostics,
+        "raw_correctness": _weighted_reward(
+            target_observations, "correct"
+        ),
+        "credible_retrieval": _weighted_reward(
+            target_observations, "credible_retrieval"
+        ),
+        "divergent_live_rewards_used": False,
+        "counterfactual_outcomes_imputed": False,
+        "response_censoring_adjusted": False,
+        "sequential_dependence_adjusted": False,
     }
 
 
@@ -945,6 +1037,10 @@ def _prospective_shadow(
                 ),
                 observed=len(same_observations),
             ),
+            "one_step_ope": _deterministic_challenger_ope(
+                group_rows,
+                observations_by_decision,
+            ),
         }
 
     challenger_summaries = [
@@ -960,9 +1056,11 @@ def _prospective_shadow(
         **overall,
         "challengers": challenger_summaries,
         "outcome_rule": (
-            "Outcomes are reported only for answered decisions when "
-            "challenger_question_id equals the actually served "
-            "live_question_id."
+            "Direct same-action outcomes are reported only when the challenger "
+            "equals the served action. Deterministic-challenger OPE gives those "
+            "agreements inverse-propensity weight and gives divergences zero "
+            "target-policy weight; it never assigns the divergent live reward "
+            "to the unserved challenger action."
         ),
         "response_censoring_adjusted": False,
     }
@@ -1189,8 +1287,10 @@ def build_policy_shadow_report(
             "affects_selection": False,
             "affects_mastery": False,
             "estimand": (
-                "one-step complete-case operational response outcomes among "
-                "answered behavior-policy-visited decision states"
+                "one-step complete-case operational response outcomes, "
+                "including inverse-propensity deterministic-challenger "
+                "estimates, among answered behavior-policy-visited decision "
+                "states"
             ),
             "answered_complete_cases_only": True,
             "response_censoring_adjusted": False,
@@ -1241,6 +1341,7 @@ __all__ = [
     "MIN_EFFECTIVE_SAMPLE_RATIO",
     "MIN_EFFECTIVE_SAMPLE_SIZE",
     "POLICY_SHADOW_REPORT_VERSION",
+    "PROSPECTIVE_ONE_STEP_OPE_VERSION",
     "SUPPORTED_LOGGING_POLICY_VERSIONS",
     "UNIFORM_SAFE_FRONTIER_POLICY_VERSION",
     "build_policy_shadow_report",
