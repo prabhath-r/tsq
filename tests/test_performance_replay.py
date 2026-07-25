@@ -322,7 +322,7 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         report = ProjectionReplay(self.database).check("performance-replay")
 
         self.assertTrue(report["ok"], report["errors"])
-        self.assertEqual(SCHEMA_VERSION, 17)
+        self.assertEqual(SCHEMA_VERSION, 18)
         self.assertEqual(TASK_SCHEMA_VERSION, 3)
         self.assertEqual(EVIDENCE_BUNDLE_SCHEMA_VERSION, 2)
         self.assertEqual(NORMALIZED_SCORING_RESULT_SCHEMA_VERSION, 1)

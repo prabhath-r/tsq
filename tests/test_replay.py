@@ -26,6 +26,8 @@ from tsq.learner import (
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -169,6 +171,11 @@ class ProjectionReplayTestCase(unittest.TestCase):
         self.assertEqual(before, after)
         self.assertTrue(report["source_projection_matches_replay"])
         self.assertTrue(report["commitment_matches_replay"])
+        self.assertTrue(report["policy_shadow_projection_matches_replay"])
+        self.assertEqual(report["policy_shadow_event_count"], 4)
+        self.assertEqual(
+            report["reconstructed_policy_shadow_evaluation_count"], 4
+        )
         self.assertTrue(all(item["hash_matches"] for item in report["checkpoints"]))
         self.assertTrue(
             all(item["state_changes_match"] for item in report["checkpoints"])
@@ -217,6 +224,9 @@ class ProjectionReplayTestCase(unittest.TestCase):
 
         self.assertTrue(report["ok"])
         self.assertTrue(report["source_projection_was_repaired"])
+        self.assertFalse(
+            report["source_policy_shadow_projection_was_repaired"]
+        )
         self.assertTrue(target.is_file())
         self.assertEqual(self.projection_snapshot(self.database), source_tampered)
         rebuilt = Database(target)
@@ -225,8 +235,45 @@ class ProjectionReplayTestCase(unittest.TestCase):
         with self.assertRaisesRegex(ConflictError, "already exists"):
             ProjectionReplay(self.database).rebuild_copy("replay-golden", target)
 
+    def test_rebuild_copy_repairs_policy_shadow_projection_from_events(
+        self,
+    ) -> None:
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DROP TRIGGER policy_shadow_evaluations_no_update"
+            )
+            evaluation = connection.execute(
+                """SELECT id FROM policy_shadow_evaluations
+                   ORDER BY id LIMIT 1"""
+            ).fetchone()
+            connection.execute(
+                """UPDATE policy_shadow_evaluations
+                   SET output_digest=? WHERE id=?""",
+                ("f" * 64, evaluation["id"]),
+            )
+        target = Path(self.tempdir.name) / "shadow-rebuilt.db"
+
+        report = ProjectionReplay(self.database).rebuild_copy(
+            "replay-golden", target
+        )
+
+        self.assertTrue(report["ok"])
+        self.assertTrue(
+            report["source_policy_shadow_projection_was_repaired"]
+        )
+        self.assertIn(
+            "stored policy-shadow projection differs from deterministic replay",
+            report["source_discrepancies"],
+        )
+        rebuilt = Database(target)
+        self.assertTrue(rebuilt.verify_integrity()["ok"])
+        self.assertTrue(
+            ProjectionReplay(rebuilt).check("replay-golden")["ok"]
+        )
+
     def test_cli_check_is_operational_and_source_schema_is_not_migrated(self) -> None:
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             self.database._drop_v6_authoring_triggers(connection)
             connection.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
         output = io.StringIO()

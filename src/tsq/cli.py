@@ -55,6 +55,19 @@ from .performance import (
 )
 from .performance_ledger import PerformanceLedger
 from .performance_selection import recommend_performance_tasks
+from .policy import POLICY_VERSION
+from .policy_shadow import (
+    GREEDY_POLICY_DEFINITION,
+    GREEDY_POLICY_DEFINITION_DIGEST,
+    GREEDY_POLICY_VERSION,
+    POLICY_SHADOW_CONTRACT_VERSION,
+)
+from .policy_shadow_reporting import (
+    POLICY_SHADOW_REPORT_VERSION,
+    SUPPORTED_LOGGING_POLICY_VERSIONS,
+    UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
+    build_policy_shadow_report,
+)
 from .replay import ProjectionReplay, replay_or_error
 from .store import Database, new_id
 
@@ -2268,6 +2281,137 @@ def command_replay(args: argparse.Namespace) -> None:
         raise TSQError("Projection replay found inconsistencies.")
 
 
+def command_policy_versions(args: argparse.Namespace) -> None:
+    result = {
+        "live_logging_policy_version": POLICY_VERSION,
+        "shadow_contract_version": POLICY_SHADOW_CONTRACT_VERSION,
+        "report_version": POLICY_SHADOW_REPORT_VERSION,
+        "supported_logging_policy_versions": list(
+            SUPPORTED_LOGGING_POLICY_VERSIONS
+        ),
+        "historical_one_step_target": (
+            UNIFORM_SAFE_FRONTIER_POLICY_VERSION
+        ),
+        "prospective_challenger": {
+            "policy_version": GREEDY_POLICY_VERSION,
+            "definition_digest": GREEDY_POLICY_DEFINITION_DIGEST,
+            "definition": GREEDY_POLICY_DEFINITION,
+        },
+        "inference_boundary": {
+            "shadow_only": True,
+            "selection_applied": False,
+            "mastery_applied": False,
+            "causal_claim": False,
+        },
+    }
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(f"Live logging policy: {POLICY_VERSION}")
+    print(
+        "Prospective challenger: "
+        f"{GREEDY_POLICY_VERSION} "
+        f"({GREEDY_POLICY_DEFINITION_DIGEST})"
+    )
+    print(
+        "Historical one-step target: "
+        f"{UNIFORM_SAFE_FRONTIER_POLICY_VERSION}"
+    )
+    print(
+        "Boundary: shadow only; no alternate selection, mastery update, "
+        "or causal claim."
+    )
+
+
+def _policy_metric(value: float | None) -> str:
+    return "unavailable" if value is None else f"{value:.4f}"
+
+
+def command_policy_report(args: argparse.Namespace) -> None:
+    database = _inspection_database(args, require_corpus=False)
+    integrity = database.verify_integrity()
+    if not integrity["ok"]:
+        raise TSQError(
+            "Policy reporting requires a clean immutable ledger: "
+            + "; ".join(integrity["errors"][:5])
+        )
+    report = build_policy_shadow_report(
+        database,
+        session_id=args.session,
+        learner_id=args.learner,
+    )
+    if args.json:
+        _emit(report, as_json=True)
+        return
+
+    counts = report["decision_counts"]
+    calibration = report["behavior_calibration"]
+    uniform = report["uniform_safe_frontier"]
+    weights = uniform["weights"]
+    prospective = report["prospective_shadow"]
+    print(
+        "Shadow-only one-step diagnostic; not learning-effect, retention, "
+        "productive-skill, or causal evidence."
+    )
+    scope_name = "session" if args.session is not None else "learner"
+    scope_value = args.session if args.session is not None else args.learner
+    print(
+        f"Scope: {scope_name} {scope_value} · {counts['total']} decision(s) · "
+        f"{counts['answered']} answered · {counts['pending']} pending · "
+        f"{counts['invalidated']} invalidated"
+    )
+    print(
+        "Live prediction calibration: "
+        f"Brier {_policy_metric(calibration['brier_score'])} · "
+        f"log loss {_policy_metric(calibration['log_loss'])} · "
+        "ECE "
+        f"{_policy_metric(calibration['expected_calibration_error'])} "
+        f"across {calibration['count']} answered decision(s)"
+    )
+    print(
+        f"Uniform safe-frontier estimate: {uniform['status']} · "
+        f"{uniform['observation_count']} observation(s) · "
+        "importance-weight ESS "
+        f"{weights['effective_sample_size']:.2f} · "
+        "ESS/N "
+        f"{_policy_metric(weights['effective_sample_ratio'])}"
+    )
+    for label, key in (
+        ("raw correctness", "raw_correctness"),
+        ("credible immediate retrieval", "credible_retrieval"),
+    ):
+        outcome = uniform[key]
+        print(
+            f"  {label}: behavior "
+            f"{_policy_metric(outcome['behavior_mean'])} · "
+            f"IPS {_policy_metric(outcome['ips'])} · "
+            f"SNIPS {_policy_metric(outcome['snips'])}"
+        )
+    for reason in uniform["low_information_reasons"]:
+        print(f"  low-information guard: {reason}")
+    print(
+        "  boundary: answered complete cases only; importance-weight ESS is "
+        "not dependence-adjusted or human validation"
+    )
+    print(
+        f"Prospective {GREEDY_POLICY_VERSION}: "
+        f"{prospective['evaluation_count']} evaluation(s) · "
+        f"{prospective['agreement_count']} agreement(s) · "
+        f"{prospective['divergence_count']} divergence(s)"
+    )
+    outcomes = prospective["same_action_outcomes"]
+    print(
+        "  observed same-action outcomes: "
+        f"{outcomes['observed_same_action_count']} · raw correct "
+        f"{_policy_metric(outcomes['raw_correct_rate'])} · credible retrieval "
+        f"{_policy_metric(outcomes['credible_retrieval_rate'])}"
+    )
+    print(
+        "  divergent observed outcomes withheld: "
+        f"{prospective['divergent_observed_outcomes_withheld']}"
+    )
+
+
 def command_verify(args: argparse.Namespace) -> None:
     database = _inspection_database(args, require_corpus=False)
     report = database.verify_integrity(args.stream)
@@ -3173,6 +3317,31 @@ def build_parser() -> argparse.ArgumentParser:
     task_report.add_argument("attempt")
     task_report.add_argument("--json", action="store_true")
     task_report.set_defaults(func=command_task_report)
+
+    policy = subparsers.add_parser(
+        "policy",
+        help="Inspect versioned shadow-only policy diagnostics",
+    )
+    policy_sub = policy.add_subparsers(
+        dest="policy_command",
+        required=True,
+    )
+    policy_versions = policy_sub.add_parser(
+        "versions",
+        help="Show frozen logging, challenger, and reporting contracts",
+    )
+    policy_versions.add_argument("--json", action="store_true")
+    policy_versions.set_defaults(func=command_policy_versions)
+
+    policy_report = policy_sub.add_parser(
+        "report",
+        help="Report calibration and one-step shadow-policy diagnostics",
+    )
+    policy_scope = policy_report.add_mutually_exclusive_group(required=True)
+    policy_scope.add_argument("--session", help="Exact session ID")
+    policy_scope.add_argument("--learner", help="Exact learner ID")
+    policy_report.add_argument("--json", action="store_true")
+    policy_report.set_defaults(func=command_policy_report)
 
     replay = subparsers.add_parser(
         "replay", help="Reconstruct and verify a learner projection on a database copy"

@@ -28,6 +28,8 @@ from tsq.models import (
 )
 from tsq.store import Database, question_content_hash
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -457,6 +459,7 @@ class StoreIntegrityTests(unittest.TestCase):
         legacy.initialize()
         release_id = legacy.import_corpus(*read_and_parse(CORPUS))["release_id"]
         with legacy.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             legacy._drop_release_snapshot_triggers(connection)
             for table in (
                 "release_question_topics",

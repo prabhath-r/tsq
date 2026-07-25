@@ -30,6 +30,8 @@ from tsq.corpus import parse_bundle, read_and_parse
 from tsq.errors import ConflictError, NotFoundError, ValidationError
 from tsq.store import Database
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -2134,6 +2136,7 @@ class AuthoringTestCase(unittest.TestCase):
         )
         job_id = CoveragePlanner(self.database).enqueue([gap])[0]
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             self.database._drop_v6_authoring_triggers(connection)
             connection.execute(
                 """UPDATE generation_jobs

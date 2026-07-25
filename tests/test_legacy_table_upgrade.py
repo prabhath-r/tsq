@@ -16,6 +16,8 @@ from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError
 from tsq.store import SCHEMA_VERSION, Database
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -85,6 +87,7 @@ class LegacyTableUpgradeTests(unittest.TestCase):
 
     def make_nullable_v12_fixture(self) -> None:
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             hashes = connection.execute(
                 "SELECT id, content_hash FROM questions ORDER BY id"
             ).fetchall()
@@ -124,6 +127,7 @@ class LegacyTableUpgradeTests(unittest.TestCase):
         """Reconstruct the nullable/trailing column emitted by legacy ALTER."""
 
         with database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             hashes = tuple(
                 (row["id"], row["content_hash"])
                 for row in connection.execute(
@@ -158,6 +162,8 @@ class LegacyTableUpgradeTests(unittest.TestCase):
         with closing(sqlite3.connect(self.path)) as connection:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys=OFF")
+            connection.execute("BEGIN IMMEDIATE")
+            restore_pre_shadow_schema(connection)
             row = connection.execute(
                 """SELECT sql FROM sqlite_master
                    WHERE type='table' AND name='learners'"""
@@ -191,7 +197,6 @@ class LegacyTableUpgradeTests(unittest.TestCase):
                        ORDER BY name"""
                 )
             )
-            connection.execute("BEGIN IMMEDIATE")
             for name, _sql in triggers:
                 quoted_name = '"' + name.replace('"', '""') + '"'
                 connection.execute(f"DROP TRIGGER {quoted_name}")
@@ -235,7 +240,7 @@ class LegacyTableUpgradeTests(unittest.TestCase):
                 ["--db", str(self.path), "topics", "--json"]
             )
         self.assertEqual(exit_code, 2)
-        self.assertIn("current schema 17", error.getvalue())
+        self.assertIn("current schema 18", error.getvalue())
         self.assertEqual(durable_database_fingerprint(self.path), before)
 
         output = io.StringIO()

@@ -12,6 +12,7 @@ from tests.test_performance_replay import (
     build_performance_database,
     performance_source_snapshot,
 )
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
 
 
 def event_fingerprint(database: Database) -> tuple[tuple[object, ...], ...]:
@@ -34,8 +35,10 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
 
             # Reconstruct the exact pre-claim v14 boundary from a current
             # database. Productive task/action/evaluation history remains
-            # populated; only the v15 admission table and guards are removed.
+            # populated; later admission and prospective-shadow structures
+            # are removed.
             with database.transaction() as connection:
+                restore_pre_shadow_schema(connection)
                 connection.execute(
                     "DROP TRIGGER events_respect_performance_scoring_claim"
                 )
@@ -66,7 +69,7 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 17)
+            self.assertEqual(SCHEMA_VERSION, 18)
             self.assertEqual(event_fingerprint(database), before_events)
             after_performance = performance_source_snapshot(database)
             self.assertEqual(
@@ -87,7 +90,7 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
                 evaluation_count = connection.execute(
                     "SELECT COUNT(*) AS n FROM task_evaluations"
                 ).fetchone()["n"]
-            self.assertEqual(version, "17")
+            self.assertEqual(version, "18")
             self.assertEqual(claim_count, 0)
             self.assertEqual(evaluation_count, 1)
             database.validate_current_schema()
@@ -115,7 +118,7 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
                            WHERE type='trigger'"""
                     )
                 }
-            self.assertEqual(version, "17")
+            self.assertEqual(version, "18")
             self.assertIsNotNone(table)
             self.assertTrue(
                 {

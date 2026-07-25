@@ -19,6 +19,8 @@ from tsq.errors import ConflictError, ExhaustedError, ValidationError
 from tsq.models import SessionPhase
 from tsq.store import SCHEMA_VERSION, Database
 
+from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
@@ -114,6 +116,7 @@ class EngineTestCase(unittest.TestCase):
     def downgrade_current_database_to_v3(self) -> None:
         """Strip v4 additions while retaining populated v3 learner/event data."""
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             self.database._drop_corpus_registry_triggers(connection)
             self.database._drop_release_snapshot_triggers(connection)
             for trigger in (
@@ -276,7 +279,7 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 17)
+        self.assertEqual(SCHEMA_VERSION, 18)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:
@@ -496,6 +499,7 @@ class EngineTestCase(unittest.TestCase):
 
     def test_v1_database_is_migrated_and_question_hashes_are_backfilled(self) -> None:
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             self.database._drop_corpus_registry_triggers(connection)
             connection.execute("ALTER TABLE questions DROP COLUMN content_hash")
             connection.execute(
@@ -591,6 +595,7 @@ class EngineTestCase(unittest.TestCase):
 
     def test_incomplete_v4_release_history_fails_closed(self) -> None:
         with self.database.transaction() as connection:
+            restore_pre_shadow_schema(connection)
             self.database._drop_release_snapshot_triggers(connection)
             connection.execute("DROP TABLE release_sources")
             connection.execute(

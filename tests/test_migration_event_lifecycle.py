@@ -25,6 +25,7 @@ from tests.test_scoring_claim_history_upgrade import (
     START as SCORING_START,
     _build_two_claim_database,
     _downgrade_exact_v15,
+    restore_pre_shadow_schema,
     rehash_event_streams,
 )
 
@@ -75,6 +76,7 @@ def data_snapshot(
     database: Database,
     *,
     omit_schema_version: bool = False,
+    omit_policy_shadow: bool = False,
 ) -> tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]:
     """Capture all application table rows independently of row order."""
 
@@ -89,6 +91,11 @@ def data_snapshot(
         ]
         result: list[tuple[str, tuple[tuple[object, ...], ...]]] = []
         for table in tables:
+            if (
+                omit_policy_shadow
+                and table == "policy_shadow_evaluations"
+            ):
+                continue
             quoted = '"' + table.replace('"', '""') + '"'
             rows = [
                 tuple(row)
@@ -149,6 +156,7 @@ def downgrade_to_exact_v16(database: Database) -> None:
         V16_SESSION_CLAUSE,
     )
     with database.transaction() as connection:
+        restore_pre_shadow_schema(connection)
         connection.execute(f'DROP TRIGGER "{CLAIM_TRIGGER}"')
         connection.execute(legacy_sql)
         connection.execute(
@@ -209,7 +217,7 @@ def remove_scoring_claim_fk_deferrability(database: Database) -> str:
 
 
 def build_exact_v16(path: Path) -> Database:
-    """Create a populated v17 database and reconstruct exact v16 structure."""
+    """Create a current database and reconstruct exact v16 structure."""
 
     database = Database(path)
     database.initialize()
@@ -338,7 +346,7 @@ def build_session_bound_migrated_v16(
 
 
 class MigrationEventLifecycleTests(unittest.TestCase):
-    def test_exact_v16_upgrade_changes_only_version_and_claim_trigger(
+    def test_exact_v16_upgrade_preserves_history_and_adds_empty_shadow(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -347,11 +355,12 @@ class MigrationEventLifecycleTests(unittest.TestCase):
             before_data = data_snapshot(
                 database,
                 omit_schema_version=True,
+                omit_policy_shadow=True,
             )
             before_events = event_snapshot(database)
             before_schema = schema_contract(database)
 
-            self.assertEqual(SCHEMA_VERSION, 17)
+            self.assertEqual(SCHEMA_VERSION, 18)
             self.assertEqual(
                 before_schema,
                 _expected_v16_schema_contract(),
@@ -368,7 +377,11 @@ class MigrationEventLifecycleTests(unittest.TestCase):
             database.initialize()
 
             self.assertEqual(
-                data_snapshot(database, omit_schema_version=True),
+                data_snapshot(
+                    database,
+                    omit_schema_version=True,
+                    omit_policy_shadow=True,
+                ),
                 before_data,
             )
             self.assertEqual(event_snapshot(database), before_events)
@@ -381,7 +394,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "17")
+            self.assertEqual(version, "18")
             upgraded_trigger = claim_trigger_sql(database)
             self.assertIn(V17_SESSION_CLAUSE, upgraded_trigger)
             self.assertIn(
@@ -392,11 +405,11 @@ class MigrationEventLifecycleTests(unittest.TestCase):
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
 
-    def test_reopening_upgraded_v17_is_semantically_idempotent(
+    def test_reopening_upgraded_v18_is_semantically_idempotent(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "reopen-v17.db"
+            path = Path(directory) / "reopen-v18.db"
             database = build_exact_v16(path)
             database.initialize()
             before_data = data_snapshot(database)
@@ -623,7 +636,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 ).fetchone()["value"]
             self.assertEqual(version, "16")
 
-    def test_v17_schema_change_before_safety_writer_is_rejected(self) -> None:
+    def test_v18_schema_change_before_safety_writer_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "v17-safety-writer-race.db"
             database = build_exact_v16(path)
@@ -689,7 +702,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "17")
+            self.assertEqual(version, "18")
 
     def test_scoring_claim_fk_deferrability_is_part_of_schema_contract(
         self,
@@ -728,13 +741,13 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 "DEFERRABLE INITIALLY DEFERRED",
                 row["sql"].upper(),
             )
-            self.assertEqual(version, "17")
+            self.assertEqual(version, "18")
 
-    def test_current_v17_fk_corruption_fails_before_safety_writes(
+    def test_current_v18_fk_corruption_fails_before_safety_writes(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "current-v17-fk-corrupt.db"
+            path = Path(directory) / "current-v18-fk-corrupt.db"
             database = Database(path)
             database.initialize()
             with closing(sqlite3.connect(path)) as connection:
@@ -789,7 +802,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
             self.assertEqual(after_violations, before_violations)
-            self.assertEqual(version, "17")
+            self.assertEqual(version, "18")
 
 
 if __name__ == "__main__":

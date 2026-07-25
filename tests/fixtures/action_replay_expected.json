@@ -1,48 +1,48 @@
 {
   "action_event_count": 6,
-  "action_projection_hash": "e8647a7e252f39e8347626b61c5e2e8c290c2712a631abb176398d60dc8d38d7",
+  "action_projection_hash": "86ce33a666ca9ac685f5a3e3b670ea0c0d623e54f92fdacc9a4f76983361bb8a",
   "artifact_count": 2,
   "checkpoints": [
     {
       "action_id": "act_action_replay_001",
       "artifact_id": null,
       "decision_id": "dec_action_replay_001",
-      "event_id": "evt_action_replay_005",
+      "event_id": "evt_action_replay_006",
       "sequence": 1
     },
     {
       "action_id": "act_action_replay_002",
       "artifact_id": null,
       "decision_id": "dec_action_replay_001",
-      "event_id": "evt_action_replay_006",
+      "event_id": "evt_action_replay_007",
       "sequence": 2
     },
     {
       "action_id": "act_action_replay_003",
       "artifact_id": "art_1111111111111111111111111111111111111111111111111111111111111111",
       "decision_id": "dec_action_replay_001",
-      "event_id": "evt_action_replay_007",
+      "event_id": "evt_action_replay_008",
       "sequence": 3
     },
     {
       "action_id": "act_action_replay_004",
       "artifact_id": "art_1111111111111111111111111111111111111111111111111111111111111111",
       "decision_id": "dec_action_replay_001",
-      "event_id": "evt_action_replay_008",
+      "event_id": "evt_action_replay_009",
       "sequence": 4
     },
     {
       "action_id": "act_action_replay_005",
       "artifact_id": "art_2222222222222222222222222222222222222222222222222222222222222222",
       "decision_id": "dec_action_replay_001",
-      "event_id": "evt_action_replay_012",
+      "event_id": "evt_action_replay_013",
       "sequence": 5
     },
     {
       "action_id": "act_action_replay_006",
       "artifact_id": "art_2222222222222222222222222222222222222222222222222222222222222222",
       "decision_id": "dec_action_replay_001",
-      "event_id": "evt_action_replay_013",
+      "event_id": "evt_action_replay_014",
       "sequence": 6
     }
   ],

@@ -2,10 +2,10 @@
   "checkpoints": [
     {
       "family_id": "f_centroid_objective_robustness",
-      "projection_event_id": "evt_golden_006",
-      "projection_hash": "49a5974f7310e1ae2844358c90e1eefc8791ff5ddea47b088be805e79e4801dd",
+      "projection_event_id": "evt_golden_007",
+      "projection_hash": "7f0e96e06274b26fa02e874362a935ac6a1e183fbf746341dd5ad22407333e2a",
       "question_id": "q_clustering_outlier_objective_001",
-      "response_event_id": "evt_golden_005",
+      "response_event_id": "evt_golden_006",
       "revision": 1,
       "state_changes": [
         {
@@ -40,10 +40,10 @@
     },
     {
       "family_id": "f_centroid_mean_update",
-      "projection_event_id": "evt_golden_009",
-      "projection_hash": "78b3a75e99e96457c0bb5e093763363bc45f03af8eb435da30b1ac6281ad3e22",
+      "projection_event_id": "evt_golden_011",
+      "projection_hash": "41a06340b888b2fb08e8c192eb5e806a0189ed5d0297d9fcc31ac436e8e5212a",
       "question_id": "q_clustering_centroid_update_001",
-      "response_event_id": "evt_golden_008",
+      "response_event_id": "evt_golden_010",
       "revision": 2,
       "state_changes": [
         {
@@ -64,10 +64,10 @@
     },
     {
       "family_id": "f_partition_label_alignment",
-      "projection_event_id": "evt_golden_013",
-      "projection_hash": "e3c1f65f11188e7b5cb6212e146ca197c52db3e16adf4c208542a9908c6c7d77",
+      "projection_event_id": "evt_golden_016",
+      "projection_hash": "ae8a34bec31ff76adbf0bbd4662b40d006baf965c22eaf478a2fc26223505429",
       "question_id": "q_clustering_label_alignment_001",
-      "response_event_id": "evt_golden_012",
+      "response_event_id": "evt_golden_015",
       "revision": 3,
       "state_changes": [
         {
@@ -88,10 +88,10 @@
     },
     {
       "family_id": "f_cluster_shape_objective_match",
-      "projection_event_id": "evt_golden_017",
-      "projection_hash": "40a3952867ce0f2c44c8b1fb35bd3812adf054eec6040239b0e525921edbce00",
+      "projection_event_id": "evt_golden_021",
+      "projection_hash": "a3f8d97baf8b81c06cde964ff1111de4fd5edd1ef25245dbb4c29d16bb62a462",
       "question_id": "q_clustering_concentric_rings_001",
-      "response_event_id": "evt_golden_016",
+      "response_event_id": "evt_golden_020",
       "revision": 4,
       "state_changes": [
         {
@@ -111,7 +111,7 @@
       ]
     }
   ],
-  "final_projection_hash": "40a3952867ce0f2c44c8b1fb35bd3812adf054eec6040239b0e525921edbce00",
+  "final_projection_hash": "a3f8d97baf8b81c06cde964ff1111de4fd5edd1ef25245dbb4c29d16bb62a462",
   "format_version": 1,
   "learner_id": "replay-golden",
   "learner_model_version": "irt-gaussian-retention-v5",
