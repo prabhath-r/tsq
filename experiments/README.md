@@ -197,3 +197,22 @@ Its deterministic artifact distinguishes lexical review candidates from proven
 dependence. Exit status `3` means a candidate would reduce exact repair or
 verification capacity if semantic review confirmed that its families collapse;
 it is not a dependence verdict and the laboratory never edits the corpus.
+
+The policy-shadow comparison laboratory gives many fresh synthetic learners
+exactly one production-selected question each, then evaluates the event-backed
+safe frontiers without modifying the live policy or learner state:
+
+```sh
+python experiments/policy_shadow_comparison_lab.py
+```
+
+It compares reported live, uniform-frontier, and frozen-greedy one-step
+estimates with the response generator's declared probability for every logged
+frontier action. Smooth, threshold, ability-only, and localized-weakness
+profiles span learn, diagnose, and review phases while exercising model
+misspecification. The replicated ignored artifact
+checks independent IPS arithmetic, overlap/ESS guards, projection replay, and
+source-database non-mutation. Low overlap is inconclusive. Synthetic oracle
+recovery is estimator evidence only—not human calibration, an alternate
+adaptive trajectory, teaching benefit, retention, or a reason to promote the
+greedy challenger.

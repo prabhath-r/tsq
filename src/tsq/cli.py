@@ -64,6 +64,7 @@ from .policy_shadow import (
 )
 from .policy_shadow_reporting import (
     POLICY_SHADOW_REPORT_VERSION,
+    PROSPECTIVE_ONE_STEP_OPE_VERSION,
     SUPPORTED_LOGGING_POLICY_VERSIONS,
     UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
     build_policy_shadow_report,
@@ -2286,6 +2287,9 @@ def command_policy_versions(args: argparse.Namespace) -> None:
         "live_logging_policy_version": POLICY_VERSION,
         "shadow_contract_version": POLICY_SHADOW_CONTRACT_VERSION,
         "report_version": POLICY_SHADOW_REPORT_VERSION,
+        "prospective_ope_contract_version": (
+            PROSPECTIVE_ONE_STEP_OPE_VERSION
+        ),
         "supported_logging_policy_versions": list(
             SUPPORTED_LOGGING_POLICY_VERSIONS
         ),
@@ -2401,7 +2405,7 @@ def command_policy_report(args: argparse.Namespace) -> None:
     )
     outcomes = prospective["same_action_outcomes"]
     print(
-        "  observed same-action outcomes: "
+        "  selection-conditioned same-action outcomes (not a policy estimate): "
         f"{outcomes['observed_same_action_count']} · raw correct "
         f"{_policy_metric(outcomes['raw_correct_rate'])} · credible retrieval "
         f"{_policy_metric(outcomes['credible_retrieval_rate'])}"
@@ -2410,6 +2414,28 @@ def command_policy_report(args: argparse.Namespace) -> None:
         "  divergent observed outcomes withheld: "
         f"{prospective['divergent_observed_outcomes_withheld']}"
     )
+    challenger_ope = prospective["one_step_ope"]
+    challenger_weights = challenger_ope["weights"]
+    print(
+        "  deterministic-challenger OPE: "
+        f"{challenger_ope['status']} · "
+        f"{challenger_ope['target_action_supported_count']}/"
+        f"{challenger_ope['observation_count']} answered actions supported · "
+        f"ESS {challenger_weights['effective_sample_size']:.2f} · "
+        "ESS/N "
+        f"{_policy_metric(challenger_weights['effective_sample_ratio'])}"
+    )
+    for label, key in (
+        ("raw correctness", "raw_correctness"),
+        ("credible immediate retrieval", "credible_retrieval"),
+    ):
+        outcome = challenger_ope[key]
+        print(
+            f"    {label}: IPS {_policy_metric(outcome['ips'])} · "
+            f"SNIPS {_policy_metric(outcome['snips'])}"
+        )
+    for reason in challenger_ope["low_information_reasons"]:
+        print(f"    low-information guard: {reason}")
 
 
 def command_verify(args: argparse.Namespace) -> None:
