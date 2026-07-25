@@ -118,14 +118,35 @@ class CorpusTestCase(unittest.TestCase):
             "c_agent_tool_use",
             "c_agent_observation_loop",
         }
+        questions_by_id = {question.id: question for question in self.questions}
         for concept_id in new_objectives:
             items = [
                 question
                 for question in self.questions
                 if question.primary_concept_id == concept_id
             ]
-            self.assertGreaterEqual(len(items), 3, concept_id)
-            self.assertEqual(len({item.family_id for item in items}), len(items), concept_id)
+            root_items = [
+                question
+                for question in items
+                if question.revision_of is None
+            ]
+            self.assertGreaterEqual(len(root_items), 3, concept_id)
+            self.assertEqual(
+                len({item.family_id for item in root_items}),
+                len(root_items),
+                concept_id,
+            )
+            self.assertEqual(
+                len({item.family_id for item in items}),
+                len(root_items),
+                concept_id,
+            )
+            for item in items:
+                if item.revision_of is None:
+                    continue
+                parent = questions_by_id[item.revision_of]
+                self.assertEqual(item.family_id, parent.family_id)
+                self.assertGreater(item.version, parent.version)
             misconception_sets = [item.misconception_ids for item in items]
             self.assertTrue(all(len(values) == 3 for values in misconception_sets))
 

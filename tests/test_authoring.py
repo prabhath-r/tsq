@@ -1173,8 +1173,8 @@ class AuthoringTestCase(unittest.TestCase):
         )
 
     def test_cross_objective_diagnoses_do_not_count_as_direct_repair_families(self) -> None:
-        objective_id = "lo_causal_visibility"
-        misconception_id = "m_transformers_are_inherently_bidirectional"
+        objective_id = "lo_transformer_information_paths"
+        misconception_id = "m_feedforward_layers_mix_token_positions"
         with self.database.read() as connection:
             release_id = self.database.get_active_release_id(connection)
             direct = connection.execute(

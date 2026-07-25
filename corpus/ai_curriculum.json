@@ -2209,6 +2209,13 @@
       "remediation": "Separate parallel masked matrix operations in training from sequential token availability during generation."
     },
     {
+      "id": "m_causal_mask_truncates_encoder_memory",
+      "name": "Target causal masking truncates encoder memory",
+      "description": "Applies the decoder target-index causal triangle to encoder cross-attention and hides later source positions even when the complete source is available.",
+      "concept_id": "c_causal_masking",
+      "remediation": "Separate the future-target boundary in decoder self-attention from cross-attention over the fully encoded nonpadding source."
+    },
+    {
       "id": "m_rag_retrieval_updates_weights",
       "name": "Retrieval updates generator weights",
       "description": "Treats adding documents to inference context as fine-tuning the generator parameters.",
@@ -14023,6 +14030,93 @@
         "encoder_decoder",
         "cross_attention",
         "visibility_scope"
+      ]
+    },
+    {
+      "id": "q_causal_cross_attention_mask_scope_002",
+      "version": 2,
+      "family_id": "f_causal_cross_attention_mask_scope",
+      "learning_objective_id": "lo_causal_visibility",
+      "status": "quarantined",
+      "revision_of": "q_causal_cross_attention_mask_scope_001",
+      "stem": "During one teacher-forced layer pass of an offline encoder-decoder Transformer, the complete nonpadding source has been encoded into cross-attention key-value positions s0, s1, s2. The right-shifted decoder input supplies self-attention key-value positions t0, t1, t2, with no target padding. For decoder query row i = 1, which key sets are visible?",
+      "kind": "application",
+      "difficulty": 0.4,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_causal_masking",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.25,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Target self-attention sees {t0, t1, t2}; source cross-attention sees {s0, s1, s2}.",
+          "correct": false,
+          "misconception_id": "m_mask_only_inference",
+          "diagnostic_objective_id": "lo_causal_visibility",
+          "rationale": "Teacher forcing makes t2 available in the input tensor, so the training mask must already prevent row i = 1 from reading that future target position."
+        },
+        {
+          "id": "b",
+          "text": "Target self-attention sees {t0, t1}; source cross-attention sees {s0, s1, s2}.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Inclusive causal self-attention admits the right-shifted decoder prefix through i, while cross-attention may use every position in the fully encoded nonpadding source."
+        },
+        {
+          "id": "c",
+          "text": "Target self-attention sees {t0}; source cross-attention sees {s0, s1, s2}.",
+          "correct": false,
+          "misconception_id": "m_mask_hides_current_token",
+          "diagnostic_objective_id": "lo_causal_visibility",
+          "rationale": "Because t1 is a right-shifted decoder input rather than the label predicted at row i = 1, the inclusive causal rule permits it and hides only positions to its right."
+        },
+        {
+          "id": "d",
+          "text": "Target self-attention sees {t0, t1}; source cross-attention sees {s0, s1}.",
+          "correct": false,
+          "misconception_id": "m_causal_mask_truncates_encoder_memory",
+          "diagnostic_objective_id": "lo_causal_visibility",
+          "rationale": "The target index defines the decoder self-attention boundary, not a prefix boundary on the already encoded source; no source padding or streaming mask removes s2 here."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_revision",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "provider": "openai_codex",
+        "batch_id": "batch_causal_revision_20260724_a",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Vaswani et al. sections 3.1 and 3.2 specify right-shifted decoder inputs, masking of subsequent target positions, and a separate encoder-decoder attention sublayer in which decoder positions attend over encoder outputs. The indexed no-padding scenario and distractor wording are original synthesis.",
+        "revision_reason": "The parent asks for the visibility rule abstractly; this revision forces an exact indexed self-attention and cross-attention trace and directly diagnoses transfer of the target causal triangle onto full encoder memory.",
+        "independence_note": "This immutable wording revision deliberately retains family f_causal_cross_attention_mask_scope and must not count as independent evidence from q_causal_cross_attention_mask_scope_001. The keyed operation enumerates exact target-self and source-cross key sets at one decoder row and distinguishes the target causal boundary from full-source visibility."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "causal_mask",
+        "encoder_decoder",
+        "cross_attention",
+        "teacher_forcing",
+        "visibility_trace"
       ]
     },
     {

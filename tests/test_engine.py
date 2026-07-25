@@ -1109,8 +1109,18 @@ class EngineTestCase(unittest.TestCase):
                    JOIN options option
                      ON option.question_id = mapping.question_id
                     AND option.option_id = mapping.option_id
+                   JOIN release_questions membership
+                     ON membership.release_id = mapping.release_id
+                    AND membership.question_id = mapping.question_id
                    WHERE mapping.release_id = ?
                      AND mapping.objective_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                     AND option.is_correct = 0
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM question_revocations revoked
+                         WHERE revoked.question_id = mapping.question_id
+                     )
                      AND option.misconception_id IS NOT NULL
                    ORDER BY option.misconception_id LIMIT 1""",
                 (

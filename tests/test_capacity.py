@@ -883,7 +883,7 @@ class CapacityCliTestCase(unittest.TestCase):
             result["achievable_main_capacity"],
         )
 
-    def test_quarantined_transformer_bridges_do_not_inflate_live_capacity(
+    def test_quarantined_transformer_candidates_do_not_inflate_live_capacity(
         self,
     ) -> None:
         bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
@@ -903,6 +903,7 @@ class CapacityCliTestCase(unittest.TestCase):
         ]
         quarantined_bridge_ids = {
             "q_attention_runtime_workspace_boundary_001",
+            "q_causal_cross_attention_mask_scope_002",
             "q_transformer_unexpected_cross_token_path_001",
         }
 
