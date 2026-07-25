@@ -17,6 +17,7 @@ NEW_TRANSFORMER_QUESTIONS = {
     "q_causal_mask_softmax_normalization_001",
     "q_causal_full_incremental_equivalence_001",
     "q_causal_cross_attention_mask_scope_001",
+    "q_causal_cross_attention_mask_scope_002",
     "q_transformer_token_intervention_trace_001",
 }
 NEW_AGENT_INTRO_QUESTIONS = {
@@ -39,7 +40,7 @@ AGENT_INTRO_BATCH_ID = "batch_agent_intro_bridges_20260724_a"
 RAG_INTRO_BATCH_ID = "batch_rag_intro_bridges_20260724_a"
 TRANSFORMER_INTRO_BATCH_ID = "batch_transformer_intro_bridges_20260724_a"
 LEGACY_GENERATED_MIGRATION_COUNT = 39
-TOTAL_UNREVIEWED_GENERATED_COUNT = 61
+TOTAL_UNREVIEWED_GENERATED_COUNT = 62
 
 
 class CorpusMisconceptionRouteTests(unittest.TestCase):
@@ -80,6 +81,100 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
             distractor.diagnostic_objective_id,
             "lo_causal_visibility",
         )
+
+    def test_causal_cross_attention_revision_is_quarantined_same_family(
+        self,
+    ) -> None:
+        expected_routes = {
+            "m_mask_only_inference",
+            "m_mask_hides_current_token",
+            "m_causal_mask_truncates_encoder_memory",
+        }
+        for questions in (
+            self.canonical_questions,
+            self.packaged_questions,
+        ):
+            parent = questions[
+                "q_causal_cross_attention_mask_scope_001"
+            ]
+            revision = questions[
+                "q_causal_cross_attention_mask_scope_002"
+            ]
+            self.assertEqual(revision.revision_of, parent.id)
+            self.assertGreater(revision.version, parent.version)
+            self.assertEqual(revision.family_id, parent.family_id)
+            self.assertEqual(
+                revision.family_id,
+                "f_causal_cross_attention_mask_scope",
+            )
+            self.assertEqual(
+                revision.objective_id,
+                "lo_causal_visibility",
+            )
+            self.assertEqual(revision.status.value, "quarantined")
+            self.assertFalse(revision.status.eligible_for_adaptation)
+            self.assertEqual(
+                {
+                    option.misconception_id
+                    for option in revision.options
+                    if not option.correct
+                },
+                expected_routes,
+            )
+            self.assertTrue(
+                all(
+                    option.diagnostic_objective_id
+                    == "lo_causal_visibility"
+                    for option in revision.options
+                    if not option.correct
+                )
+            )
+            correct = revision.correct_option
+            self.assertIn("{t0, t1}", correct.text)
+            self.assertIn("{s0, s1, s2}", correct.text)
+            cross_scope = next(
+                option
+                for option in revision.options
+                if option.misconception_id
+                == "m_causal_mask_truncates_encoder_memory"
+            )
+            self.assertIn("{s0, s1}", cross_scope.text)
+            misconception = self.canonical_misconceptions[
+                "m_causal_mask_truncates_encoder_memory"
+            ]
+            self.assertEqual(
+                misconception.concept_id,
+                "c_causal_masking",
+            )
+            self.assertIn(
+                "encoder cross-attention",
+                misconception.description,
+            )
+            self.assertEqual(
+                revision.source_ids,
+                (
+                    "src_vaswani_attention_2017",
+                    "src_expert_synthesis_2026",
+                ),
+            )
+            self.assertIs(revision.provenance["generated"], True)
+            self.assertIs(revision.provenance["human_review"], False)
+            self.assertEqual(
+                revision.provenance["batch_id"],
+                "batch_causal_revision_20260724_a",
+            )
+            self.assertEqual(
+                revision.provenance["review_status"],
+                "internal_ai_critique_pending_quarantined",
+            )
+            self.assertEqual(
+                revision.provenance["human_review_status"],
+                "required_before_activation",
+            )
+            self.assertIn(
+                parent.id,
+                revision.provenance["independence_note"],
+            )
 
     def test_agent_capability_availability_has_exact_named_route(self) -> None:
         question = self.canonical_questions[
