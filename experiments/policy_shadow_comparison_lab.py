@@ -38,6 +38,8 @@ from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.policy import POLICY_VERSION  # noqa: E402
 from tsq.policy_shadow import GREEDY_POLICY_VERSION  # noqa: E402
 from tsq.policy_shadow_reporting import (  # noqa: E402
+    MIN_EFFECTIVE_SAMPLE_RATIO,
+    MIN_EFFECTIVE_SAMPLE_SIZE,
     POLICY_SHADOW_REPORT_VERSION,
     PROSPECTIVE_ONE_STEP_OPE_VERSION,
     build_policy_shadow_report,
@@ -295,6 +297,122 @@ def _mean(values: Sequence[float]) -> float:
     return sum(values) / len(values)
 
 
+def _local_target_summary(
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    target: str,
+) -> dict[str, Any]:
+    if target not in {"uniform", "greedy"}:
+        raise ValueError("Local target must be uniform or greedy.")
+    weight_field = f"{target}_weight"
+    range_field = f"{target}_range_bound"
+    weights = [float(row[weight_field]) for row in rows]
+    outcomes = [float(row["correct"]) for row in rows]
+    weight_sum = sum(weights)
+    squared_sum = sum(weight * weight for weight in weights)
+    if not rows:
+        status = "unavailable"
+        reasons = ["no observations"]
+        ess = 0.0
+        ess_ratio = None
+        ips = None
+        snips = None
+    elif weight_sum <= 0.0 or squared_sum <= 0.0:
+        status = "unavailable"
+        reasons = ["no target-action support"]
+        ess = 0.0
+        ess_ratio = 0.0
+        ips = None
+        snips = None
+    else:
+        ess = weight_sum * weight_sum / squared_sum
+        ess_ratio = ess / len(rows)
+        reasons = []
+        if ess < MIN_EFFECTIVE_SAMPLE_SIZE:
+            reasons.append("effective sample size is below 30")
+        if ess_ratio < MIN_EFFECTIVE_SAMPLE_RATIO:
+            reasons.append("effective sample ratio is below 0.10")
+        status = "low_information" if reasons else "descriptive_only"
+        weighted_reward = sum(
+            weight * outcome
+            for weight, outcome in zip(weights, outcomes, strict=True)
+        )
+        ips = weighted_reward / len(rows)
+        snips = weighted_reward / weight_sum
+    oracle = (
+        _mean([float(row["oracle"][target]) for row in rows])
+        if rows
+        else None
+    )
+    return {
+        "status": status,
+        "low_information_reasons": reasons,
+        "support_count": sum(weight > 0.0 for weight in weights),
+        "support_rate": (
+            sum(weight > 0.0 for weight in weights) / len(rows)
+            if rows
+            else None
+        ),
+        "weights": {
+            "sum": weight_sum,
+            "effective_sample_size": ess,
+            "effective_sample_ratio": ess_ratio,
+            "zero_count": sum(weight == 0.0 for weight in weights),
+        },
+        "ips": ips,
+        "snips": snips,
+        "oracle": oracle,
+        "assessment": (
+            None
+            if oracle is None
+            else _assessment(
+                estimate=ips,
+                oracle=oracle,
+                range_bounds=[
+                    float(row[range_field]) for row in rows
+                ],
+                status=status,
+            )
+        ),
+    }
+
+
+def _stratum_summary(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    outcomes = [float(row["correct"]) for row in rows]
+    behavior_oracle = (
+        _mean([float(row["oracle"]["behavior"]) for row in rows])
+        if rows
+        else None
+    )
+    behavior_status = (
+        "descriptive_only"
+        if len(rows) >= MIN_UNWEIGHTED_OBSERVATIONS
+        else ("low_information" if rows else "unavailable")
+    )
+    return {
+        "observation_count": len(rows),
+        "live_behavior": {
+            "status": behavior_status,
+            "observed_mean": _mean(outcomes) if rows else None,
+            "oracle": behavior_oracle,
+            "assessment": (
+                None
+                if behavior_oracle is None
+                else _assessment(
+                    estimate=_mean(outcomes),
+                    oracle=behavior_oracle,
+                    range_bounds=[1.0] * len(rows),
+                    status=behavior_status,
+                )
+            ),
+        },
+        "uniform": _local_target_summary(rows, target="uniform"),
+        "greedy": _local_target_summary(rows, target="greedy"),
+    }
+
+
 def _run_once(
     database_path: Path,
     *,
@@ -530,6 +648,20 @@ def _run_once(
             status=greedy_result["status"],
         ),
     }
+    profile_strata = {
+        profile.id: _stratum_summary(
+            [row for row in rows if row["profile"] == profile.id]
+        )
+        for profile in profiles
+    }
+    observed_phases = sorted({str(row["phase"]) for row in rows})
+    phase_strata = {
+        phase: _stratum_summary(
+            [row for row in rows if row["phase"] == phase]
+        )
+        for phase in observed_phases
+    }
+    expected_phases = {profile.mode for profile in profiles}
     failures: list[str] = []
     if not integrity["ok"]:
         failures.append("Event or projection integrity failed.")
@@ -547,6 +679,8 @@ def _run_once(
         profile.id for profile in profiles
     }:
         failures.append("At least one declared profile was not observed.")
+    if set(observed_phases) != expected_phases:
+        failures.append("At least one declared session phase was not observed.")
     return {
         "lab_version": LAB_VERSION,
         "backend_versions": {
@@ -580,6 +714,14 @@ def _run_once(
             "greedy": greedy_result,
         },
         "assessments": assessments,
+        "stratified": {
+            "profiles": profile_strata,
+            "phases": phase_strata,
+            "boundary": (
+                "Strata are descriptive overlap diagnostics. No multiplicity, "
+                "dependence, or human-population adjustment is applied."
+            ),
+        },
         "invariants": {
             "integrity_ok": bool(integrity["ok"]),
             "production_arithmetic_matches": arithmetic_ok,
@@ -595,6 +737,9 @@ def _run_once(
                 set(row["profile"] for row in rows)
                 == {profile.id for profile in profiles}
             ),
+            "all_declared_phases_observed": (
+                set(observed_phases) == expected_phases
+            ),
         },
         "findings": {
             "falsified_estimators": [
@@ -606,6 +751,16 @@ def _run_once(
                 name
                 for name, assessment in assessments.items()
                 if assessment["assessment"] == "inconclusive"
+            ],
+            "underpowered_greedy_profile_ids": [
+                profile_id
+                for profile_id, summary in profile_strata.items()
+                if summary["greedy"]["status"] != "descriptive_only"
+            ],
+            "underpowered_greedy_phases": [
+                phase
+                for phase, summary in phase_strata.items()
+                if summary["greedy"]["status"] != "descriptive_only"
             ],
         },
         "limitations": [
@@ -632,6 +787,10 @@ def _run_once(
             (
                 "Fully answered trials do not identify response-censoring "
                 "or abandonment effects."
+            ),
+            (
+                "Aggregate overlap does not establish profile- or phase-level "
+                "support; every stratum is reported separately."
             ),
         ],
         "failures": failures,

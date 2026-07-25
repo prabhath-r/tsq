@@ -212,7 +212,9 @@ frontier action. Smooth, threshold, ability-only, and localized-weakness
 profiles span learn, diagnose, and review phases while exercising model
 misspecification. The replicated ignored artifact
 checks independent IPS arithmetic, overlap/ESS guards, projection replay, and
-source-database non-mutation. Low overlap is inconclusive. Synthetic oracle
-recovery is estimator evidence only—not human calibration, an alternate
-adaptive trajectory, teaching benefit, retention, or a reason to promote the
-greedy challenger.
+source-database non-mutation. It reports aggregate, response-profile, and
+session-phase overlap separately so a healthy aggregate cannot hide an
+underpowered subgroup. Low overlap is inconclusive. Synthetic oracle recovery
+is estimator evidence only—not human calibration, an alternate adaptive
+trajectory, teaching benefit, retention, or a reason to promote the greedy
+challenger.
