@@ -553,9 +553,14 @@ class AuthoringTestCase(unittest.TestCase):
                 "same_family_rows_prioritized"
             ]
         )
-        self.assertFalse(
+        self.assertTrue(
             detail["local_comparison_scope"][
                 "secondary_concept_only_matches_included"
+            ]
+        )
+        self.assertTrue(
+            detail["local_comparison_scope"][
+                "included_if_any_mapped_concept_shared"
             ]
         )
         self.assertTrue(
@@ -563,6 +568,14 @@ class AuthoringTestCase(unittest.TestCase):
                 comparison["same_family"]
                 or comparison["same_learning_objective"]
                 or comparison["same_primary_concept"]
+                or comparison["same_any_concept"]
+                for comparison in detail["local_family_comparison"]
+            )
+        )
+        self.assertTrue(
+            all(
+                comparison["same_any_concept"]
+                == bool(comparison["shared_concept_ids"])
                 for comparison in detail["local_family_comparison"]
             )
         )
@@ -617,6 +630,16 @@ class AuthoringTestCase(unittest.TestCase):
                 "family_material_selection_family_enriched"
             ]
         )
+        self.assertTrue(
+            packet["review_contract"][
+                "family_material_selection_concept_enriched"
+            ]
+        )
+        self.assertTrue(
+            packet["review_contract"][
+                "family_material_scope_fields_blind"
+            ]
+        )
         self.assertFalse(
             packet["review_contract"]["family_independence_claim_resolved"]
         )
@@ -636,6 +659,10 @@ class AuthoringTestCase(unittest.TestCase):
             "same_family",
             "same_learning_objective",
             "same_primary_concept",
+            "shared_concept_ids",
+            "same_any_concept",
+            "secondary_concept_only",
+            "comparison_scope_priority",
             "source_ids",
         }
         self.assertTrue(
@@ -762,6 +789,10 @@ class AuthoringTestCase(unittest.TestCase):
             "same_family",
             "same_learning_objective",
             "same_primary_concept",
+            "shared_concept_ids",
+            "same_any_concept",
+            "secondary_concept_only",
+            "comparison_scope_priority",
             "source_ids",
         }
         for question_id, family_id, neighbor_id, release_status in cases:
@@ -818,6 +849,116 @@ class AuthoringTestCase(unittest.TestCase):
                 self.assertTrue(
                     forbidden_fields.isdisjoint(
                         set(nested_keys(family_packet["material"]))
+                    )
+                )
+
+    def test_family_review_includes_secondary_concept_neighbors(
+        self,
+    ) -> None:
+        queue = QuarantineReviewQueue(self.database)
+        cases = {
+            "q_transformer_kv_cache_eviction_equivalence_001": {
+                "q_attention_window_resource_contrast_001",
+                "q_attention_flash_io_arithmetic_001",
+            },
+            "q_transformer_kv_cache_alignment_001": {
+                "q_attention_value_routing_001",
+                "q_attention_value_role_ablation_001",
+                "q_attention_value_projection_counterfactual_001",
+                "q_attention_value_perturbation_001",
+            },
+        }
+        priority = {
+            "same_family": 0,
+            "same_direct_learning_objective": 1,
+            "same_primary_concept": 2,
+            "secondary_concept_only": 3,
+        }
+        family_forbidden_fields = {
+            "correct",
+            "rationale",
+            "misconception_id",
+            "diagnostic_objective_id",
+            "provenance",
+            "independence_note",
+            "family_id",
+            "release_status",
+            "same_family",
+            "same_learning_objective",
+            "same_primary_concept",
+            "shared_concept_ids",
+            "same_any_concept",
+            "secondary_concept_only",
+            "comparison_scope_priority",
+            "source_ids",
+        }
+
+        for question_id, expected_neighbor_ids in cases.items():
+            with self.subTest(question_id=question_id):
+                detail = queue.show(question_id)
+                self.assertLessEqual(
+                    detail["local_comparison_total_lower_bound"],
+                    detail["local_comparison_scope"]["maximum_rows"],
+                )
+                self.assertTrue(
+                    detail["local_comparison_scope_complete"]
+                )
+                comparisons = detail["local_family_comparison"]
+                self.assertEqual(
+                    [
+                        priority[row["comparison_scope_priority"]]
+                        for row in comparisons
+                    ],
+                    sorted(
+                        priority[row["comparison_scope_priority"]]
+                        for row in comparisons
+                    ),
+                )
+                by_question_id = {
+                    row["question"]["id"]: row for row in comparisons
+                }
+                self.assertTrue(
+                    expected_neighbor_ids <= set(by_question_id)
+                )
+                for neighbor_id in expected_neighbor_ids:
+                    neighbor = by_question_id[neighbor_id]
+                    self.assertTrue(neighbor["same_any_concept"])
+                    self.assertTrue(
+                        neighbor["secondary_concept_only"]
+                    )
+                    self.assertEqual(
+                        neighbor["comparison_scope_priority"],
+                        "secondary_concept_only",
+                    )
+                    self.assertIn(
+                        "c_attention",
+                        neighbor["shared_concept_ids"],
+                    )
+
+                first_packet = queue.packet(
+                    question_id, stage="family"
+                )
+                second_packet = queue.packet(
+                    question_id, stage="family"
+                )
+                self.assertEqual(first_packet, second_packet)
+                packet_neighbor_ids = {
+                    row["question"]["id"]
+                    for row in first_packet["material"][
+                        "comparison_questions"
+                    ]
+                }
+                self.assertTrue(
+                    expected_neighbor_ids <= packet_neighbor_ids
+                )
+                self.assertTrue(
+                    first_packet["material"][
+                        "comparison_scope_complete"
+                    ]
+                )
+                self.assertTrue(
+                    family_forbidden_fields.isdisjoint(
+                        set(nested_keys(first_packet["material"]))
                     )
                 )
 

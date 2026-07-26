@@ -159,7 +159,7 @@ class PackagingTestCase(unittest.TestCase):
         bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
         # Remove one explicitly marked generated/quarantined item so the
         # immutable legacy-unattested cohort remains complete and byte-stable.
-        removed_id = "q_attention_duplicate_value_identifiability_001"
+        removed_id = "q_attention_runtime_workspace_boundary_001"
         bundle["questions"] = [
             question
             for question in bundle["questions"]
@@ -208,7 +208,7 @@ class PackagingTestCase(unittest.TestCase):
         bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
         bundle.pop("domains")
         bundle.pop("topics")
-        removed_id = "q_attention_duplicate_value_identifiability_001"
+        removed_id = "q_attention_runtime_workspace_boundary_001"
         bundle["questions"] = [
             question
             for question in bundle["questions"]

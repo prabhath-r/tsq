@@ -1556,58 +1556,70 @@ class QuarantineReviewQueue:
                 ),
             ).fetchall()
             comparison_rows = connection.execute(
-                """SELECT candidate.id, candidate.content_hash,
-                          candidate.family_id, candidate.kind,
-                          candidate.difficulty, candidate.stem,
-                          candidate.provenance_json, candidate.revision_of,
-                          candidate_membership.status,
-                          (
-                              SELECT mapping.objective_id
-                              FROM release_question_objectives mapping
-                              WHERE mapping.release_id = ?
-                                AND mapping.question_id = candidate.id
-                          ) AS objective_id,
-                          (
-                              SELECT mapping.concept_id
-                              FROM question_concepts mapping
-                              WHERE mapping.question_id = candidate.id
-                                AND mapping.role = 'primary'
-                          ) AS primary_concept_id
-                   FROM release_questions candidate_membership
-                   JOIN questions candidate
-                     ON candidate.id = candidate_membership.question_id
-                   WHERE candidate_membership.release_id = ?
-                     AND candidate.id != ?
-                     AND (
-                         EXISTS (
-                             SELECT 1
-                             FROM release_question_objectives mapping
-                             WHERE mapping.release_id = ?
-                               AND mapping.question_id = candidate.id
-                               AND mapping.objective_id = ?
-                         )
-                         OR EXISTS (
-                             SELECT 1 FROM question_concepts mapping
-                             WHERE mapping.question_id = candidate.id
-                               AND mapping.role = 'primary'
-                               AND mapping.concept_id = ?
-                         )
-                         OR candidate.family_id = ?
-                     )
-                   ORDER BY CASE WHEN candidate.family_id = ?
-                                      THEN 0 ELSE 1 END,
-                            candidate_membership.status,
-                            candidate.difficulty, candidate.id
+                """WITH target_concepts AS (
+                       SELECT concept_id
+                       FROM question_concepts
+                       WHERE question_id = ?
+                   ),
+                   scoped AS (
+                       SELECT candidate.id, candidate.content_hash,
+                              candidate.family_id, candidate.kind,
+                              candidate.difficulty, candidate.stem,
+                              candidate.provenance_json,
+                              candidate.revision_of,
+                              candidate_membership.status,
+                              (
+                                  SELECT mapping.objective_id
+                                  FROM release_question_objectives mapping
+                                  WHERE mapping.release_id = ?
+                                    AND mapping.question_id = candidate.id
+                              ) AS objective_id,
+                              (
+                                  SELECT mapping.concept_id
+                                  FROM question_concepts mapping
+                                  WHERE mapping.question_id = candidate.id
+                                    AND mapping.role = 'primary'
+                              ) AS primary_concept_id,
+                              EXISTS (
+                                  SELECT 1
+                                  FROM question_concepts mapping
+                                  JOIN target_concepts target
+                                    ON target.concept_id =
+                                       mapping.concept_id
+                                  WHERE mapping.question_id = candidate.id
+                              ) AS same_any_concept
+                       FROM release_questions candidate_membership
+                       JOIN questions candidate
+                         ON candidate.id =
+                            candidate_membership.question_id
+                       WHERE candidate_membership.release_id = ?
+                         AND candidate.id != ?
+                   )
+                   SELECT *
+                   FROM scoped
+                   WHERE family_id = ?
+                      OR objective_id = ?
+                      OR primary_concept_id = ?
+                      OR same_any_concept
+                   ORDER BY CASE
+                                WHEN family_id = ? THEN 0
+                                WHEN objective_id = ? THEN 1
+                                WHEN primary_concept_id = ? THEN 2
+                                ELSE 3
+                            END,
+                            status, difficulty, id
                    LIMIT 101""",
                 (
+                    question_id,
                     release_id,
                     release_id,
                     question_id,
-                    release_id,
+                    question.family_id,
                     question.objective_id,
                     question.primary_concept_id,
                     question.family_id,
-                    question.family_id,
+                    question.objective_id,
+                    question.primary_concept_id,
                 ),
             ).fetchall()
             same_family_total = int(
@@ -1814,6 +1826,9 @@ class QuarantineReviewQueue:
         ]
         local_comparison_truncated = len(comparison_rows) > 100
         local_family_comparison: list[dict[str, Any]] = []
+        target_concept_ids = {
+            mapping.concept_id for mapping in question.concepts
+        }
         for row in comparison_rows[:100]:
             candidate = self.database.get_question(
                 row["id"], release_id=release_id
@@ -1823,20 +1838,56 @@ class QuarantineReviewQueue:
                     f"Comparison question {row['id']} content hash does not "
                     "match its stored immutable identity."
                 )
+            shared_concept_ids = sorted(
+                target_concept_ids
+                & {
+                    mapping.concept_id
+                    for mapping in candidate.concepts
+                }
+            )
+            same_family = row["family_id"] == question.family_id
+            same_learning_objective = (
+                question.objective_id is not None
+                and row["objective_id"] == question.objective_id
+            )
+            same_primary_concept = (
+                row["primary_concept_id"]
+                == question.primary_concept_id
+            )
+            same_any_concept = bool(shared_concept_ids)
+            if same_any_concept != bool(row["same_any_concept"]):
+                raise ValidationError(
+                    f"Comparison question {row['id']} concept scope does not "
+                    "match its stored mappings."
+                )
+            secondary_concept_only = (
+                same_any_concept
+                and not same_family
+                and not same_learning_objective
+                and not same_primary_concept
+            )
+            if same_family:
+                comparison_scope_priority = "same_family"
+            elif same_learning_objective:
+                comparison_scope_priority = (
+                    "same_direct_learning_objective"
+                )
+            elif same_primary_concept:
+                comparison_scope_priority = "same_primary_concept"
+            else:
+                comparison_scope_priority = "secondary_concept_only"
             local_family_comparison.append(
                 {
                     "question_content_sha256": row["content_hash"],
                     "release_status": row["status"],
-                    "same_family": (
-                        row["family_id"] == question.family_id
-                    ),
-                    "same_learning_objective": (
-                        question.objective_id is not None
-                        and row["objective_id"] == question.objective_id
-                    ),
-                    "same_primary_concept": (
-                        row["primary_concept_id"]
-                        == question.primary_concept_id
+                    "same_family": same_family,
+                    "same_learning_objective": same_learning_objective,
+                    "same_primary_concept": same_primary_concept,
+                    "shared_concept_ids": shared_concept_ids,
+                    "same_any_concept": same_any_concept,
+                    "secondary_concept_only": secondary_concept_only,
+                    "comparison_scope_priority": (
+                        comparison_scope_priority
                     ),
                     "independence_note": candidate.provenance.get(
                         "independence_note"
@@ -1879,10 +1930,29 @@ class QuarantineReviewQueue:
                 "included_if_same_family": True,
                 "included_if_same_direct_learning_objective": True,
                 "included_if_same_primary_concept": True,
-                "secondary_concept_only_matches_included": False,
+                "included_if_any_mapped_concept_shared": True,
+                "secondary_concept_only_matches_included": True,
+                "secondary_concept_only_definition": (
+                    "shares at least one mapped concept but has no same-family, "
+                    "same-direct-objective, or same-primary-concept relation"
+                ),
                 "cross_topic_only_matches_included": False,
-                "unrelated_objective_matches_included": False,
+                "unrelated_objective_matches_included_if_concept_shared": (
+                    True
+                ),
+                "unrelated_without_shared_concept_matches_included": False,
                 "same_family_rows_prioritized": True,
+                "same_direct_learning_objective_rows_prioritized_second": (
+                    True
+                ),
+                "same_primary_concept_rows_prioritized_third": True,
+                "secondary_concept_only_rows_prioritized_fourth": True,
+                "priority_order": [
+                    "same_family",
+                    "same_direct_learning_objective",
+                    "same_primary_concept",
+                    "secondary_concept_only",
+                ],
                 "maximum_rows": 100,
             },
             "local_comparison_scope_complete": (
@@ -2037,6 +2107,8 @@ class QuarantineReviewQueue:
                 "family_material_source_selection_blind": True,
                 "family_material_family_assignment_fields_blind": True,
                 "family_material_selection_family_enriched": True,
+                "family_material_selection_concept_enriched": True,
+                "family_material_scope_fields_blind": True,
                 "family_reviewer_must_not_receive_critic_material": True,
                 "stage_sequence_advisory_only": True,
                 "stage_exports_are_not_access_control": True,
@@ -2082,9 +2154,11 @@ class QuarantineReviewQueue:
                     "review inputs, not proof of family independence."
                 ),
                 (
-                    "Family-stage selection is enriched with declared "
-                    "same-family neighbors, but assignment fields are hidden. "
-                    "Inclusion is not evidence of semantic dependence."
+                    "Family-stage selection is enriched with same-family, "
+                    "same-objective, and shared-concept neighbors in the "
+                    "documented priority order, but assignment and scope "
+                    "fields are hidden. Inclusion is not evidence of semantic "
+                    "dependence."
                 ),
                 (
                     "The combined packet is coordinator-only. Use a blind "

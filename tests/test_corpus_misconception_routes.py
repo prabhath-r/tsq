@@ -35,12 +35,21 @@ NEW_TRANSFORMER_INTRO_QUESTIONS = {
     "q_attention_runtime_workspace_boundary_001",
     "q_transformer_unexpected_cross_token_path_001",
 }
+NEW_TRANSFORMER_CAPACITY_QUESTIONS = {
+    "q_transformer_kv_cache_alignment_001",
+    "q_transformer_kv_cache_eviction_equivalence_001",
+    "q_attention_duplicate_value_identifiability_002",
+    "q_attention_value_gradient_routing_001",
+}
 GENERATED_BATCH_ID = "batch_rag_agent_headroom_20260723_c"
 AGENT_INTRO_BATCH_ID = "batch_agent_intro_bridges_20260724_a"
 RAG_INTRO_BATCH_ID = "batch_rag_intro_bridges_20260724_a"
 TRANSFORMER_INTRO_BATCH_ID = "batch_transformer_intro_bridges_20260724_a"
+TRANSFORMER_CAPACITY_BATCH_ID = (
+    "batch_transformer_capacity_repairs_20260725_a"
+)
 LEGACY_GENERATED_MIGRATION_COUNT = 39
-TOTAL_UNREVIEWED_GENERATED_COUNT = 62
+TOTAL_UNREVIEWED_GENERATED_COUNT = 66
 
 
 class CorpusMisconceptionRouteTests(unittest.TestCase):
@@ -50,6 +59,9 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
         packaged = read_and_parse(PACKAGED_CORPUS)
         cls.canonical_misconceptions = {
             item.id: item for item in canonical[2]
+        }
+        cls.canonical_sources = {
+            item.id: item for item in canonical[3]
         }
         cls.canonical_questions = {
             item.id: item for item in canonical[4]
@@ -559,6 +571,180 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                 }
                 self.assertEqual(observed, routes)
 
+    def test_transformer_capacity_candidates_are_distinct_and_quarantined(
+        self,
+    ) -> None:
+        expected_routes = {
+            "q_transformer_kv_cache_alignment_001": {
+                "m_decode_cache_retains_queries": (
+                    "lo_incremental_kv_cache"
+                ),
+                "m_multiquery_shares_queries": (
+                    "lo_incremental_kv_cache"
+                ),
+                "m_kv_sharing_collapses_time": (
+                    "lo_incremental_kv_cache"
+                ),
+            },
+            "q_transformer_kv_cache_eviction_equivalence_001": {
+                "m_multiquery_shares_queries": (
+                    "lo_incremental_kv_cache"
+                ),
+                "m_kv_sharing_collapses_time": (
+                    "lo_incremental_kv_cache"
+                ),
+                "m_decode_cache_retains_queries": (
+                    "lo_incremental_kv_cache"
+                ),
+            },
+            "q_attention_duplicate_value_identifiability_002": {
+                "m_attention_values_determine_weights": (
+                    "lo_attention_value_routing"
+                ),
+                "m_attention_keys_are_output_payloads": (
+                    "lo_attention_value_routing"
+                ),
+                "m_attention_is_hard_selection": (
+                    "lo_attention_value_routing"
+                ),
+            },
+            "q_attention_value_gradient_routing_001": {
+                "m_attention_values_determine_weights": (
+                    "lo_attention_value_routing"
+                ),
+                "m_attention_keys_are_output_payloads": (
+                    "lo_attention_value_routing"
+                ),
+                "m_attention_is_hard_selection": (
+                    "lo_attention_value_routing"
+                ),
+            },
+        }
+        for questions in (
+            self.canonical_questions,
+            self.packaged_questions,
+        ):
+            batch = {
+                question.id: question
+                for question in questions.values()
+                if question.provenance.get("batch_id")
+                == TRANSFORMER_CAPACITY_BATCH_ID
+            }
+            self.assertEqual(
+                set(batch),
+                NEW_TRANSFORMER_CAPACITY_QUESTIONS,
+            )
+            self.assertEqual(
+                len({question.family_id for question in batch.values()}),
+                4,
+            )
+            self.assertEqual(
+                {
+                    question.objective_id for question in batch.values()
+                },
+                {
+                    "lo_incremental_kv_cache",
+                    "lo_attention_value_routing",
+                },
+            )
+            self.assertTrue(
+                all(
+                    question.status.value == "quarantined"
+                    and not question.status.eligible_for_adaptation
+                    and question.provenance.get("generated") is True
+                    and question.provenance.get("human_review") is False
+                    and question.provenance.get("human_review_status")
+                    == "required_before_activation"
+                    and question.provenance.get("review_status")
+                    == "internal_ai_critique_pending_quarantined"
+                    and question.provenance.get("activation")
+                    == (
+                        "manual_only_after_human_review_and_new_immutable_release"
+                    )
+                    and bool(question.provenance.get("source_scope"))
+                    and bool(question.provenance.get("independence_note"))
+                    for question in batch.values()
+                )
+            )
+            for question_id, routes in expected_routes.items():
+                observed = {
+                    option.misconception_id: option.diagnostic_objective_id
+                    for option in batch[question_id].options
+                    if not option.correct
+                }
+                self.assertEqual(observed, routes)
+
+            alignment = batch[
+                "q_transformer_kv_cache_alignment_001"
+            ]
+            eviction = batch[
+                "q_transformer_kv_cache_eviction_equivalence_001"
+            ]
+            self.assertEqual(
+                alignment.source_ids,
+                (
+                    "src_vaswani_attention_2017",
+                    "src_shazeer_fast_decoding_2019",
+                    "src_expert_synthesis_2026",
+                ),
+            )
+            self.assertEqual(eviction.source_ids, alignment.source_ids)
+            self.assertIn(
+                "same temporal ordering",
+                alignment.correct_option.text,
+            )
+            self.assertIn(
+                "changing the visible context",
+                eviction.correct_option.text,
+            )
+
+            parent = questions[
+                "q_attention_duplicate_value_identifiability_001"
+            ]
+            revision = batch[
+                "q_attention_duplicate_value_identifiability_002"
+            ]
+            self.assertEqual(revision.revision_of, parent.id)
+            self.assertEqual(revision.version, 2)
+            self.assertGreater(revision.version, parent.version)
+            self.assertEqual(revision.family_id, parent.family_id)
+            self.assertNotIn("0.0", revision.stem)
+            self.assertIn("[0.8, 0.1, 0.1]", revision.stem)
+            self.assertIn("[0.1, 0.8, 0.1]", revision.stem)
+            self.assertIn(
+                "0.9u + 0.1w",
+                revision.correct_option.text,
+            )
+            self.assertIn(
+                "src_brunner_identifiability_2020",
+                revision.source_ids,
+            )
+
+            gradient = batch[
+                "q_attention_value_gradient_routing_001"
+            ]
+            self.assertIn(
+                "0.6g1 + 0.2g2",
+                gradient.correct_option.text,
+            )
+            self.assertIn(
+                "0.4g1 + 0.8g2",
+                gradient.correct_option.text,
+            )
+            self.assertIn(
+                "A-transpose",
+                gradient.correct_option.text,
+            )
+
+        source = self.canonical_sources[
+            "src_brunner_identifiability_2020"
+        ]
+        self.assertEqual(source.title, "On Identifiability in Transformers")
+        self.assertEqual(
+            source.uri,
+            "https://arxiv.org/abs/1908.04211",
+        )
+
     def test_generated_without_human_review_is_never_adaptation_eligible(
         self,
     ) -> None:
@@ -580,6 +766,7 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                 and question.id not in NEW_AGENT_INTRO_QUESTIONS
                 and question.id not in NEW_RAG_INTRO_QUESTIONS
                 and question.id not in NEW_TRANSFORMER_INTRO_QUESTIONS
+                and question.id not in NEW_TRANSFORMER_CAPACITY_QUESTIONS
             ]
 
             self.assertEqual(
