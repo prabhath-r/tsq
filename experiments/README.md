@@ -204,6 +204,18 @@ capacity for the exact objective and misconception signature. This is a
 counterfactual authoring check: generated candidates remain quarantined,
 human-unreviewed, manual-activation-only, and semantically unverified.
 
+The same artifact declares the three active teacher-forced causal-visibility
+families as a semantic-review cluster, including the pair that falls below the
+lexical nomination threshold. It then evaluates the complete sixteen-subset
+power set of four quarantined causal-reserve families under declared-family,
+batch/training-pair-collapse, and three-family-collapse assumptions. Every
+subset is measured at both the whole causal-masking concept and the exact
+three-misconception route. Only one frozen representative of the
+cross-attention family is made eligible, so its `_001`/`_002` revision pair
+still contributes one family. Missing legacy generation, human-review, or
+manual-activation provenance is reported explicitly; quarantine remains the
+activation ceiling and no capacity result establishes semantic independence.
+
 The policy-shadow comparison laboratory gives many fresh synthetic learners
 exactly one production-selected question each, then evaluates the event-backed
 safe frontiers without modifying the live policy or learner state:

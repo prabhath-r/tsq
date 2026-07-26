@@ -80,7 +80,9 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             ]
         )
 
-    def test_known_trios_are_signal_connected_and_capacity_critical(self) -> None:
+    def test_declared_clusters_are_capacity_critical_and_fail_visible(
+        self,
+    ) -> None:
         report = build_report()
         declared = {
             row["cluster_id"]: row
@@ -105,6 +107,7 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             set(declared),
             {
                 "attention_value_routing_trio",
+                "causal_training_visibility_triad",
                 "multiquery_kv_cache_trio",
             },
         )
@@ -119,6 +122,11 @@ class FamilyIndependenceLabTests(unittest.TestCase):
                 "q_transformer_multiquery_cache_inventory_001",
                 "q_transformer_multiquery_state_transition_001",
             },
+            "causal_training_visibility_triad": {
+                "q_causal_mask_training_leak_001",
+                "q_causal_mask_parallelism_001",
+                "q_causal_mask_batch_matrix_001",
+            },
         }
         nominated_pairs = {
             frozenset(
@@ -126,7 +134,11 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             )
             for row in report["duplicate_pair_candidates"]
         }
-        for cluster_id, question_ids in expected.items():
+        for cluster_id in (
+            "attention_value_routing_trio",
+            "multiquery_kv_cache_trio",
+        ):
+            question_ids = expected[cluster_id]
             cluster = declared[cluster_id]
             self.assertEqual(set(cluster["question_ids"]), question_ids)
             self.assertTrue(cluster["automatic_signal_connected"])
@@ -157,6 +169,49 @@ class FamilyIndependenceLabTests(unittest.TestCase):
                 stress["collapsed"]["aggregate_status"], "blocked"
             )
 
+        causal = declared["causal_training_visibility_triad"]
+        causal_ids = expected["causal_training_visibility_triad"]
+        self.assertEqual(set(causal["question_ids"]), causal_ids)
+        self.assertFalse(causal["automatic_signal_connected"])
+        self.assertFalse(causal["semantic_dependence_established"])
+        self.assertEqual(
+            len(
+                [
+                    pair
+                    for pair in nominated_pairs
+                    if pair <= causal_ids
+                ]
+            ),
+            1,
+        )
+        causal_stress = causal["capacity_stress_test"]
+        self.assertEqual(
+            causal_stress["baseline"]["order_robust_main_capacity"], 2
+        )
+        self.assertEqual(
+            causal_stress["baseline"]["achievable_main_capacity"], 2
+        )
+        self.assertEqual(
+            causal_stress["collapsed"]["order_robust_main_capacity"], 0
+        )
+        self.assertEqual(
+            causal_stress["collapsed"]["achievable_main_capacity"], 0
+        )
+        self.assertEqual(
+            causal_stress["collapsed"]["aggregate_status"], "blocked"
+        )
+        self.assertEqual(
+            set(
+                causal_stress[
+                    "counterfactually_unavailable_family_ids"
+                ]
+            ),
+            {
+                "f_causal_mask_parallelism",
+                "f_causal_mask_training_leak",
+            },
+        )
+
     def test_quarantined_repairs_restore_declared_collapse_in_memory_only(
         self,
     ) -> None:
@@ -165,7 +220,7 @@ class FamilyIndependenceLabTests(unittest.TestCase):
         after = DEFAULT_CORPUS.read_bytes()
         batch = report["quarantined_candidate_counterfactual"]
 
-        self.assertEqual(LAB_VERSION, "family-independence-falsification-v2")
+        self.assertEqual(LAB_VERSION, "family-independence-falsification-v3")
         self.assertEqual(report["lab_version"], LAB_VERSION)
         self.assertEqual(before, after)
         self.assertEqual(batch["batch_id"], CANDIDATE_REPAIR_BATCH_ID)
@@ -257,6 +312,157 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             self.assertTrue(
                 comparison["human_review_required_before_activation"]
             )
+
+    def test_causal_reserve_power_set_is_exact_quarantined_and_read_only(
+        self,
+    ) -> None:
+        before = DEFAULT_CORPUS.read_bytes()
+        report = build_report()
+        after = DEFAULT_CORPUS.read_bytes()
+        reserve = report["causal_reserve_counterfactual"]
+
+        candidate_ids = {
+            "q_causal_mask_matrix_001",
+            "q_causal_mask_softmax_normalization_001",
+            "q_causal_full_incremental_equivalence_001",
+            "q_causal_cross_attention_mask_scope_002",
+        }
+        route_candidate_ids = {
+            "q_causal_mask_matrix_001",
+            "q_causal_mask_softmax_normalization_001",
+            "q_causal_full_incremental_equivalence_001",
+        }
+        self.assertEqual(before, after)
+        self.assertTrue(report["corpus"]["source_bytes_unchanged"])
+        self.assertFalse(reserve["source_corpus_mutated"])
+        self.assertFalse(reserve["semantic_independence_established"])
+        self.assertTrue(
+            reserve["human_review_required_before_activation"]
+        )
+        self.assertTrue(reserve["manual_activation_required"])
+        self.assertEqual(
+            set(reserve["candidate_question_ids"]), candidate_ids
+        )
+        self.assertEqual(reserve["candidate_family_count"], 4)
+        self.assertEqual(reserve["source_family_member_count"], 5)
+        self.assertEqual(
+            set(reserve["source_family_member_question_ids"]),
+            {
+                *candidate_ids,
+                "q_causal_cross_attention_mask_scope_001",
+            },
+        )
+        cross = next(
+            row
+            for row in reserve["candidate_declarations"]
+            if row["family_id"]
+            == "f_causal_cross_attention_mask_scope"
+        )
+        self.assertEqual(
+            cross["family_question_ids"],
+            [
+                "q_causal_cross_attention_mask_scope_001",
+                "q_causal_cross_attention_mask_scope_002",
+            ],
+        )
+        self.assertEqual(cross["same_family_member_count"], 2)
+
+        source = {
+            row["question_id"]: row
+            for row in reserve["source_candidate_state"]
+        }
+        self.assertEqual(
+            reserve["provenance_gap_question_ids"],
+            ["q_causal_mask_matrix_001"],
+        )
+        self.assertFalse(reserve["all_source_provenance_complete"])
+        for row in source.values():
+            self.assertEqual(row["source_status"], "quarantined")
+            self.assertFalse(row["source_eligible_for_adaptation"])
+            self.assertTrue(
+                row["activation_ceiling_preserved_by_source_status"]
+            )
+        self.assertEqual(
+            source["q_causal_mask_matrix_001"]["provenance_gaps"],
+            [
+                "activation_is_manual_only",
+                "generated_is_explicit_true",
+                "human_review_is_explicit_false",
+            ],
+        )
+        for question_id, row in source.items():
+            if question_id == "q_causal_mask_matrix_001":
+                continue
+            self.assertTrue(
+                row["provenance_complete_for_counterfactual_review"]
+            )
+            self.assertEqual(row["provenance_gaps"], [])
+
+        self.assertEqual(reserve["subset_count"], 16)
+        self.assertEqual(
+            reserve["subset_kind_counts"],
+            {
+                "none": 1,
+                "single": 4,
+                "pair": 6,
+                "triple": 4,
+                "all": 1,
+            },
+        )
+        subsets = {
+            frozenset(row["candidate_question_ids"]): row
+            for row in reserve["subset_analysis"]
+        }
+        self.assertEqual(len(subsets), 16)
+        self.assertIn(frozenset(), subsets)
+        self.assertIn(frozenset(candidate_ids), subsets)
+
+        scenarios = {
+            "declared_families": (4, 2),
+            "batch_training_pair_collapsed": (3, 1),
+            "training_visibility_triad_collapsed": (2, 0),
+        }
+        for subset_ids, row in subsets.items():
+            concept_increment = len(subset_ids)
+            route_increment = len(
+                subset_ids & route_candidate_ids
+            )
+            for scenario_id, (
+                concept_baseline,
+                route_baseline,
+            ) in scenarios.items():
+                snapshot = row["collapse_scenarios"][scenario_id]
+                concept = snapshot["whole_concept"]
+                route = snapshot["exact_route"]
+                expected_concept = concept_baseline + concept_increment
+                expected_route = route_baseline + route_increment
+                self.assertEqual(
+                    concept["order_robust_main_capacity"],
+                    expected_concept,
+                )
+                self.assertEqual(
+                    concept["achievable_main_capacity"],
+                    expected_concept,
+                )
+                self.assertEqual(
+                    route["order_robust_main_capacity"],
+                    expected_route,
+                )
+                self.assertEqual(
+                    route["achievable_main_capacity"],
+                    expected_route,
+                )
+
+        all_candidates = subsets[frozenset(candidate_ids)]
+        triad = all_candidates["collapse_scenarios"][
+            "training_visibility_triad_collapsed"
+        ]
+        self.assertEqual(
+            triad["whole_concept"]["order_robust_main_capacity"], 6
+        )
+        self.assertEqual(
+            triad["exact_route"]["order_robust_main_capacity"], 3
+        )
 
     def test_report_is_deterministic_versioned_and_read_only(self) -> None:
         before = hashlib.sha256(DEFAULT_CORPUS.read_bytes()).hexdigest()
