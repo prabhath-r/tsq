@@ -9,7 +9,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from experiments.family_independence_lab import (
+    CANDIDATE_REPAIR_BATCH_ID,
     DEFAULT_CORPUS,
+    LAB_VERSION,
     QuestionFeatures,
     build_report,
     canonical_hash,
@@ -153,6 +155,107 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             )
             self.assertEqual(
                 stress["collapsed"]["aggregate_status"], "blocked"
+            )
+
+    def test_quarantined_repairs_restore_declared_collapse_in_memory_only(
+        self,
+    ) -> None:
+        before = DEFAULT_CORPUS.read_bytes()
+        report = build_report()
+        after = DEFAULT_CORPUS.read_bytes()
+        batch = report["quarantined_candidate_counterfactual"]
+
+        self.assertEqual(LAB_VERSION, "family-independence-falsification-v2")
+        self.assertEqual(report["lab_version"], LAB_VERSION)
+        self.assertEqual(before, after)
+        self.assertEqual(batch["batch_id"], CANDIDATE_REPAIR_BATCH_ID)
+        self.assertEqual(
+            batch["status"],
+            "counterfactual_only_human_review_required",
+        )
+        self.assertFalse(batch["source_corpus_mutated"])
+        self.assertFalse(batch["semantic_independence_established"])
+        self.assertTrue(batch["manual_activation_required"])
+        self.assertEqual(
+            set(batch["candidate_question_ids"]),
+            {
+                "q_transformer_kv_cache_alignment_001",
+                "q_transformer_kv_cache_eviction_equivalence_001",
+                "q_attention_duplicate_value_identifiability_002",
+                "q_attention_value_gradient_routing_001",
+            },
+        )
+
+        parsed = {
+            question.id: question
+            for question in read_and_parse(DEFAULT_CORPUS)[4]
+        }
+        for row in batch["source_candidate_state"]:
+            question = parsed[row["question_id"]]
+            self.assertEqual(question.status.value, "quarantined")
+            self.assertFalse(question.status.eligible_for_adaptation)
+            self.assertTrue(question.provenance["generated"])
+            self.assertFalse(question.provenance["human_review"])
+            self.assertEqual(
+                question.provenance["activation"],
+                "manual_only_after_human_review_and_new_immutable_release",
+            )
+            self.assertTrue(row["quarantine_invariants_validated"])
+            self.assertEqual(row["source_status"], "quarantined")
+            self.assertFalse(row["source_eligible_for_adaptation"])
+            self.assertTrue(row["generated"])
+            self.assertFalse(row["human_review"])
+
+        comparisons = {
+            row["declared_cluster_id"]: row
+            for row in batch["cluster_comparisons"]
+        }
+        self.assertEqual(
+            set(comparisons),
+            {
+                "attention_value_routing_trio",
+                "multiquery_kv_cache_trio",
+            },
+        )
+        for comparison in comparisons.values():
+            baseline = comparison["baseline"]
+            collapsed = comparison["declared_cluster_collapsed"]
+            expanded = comparison[
+                "with_candidates_counterfactually_eligible"
+            ]
+            repaired = comparison[
+                "collapsed_with_candidates_counterfactually_eligible"
+            ]
+            self.assertLess(
+                collapsed["order_robust_main_capacity"],
+                baseline["order_robust_main_capacity"],
+            )
+            self.assertLess(
+                collapsed["achievable_main_capacity"],
+                baseline["achievable_main_capacity"],
+            )
+            self.assertGreaterEqual(
+                expanded["order_robust_main_capacity"],
+                baseline["order_robust_main_capacity"],
+            )
+            self.assertGreaterEqual(
+                repaired["order_robust_main_capacity"],
+                baseline["order_robust_main_capacity"],
+            )
+            self.assertGreaterEqual(
+                repaired["achievable_main_capacity"],
+                baseline["achievable_main_capacity"],
+            )
+            self.assertTrue(
+                comparison["restoration_check"][
+                    "restores_baseline_if_candidate_families_survive_review"
+                ]
+            )
+            self.assertFalse(
+                comparison["semantic_independence_established"]
+            )
+            self.assertTrue(
+                comparison["human_review_required_before_activation"]
             )
 
     def test_report_is_deterministic_versioned_and_read_only(self) -> None:

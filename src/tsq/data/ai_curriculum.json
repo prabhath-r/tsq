@@ -2388,6 +2388,15 @@
       "locator": "Advances in Neural Information Processing Systems 30"
     },
     {
+      "id": "src_brunner_identifiability_2020",
+      "type": "paper",
+      "title": "On Identifiability in Transformers",
+      "authors": ["Gino Brunner", "Yang Liu", "Damián Pascual", "Oliver Richter", "Massimiliano Ciaramita", "Roger Wattenhofer"],
+      "year": 2020,
+      "locator": "International Conference on Learning Representations 2020",
+      "uri": "https://arxiv.org/abs/1908.04211"
+    },
+    {
       "id": "src_brown_gpt3_2020",
       "type": "paper",
       "title": "Language Models are Few-Shot Learners",
@@ -14941,6 +14950,355 @@
         "fault_localization",
         "introductory",
         "diagnostic"
+      ]
+    },
+    {
+      "id": "q_transformer_kv_cache_alignment_001",
+      "version": 1,
+      "family_id": "f_incremental_cache_kv_alignment",
+      "learning_objective_id": "lo_incremental_kv_cache",
+      "status": "quarantined",
+      "stem": "With a nonempty previous cache, an incremental multi-query self-attention kernel updates one layer with K = concat(previous K, current k, time) but V = concat(current v, previous V, time). It then computes a = softmax(q times K-transpose) and y = aV. All tensor shapes and sequence lengths pass validation. Which diagnosis is correct?",
+      "kind": "debugging",
+      "difficulty": 0.85,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.6,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_attention",
+          "weight": 0.4,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Caching the previous queries beside K and V repairs the mismatch because old queries recover which value row belongs to each key coefficient.",
+          "correct": false,
+          "misconception_id": "m_decode_cache_retains_queries",
+          "diagnostic_objective_id": "lo_incremental_kv_cache",
+          "rationale": "Earlier queries are not the missing association. The cache must keep each key row aligned with its corresponding value row."
+        },
+        {
+          "id": "b",
+          "text": "The mismatch is expected because multi-query attention shares queries rather than keys and values; sharing Q would make the opposing K/V orders equivalent.",
+          "correct": false,
+          "misconception_id": "m_multiquery_shares_queries",
+          "diagnostic_objective_id": "lo_incremental_kv_cache",
+          "rationale": "Multi-query attention keeps multiple query heads and shares K/V heads; neither form of head sharing permits independently reordered K and V time rows."
+        },
+        {
+          "id": "c",
+          "text": "The kernel misaligns positions: a coefficient derived from one key can multiply another position's value, so K and V need the same temporal ordering.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Incremental attention preserves aligned key-value pairs. Appending K while prepending V reverses only one history and changes the weighted value routing despite valid shapes."
+        },
+        {
+          "id": "d",
+          "text": "The kernel is exact because sharing K/V heads collapses prefix positions into an unordered summary, making prepend and append equivalent.",
+          "correct": false,
+          "misconception_id": "m_kv_sharing_collapses_time",
+          "diagnostic_objective_id": "lo_incremental_kv_cache",
+          "rationale": "Head sharing does not remove the time axis. Distinct prefix positions and their aligned key-value pairs remain semantically ordered."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_shazeer_fast_decoding_2019",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-25",
+        "generated": true,
+        "provider": "openai_codex",
+        "batch_id": "batch_transformer_capacity_repairs_20260725_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Vaswani et al. section 3.2.1 defines attention as key-derived softmax weights multiplied by the aligned value matrix. Shazeer section 2.4 appends new K and V entries along the same incremental memory axis before applying that contraction. The opposite-order mutation and fault-localization task are stipulated original code-review facts.",
+        "independence_note": "The keyed operation diagnoses a shape-valid cache corruption by tracing positional K-V alignment through incremental code. It is not a multi-query head-axis inventory, a retain-K/V versus discard-Q statement, an asymptotic complexity comparison, or a cached-query masking question."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "attention",
+        "kv_cache",
+        "incremental_decoding",
+        "alignment",
+        "debugging"
+      ]
+    },
+    {
+      "id": "q_transformer_kv_cache_eviction_equivalence_001",
+      "version": 1,
+      "family_id": "f_kv_cache_eviction_equivalence",
+      "learning_objective_id": "lo_incremental_kv_cache",
+      "status": "quarantined",
+      "stem": "A frozen multi-query decoder processes the same prefix through the first cache eviction. Exact implementation E retains every prior key and value, its causal mask permits every prior position including those W evicts, and it matches full-prefix masked logits. Windowed implementation W keeps only the newest 1,024 key-value positions. At this step E and W choose the same greedy next token, but their full logit vectors have not been compared. Which audit conclusion is warranted?",
+      "kind": "counterfactual",
+      "difficulty": 0.85,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.6,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_attention",
+          "weight": 0.4,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "W becomes exact if it retains the evicted positions' past queries, because those queries reconstruct the missing keys and values at the next step.",
+          "correct": false,
+          "misconception_id": "m_decode_cache_retains_queries",
+          "diagnostic_objective_id": "lo_incremental_kv_cache",
+          "rationale": "Past queries are not reusable prefix memory and cannot recreate key-value entries that W removed from the visible attention set."
+        },
+        {
+          "id": "b",
+          "text": "W remains exact because multi-query attention shares query heads, so key-value positions older than the window have no effect on future logits.",
+          "correct": false,
+          "misconception_id": "m_multiquery_shares_queries",
+          "diagnostic_objective_id": "lo_incremental_kv_cache",
+          "rationale": "Multi-query attention keeps multiple query heads and shares key-value heads; it does not make older retained positions irrelevant."
+        },
+        {
+          "id": "c",
+          "text": "W remains exact because sharing key-value heads collapses the time history into its newest entry, and the matching top token confirms equivalence.",
+          "correct": false,
+          "misconception_id": "m_kv_sharing_collapses_time",
+          "diagnostic_objective_id": "lo_incremental_kv_cache",
+          "rationale": "Head sharing preserves distinct time entries, and one matching argmax does not establish equality of the full logit vectors."
+        },
+        {
+          "id": "d",
+          "text": "W bounded memory by changing the visible context; a matching argmax establishes neither logit equality nor future generated-trajectory equivalence, so W needs separate quality and resource evaluation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Eviction removes key-value positions available to E, so one coincident selected token is insufficient evidence of equal distributions or later generated behavior."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_shazeer_fast_decoding_2019",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_counterfactual",
+        "created_on": "2026-07-25",
+        "generated": true,
+        "provider": "openai_codex",
+        "batch_id": "batch_transformer_capacity_repairs_20260725_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Shazeer's sections 2.4 and 3 define exact incremental multi-query attention with a distinct retained K/V entry for every prior position while removing only the K/V head axis. Vaswani et al. equation 1 makes the head output depend on the visible key-value set. The 1,024-position window, unobserved full-logit comparison, and matching argmax are stipulated original audit facts; no empirical safety claim is attributed to either paper.",
+        "independence_note": "The keyed counterfactual distinguishes exact full-history reuse from bounded eviction when one observed greedy action matches but distributional equivalence is untested. It is not a no-cache asymptotic comparison, multi-query tensor inventory, append/discard state transition, K/V ordering fault, or causal-mask question."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "attention",
+        "multiquery_attention",
+        "kv_cache",
+        "bounded_context",
+        "eviction",
+        "counterfactual"
+      ]
+    },
+    {
+      "id": "q_attention_duplicate_value_identifiability_002",
+      "version": 2,
+      "family_id": "f_attention_duplicate_value_identifiability",
+      "learning_objective_id": "lo_attention_value_routing",
+      "status": "quarantined",
+      "revision_of": "q_attention_duplicate_value_identifiability_001",
+      "stem": "One attention head has value vectors v1 = u, v2 = u, and v3 = w, with w different from u. Two possible attention rows are A = [0.8, 0.1, 0.1] and B = [0.1, 0.8, 0.1]. An audit retained only the pre-output head result. Which conclusion follows?",
+      "kind": "calculation",
+      "difficulty": 0.75,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_attention",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The two rows are incompatible with the same values because the value vectors determine the compatibility distribution.",
+          "correct": false,
+          "misconception_id": "m_attention_values_determine_weights",
+          "diagnostic_objective_id": "lo_attention_value_routing",
+          "rationale": "Queries and keys determine an attention row; duplicated values can let different rows produce the same routed result."
+        },
+        {
+          "id": "b",
+          "text": "Neither result can be computed without the keys because attention combines keys rather than the stated values after softmax.",
+          "correct": false,
+          "misconception_id": "m_attention_keys_are_output_payloads",
+          "diagnostic_objective_id": "lo_attention_value_routing",
+          "rationale": "The rows are already supplied, and their coefficients multiply the stated value vectors."
+        },
+        {
+          "id": "c",
+          "text": "Both results are u because softmax keeps the largest-weight source and discards each 0.1 contribution.",
+          "correct": false,
+          "misconception_id": "m_attention_is_hard_selection",
+          "diagnostic_objective_id": "lo_attention_value_routing",
+          "rationale": "Ordinary softmax attention keeps every positive coefficient, including the contribution from w."
+        },
+        {
+          "id": "d",
+          "text": "Both results are 0.9u + 0.1w, so the retained output is insufficient to identify whether attention row A or B occurred.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A yields 0.8u + 0.1u + 0.1w and B yields 0.1u + 0.8u + 0.1w; the duplicated payload makes those results equal."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_brunner_identifiability_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_revision",
+        "created_on": "2026-07-25",
+        "generated": true,
+        "provider": "openai_codex",
+        "batch_id": "batch_transformer_capacity_repairs_20260725_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Vaswani et al. equation 1 defines the weighted value contraction. Brunner et al. section 3 establishes that attention weights need not be identifiable from a head output. The positive attention rows, duplicated-value witness, and retained-output audit are original algebraic synthesis rather than a quoted empirical result.",
+        "revision_reason": "The parent used exact zero coefficients without stating a mask, which ordinary finite-logit softmax cannot produce. This immutable revision uses strictly positive normalized rows and makes the inverse retained-output inference explicit.",
+        "derivation": "A V = 0.8u + 0.1u + 0.1w = 0.9u + 0.1w, while B V = 0.1u + 0.8u + 0.1w = 0.9u + 0.1w.",
+        "independence_note": "This revision deliberately retains the parent's family and cannot count independently from q_attention_duplicate_value_identifiability_001. The family reasons inversely from a retained output to non-identifiability under duplicate values; it is not a forward value perturbation or value-projection ablation."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "attention",
+        "values",
+        "non_identifiability",
+        "calculation",
+        "revision"
+      ]
+    },
+    {
+      "id": "q_attention_value_gradient_routing_001",
+      "version": 1,
+      "family_id": "f_attention_value_gradient_routing",
+      "learning_objective_id": "lo_attention_value_routing",
+      "status": "quarantined",
+      "stem": "An autograd audit freezes queries and keys for two output rows, so A = [[0.6, 0.4], [0.2, 0.8]] and Y = AV. If upstream gradients at the output rows are g1 and g2, which gradients reach source values v1 and v2 through this weighted-sum path?",
+      "kind": "debugging",
+      "difficulty": 1.15,
+      "discrimination": 1.8,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_attention",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_transformers",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "v1 receives 0.6g1 + 0.2g2 and v2 receives 0.4g1 + 0.8g2, which is the A-transpose times upstream-gradient trace.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Each source value contributes to both output rows, so reverse-mode accumulation sends every row's upstream gradient back through that value's attention coefficient."
+        },
+        {
+          "id": "b",
+          "text": "No fixed-coefficient result exists because differentiating the values necessarily changes the attention matrix A.",
+          "correct": false,
+          "misconception_id": "m_attention_values_determine_weights",
+          "diagnostic_objective_id": "lo_attention_value_routing",
+          "rationale": "The audit freezes queries and keys, so A is fixed with respect to the value path being differentiated."
+        },
+        {
+          "id": "c",
+          "text": "Both value gradients are zero; the aligned key vectors receive A-transpose times the upstream gradients as the output payloads.",
+          "correct": false,
+          "misconception_id": "m_attention_keys_are_output_payloads",
+          "diagnostic_objective_id": "lo_attention_value_routing",
+          "rationale": "The forward contraction multiplies A by V, so this path sends the adjoint into the values rather than substituting keys as payloads."
+        },
+        {
+          "id": "d",
+          "text": "v1 receives g1 and v2 receives g2 because each output routes gradient through its largest attention coefficient.",
+          "correct": false,
+          "misconception_id": "m_attention_is_hard_selection",
+          "diagnostic_objective_id": "lo_attention_value_routing",
+          "rationale": "Softmax attention is a weighted sum, so every nonzero coefficient contributes to reverse-mode gradient routing."
+        }
+      ],
+      "source_ids": [
+        "src_vaswani_attention_2017",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_derivation",
+        "created_on": "2026-07-25",
+        "generated": true,
+        "provider": "openai_codex",
+        "batch_id": "batch_transformer_capacity_repairs_20260725_a",
+        "review_status": "internal_ai_critique_pending_quarantined",
+        "human_review": false,
+        "human_review_status": "required_before_activation",
+        "activation": "manual_only_after_human_review_and_new_immutable_release",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Vaswani et al. equation 1 supplies the Y = AV value-routing map, and Goodfellow et al. chapter 6 supplies reverse-mode differentiation through computational graphs. The fixed matrix, upstream vectors, and A-transpose derivation are original audit conditions.",
+        "derivation": "Writing upstream rows as G = [g1; g2], the differential dY = A dV gives dL = trace(G-transpose A dV) = trace((A-transpose G)-transpose dV), hence dL/dV = A-transpose G.",
+        "independence_note": "The keyed operation traces the adjoint A-transpose G from multiple output rows back into source values. It is not the released forward AV perturbation/projection operation and not the inverse duplicate-value identifiability family. Semantic independence still requires human review and later response evidence."
+      },
+      "tags": [
+        "llm",
+        "transformers",
+        "attention",
+        "values",
+        "autograd",
+        "gradient_routing",
+        "debugging"
       ]
     }
   ]

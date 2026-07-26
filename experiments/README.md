@@ -196,7 +196,13 @@ python experiments/family_independence_lab.py --fail-on-critical
 Its deterministic artifact distinguishes lexical review candidates from proven
 dependence. Exit status `3` means a candidate would reduce exact repair or
 verification capacity if semantic review confirmed that its families collapse;
-it is not a dependence verdict and the laboratory never edits the corpus.
+it is not a dependence verdict and the laboratory never edits the corpus. The
+artifact also tests the quarantined Transformer capacity-repair batch by making
+its frozen question dataclasses eligible in memory only. It reports baseline,
+declared-family collapse, candidate expansion, and collapsed-plus-candidate
+capacity for the exact objective and misconception signature. This is a
+counterfactual authoring check: generated candidates remain quarantined,
+human-unreviewed, manual-activation-only, and semantically unverified.
 
 The policy-shadow comparison laboratory gives many fresh synthetic learners
 exactly one production-selected question each, then evaluates the event-backed

@@ -15,6 +15,11 @@ signal-nominated cluster, the lab also stress-tests the exact sustained-capacity
 analyzer by counterfactually treating the cluster as one family.  A capacity
 drop means independence is operationally important *if* a reviewer later
 confirms dependence; it does not confirm dependence itself.
+
+The laboratory also measures one declared batch of quarantined repair
+candidates by making frozen question copies eligible in memory.  This is a
+counterfactual authoring check, not activation or evidence that the candidate
+families are semantically independent.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ import hashlib
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -43,12 +48,16 @@ from tsq.capacity import (  # noqa: E402
 )
 from tsq.corpus import load_bundle, read_and_parse  # noqa: E402
 from tsq.graph import KnowledgeGraph  # noqa: E402
-from tsq.models import LearningObjective, Question  # noqa: E402
+from tsq.models import (  # noqa: E402
+    LearningObjective,
+    Question,
+    QuestionStatus,
+)
 from tsq.policy import POLICY_VERSION  # noqa: E402
 from tsq.versions import DEFAULT_LEARNER_MODEL_VERSION  # noqa: E402
 
 
-LAB_VERSION = "family-independence-falsification-v1"
+LAB_VERSION = "family-independence-falsification-v2"
 NORMALIZATION_VERSION = "lower-alnum-stopwords-v1"
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
 DEFAULT_OUTPUT = (
@@ -88,6 +97,27 @@ DECLARED_REVIEW_CLUSTERS: tuple[dict[str, object], ...] = (
             "decide whether the tensor-accounting operations are independent."
         ),
     },
+)
+
+CANDIDATE_REPAIR_BATCH_ID = "batch_transformer_capacity_repairs_20260725_a"
+CANDIDATE_REPAIR_CLUSTERS: tuple[dict[str, object], ...] = (
+    {
+        "declared_cluster_id": "multiquery_kv_cache_trio",
+        "candidate_question_ids": (
+            "q_transformer_kv_cache_alignment_001",
+            "q_transformer_kv_cache_eviction_equivalence_001",
+        ),
+    },
+    {
+        "declared_cluster_id": "attention_value_routing_trio",
+        "candidate_question_ids": (
+            "q_attention_duplicate_value_identifiability_002",
+            "q_attention_value_gradient_routing_001",
+        ),
+    },
+)
+_MANUAL_ACTIVATION_MARKER = (
+    "manual_only_after_human_review_and_new_immutable_release"
 )
 
 _TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
@@ -438,6 +468,253 @@ def _capacity_comparison(
     }
 
 
+def _candidate_repair_batch_report(
+    *,
+    questions: Sequence[Question],
+    active_questions: Sequence[Question],
+    declared_results: Sequence[dict[str, object]],
+    graph: KnowledgeGraph,
+    misconceptions: Sequence[object],
+) -> dict[str, object]:
+    """Measure possible capacity without making candidates eligible.
+
+    Replacing status on frozen in-memory dataclasses is intentionally a
+    counterfactual calculation. It bypasses the production review gate only
+    inside this process and neither serializes nor activates a candidate.
+    """
+
+    by_question_id = {question.id: question for question in questions}
+    declared_by_id = {
+        str(result["cluster_id"]): result for result in declared_results
+    }
+    expected_ids = {
+        str(question_id)
+        for mapping in CANDIDATE_REPAIR_CLUSTERS
+        for question_id in mapping["candidate_question_ids"]
+    }
+    actual_ids = {
+        question.id
+        for question in questions
+        if question.provenance.get("batch_id") == CANDIDATE_REPAIR_BATCH_ID
+    }
+    if actual_ids != expected_ids:
+        missing = sorted(expected_ids - actual_ids)
+        unexpected = sorted(actual_ids - expected_ids)
+        raise LabInvariantError(
+            "Candidate repair batch membership changed: "
+            f"missing={missing}, unexpected={unexpected}."
+        )
+
+    candidate_rows: list[dict[str, object]] = []
+    comparisons: list[dict[str, object]] = []
+    for mapping in CANDIDATE_REPAIR_CLUSTERS:
+        cluster_id = str(mapping["declared_cluster_id"])
+        declared = declared_by_id.get(cluster_id)
+        if declared is None:
+            raise LabInvariantError(
+                f"Candidate repair mapping names unknown cluster {cluster_id}."
+            )
+        candidate_ids = tuple(
+            str(question_id)
+            for question_id in mapping["candidate_question_ids"]
+        )
+        candidates = tuple(
+            by_question_id[question_id] for question_id in candidate_ids
+        )
+        declared_ids = tuple(
+            str(question_id) for question_id in declared["question_ids"]
+        )
+        declared_questions = tuple(
+            by_question_id[question_id] for question_id in declared_ids
+        )
+        objective_id = declared_questions[0].objective_id
+        objective = declared_questions[0].objective
+        if objective_id is None or objective is None:
+            raise LabInvariantError(
+                f"Declared cluster {cluster_id} lacks a fine objective."
+            )
+        misconception_ids = tuple(
+            sorted(declared_questions[0].misconception_ids)
+        )
+        declared_family_ids = tuple(
+            sorted({question.family_id for question in declared_questions})
+        )
+        candidate_family_ids = tuple(
+            sorted({question.family_id for question in candidates})
+        )
+        if len(candidate_family_ids) != len(candidates):
+            raise LabInvariantError(
+                f"Candidate repair mapping {cluster_id} repeats a family."
+            )
+        if set(candidate_family_ids) & set(declared_family_ids):
+            raise LabInvariantError(
+                f"Candidate repair mapping {cluster_id} reuses a declared "
+                "active family."
+            )
+
+        for candidate in candidates:
+            provenance = candidate.provenance
+            failures: list[str] = []
+            if candidate.status is not QuestionStatus.QUARANTINED:
+                failures.append("status_is_not_quarantined")
+            if provenance.get("batch_id") != CANDIDATE_REPAIR_BATCH_ID:
+                failures.append("batch_id_mismatch")
+            if provenance.get("generated") is not True:
+                failures.append("generated_marker_is_not_true")
+            if provenance.get("human_review") is not False:
+                failures.append("human_review_marker_is_not_false")
+            if (
+                provenance.get("human_review_status")
+                != "required_before_activation"
+            ):
+                failures.append("human_review_requirement_missing")
+            if provenance.get("activation") != _MANUAL_ACTIVATION_MARKER:
+                failures.append("manual_activation_marker_missing")
+            if candidate.objective_id != objective_id:
+                failures.append("fine_objective_mismatch")
+            if tuple(sorted(candidate.misconception_ids)) != misconception_ids:
+                failures.append("named_misconception_signature_mismatch")
+            if failures:
+                raise LabInvariantError(
+                    f"Candidate {candidate.id} failed quarantine invariants: "
+                    f"{', '.join(failures)}."
+                )
+            candidate_rows.append(
+                {
+                    "question_id": candidate.id,
+                    "declared_cluster_id": cluster_id,
+                    "family_id": candidate.family_id,
+                    "objective_id": candidate.objective_id,
+                    "named_misconception_ids": list(misconception_ids),
+                    "source_ids": list(candidate.source_ids),
+                    "source_status": candidate.status.value,
+                    "source_eligible_for_adaptation": (
+                        candidate.status.eligible_for_adaptation
+                    ),
+                    "generated": provenance["generated"],
+                    "human_review": provenance["human_review"],
+                    "human_review_status": provenance["human_review_status"],
+                    "activation": provenance["activation"],
+                    "quarantine_invariants_validated": True,
+                }
+            )
+
+        collapsed_family_ids = declared_family_ids[1:]
+        baseline = _objective_capacity(
+            objective=objective,
+            misconception_ids=misconception_ids,
+            questions=active_questions,
+            graph=graph,
+            misconceptions=misconceptions,
+        )
+        collapsed = _objective_capacity(
+            objective=objective,
+            misconception_ids=misconception_ids,
+            questions=active_questions,
+            graph=graph,
+            misconceptions=misconceptions,
+            unavailable_family_ids=collapsed_family_ids,
+        )
+        counterfactually_eligible_candidates = tuple(
+            replace(candidate, status=QuestionStatus.APPROVED)
+            for candidate in candidates
+        )
+        with_candidates = (
+            *active_questions,
+            *counterfactually_eligible_candidates,
+        )
+        expanded = _objective_capacity(
+            objective=objective,
+            misconception_ids=misconception_ids,
+            questions=with_candidates,
+            graph=graph,
+            misconceptions=misconceptions,
+        )
+        collapsed_expanded = _objective_capacity(
+            objective=objective,
+            misconception_ids=misconception_ids,
+            questions=with_candidates,
+            graph=graph,
+            misconceptions=misconceptions,
+            unavailable_family_ids=collapsed_family_ids,
+        )
+        robust_restored = (
+            collapsed_expanded.order_robust_main_capacity
+            >= baseline.order_robust_main_capacity
+        )
+        achievable_restored = (
+            collapsed_expanded.achievable_main_capacity
+            >= baseline.achievable_main_capacity
+        )
+        comparisons.append(
+            {
+                "declared_cluster_id": cluster_id,
+                "objective_id": objective_id,
+                "objective_name": objective.name,
+                "named_misconception_ids": list(misconception_ids),
+                "candidate_question_ids": list(candidate_ids),
+                "candidate_family_ids": list(candidate_family_ids),
+                "counterfactually_unavailable_declared_family_ids": list(
+                    collapsed_family_ids
+                ),
+                "capacity_scope": (
+                    "exact same fine objective and identical named-"
+                    "misconception signature"
+                ),
+                "baseline": _capacity_snapshot(baseline),
+                "declared_cluster_collapsed": _capacity_snapshot(collapsed),
+                "with_candidates_counterfactually_eligible": (
+                    _capacity_snapshot(expanded)
+                ),
+                "collapsed_with_candidates_counterfactually_eligible": (
+                    _capacity_snapshot(collapsed_expanded)
+                ),
+                "restoration_check": {
+                    "order_robust_at_least_baseline": robust_restored,
+                    "achievable_at_least_baseline": achievable_restored,
+                    "restores_baseline_if_candidate_families_survive_review": (
+                        robust_restored and achievable_restored
+                    ),
+                },
+                "semantic_independence_established": False,
+                "human_review_required_before_activation": True,
+            }
+        )
+
+    restored_cluster_ids = [
+        row["declared_cluster_id"]
+        for row in comparisons
+        if row["restoration_check"][
+            "restores_baseline_if_candidate_families_survive_review"
+        ]
+    ]
+    return {
+        "batch_id": CANDIDATE_REPAIR_BATCH_ID,
+        "status": "counterfactual_only_human_review_required",
+        "candidate_question_ids": sorted(expected_ids),
+        "source_candidate_state": sorted(
+            candidate_rows, key=lambda row: row["question_id"]
+        ),
+        "in_memory_operation": (
+            "replace each quarantined candidate status with approved solely "
+            "for exact capacity analysis; do not serialize the replacement"
+        ),
+        "source_corpus_mutated": False,
+        "semantic_independence_established": False,
+        "manual_activation_required": True,
+        "cluster_comparisons": sorted(
+            comparisons, key=lambda row: row["declared_cluster_id"]
+        ),
+        "findings": {
+            "candidate_count": len(expected_ids),
+            "quarantine_invariants_validated_count": len(candidate_rows),
+            "mapped_cluster_count": len(comparisons),
+            "baseline_restored_cluster_ids": restored_cluster_ids,
+            "baseline_restored_cluster_count": len(restored_cluster_ids),
+        },
+    }
+
+
 def _cluster_pair_evidence(
     question_ids: Sequence[str],
     features: dict[str, QuestionFeatures],
@@ -638,6 +915,13 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
             "capacity_critical_if_dependence_confirmed"
         ]
     ]
+    candidate_batch = _candidate_repair_batch_report(
+        questions=questions,
+        active_questions=active,
+        declared_results=declared_results,
+        graph=graph,
+        misconceptions=misconceptions,
+    )
     deterministic: dict[str, object] = {
         "lab_version": LAB_VERSION,
         "corpus": {
@@ -689,10 +973,16 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
                 "capacity consequence if a nominated cluster were one family; "
                 "the collapse is not a corpus mutation"
             ),
+            "candidate_repair_semantics": (
+                "quarantined generated candidates are made eligible only by "
+                "replacing status on frozen in-memory dataclasses; the report "
+                "does not activate content or establish semantic independence"
+            ),
         },
         "duplicate_pair_candidates": duplicate_candidates,
         "declared_review_clusters": declared_results,
         "signal_nominated_clusters": suspected_results,
+        "quarantined_candidate_counterfactual": candidate_batch,
         "findings": {
             "eligible_signature_pair_count": len(all_pairs),
             "duplicate_pair_candidate_count": len(duplicate_candidates),
@@ -701,6 +991,12 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
             "capacity_critical_candidate_cluster_ids": critical_ids,
             "capacity_critical_candidate_count": len(critical_ids),
             "semantic_dependence_confirmed_count": 0,
+            "counterfactual_candidate_count": candidate_batch["findings"][
+                "candidate_count"
+            ],
+            "counterfactual_repaired_cluster_count": candidate_batch[
+                "findings"
+            ]["baseline_restored_cluster_count"],
             "required_declared_clusters_present": all(
                 declaration["id"]
                 in {
@@ -728,6 +1024,16 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
             (
                 "Independent semantic review and later learner-response data "
                 "remain necessary before changing family declarations."
+            ),
+            (
+                "The candidate-repair calculation assumes that each candidate "
+                "family survives independent human semantic review. Capacity "
+                "restoration under declared IDs is not evidence that it will."
+            ),
+            (
+                "All candidate status substitutions are process-local and "
+                "counterfactual. Generated content remains quarantined, "
+                "unreviewed, and manual-activation-only in the source corpus."
             ),
         ],
     }
