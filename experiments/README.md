@@ -172,9 +172,11 @@ fresh databases: a real wrong MCQ answer localizes an objective and named
 misconception, reviewed release-pinned debugging and explanation tasks are
 ranked, one productive attempt records assisted semantic actions, an imported
 evaluation is reduced into shadow evidence, and a fresh family is recommended
-next. It also proves that MCQ and productive attempts cannot overlap, the
-selected-response projection does not change, and the performance projection
-replays exactly:
+next. It hashes a real temporary learner file at both the artifact and
+submission boundaries, confirms both commitments match the fixture bytes, and
+scans every persisted table for distinctive private sentinels. It also proves
+that MCQ and productive attempts cannot overlap, the selected-response
+projection does not change, and the performance projection replays exactly:
 
 ```sh
 python experiments/productive_probe_lab.py --stdout
@@ -183,7 +185,9 @@ python experiments/productive_probe_lab.py --stdout
 The ignored artifact is written to
 `experiments/results/productive_probe_lab.json`. The fixture tasks exist only
 inside disposable laboratory databases; TSQ does not ship them as reviewed
-curriculum content.
+curriculum content. The file is never executed. Its digest proves byte equality
+only: it is not skill evidence, encryption, or protection against guessing
+low-entropy content.
 
 The family-independence laboratory nominates active cross-family pairs through
 documented token-overlap signals, then counterfactually collapses each review

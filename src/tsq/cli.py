@@ -16,6 +16,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Iterator
 
+from .artifact_intake import CheckpointFileKind, prepare_file_checkpoint
 from .capacity import (
     DEFAULT_STATE_LIMIT,
     CapacityAnalysisLimitError,
@@ -2104,6 +2105,45 @@ def command_task_action(args: argparse.Namespace) -> None:
     )
 
 
+def command_task_checkpoint_file(args: argparse.Namespace) -> None:
+    # Intake and hashing deliberately finish before `_database` can initialize
+    # or migrate a writable store.  The file body never crosses into the
+    # ledger; only the existing closed action payload does.
+    checkpoint = prepare_file_checkpoint(
+        args.path,
+        kind=args.kind,
+        artifact_kind=args.artifact_kind,
+    )
+    result = PerformanceLedger(_database(args)).record_action(
+        args.attempt,
+        checkpoint.action_kind.value,
+        checkpoint.payload,
+        phase=args.phase,
+        idempotency_key=args.idempotency_key,
+    )
+    output = {
+        "action": result,
+        "artifact_content_persisted": False,
+        "artifact_executed": False,
+        "evaluation_created": False,
+        "learner_projection_applied": False,
+        "certification_applied": False,
+    }
+    if args.json:
+        _emit(output, as_json=True)
+        return
+    replay = " (idempotent replay)" if result["idempotent_replay"] else ""
+    print(
+        f"Recorded {result['action_type']} sequence {result['sequence']} "
+        f"for {result['attempt_id']}{replay}."
+    )
+    print("Artifact content persisted: no. Artifact executed: no.")
+    print(
+        "Evaluation created: no. Learner projection applied: no. "
+        "Certification applied: no."
+    )
+
+
 def command_task_actions(args: argparse.Namespace) -> None:
     result = PerformanceLedger(_inspection_database(args)).list_actions(args.attempt)
     if args.json:
@@ -3288,6 +3328,30 @@ def build_parser() -> argparse.ArgumentParser:
     task_action.add_argument("--idempotency-key")
     task_action.add_argument("--json", action="store_true")
     task_action.set_defaults(func=command_task_action)
+
+    task_checkpoint_file = task_sub.add_parser(
+        "checkpoint-file",
+        help="Hash a local task artifact without storing or executing it",
+    )
+    task_checkpoint_file.add_argument("attempt")
+    task_checkpoint_file.add_argument("path", type=Path)
+    task_checkpoint_file.add_argument(
+        "--kind",
+        choices=[kind.value for kind in CheckpointFileKind],
+        required=True,
+    )
+    task_checkpoint_file.add_argument(
+        "--artifact-kind",
+        help="Stable artifact format ID; required only with --kind artifact",
+    )
+    task_checkpoint_file.add_argument(
+        "--phase",
+        choices=[phase.value for phase in ActionPhase],
+        default=ActionPhase.UNASSISTED.value,
+    )
+    task_checkpoint_file.add_argument("--idempotency-key")
+    task_checkpoint_file.add_argument("--json", action="store_true")
+    task_checkpoint_file.set_defaults(func=command_task_checkpoint_file)
 
     task_actions = task_sub.add_parser(
         "actions", help="List one performance attempt's semantic trace"
