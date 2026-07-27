@@ -189,6 +189,23 @@ curriculum content. The file is never executed. Its digest proves byte equality
 only: it is not skill evidence, encryption, or protection against guessing
 low-entropy content.
 
+The artifact-runner laboratory exercises the fixed data-only causal-mask
+checker and its durable admission/receipt ledger across two fresh databases:
+
+```sh
+python experiments/artifact_runner_lab.py --stdout
+```
+
+The valid, semantic-failure, and malformed cases invoke the real child process.
+Deterministic receipt injections cover timeout and worker-start failure, and a
+controlled post-admission exception covers the unresolved-crash path. The lab
+verifies at-most-once behavior under varied caller keys, projection neutrality,
+absence of each full artifact byte sequence and path from its database scan,
+integrity, and exact projection-copy replay. The checker process boundary is
+not an operating-system, filesystem, or network sandbox. Results remain
+shadow-only and cannot apply mastery, skill authority, evaluation, or
+certification.
+
 The scoring-reconciliation laboratory exercises provider failure after a
 durable callback admission. Across two fresh databases it keeps ambiguous
 lookups unknown, recovers one authority-free result after `SessionEnded`, and

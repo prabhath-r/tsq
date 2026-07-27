@@ -1,13 +1,15 @@
 # SPDX-License-Identifier: MPL-2.0
 
-"""Safe, digest-only intake for learner-created productive artifacts.
+"""Safe intake for learner-created productive artifacts.
 
-This module opens an explicitly named local file only long enough to compute
-its SHA-256 digest.  It does not parse, import, execute, retain, copy, or name
-the file in its result.  The resulting commitment can be recorded through the
-existing productive-action ledger; it is not an evaluation or a skill claim.
-The digest is a commitment, not encryption: callers should still protect
-guessable or sensitive source material outside TSQ.
+The digest-only checkpoint path opens an explicitly named local file only long
+enough to compute its SHA-256 digest.  It does not parse, import, execute,
+retain, copy, or name the file in its result.  The explicit snapshot path
+retains one verified immutable byte copy in memory for a trusted inert checker;
+it never carries the source path or persists the content.  Neither path is an
+evaluation or a skill claim.  A digest is a commitment, not encryption:
+callers should still protect guessable or sensitive source material outside
+TSQ.
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ import hashlib
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -74,8 +76,12 @@ def _validate_regular_size(value: os.stat_result) -> None:
         )
 
 
-def hash_productive_artifact(path: os.PathLike[str] | str) -> str:
-    """Hash one stable regular file without interpreting or retaining its bytes.
+def _read_productive_artifact(
+    path: os.PathLike[str] | str,
+    *,
+    retain_content: bool,
+) -> tuple[str, int, bytes | None]:
+    """Read one stable regular file through the shared intake boundary.
 
     The path is inspected before opening, the descriptor is opened with
     ``O_NOFOLLOW`` where the platform provides it, and both descriptor and path
@@ -122,6 +128,7 @@ def hash_productive_artifact(path: os.PathLike[str] | str) -> str:
 
     digest = hashlib.sha256()
     byte_count = 0
+    content_parts: list[bytes] | None = [] if retain_content else None
     failure_in_flight = False
     try:
         try:
@@ -150,6 +157,8 @@ def hash_productive_artifact(path: os.PathLike[str] | str) -> str:
                         "Productive artifact changed while it was being read."
                     )
                 digest.update(chunk)
+                if content_parts is not None:
+                    content_parts.append(chunk)
         except ValidationError:
             raise
         except OSError as exc:
@@ -186,7 +195,65 @@ def hash_productive_artifact(path: os.PathLike[str] | str) -> str:
                     "Productive artifact descriptor could not be closed safely."
                 ) from exc
 
-    return digest.hexdigest()
+    content = b"".join(content_parts) if content_parts is not None else None
+    return digest.hexdigest(), byte_count, content
+
+
+@dataclass(frozen=True, slots=True)
+class ProductiveArtifactSnapshot:
+    """One path-free, immutable in-memory artifact snapshot."""
+
+    content: bytes = field(repr=False)
+    sha256: str
+    size_bytes: int
+
+    def __post_init__(self) -> None:
+        if type(self.content) is not bytes:
+            raise ValidationError(
+                "Productive artifact snapshot content must be immutable bytes."
+            )
+        if (
+            type(self.size_bytes) is not int
+            or self.size_bytes <= 0
+            or self.size_bytes > MAX_PRODUCTIVE_ARTIFACT_BYTES
+            or self.size_bytes != len(self.content)
+        ):
+            raise ValidationError(
+                "Productive artifact snapshot size does not match its content."
+            )
+        if (
+            type(self.sha256) is not str
+            or not _DIGEST_PATTERN.fullmatch(self.sha256)
+            or hashlib.sha256(self.content).hexdigest() != self.sha256
+        ):
+            raise ValidationError(
+                "Productive artifact snapshot digest does not match its content."
+            )
+
+
+def capture_productive_artifact(
+    path: os.PathLike[str] | str,
+) -> ProductiveArtifactSnapshot:
+    """Capture one stable regular file without interpreting or naming it."""
+
+    sha256, size_bytes, content = _read_productive_artifact(
+        path,
+        retain_content=True,
+    )
+    if content is None:  # pragma: no cover - fixed by the retain_content call
+        raise AssertionError("Artifact intake failed to retain content.")
+    return ProductiveArtifactSnapshot(
+        content=content,
+        sha256=sha256,
+        size_bytes=size_bytes,
+    )
+
+
+def hash_productive_artifact(path: os.PathLike[str] | str) -> str:
+    """Hash one stable regular file without interpreting or retaining its bytes."""
+
+    sha256, _, _ = _read_productive_artifact(path, retain_content=False)
+    return sha256
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +350,8 @@ __all__ = [
     "CheckpointFileKind",
     "MAX_PRODUCTIVE_ARTIFACT_BYTES",
     "PreparedFileCheckpoint",
+    "ProductiveArtifactSnapshot",
+    "capture_productive_artifact",
     "hash_productive_artifact",
     "prepare_file_checkpoint",
 ]

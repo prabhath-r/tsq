@@ -450,6 +450,8 @@ def performance_source_snapshot(database: Database) -> dict[str, object]:
                        'PerformanceScoringClaimMigrated',
                        'PerformanceScoringReconciled',
                        'PerformanceScoringLegacyExempted',
+                       'PerformanceArtifactRunClaimed',
+                       'PerformanceArtifactRunObserved',
                        'TaskEvaluationRecorded', 'ShadowEvidenceReduced'
                    ) ORDER BY stream_id, stream_version"""
             )
@@ -460,6 +462,8 @@ def performance_source_snapshot(database: Database) -> dict[str, object]:
                 """SELECT name, sql FROM sqlite_master
                    WHERE type='trigger' AND tbl_name IN (
                        'performance_attempts', 'performance_actions',
+                       'performance_artifact_run_claims',
+                       'performance_artifact_run_receipts',
                        'performance_scoring_claims',
                        'performance_scoring_reconciliations',
                        'task_evaluations', 'shadow_evidence_bundles'
@@ -529,6 +533,18 @@ def golden_performance_projection(
                             observation.id"""
             )
         ]
+        artifact_run_claims = [
+            dict(item)
+            for item in connection.execute(
+                "SELECT * FROM performance_artifact_run_claims ORDER BY id"
+            )
+        ]
+        artifact_run_receipts = [
+            dict(item)
+            for item in connection.execute(
+                "SELECT * FROM performance_artifact_run_receipts ORDER BY id"
+            )
+        ]
     task = json.loads(row["definition_json"])
     evaluation = json.loads(row["evaluation_json"])
     authority = json.loads(row["authority_json"])
@@ -555,6 +571,8 @@ def golden_performance_projection(
         "evaluation_digest": row["evaluation_digest"],
         "bundle_digest": row["bundle_digest"],
         "projection_rows": {
+            "artifact_run_claims": artifact_run_claims,
+            "artifact_run_receipts": artifact_run_receipts,
             "scoring_claims": scoring_claims,
             "scoring_reconciliations": scoring_reconciliations,
             "evaluation": {
@@ -590,6 +608,12 @@ def golden_performance_projection(
         "performance_event_count": report["performance_event_count"],
         "attempt_count": report["reconstructed_performance_attempt_count"],
         "action_count": report["reconstructed_performance_action_count"],
+        "artifact_run_claim_count": report[
+            "reconstructed_performance_artifact_run_claim_count"
+        ],
+        "artifact_run_receipt_count": report[
+            "reconstructed_performance_artifact_run_receipt_count"
+        ],
         "scoring_claim_count": report[
             "reconstructed_performance_scoring_claim_count"
         ],
@@ -622,7 +646,7 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         report = ProjectionReplay(self.database).check("performance-replay")
 
         self.assertTrue(report["ok"], report["errors"])
-        self.assertEqual(SCHEMA_VERSION, 19)
+        self.assertEqual(SCHEMA_VERSION, 20)
         self.assertEqual(TASK_SCHEMA_VERSION, 3)
         self.assertEqual(EVIDENCE_BUNDLE_SCHEMA_VERSION, 2)
         self.assertEqual(NORMALIZED_SCORING_RESULT_SCHEMA_VERSION, 1)
@@ -689,6 +713,18 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         )
         self.assertFalse(
             actual["projection_rows"]["bundle"]["certification_applied"]
+        )
+        self.assertEqual(
+            report["source_performance_artifact_run_claim_count"], 0
+        )
+        self.assertEqual(
+            report["reconstructed_performance_artifact_run_claim_count"], 0
+        )
+        self.assertEqual(
+            report["source_performance_artifact_run_receipt_count"], 0
+        )
+        self.assertEqual(
+            report["reconstructed_performance_artifact_run_receipt_count"], 0
         )
         self.assertEqual(actual, expected)
 
@@ -773,6 +809,12 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
             report["performance_replay_error"],
         )
         self.assertIsNone(report["performance_event_count"])
+        self.assertIsNone(
+            report["reconstructed_performance_artifact_run_claim_count"]
+        )
+        self.assertIsNone(
+            report["reconstructed_performance_artifact_run_receipt_count"]
+        )
         self.assertIsNone(
             report["reconstructed_performance_scoring_reconciliation_count"]
         )

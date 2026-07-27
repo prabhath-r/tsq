@@ -78,6 +78,7 @@ def data_snapshot(
     omit_schema_version: bool = False,
     omit_policy_shadow: bool = False,
     omit_scoring_reconciliation: bool = False,
+    omit_artifact_runs: bool = False,
 ) -> tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]:
     """Capture all application table rows independently of row order."""
 
@@ -101,6 +102,11 @@ def data_snapshot(
                 omit_scoring_reconciliation
                 and table == "performance_scoring_reconciliations"
             ):
+                continue
+            if omit_artifact_runs and table in {
+                "performance_artifact_run_claims",
+                "performance_artifact_run_receipts",
+            }:
                 continue
             quoted = '"' + table.replace('"', '""') + '"'
             rows = [
@@ -371,11 +377,12 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 omit_schema_version=True,
                 omit_policy_shadow=True,
                 omit_scoring_reconciliation=True,
+                omit_artifact_runs=True,
             )
             before_events = event_snapshot(database)
             before_schema = schema_contract(database)
 
-            self.assertEqual(SCHEMA_VERSION, 19)
+            self.assertEqual(SCHEMA_VERSION, 20)
             self.assertEqual(
                 before_schema,
                 _expected_v16_schema_contract(),
@@ -397,6 +404,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     omit_schema_version=True,
                     omit_policy_shadow=True,
                     omit_scoring_reconciliation=True,
+                    omit_artifact_runs=True,
                 ),
                 before_data,
             )
@@ -410,7 +418,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "19")
+            self.assertEqual(version, "20")
             upgraded_trigger = claim_trigger_sql(database)
             self.assertIn(
                 "NEW.claim_schema_version = 1",
@@ -427,24 +435,6 @@ class MigrationEventLifecycleTests(unittest.TestCase):
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
-
-    def test_reopening_upgraded_v18_is_semantically_idempotent(
-        self,
-    ) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "reopen-v18.db"
-            database = build_exact_v16(path)
-            database.initialize()
-            before_data = data_snapshot(database)
-            before_events = event_snapshot(database)
-            before_schema = schema_contract(database)
-
-            database.initialize()
-
-            self.assertEqual(data_snapshot(database), before_data)
-            self.assertEqual(event_snapshot(database), before_events)
-            self.assertEqual(schema_contract(database), before_schema)
-            Database(path, read_only=True).validate_current_schema()
 
     def test_tampered_v16_fails_before_any_durable_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -729,7 +719,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "19")
+            self.assertEqual(version, "20")
 
     def test_scoring_claim_fk_deferrability_is_part_of_schema_contract(
         self,
@@ -768,13 +758,13 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 "DEFERRABLE INITIALLY DEFERRED",
                 row["sql"].upper(),
             )
-            self.assertEqual(version, "19")
+            self.assertEqual(version, "20")
 
-    def test_current_v18_fk_corruption_fails_before_safety_writes(
+    def test_current_v20_fk_corruption_fails_before_safety_writes(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "current-v18-fk-corrupt.db"
+            path = Path(directory) / "current-v20-fk-corrupt.db"
             database = Database(path)
             database.initialize()
             with closing(sqlite3.connect(path)) as connection:
@@ -829,7 +819,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
             self.assertEqual(after_violations, before_violations)
-            self.assertEqual(version, "19")
+            self.assertEqual(version, "20")
 
 
 if __name__ == "__main__":

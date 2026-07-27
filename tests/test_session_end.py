@@ -13,7 +13,7 @@ from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ValidationError
 from tsq.replay import ProjectionReplay
-from tsq.store import Database
+from tsq.store import SCHEMA_VERSION, Database
 
 from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
 
@@ -424,7 +424,7 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
 
-        self.assertEqual(schema_version, "19")
+        self.assertEqual(schema_version, str(SCHEMA_VERSION))
         self.assertEqual(
             decision["invalidation_reason"], "learner_projection_advanced"
         )

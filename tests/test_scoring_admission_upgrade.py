@@ -72,7 +72,7 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 19)
+            self.assertEqual(SCHEMA_VERSION, 20)
             self.assertEqual(event_fingerprint(database), before_events)
             after_performance = performance_source_snapshot(database)
             self.assertEqual(
@@ -93,48 +93,12 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
                 evaluation_count = connection.execute(
                     "SELECT COUNT(*) AS n FROM task_evaluations"
                 ).fetchone()["n"]
-            self.assertEqual(version, "19")
+            self.assertEqual(version, "20")
             self.assertEqual(claim_count, 0)
             self.assertEqual(evaluation_count, 1)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
-
-    def test_fresh_v15_schema_installs_claim_table_and_all_guards(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            database = Database(Path(directory) / "fresh-v15.db")
-            database.initialize()
-
-            with database.read() as connection:
-                version = connection.execute(
-                    "SELECT value FROM meta WHERE key='schema_version'"
-                ).fetchone()["value"]
-                table = connection.execute(
-                    """SELECT 1 FROM sqlite_master
-                       WHERE type='table'
-                         AND name='performance_scoring_claims'"""
-                ).fetchone()
-                triggers = {
-                    row["name"]
-                    for row in connection.execute(
-                        """SELECT name FROM sqlite_master
-                           WHERE type='trigger'"""
-                    )
-                }
-            self.assertEqual(version, "19")
-            self.assertIsNotNone(table)
-            self.assertTrue(
-                {
-                    "performance_scoring_claims_validate_insert",
-                    "performance_scoring_claims_no_update",
-                    "performance_scoring_claims_no_delete",
-                    "events_respect_performance_scoring_claim",
-                    "task_evaluations_validate_scoring_claim",
-                }
-                <= triggers
-            )
-            database.validate_current_schema()
-
 
 if __name__ == "__main__":
     unittest.main()

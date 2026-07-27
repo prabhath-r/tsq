@@ -108,12 +108,18 @@ from .versions import (
 )
 
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX = (
     "performance-score-claim:v1:"
 )
 PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX = (
     "performance-score-reconcile:v1:"
+)
+PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX = (
+    "performance-artifact-run-claim:v1:"
+)
+PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX = (
+    "performance-artifact-run-receipt:v1:"
 )
 LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON = (
     "Unreviewed generated question was active in a historical corpus release."
@@ -152,6 +158,8 @@ CURRENT_SCHEMA_TABLES = frozenset(
         "objective_states",
         "options",
         "performance_actions",
+        "performance_artifact_run_claims",
+        "performance_artifact_run_receipts",
         "performance_attempts",
         "performance_scoring_claims",
         "performance_scoring_reconciliations",
@@ -188,6 +196,126 @@ CURRENT_SCHEMA_TABLES = frozenset(
 # Compatibility name retained for code that previously imported store's
 # singular current-grid identifier. Immutable dispatch uses explicit versions.
 OBJECTIVE_GRID_MODEL_VERSION = OBJECTIVE_GRID_V8_MODEL_VERSION
+
+
+def _artifact_run_event_key(prefix: str, digest: str, label: str) -> str:
+    """Return a reserved artifact-run event key for one exact digest."""
+
+    if (
+        type(digest) is not str
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise ValidationError(f"{label} must be lowercase SHA-256.")
+    return prefix + digest
+
+
+def performance_artifact_run_claim_event_key(command_hash: str) -> str:
+    """Return the reserved event key for artifact-run admission."""
+
+    return _artifact_run_event_key(
+        PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX,
+        command_hash,
+        "Performance artifact-run claim command hash",
+    )
+
+
+def performance_artifact_run_receipt_event_key(receipt_digest: str) -> str:
+    """Return the reserved event key for an artifact-run terminal receipt."""
+
+    return _artifact_run_event_key(
+        PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX,
+        receipt_digest,
+        "Performance artifact-run receipt digest",
+    )
+
+
+def performance_artifact_run_claim_payload(
+    *,
+    claim_id: str,
+    caller_idempotency_key: str | None,
+    attempt_id: str,
+    session_id: str,
+    session_revision: int,
+    artifact_action_id: str,
+    through_sequence: int,
+    task_release_id: str,
+    task_id: str,
+    task_version: int,
+    task_digest: str,
+    artifact_digest: str,
+    artifact_kind: str,
+    artifact_manifest_digest: str,
+    check_set_id: str,
+    check_set_manifest_digest: str,
+    runner_id: str,
+    runner_version: str,
+    request: dict[str, Any],
+    request_digest: str,
+    binding: dict[str, Any],
+    binding_digest: str,
+    command_hash: str,
+    claimed_at: str,
+) -> dict[str, Any]:
+    """Return the closed event payload for one artifact-run admission."""
+
+    return {
+        "claim_id": claim_id,
+        "caller_idempotency_key": caller_idempotency_key,
+        "attempt_id": attempt_id,
+        "session_id": session_id,
+        "session_revision": session_revision,
+        "artifact_action_id": artifact_action_id,
+        "through_sequence": through_sequence,
+        "task_release_id": task_release_id,
+        "task_id": task_id,
+        "task_version": task_version,
+        "task_digest": task_digest,
+        "artifact_digest": artifact_digest,
+        "artifact_kind": artifact_kind,
+        "artifact_manifest_digest": artifact_manifest_digest,
+        "check_set_id": check_set_id,
+        "check_set_manifest_digest": check_set_manifest_digest,
+        "runner_id": runner_id,
+        "runner_version": runner_version,
+        "request": request,
+        "request_digest": request_digest,
+        "binding": binding,
+        "binding_digest": binding_digest,
+        "command_hash": command_hash,
+        "claimed_at": claimed_at,
+    }
+
+
+def performance_artifact_run_observed_payload(
+    *,
+    receipt_id: str,
+    claim_id: str,
+    attempt_id: str,
+    check_action_id: str | None,
+    outcome: str,
+    result: dict[str, Any] | None,
+    result_digest: str | None,
+    receipt: dict[str, Any],
+    receipt_digest: str,
+    started_at: str,
+    completed_at: str,
+) -> dict[str, Any]:
+    """Return the closed event payload for one terminal artifact-run receipt."""
+
+    return {
+        "receipt_id": receipt_id,
+        "claim_id": claim_id,
+        "attempt_id": attempt_id,
+        "check_action_id": check_action_id,
+        "outcome": outcome,
+        "result": result,
+        "result_digest": result_digest,
+        "receipt": receipt,
+        "receipt_digest": receipt_digest,
+        "started_at": started_at,
+        "completed_at": completed_at,
+    }
 
 
 def performance_scoring_claim_event_key(command_hash: str) -> str:
@@ -1338,6 +1466,158 @@ CREATE TABLE IF NOT EXISTS performance_actions (
 CREATE INDEX IF NOT EXISTS idx_performance_actions_attempt
 ON performance_actions(attempt_id, sequence);
 
+-- An artifact-run claim reserves one exact isolated-runner operation before
+-- crossing the runner boundary. The request, trust binding, task/release
+-- snapshot, artifact, check set, and current attempt/session boundary are
+-- immutable. A stranded claim never expires and is never an automatic retry
+-- authorization.
+CREATE TABLE IF NOT EXISTS performance_artifact_run_claims (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    idempotency_key TEXT UNIQUE CHECK(
+        idempotency_key IS NULL
+        OR (
+            length(idempotency_key) BETWEEN 1 AND 256
+            AND idempotency_key = trim(idempotency_key)
+        )
+    ),
+    attempt_id TEXT NOT NULL REFERENCES performance_attempts(id),
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    session_revision INTEGER NOT NULL CHECK(session_revision >= 0),
+    artifact_action_id TEXT NOT NULL REFERENCES performance_actions(id),
+    through_sequence INTEGER NOT NULL CHECK(through_sequence >= 0),
+    task_release_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    task_version INTEGER NOT NULL CHECK(task_version > 0),
+    task_digest TEXT NOT NULL CHECK(
+        length(task_digest) = 64
+        AND task_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    artifact_digest TEXT NOT NULL CHECK(
+        length(artifact_digest) = 64
+        AND artifact_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    artifact_kind TEXT NOT NULL CHECK(
+        length(artifact_kind) BETWEEN 1 AND 128
+        AND artifact_kind = trim(artifact_kind)
+        AND artifact_kind NOT GLOB '*[^A-Za-z0-9._:-]*'
+    ),
+    artifact_manifest_digest TEXT NOT NULL CHECK(
+        length(artifact_manifest_digest) = 64
+        AND artifact_manifest_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    check_set_id TEXT NOT NULL CHECK(
+        length(check_set_id) BETWEEN 1 AND 128
+        AND check_set_id = trim(check_set_id)
+        AND check_set_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+    ),
+    check_set_manifest_digest TEXT NOT NULL CHECK(
+        length(check_set_manifest_digest) = 64
+        AND check_set_manifest_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    runner_id TEXT NOT NULL CHECK(
+        length(runner_id) BETWEEN 1 AND 128
+        AND runner_id = trim(runner_id)
+        AND runner_id NOT GLOB '*[^A-Za-z0-9._:-]*'
+    ),
+    runner_version TEXT NOT NULL CHECK(
+        length(runner_version) BETWEEN 1 AND 128
+        AND runner_version = trim(runner_version)
+        AND runner_version NOT GLOB '*[^A-Za-z0-9._:-]*'
+    ),
+    request_json TEXT NOT NULL CHECK(
+        length(request_json) <= 131072
+        AND json_valid(request_json)
+        AND json_type(request_json) = 'object'
+    ),
+    request_digest TEXT NOT NULL CHECK(
+        length(request_digest) = 64
+        AND request_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    binding_json TEXT NOT NULL CHECK(
+        length(binding_json) <= 131072
+        AND json_valid(binding_json)
+        AND json_type(binding_json) = 'object'
+    ),
+    binding_digest TEXT NOT NULL CHECK(
+        length(binding_digest) = 64
+        AND binding_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    command_hash TEXT NOT NULL UNIQUE CHECK(
+        length(command_hash) = 64
+        AND command_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    claimed_at TEXT NOT NULL,
+    FOREIGN KEY(task_release_id, task_id, task_version)
+        REFERENCES release_performance_tasks(release_id, task_id, task_version)
+);
+
+CREATE INDEX IF NOT EXISTS idx_performance_artifact_run_claims_attempt
+ON performance_artifact_run_claims(attempt_id, through_sequence);
+CREATE INDEX IF NOT EXISTS idx_performance_artifact_run_claims_artifact
+ON performance_artifact_run_claims(
+    artifact_digest, check_set_id, runner_id, runner_version
+);
+
+-- Exactly one terminal receipt may close an artifact-run claim. Successful
+-- and invalid-artifact observations both require a strict result and one
+-- generated check_run action. Runner failures and timeouts carry neither.
+CREATE TABLE IF NOT EXISTS performance_artifact_run_receipts (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    claim_id TEXT NOT NULL UNIQUE
+        REFERENCES performance_artifact_run_claims(id),
+    check_action_id TEXT UNIQUE REFERENCES performance_actions(id),
+    outcome TEXT NOT NULL CHECK(
+        outcome IN (
+            'completed', 'invalid_artifact', 'runner_failed', 'timed_out'
+        )
+    ),
+    result_json TEXT CHECK(
+        result_json IS NULL
+        OR (
+            length(result_json) <= 1048576
+            AND json_valid(result_json)
+            AND json_type(result_json) = 'object'
+        )
+    ),
+    result_digest TEXT CHECK(
+        result_digest IS NULL
+        OR (
+            length(result_digest) = 64
+            AND result_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    receipt_json TEXT NOT NULL CHECK(
+        length(receipt_json) <= 131072
+        AND json_valid(receipt_json)
+        AND json_type(receipt_json) = 'object'
+    ),
+    receipt_digest TEXT NOT NULL UNIQUE CHECK(
+        length(receipt_digest) = 64
+        AND receipt_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    started_at TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    CHECK(
+        (
+            outcome IN ('completed', 'invalid_artifact')
+            AND result_json IS NOT NULL
+            AND result_digest IS NOT NULL
+            AND check_action_id IS NOT NULL
+        )
+        OR (
+            outcome IN ('runner_failed', 'timed_out')
+            AND result_json IS NULL
+            AND result_digest IS NULL
+            AND check_action_id IS NULL
+        )
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_performance_artifact_run_receipts_outcome
+ON performance_artifact_run_receipts(outcome, completed_at);
+
 -- A scoring claim is an immutable admission record for one logical provider
 -- callback.  Its command hash, and the caller key when one is supplied, are
 -- committed before the callback runs.  This provides cross-process,
@@ -2179,6 +2459,544 @@ BEFORE DELETE ON performance_actions BEGIN
     SELECT RAISE(ABORT, 'performance actions are immutable');
 END;
 
+CREATE TRIGGER IF NOT EXISTS performance_artifact_run_claims_validate_insert
+BEFORE INSERT ON performance_artifact_run_claims BEGIN
+    SELECT CASE WHEN NEW.idempotency_key IS NOT NULL AND (
+        NEW.idempotency_key GLOB 'performance-score-claim:v1:*'
+        OR NEW.idempotency_key GLOB 'performance-score-reconcile:v1:*'
+        OR NEW.idempotency_key GLOB 'performance-artifact-run-claim:v1:*'
+        OR NEW.idempotency_key GLOB 'performance-artifact-run-receipt:v1:*'
+    ) THEN RAISE(
+        ABORT, 'artifact-run caller key uses a reserved event namespace'
+    ) END;
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM events admission
+        WHERE admission.event_type IN (
+            'PerformanceScoringClaimed',
+            'PerformanceScoringClaimMigrated',
+            'PerformanceScoringReconciled'
+        )
+          AND json_extract(
+              admission.payload_json, '$.caller_idempotency_key'
+          ) = 'performance-artifact-run-claim:v1:' || NEW.command_hash
+    ) THEN RAISE(
+        ABORT, 'artifact-run technical event key collides with scoring caller'
+    ) END;
+    SELECT CASE WHEN NEW.idempotency_key IS NOT NULL AND (
+        EXISTS (
+            SELECT 1 FROM events event
+            WHERE event.idempotency_key = NEW.idempotency_key
+        )
+        OR EXISTS (
+            SELECT 1 FROM events admission
+            WHERE admission.event_type IN (
+                'PerformanceScoringClaimed',
+                'PerformanceScoringClaimMigrated',
+                'PerformanceScoringReconciled'
+            )
+              AND json_extract(
+                  admission.payload_json, '$.caller_idempotency_key'
+              ) = NEW.idempotency_key
+        )
+    ) THEN RAISE(
+        ABORT, 'artifact-run caller key is already reserved'
+    ) END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM performance_attempts attempt
+        JOIN sessions session ON session.id = attempt.session_id
+        JOIN release_performance_tasks member
+          ON member.release_id = attempt.task_release_id
+         AND member.task_id = attempt.task_id
+         AND member.task_version = attempt.task_version
+        JOIN performance_actions artifact
+          ON artifact.id = NEW.artifact_action_id
+         AND artifact.attempt_id = attempt.id
+         AND artifact.action_type = 'artifact_checkpoint'
+        JOIN events artifact_event ON artifact_event.event_id = artifact.event_id
+        JOIN performance_actions boundary
+          ON boundary.attempt_id = attempt.id
+         AND boundary.sequence = NEW.through_sequence
+        JOIN events boundary_event ON boundary_event.event_id = boundary.event_id
+        JOIN events claim_event ON claim_event.event_id = NEW.event_id
+        WHERE attempt.id = NEW.attempt_id
+          AND attempt.session_id = NEW.session_id
+          AND session.id = NEW.session_id
+          AND session.status = 'active'
+          AND session.revision = NEW.session_revision
+          AND attempt.task_release_id = NEW.task_release_id
+          AND attempt.task_id = NEW.task_id
+          AND attempt.task_version = NEW.task_version
+          AND attempt.task_digest = NEW.task_digest
+          AND member.task_digest = NEW.task_digest
+          AND artifact.sequence <= NEW.through_sequence
+          AND json_extract(
+              artifact.payload_json, '$.artifact_digest'
+          ) = NEW.artifact_digest
+          AND json_extract(
+              artifact.payload_json, '$.artifact_kind'
+          ) = NEW.artifact_kind
+          AND NOT EXISTS (
+              SELECT 1 FROM performance_actions later
+              WHERE later.attempt_id = NEW.attempt_id
+                AND later.sequence > NEW.through_sequence
+          )
+          AND claim_event.event_type = 'PerformanceArtifactRunClaimed'
+          AND claim_event.schema_version = 1
+          AND claim_event.stream_id = 'learner:' || attempt.learner_id
+          AND claim_event.learner_id = attempt.learner_id
+          AND claim_event.session_id = attempt.session_id
+          AND claim_event.stream_version > artifact_event.stream_version
+          AND claim_event.stream_id = boundary_event.stream_id
+          AND claim_event.stream_version > boundary_event.stream_version
+          AND claim_event.idempotency_key =
+              'performance-artifact-run-claim:v1:' || NEW.command_hash
+          AND claim_event.correlation_id = NEW.attempt_id
+          AND claim_event.causation_id = artifact.event_id
+          AND claim_event.occurred_at = NEW.claimed_at
+          AND json_type(claim_event.payload_json) = 'object'
+          AND (
+              SELECT COUNT(*) FROM json_each(claim_event.payload_json)
+          ) = 24
+          AND json_extract(
+              claim_event.payload_json, '$.claim_id'
+          ) = NEW.id
+          AND json_extract(
+              claim_event.payload_json, '$.caller_idempotency_key'
+          ) IS NEW.idempotency_key
+          AND json_extract(
+              claim_event.payload_json, '$.attempt_id'
+          ) = NEW.attempt_id
+          AND json_extract(
+              claim_event.payload_json, '$.session_id'
+          ) = NEW.session_id
+          AND json_type(
+              claim_event.payload_json, '$.session_revision'
+          ) = 'integer'
+          AND json_extract(
+              claim_event.payload_json, '$.session_revision'
+          ) = NEW.session_revision
+          AND json_extract(
+              claim_event.payload_json, '$.artifact_action_id'
+          ) = NEW.artifact_action_id
+          AND json_type(
+              claim_event.payload_json, '$.through_sequence'
+          ) = 'integer'
+          AND json_extract(
+              claim_event.payload_json, '$.through_sequence'
+          ) = NEW.through_sequence
+          AND json_extract(
+              claim_event.payload_json, '$.task_release_id'
+          ) = NEW.task_release_id
+          AND json_extract(
+              claim_event.payload_json, '$.task_id'
+          ) = NEW.task_id
+          AND json_type(
+              claim_event.payload_json, '$.task_version'
+          ) = 'integer'
+          AND json_extract(
+              claim_event.payload_json, '$.task_version'
+          ) = NEW.task_version
+          AND json_extract(
+              claim_event.payload_json, '$.task_digest'
+          ) = NEW.task_digest
+          AND json_extract(
+              claim_event.payload_json, '$.artifact_digest'
+          ) = NEW.artifact_digest
+          AND json_extract(
+              claim_event.payload_json, '$.artifact_kind'
+          ) = NEW.artifact_kind
+          AND json_extract(
+              claim_event.payload_json, '$.artifact_manifest_digest'
+          ) = NEW.artifact_manifest_digest
+          AND json_extract(
+              claim_event.payload_json, '$.check_set_id'
+          ) = NEW.check_set_id
+          AND json_extract(
+              claim_event.payload_json, '$.check_set_manifest_digest'
+          ) = NEW.check_set_manifest_digest
+          AND json_extract(
+              claim_event.payload_json, '$.runner_id'
+          ) = NEW.runner_id
+          AND json_extract(
+              claim_event.payload_json, '$.runner_version'
+          ) = NEW.runner_version
+          AND json_type(
+              claim_event.payload_json, '$.request'
+          ) = 'object'
+          AND json_extract(
+              claim_event.payload_json, '$.request'
+          ) = json(NEW.request_json)
+          AND json_extract(
+              claim_event.payload_json, '$.request_digest'
+          ) = NEW.request_digest
+          AND json_type(
+              claim_event.payload_json, '$.binding'
+          ) = 'object'
+          AND json_extract(
+              claim_event.payload_json, '$.binding'
+          ) = json(NEW.binding_json)
+          AND json_extract(
+              claim_event.payload_json, '$.binding_digest'
+          ) = NEW.binding_digest
+          AND json_extract(
+              claim_event.payload_json, '$.command_hash'
+          ) = NEW.command_hash
+          AND json_extract(
+              claim_event.payload_json, '$.claimed_at'
+          ) = NEW.claimed_at
+          AND json_type(claim_event.metadata_json) = 'object'
+          AND (
+              SELECT COUNT(*) FROM json_each(claim_event.metadata_json)
+          ) = 4
+          AND json_type(
+              claim_event.metadata_json, '$.artifact_run_schema_version'
+          ) = 'integer'
+          AND json_extract(
+              claim_event.metadata_json, '$.artifact_run_schema_version'
+          ) = 1
+          AND json_extract(
+              claim_event.metadata_json, '$.admission_mode'
+          ) = 'pre_runner'
+          AND json_type(
+              claim_event.metadata_json, '$.automatic_retry_allowed'
+          ) = 'false'
+          AND json_type(
+              claim_event.metadata_json, '$.shadow_only'
+          ) = 'true'
+          AND (
+              (
+                  length(NEW.claimed_at) = 25
+                  AND NEW.claimed_at GLOB
+                      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+              )
+              OR (
+                  length(NEW.claimed_at) = 32
+                  AND NEW.claimed_at GLOB
+                      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+                  AND substr(NEW.claimed_at, 21, 6) != '000000'
+              )
+          )
+          AND substr(NEW.claimed_at, 1, 4) != '0000'
+          AND substr(NEW.claimed_at, -6) = '+00:00'
+          AND substr(NEW.claimed_at, 12, 2) BETWEEN '00' AND '23'
+          AND substr(NEW.claimed_at, 15, 2) BETWEEN '00' AND '59'
+          AND substr(NEW.claimed_at, 18, 2) BETWEEN '00' AND '59'
+          AND julianday(NEW.claimed_at) IS NOT NULL
+          AND strftime('%Y-%m-%d', NEW.claimed_at) =
+              substr(NEW.claimed_at, 1, 10)
+          AND NEW.claimed_at >= artifact.occurred_at
+    ) THEN RAISE(
+        ABORT, 'artifact-run claim does not match its boundary/event'
+    ) END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_artifact_run_claims_no_update
+BEFORE UPDATE ON performance_artifact_run_claims BEGIN
+    SELECT RAISE(ABORT, 'performance artifact-run claims are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_artifact_run_claims_no_delete
+BEFORE DELETE ON performance_artifact_run_claims BEGIN
+    SELECT RAISE(ABORT, 'performance artifact-run claims are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS
+events_respect_performance_artifact_run_claim
+BEFORE INSERT ON events
+WHEN NEW.idempotency_key IS NOT NULL
+ AND EXISTS (
+     SELECT 1 FROM performance_artifact_run_claims claim
+     WHERE claim.idempotency_key = NEW.idempotency_key
+ )
+BEGIN
+    SELECT RAISE(
+        ABORT, 'event idempotency key is reserved by an artifact-run claim'
+    );
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_artifact_run_receipts_validate_insert
+BEFORE INSERT ON performance_artifact_run_receipts BEGIN
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM events admission
+        WHERE admission.event_type IN (
+            'PerformanceScoringClaimed',
+            'PerformanceScoringClaimMigrated',
+            'PerformanceScoringReconciled'
+        )
+          AND json_extract(
+              admission.payload_json, '$.caller_idempotency_key'
+          ) = 'performance-artifact-run-receipt:v1:' || NEW.receipt_digest
+    ) THEN RAISE(
+        ABORT, 'artifact-run technical event key collides with scoring caller'
+    ) END;
+    SELECT CASE WHEN NOT EXISTS (
+        SELECT 1
+        FROM performance_artifact_run_claims claim
+        JOIN performance_attempts attempt ON attempt.id = claim.attempt_id
+        JOIN sessions session ON session.id = claim.session_id
+        JOIN performance_actions artifact
+          ON artifact.id = claim.artifact_action_id
+        JOIN events claim_event ON claim_event.event_id = claim.event_id
+        JOIN events receipt_event ON receipt_event.event_id = NEW.event_id
+        WHERE claim.id = NEW.claim_id
+          AND session.id = claim.session_id
+          AND session.status = 'active'
+          AND session.revision = claim.session_revision
+          AND receipt_event.event_type = 'PerformanceArtifactRunObserved'
+          AND receipt_event.schema_version = 1
+          AND receipt_event.stream_id = 'learner:' || attempt.learner_id
+          AND receipt_event.learner_id = attempt.learner_id
+          AND receipt_event.session_id IS NULL
+          AND receipt_event.stream_version > claim_event.stream_version
+          AND receipt_event.idempotency_key =
+              'performance-artifact-run-receipt:v1:' ||
+              NEW.receipt_digest
+          AND receipt_event.correlation_id = claim.attempt_id
+          AND receipt_event.causation_id = claim.event_id
+          AND receipt_event.occurred_at = NEW.completed_at
+          AND json_type(receipt_event.payload_json) = 'object'
+          AND (
+              SELECT COUNT(*) FROM json_each(receipt_event.payload_json)
+          ) = 11
+          AND json_extract(
+              receipt_event.payload_json, '$.receipt_id'
+          ) = NEW.id
+          AND json_extract(
+              receipt_event.payload_json, '$.claim_id'
+          ) = NEW.claim_id
+          AND json_extract(
+              receipt_event.payload_json, '$.attempt_id'
+          ) = claim.attempt_id
+          AND json_extract(
+              receipt_event.payload_json, '$.check_action_id'
+          ) IS NEW.check_action_id
+          AND json_extract(
+              receipt_event.payload_json, '$.outcome'
+          ) = NEW.outcome
+          AND (
+              (
+                  NEW.outcome IN ('completed', 'invalid_artifact')
+                  AND json_type(
+                      receipt_event.payload_json, '$.result'
+                  ) = 'object'
+                  AND json_extract(
+                      receipt_event.payload_json, '$.result'
+                  ) = json(NEW.result_json)
+                  AND json_extract(
+                      receipt_event.payload_json, '$.result_digest'
+                  ) = NEW.result_digest
+              )
+              OR (
+                  NEW.outcome IN ('runner_failed', 'timed_out')
+                  AND json_type(
+                      receipt_event.payload_json, '$.result'
+                  ) = 'null'
+                  AND json_type(
+                      receipt_event.payload_json, '$.result_digest'
+                  ) = 'null'
+              )
+          )
+          AND json_type(
+              receipt_event.payload_json, '$.receipt'
+          ) = 'object'
+          AND json_extract(
+              receipt_event.payload_json, '$.receipt'
+          ) = json(NEW.receipt_json)
+          AND json_extract(
+              receipt_event.payload_json, '$.receipt_digest'
+          ) = NEW.receipt_digest
+          AND json_extract(
+              receipt_event.payload_json, '$.started_at'
+          ) = NEW.started_at
+          AND json_extract(
+              receipt_event.payload_json, '$.completed_at'
+          ) = NEW.completed_at
+          AND json_type(receipt_event.metadata_json) = 'object'
+          AND (
+              SELECT COUNT(*) FROM json_each(receipt_event.metadata_json)
+          ) = 6
+          AND json_type(
+              receipt_event.metadata_json, '$.artifact_run_schema_version'
+          ) = 'integer'
+          AND json_extract(
+              receipt_event.metadata_json, '$.artifact_run_schema_version'
+          ) = 1
+          AND json_type(
+              receipt_event.metadata_json, '$.observational_only'
+          ) = 'true'
+          AND json_type(
+              receipt_event.metadata_json, '$.projection_applied'
+          ) = 'false'
+          AND json_type(
+              receipt_event.metadata_json, '$.certification_applied'
+          ) = 'false'
+          AND json_type(
+              receipt_event.metadata_json, '$.skill_authority'
+          ) = 'false'
+          AND json_type(
+              receipt_event.metadata_json, '$.shadow_only'
+          ) = 'true'
+          AND json_type(NEW.receipt_json) = 'object'
+          AND (
+              SELECT COUNT(*) FROM json_each(NEW.receipt_json)
+          ) = 17
+          AND json_extract(
+              NEW.receipt_json, '$.claim_id'
+          ) = claim.id
+          AND json_extract(
+              NEW.receipt_json, '$.attempt_id'
+          ) = claim.attempt_id
+          AND json_extract(
+              NEW.receipt_json, '$.artifact_action_id'
+          ) = claim.artifact_action_id
+          AND json_extract(
+              NEW.receipt_json, '$.artifact_digest'
+          ) = claim.artifact_digest
+          AND json_extract(
+              NEW.receipt_json, '$.artifact_kind'
+          ) = claim.artifact_kind
+          AND json_extract(
+              NEW.receipt_json, '$.artifact_manifest_digest'
+          ) = claim.artifact_manifest_digest
+          AND json_extract(
+              NEW.receipt_json, '$.check_set_id'
+          ) = claim.check_set_id
+          AND json_extract(
+              NEW.receipt_json, '$.check_set_manifest_digest'
+          ) = claim.check_set_manifest_digest
+          AND json_extract(
+              NEW.receipt_json, '$.runner_id'
+          ) = claim.runner_id
+          AND json_extract(
+              NEW.receipt_json, '$.runner_version'
+          ) = claim.runner_version
+          AND json_extract(
+              NEW.receipt_json, '$.outcome'
+          ) = NEW.outcome
+          AND json_extract(
+              NEW.receipt_json, '$.started_at'
+          ) = NEW.started_at
+          AND json_extract(
+              NEW.receipt_json, '$.completed_at'
+          ) = NEW.completed_at
+          AND json_extract(
+              NEW.receipt_json, '$.result_digest'
+          ) IS NEW.result_digest
+          AND json_extract(
+              NEW.receipt_json, '$.request_digest'
+          ) = claim.request_digest
+          AND json_extract(
+              NEW.receipt_json, '$.binding_digest'
+          ) = claim.binding_digest
+          AND json_type(
+              NEW.receipt_json, '$.schema_version'
+          ) = 'integer'
+          AND json_extract(
+              NEW.receipt_json, '$.schema_version'
+          ) = 1
+          AND (
+              (
+                  length(NEW.started_at) = 25
+                  AND NEW.started_at GLOB
+                      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+              )
+              OR (
+                  length(NEW.started_at) = 32
+                  AND NEW.started_at GLOB
+                      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+                  AND substr(NEW.started_at, 21, 6) != '000000'
+              )
+          )
+          AND (
+              (
+                  length(NEW.completed_at) = 25
+                  AND NEW.completed_at GLOB
+                      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+              )
+              OR (
+                  length(NEW.completed_at) = 32
+                  AND NEW.completed_at GLOB
+                      '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+                  AND substr(NEW.completed_at, 21, 6) != '000000'
+              )
+          )
+          AND substr(NEW.started_at, 1, 4) != '0000'
+          AND substr(NEW.completed_at, 1, 4) != '0000'
+          AND substr(NEW.started_at, -6) = '+00:00'
+          AND substr(NEW.completed_at, -6) = '+00:00'
+          AND substr(NEW.started_at, 12, 2) BETWEEN '00' AND '23'
+          AND substr(NEW.started_at, 15, 2) BETWEEN '00' AND '59'
+          AND substr(NEW.started_at, 18, 2) BETWEEN '00' AND '59'
+          AND substr(NEW.completed_at, 12, 2) BETWEEN '00' AND '23'
+          AND substr(NEW.completed_at, 15, 2) BETWEEN '00' AND '59'
+          AND substr(NEW.completed_at, 18, 2) BETWEEN '00' AND '59'
+          AND julianday(NEW.started_at) IS NOT NULL
+          AND julianday(NEW.completed_at) IS NOT NULL
+          AND strftime('%Y-%m-%d', NEW.started_at) =
+              substr(NEW.started_at, 1, 10)
+          AND strftime('%Y-%m-%d', NEW.completed_at) =
+              substr(NEW.completed_at, 1, 10)
+          AND NEW.started_at >= claim.claimed_at
+          AND NEW.completed_at >= NEW.started_at
+          AND (
+              (
+                  NEW.outcome IN ('completed', 'invalid_artifact')
+                  AND EXISTS (
+                      SELECT 1
+                      FROM performance_actions check_action
+                      JOIN events check_event
+                        ON check_event.event_id = check_action.event_id
+                      WHERE check_action.id = NEW.check_action_id
+                        AND check_action.attempt_id = claim.attempt_id
+                        AND check_action.sequence =
+                            claim.through_sequence + 1
+                        AND check_action.phase = artifact.phase
+                        AND check_action.action_type = 'check_run'
+                        AND check_action.occurred_at = NEW.completed_at
+                        AND json_extract(
+                            check_action.payload_json, '$.check_set_id'
+                        ) = claim.check_set_id
+                        AND json_extract(
+                            check_action.payload_json, '$.result_digest'
+                        ) = NEW.result_digest
+                        AND check_event.stream_id =
+                            receipt_event.stream_id
+                        AND check_event.stream_version >
+                            claim_event.stream_version
+                        AND check_event.stream_version <
+                            receipt_event.stream_version
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM performance_actions later
+                      WHERE later.attempt_id = claim.attempt_id
+                        AND later.sequence > claim.through_sequence + 1
+                  )
+              )
+              OR (
+                  NEW.outcome IN ('runner_failed', 'timed_out')
+                  AND NOT EXISTS (
+                      SELECT 1 FROM performance_actions later
+                      WHERE later.attempt_id = claim.attempt_id
+                        AND later.sequence > claim.through_sequence
+                  )
+              )
+          )
+    ) THEN RAISE(
+        ABORT, 'artifact-run receipt does not match its claim/event'
+    ) END;
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_artifact_run_receipts_no_update
+BEFORE UPDATE ON performance_artifact_run_receipts BEGIN
+    SELECT RAISE(ABORT, 'performance artifact-run receipts are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS performance_artifact_run_receipts_no_delete
+BEFORE DELETE ON performance_artifact_run_receipts BEGIN
+    SELECT RAISE(ABORT, 'performance artifact-run receipts are immutable');
+END;
+
 CREATE TRIGGER IF NOT EXISTS performance_scoring_claims_validate_insert
 BEFORE INSERT ON performance_scoring_claims BEGIN
     SELECT CASE WHEN EXISTS (
@@ -2968,6 +3786,53 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         connection.close()
 
 
+_ARTIFACT_RUN_TABLES = frozenset(
+    {
+        "performance_artifact_run_claims",
+        "performance_artifact_run_receipts",
+    }
+)
+_ARTIFACT_RUN_TRIGGER_NAMES = frozenset(
+    {
+        "performance_artifact_run_claims_validate_insert",
+        "performance_artifact_run_claims_no_update",
+        "performance_artifact_run_claims_no_delete",
+        "events_respect_performance_artifact_run_claim",
+        "performance_artifact_run_receipts_validate_insert",
+        "performance_artifact_run_receipts_no_update",
+        "performance_artifact_run_receipts_no_delete",
+    }
+)
+
+
+@lru_cache(maxsize=1)
+def _expected_v19_schema_contract() -> _CurrentSchemaContract:
+    """Return the one exact v19 structure accepted as a migration source."""
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    reference = Database(":memory:")
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(DDL)
+        reference._migrate_v11_to_v12(connection)
+        reference._migrate_v12_to_v13(connection)
+        reference._migrate_v13_to_v14(connection)
+        reference._migrate_v14_to_v15(connection)
+        reference._install_current_performance_scoring_triggers(connection)
+        reference._install_v5_indexes(connection)
+        reference._install_v6_authoring_triggers(connection)
+        reference._install_v4_attempt_triggers(connection)
+        reference._install_v8_learning_action_triggers(connection)
+        reference._install_release_snapshot_triggers(connection)
+        reference._install_corpus_registry_triggers(connection)
+        reference._downgrade_v20_contract_to_v19(connection)
+        connection.commit()
+        return _capture_current_schema_contract(connection)
+    finally:
+        connection.close()
+
+
 @lru_cache(maxsize=1)
 def _expected_v18_schema_contract() -> _CurrentSchemaContract:
     """Return the one exact v18 structure accepted as a migration source."""
@@ -2989,6 +3854,7 @@ def _expected_v18_schema_contract() -> _CurrentSchemaContract:
         reference._install_v8_learning_action_triggers(connection)
         reference._install_release_snapshot_triggers(connection)
         reference._install_corpus_registry_triggers(connection)
+        reference._downgrade_v20_contract_to_v19(connection)
         reference._downgrade_v19_contract_to_v18(connection)
         connection.commit()
         return _capture_current_schema_contract(connection)
@@ -3574,7 +4440,16 @@ class Database:
                             )
                             self._enforce_historical_generated_safety()
                             return
-                        if existing_version == 18:
+                        if existing_version == 19:
+                            actual_v19 = _capture_current_schema_contract(
+                                existing_connection
+                            )
+                            if actual_v19 != _expected_v19_schema_contract():
+                                raise ConflictError(
+                                    "Schema v19 structure is not the exact "
+                                    "supported v20 migration source."
+                                )
+                        elif existing_version == 18:
                             actual_v18 = _capture_current_schema_contract(
                                 existing_connection
                             )
@@ -3708,7 +4583,16 @@ class Database:
                 raise ConflictError(
                     f"Database schema is {current_version}; engine expects at most {SCHEMA_VERSION}."
                 )
-            if current_version == 18:
+            if current_version == 19:
+                if (
+                    _capture_current_schema_contract(connection)
+                    != _expected_v19_schema_contract()
+                ):
+                    raise ConflictError(
+                        "Schema v19 structure is not the exact supported "
+                        "v20 migration source."
+                    )
+            elif current_version == 18:
                 if (
                     _capture_current_schema_contract(connection)
                     != _expected_v18_schema_contract()
@@ -3833,6 +4717,12 @@ class Database:
             if current_version < 19:
                 self._migrate_v18_to_v19(connection)
                 current_version = 19
+            # v20 installs a prospective, event-backed isolated artifact-run
+            # claim/receipt boundary. No historical operation is inferred
+            # from artifact/check actions or from existing task evaluations.
+            if current_version < 20:
+                self._migrate_v19_to_v20(connection)
+                current_version = 20
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -5688,6 +6578,161 @@ class Database:
             """,
         )
 
+    @staticmethod
+    def _drop_empty_v20_artifact_run_tables(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Remove only an empty prospective v20 artifact-run boundary."""
+
+        present = {
+            row["name"]
+            for row in connection.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='table'
+                     AND name IN (
+                         'performance_artifact_run_claims',
+                         'performance_artifact_run_receipts'
+                     )"""
+            )
+        }
+        if not present:
+            return
+        if present != _ARTIFACT_RUN_TABLES:
+            raise RuntimeError(
+                "The v19 contract cannot be derived from a partial v20 "
+                "artifact-run boundary."
+            )
+        for table in sorted(_ARTIFACT_RUN_TABLES):
+            quoted = _quote_sqlite_identifier(table)
+            if connection.execute(
+                f"SELECT 1 FROM {quoted} LIMIT 1"
+            ).fetchone() is not None:
+                raise RuntimeError(
+                    "The v19 contract can only be derived from an empty "
+                    "artifact-run reference."
+                )
+        if connection.execute(
+            """SELECT 1 FROM events
+               WHERE event_type IN (
+                   'PerformanceArtifactRunClaimed',
+                   'PerformanceArtifactRunObserved'
+               )
+               LIMIT 1"""
+        ).fetchone() is not None:
+            raise RuntimeError(
+                "The v19 contract cannot discard artifact-run events."
+            )
+        for trigger_name in sorted(_ARTIFACT_RUN_TRIGGER_NAMES):
+            connection.execute(
+                "DROP TRIGGER IF EXISTS "
+                + _quote_sqlite_identifier(trigger_name)
+            )
+        connection.execute("DROP TABLE performance_artifact_run_receipts")
+        connection.execute("DROP TABLE performance_artifact_run_claims")
+
+    @classmethod
+    def _downgrade_v20_contract_to_v19(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Derive the exact empty v19 contract for migration preflight.
+
+        This helper operates only on fresh test/reference databases. It strips
+        the v20 cross-namespace caller-key checks from the two v19 scoring
+        triggers before removing the empty artifact-run tables.
+        """
+
+        claim_namespace_fragment = """
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL AND (
+                    NEW.idempotency_key GLOB
+                        'performance-score-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-score-reconcile:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-receipt:v1:*'
+                ) THEN RAISE(
+                    ABORT,
+                    'scoring caller key uses a reserved event namespace'
+                ) END;"""
+        claim_fragment = """
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM performance_artifact_run_claims artifact_claim
+                      WHERE artifact_claim.idempotency_key =
+                          NEW.idempotency_key
+                  )
+                THEN RAISE(
+                    ABORT,
+                    'scoring claim idempotency key belongs to an artifact run'
+                ) END;"""
+        reconciliation_namespace_fragment = """
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL AND (
+                    NEW.idempotency_key GLOB
+                        'performance-score-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-score-reconcile:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-receipt:v1:*'
+                ) THEN RAISE(
+                    ABORT,
+                    'reconciliation caller key uses a reserved event namespace'
+                ) END;"""
+        reconciliation_fragment = """
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM performance_artifact_run_claims artifact_claim
+                      WHERE artifact_claim.idempotency_key =
+                          NEW.idempotency_key
+                  )
+                THEN RAISE(
+                    ABORT,
+                    'reconciliation idempotency key belongs to an artifact run'
+                ) END;"""
+        rewritten: list[str] = []
+        for trigger_name, fragments in (
+            (
+                "performance_scoring_claims_validate_insert",
+                (claim_namespace_fragment, claim_fragment),
+            ),
+            (
+                "performance_scoring_reconciliations_validate_insert",
+                (
+                    reconciliation_namespace_fragment,
+                    reconciliation_fragment,
+                ),
+            ),
+        ):
+            row = connection.execute(
+                """SELECT sql FROM sqlite_master
+                   WHERE type='trigger' AND name=?""",
+                (trigger_name,),
+            ).fetchone()
+            if row is None or not row["sql"]:
+                raise RuntimeError(
+                    "Current schema lacks the scoring trigger needed to "
+                    "derive v19."
+                )
+            sql = row["sql"]
+            for fragment in fragments:
+                if sql.count(fragment) != 1:
+                    raise RuntimeError(
+                        f"Current trigger {trigger_name} cannot derive v19."
+                    )
+                sql = sql.replace(fragment, "")
+            rewritten.append(sql)
+            connection.execute(
+                "DROP TRIGGER " + _quote_sqlite_identifier(trigger_name)
+            )
+        cls._drop_empty_v20_artifact_run_tables(connection)
+        for sql in rewritten:
+            connection.execute(sql)
+
     @classmethod
     def _downgrade_v19_contract_to_v18(
         cls,
@@ -5699,6 +6744,13 @@ class Database:
         It never rewrites a user database.
         """
 
+        artifact_table = connection.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table'
+                 AND name='performance_artifact_run_claims'"""
+        ).fetchone()
+        if artifact_table is not None:
+            cls._downgrade_v20_contract_to_v19(connection)
         for trigger in (
             "performance_scoring_claims_validate_insert",
             "performance_scoring_claims_no_update",
@@ -6187,6 +7239,64 @@ class Database:
         connection.execute("DROP TABLE _tsq_v19_scoring_claims_old")
 
     @staticmethod
+    def _migrate_v19_to_v20(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Install empty, prospective artifact-run claim/receipt history.
+
+        Artifact checkpoints and check-run actions in v19 do not prove that an
+        isolated runner operation was admitted or observed. The migration
+        therefore validates the newly installed boundary and fabricates no
+        claim, receipt, check action, or event.
+        """
+
+        historical_event = connection.execute(
+            """SELECT event_id FROM events
+               WHERE event_type IN (
+                   'PerformanceArtifactRunClaimed',
+                   'PerformanceArtifactRunObserved'
+               )
+               ORDER BY event_id LIMIT 1"""
+        ).fetchone()
+        if historical_event is not None:
+            raise ConflictError(
+                "Schema v19 contains an artifact-run event without its v20 "
+                "event-backed projection; explicit repair is required before "
+                f"v20 ({historical_event['event_id']})."
+            )
+        for table in sorted(_ARTIFACT_RUN_TABLES):
+            quoted = _quote_sqlite_identifier(table)
+            present = connection.execute(
+                """SELECT 1 FROM sqlite_master
+                   WHERE type='table' AND name=?""",
+                (table,),
+            ).fetchone()
+            if present is None:
+                raise ConflictError(
+                    f"Schema v20 artifact-run table was not installed: {table}."
+                )
+            if connection.execute(
+                f"SELECT 1 FROM {quoted} LIMIT 1"
+            ).fetchone() is not None:
+                raise ConflictError(
+                    "Schema v20 artifact-run migration requires empty "
+                    f"prospective history ({table})."
+                )
+        triggers = {
+            row["name"]
+            for row in connection.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='trigger'"""
+            )
+        }
+        missing = _ARTIFACT_RUN_TRIGGER_NAMES - triggers
+        if missing:
+            raise ConflictError(
+                "Schema v20 artifact-run guards were not installed: "
+                + ", ".join(sorted(missing))
+            )
+
+    @staticmethod
     def _drop_policy_shadow_triggers(
         connection: sqlite3.Connection,
     ) -> None:
@@ -6226,6 +7336,9 @@ class Database:
     ) -> None:
         """Install the exact callback-admission guards used by schema v18."""
 
+        # Historical-fixture builders begin from the current DDL. Strip the
+        # empty prospective v20 boundary before recreating exact v18 guards.
+        Database._drop_empty_v20_artifact_run_tables(connection)
         _execute_sql_script(
             connection,
             """
@@ -6467,7 +7580,7 @@ class Database:
     def _install_current_performance_scoring_triggers(
         connection: sqlite3.Connection,
     ) -> None:
-        """Install the v19 scoring, reconciliation, and recovery guards.
+        """Install the current scoring, reconciliation, and recovery guards.
 
         SQLite can enforce closed JSON shape, scalar types, fixed flags,
         projection equality, and canonical UTC temporal ordering.  It cannot
@@ -6497,6 +7610,19 @@ class Database:
 
             CREATE TRIGGER performance_scoring_claims_validate_insert
             BEFORE INSERT ON performance_scoring_claims BEGIN
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL AND (
+                    NEW.idempotency_key GLOB
+                        'performance-score-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-score-reconcile:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-receipt:v1:*'
+                ) THEN RAISE(
+                    ABORT,
+                    'scoring caller key uses a reserved event namespace'
+                ) END;
                 SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
                   AND EXISTS (
                       SELECT 1
@@ -6507,6 +7633,17 @@ class Database:
                 THEN RAISE(
                     ABORT,
                     'scoring claim idempotency key belongs to a reconciliation'
+                ) END;
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM performance_artifact_run_claims artifact_claim
+                      WHERE artifact_claim.idempotency_key =
+                          NEW.idempotency_key
+                  )
+                THEN RAISE(
+                    ABORT,
+                    'scoring claim idempotency key belongs to an artifact run'
                 ) END;
                 SELECT CASE WHEN EXISTS (
                     SELECT 1 FROM events event
@@ -7147,6 +8284,19 @@ class Database:
             CREATE TRIGGER
             performance_scoring_reconciliations_validate_insert
             BEFORE INSERT ON performance_scoring_reconciliations BEGIN
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL AND (
+                    NEW.idempotency_key GLOB
+                        'performance-score-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-score-reconcile:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-claim:v1:*'
+                    OR NEW.idempotency_key GLOB
+                        'performance-artifact-run-receipt:v1:*'
+                ) THEN RAISE(
+                    ABORT,
+                    'reconciliation caller key uses a reserved event namespace'
+                ) END;
                 SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
                   AND EXISTS (
                       SELECT 1
@@ -7156,6 +8306,17 @@ class Database:
                 THEN RAISE(
                     ABORT,
                     'reconciliation idempotency key belongs to a scoring claim'
+                ) END;
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM performance_artifact_run_claims artifact_claim
+                      WHERE artifact_claim.idempotency_key =
+                          NEW.idempotency_key
+                  )
+                THEN RAISE(
+                    ABORT,
+                    'reconciliation idempotency key belongs to an artifact run'
                 ) END;
                 SELECT CASE WHEN EXISTS (
                     SELECT 1 FROM events event
@@ -16747,6 +17908,12 @@ class Database:
             performance_action_count = connection.execute(
                 "SELECT COUNT(*) AS n FROM performance_actions"
             ).fetchone()["n"]
+            performance_artifact_run_claim_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM performance_artifact_run_claims"
+            ).fetchone()["n"]
+            performance_artifact_run_receipt_count = connection.execute(
+                "SELECT COUNT(*) AS n FROM performance_artifact_run_receipts"
+            ).fetchone()["n"]
             task_evaluation_count = connection.execute(
                 "SELECT COUNT(*) AS n FROM task_evaluations"
             ).fetchone()["n"]
@@ -16764,6 +17931,12 @@ class Database:
             "learning_artifact_count": len(artifact_rows),
             "performance_attempt_count": performance_attempt_count,
             "performance_action_count": performance_action_count,
+            "performance_artifact_run_claim_count": (
+                performance_artifact_run_claim_count
+            ),
+            "performance_artifact_run_receipt_count": (
+                performance_artifact_run_receipt_count
+            ),
             "task_evaluation_count": task_evaluation_count,
             "shadow_evidence_bundle_count": shadow_evidence_bundle_count,
             "policy_shadow_evaluation_count": policy_shadow_evaluation_count,

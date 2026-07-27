@@ -279,7 +279,7 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 19)
+        self.assertEqual(SCHEMA_VERSION, 20)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:

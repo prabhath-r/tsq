@@ -5,9 +5,11 @@
 This module operationalizes the pure contracts in :mod:`tsq.evidence` without
 promoting rubric observations into learner mastery.  Task releases are pinned
 to an immutable curriculum release; attempts, semantic actions, evaluations,
-and reduced bundles are committed to the learner event stream.  The ledger
-stores digests and closed semantic payloads only.  It does not execute learner
-artifacts, code, commands, tests, or model calls.
+and reduced bundles are committed to the learner event stream.  The only
+artifact checking admitted here sends one inert, bounded data snapshot to a
+fixed bundled checker in a separate process.  It never executes learner code,
+commands, plugins, tests, or model calls, and it remains explicitly
+non-authoritative.
 """
 
 from __future__ import annotations
@@ -22,6 +24,17 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
+from .artifact_intake import ProductiveArtifactSnapshot
+from .artifact_runner import (
+    ArtifactProcessReceipt,
+    ArtifactRunOutcome,
+    ArtifactRunRequest,
+    ArtifactRunnerBinding,
+    ArtifactRunnerProtocolError,
+    SyntheticArtifactRunnerRegistry,
+    build_artifact_run_request,
+    bundled_synthetic_binding,
+)
 from .errors import ConflictError, NotFoundError, ValidationError
 from .evidence import (
     ActionKind,
@@ -62,11 +75,17 @@ from .reconciliation import (
     provider_scoring_operation_digest,
 )
 from .store import (
+    PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX,
+    PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX,
     PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
     PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
     Database,
     from_timestamp,
     new_id,
+    performance_artifact_run_claim_event_key,
+    performance_artifact_run_claim_payload,
+    performance_artifact_run_observed_payload,
+    performance_artifact_run_receipt_event_key,
     performance_scoring_claim_event_key,
     performance_scoring_claim_payload,
     performance_scoring_claim_v2_payload,
@@ -81,6 +100,13 @@ PERFORMANCE_EVENT_SCHEMA_VERSION = 1
 TASK_STATUSES = frozenset({"quarantined", "pilot", "approved"})
 SERVICEABLE_TASK_STATUSES = frozenset({"pilot", "approved"})
 MAX_TASK_RELEASE_BYTES = 16 * 1024 * 1024
+PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION = 1
+_PERFORMANCE_TECHNICAL_EVENT_KEY_PREFIXES = (
+    PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX,
+    PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX,
+    PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
+    PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
+)
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -97,6 +123,27 @@ _BUNDLE_FIELDS = frozenset(
     {"schema_version", "title", "corpus_release_id", "review", "tasks"}
 )
 _TASK_ENTRY_FIELDS = frozenset({"status", "task"})
+_OPERATIONAL_ARTIFACT_RUN_RECEIPT_FIELDS = frozenset(
+    {
+        "claim_id",
+        "attempt_id",
+        "artifact_action_id",
+        "artifact_digest",
+        "artifact_kind",
+        "artifact_manifest_digest",
+        "check_set_id",
+        "check_set_manifest_digest",
+        "runner_id",
+        "runner_version",
+        "outcome",
+        "started_at",
+        "completed_at",
+        "result_digest",
+        "request_digest",
+        "binding_digest",
+        "schema_version",
+    }
+)
 
 
 def _strict_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -197,6 +244,145 @@ def _json_object(raw: str, label: str) -> dict[str, Any]:
     if type(value) is not dict:
         raise ValidationError(f"{label} must be a JSON object.")
     return value
+
+
+@dataclass(frozen=True, slots=True)
+class OperationalArtifactRunReceipt:
+    """Ledger receipt binding one terminal process observation to its claim."""
+
+    claim_id: str
+    attempt_id: str
+    artifact_action_id: str
+    artifact_digest: str
+    artifact_kind: str
+    artifact_manifest_digest: str
+    check_set_id: str
+    check_set_manifest_digest: str
+    runner_id: str
+    runner_version: str
+    outcome: str
+    started_at: str
+    completed_at: str
+    result_digest: str | None
+    request_digest: str
+    binding_digest: str
+    schema_version: int = PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "claim_id",
+            "attempt_id",
+            "artifact_action_id",
+            "artifact_kind",
+            "check_set_id",
+            "runner_id",
+            "runner_version",
+        ):
+            _require_id(
+                getattr(self, field_name),
+                f"Artifact run receipt {field_name}",
+            )
+        for field_name in (
+            "artifact_digest",
+            "artifact_manifest_digest",
+            "check_set_manifest_digest",
+            "request_digest",
+            "binding_digest",
+        ):
+            _require_digest(
+                getattr(self, field_name),
+                f"Artifact run receipt {field_name}",
+            )
+        if self.outcome not in {
+            ArtifactRunOutcome.COMPLETED.value,
+            ArtifactRunOutcome.INVALID_ARTIFACT.value,
+            "runner_failed",
+            ArtifactRunOutcome.TIMED_OUT.value,
+        }:
+            raise ValidationError("Artifact run receipt has an unknown outcome.")
+        started = _aware_timestamp(
+            self.started_at, "Artifact run receipt started_at"
+        )
+        completed = _aware_timestamp(
+            self.completed_at, "Artifact run receipt completed_at"
+        )
+        if completed < started:
+            raise ValidationError(
+                "Artifact run receipt cannot complete before it starts."
+            )
+        if self.outcome in {
+            ArtifactRunOutcome.COMPLETED.value,
+            ArtifactRunOutcome.INVALID_ARTIFACT.value,
+        }:
+            _require_digest(
+                self.result_digest,
+                "Artifact run receipt result_digest",
+            )
+        elif self.result_digest is not None:
+            raise ValidationError(
+                "Failed artifact runs cannot carry a result digest."
+            )
+        if self.schema_version != PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION:
+            raise ValidationError(
+                "Artifact run receipt has an unsupported schema_version."
+            )
+
+    @property
+    def digest(self) -> str:
+        return canonical_digest(self.terms())
+
+    def terms(self) -> dict[str, Any]:
+        return {
+            "claim_id": self.claim_id,
+            "attempt_id": self.attempt_id,
+            "artifact_action_id": self.artifact_action_id,
+            "artifact_digest": self.artifact_digest,
+            "artifact_kind": self.artifact_kind,
+            "artifact_manifest_digest": self.artifact_manifest_digest,
+            "check_set_id": self.check_set_id,
+            "check_set_manifest_digest": self.check_set_manifest_digest,
+            "runner_id": self.runner_id,
+            "runner_version": self.runner_version,
+            "outcome": self.outcome,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "result_digest": self.result_digest,
+            "request_digest": self.request_digest,
+            "binding_digest": self.binding_digest,
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def from_terms(cls, value: object) -> "OperationalArtifactRunReceipt":
+        if type(value) is not dict:
+            raise ValidationError("Artifact run receipt must be an object.")
+        _require_exact_fields(
+            value,
+            _OPERATIONAL_ARTIFACT_RUN_RECEIPT_FIELDS,
+            "Artifact run receipt",
+        )
+        receipt = cls(
+            claim_id=value["claim_id"],
+            attempt_id=value["attempt_id"],
+            artifact_action_id=value["artifact_action_id"],
+            artifact_digest=value["artifact_digest"],
+            artifact_kind=value["artifact_kind"],
+            artifact_manifest_digest=value["artifact_manifest_digest"],
+            check_set_id=value["check_set_id"],
+            check_set_manifest_digest=value["check_set_manifest_digest"],
+            runner_id=value["runner_id"],
+            runner_version=value["runner_version"],
+            outcome=value["outcome"],
+            started_at=value["started_at"],
+            completed_at=value["completed_at"],
+            result_digest=value["result_digest"],
+            request_digest=value["request_digest"],
+            binding_digest=value["binding_digest"],
+            schema_version=value["schema_version"],
+        )
+        if canonical_json(receipt.terms()) != canonical_json(value):
+            raise ValidationError("Artifact run receipt is not canonical.")
+        return receipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -1431,6 +1617,1175 @@ class PerformanceLedger:
             ).fetchall()
         return [self._action_view(row) for row in rows]
 
+    @staticmethod
+    def _artifact_runner_contract(
+        task: LearningTask,
+        binding: ArtifactRunnerBinding,
+    ) -> ScorerContract:
+        required_actions = (
+            ActionKind.ARTIFACT_CHECKPOINT,
+            ActionKind.CHECK_RUN,
+        )
+        if any(kind not in task.allowed_action_kinds for kind in required_actions):
+            raise ValidationError(
+                "The released task does not allow the artifact/check action pair."
+            )
+        contracts = [
+            contract
+            for contract in task.scorer_contracts
+            if (
+                contract.kind is ScorerKind.DETERMINISTIC
+                and contract.evidence_action_kinds == required_actions
+                and contract.artifact_manifests
+                == (
+                    (
+                        binding.artifact_kind,
+                        binding.artifact_manifest_digest,
+                    ),
+                )
+                and contract.check_set_manifests
+                == (
+                    (
+                        binding.check_set_id,
+                        binding.check_set_manifest_digest,
+                    ),
+                )
+                and contract.requires_attestation is False
+            )
+        ]
+        if len(contracts) != 1:
+            raise ValidationError(
+                "Artifact checking requires one exact released deterministic "
+                "scorer contract pairing the bundled artifact and check-set "
+                "manifests with artifact_checkpoint and check_run actions."
+            )
+        return contracts[0]
+
+    @staticmethod
+    def _resolve_artifact_action(
+        connection: sqlite3.Connection,
+        attempt_id: str,
+        snapshot: ProductiveArtifactSnapshot,
+        binding: ArtifactRunnerBinding,
+        artifact_action_id: str | None,
+    ) -> sqlite3.Row:
+        if artifact_action_id is not None:
+            _require_id(artifact_action_id, "artifact_action_id")
+            row = connection.execute(
+                """SELECT * FROM performance_actions
+                   WHERE id=? AND attempt_id=?
+                     AND action_type='artifact_checkpoint'""",
+                (artifact_action_id, attempt_id),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(
+                    "The requested artifact checkpoint does not exist on "
+                    "this performance attempt."
+                )
+            payload = _json_object(
+                row["payload_json"], "Stored artifact checkpoint"
+            )
+            if (
+                payload.get("artifact_digest") != snapshot.sha256
+                or payload.get("artifact_kind") != binding.artifact_kind
+            ):
+                raise ValidationError(
+                    "The requested artifact checkpoint does not match the "
+                    "captured artifact and exact runner binding."
+                )
+            return row
+        rows = connection.execute(
+            """SELECT * FROM performance_actions
+               WHERE attempt_id=? AND action_type='artifact_checkpoint'
+                 AND json_extract(
+                     payload_json, '$.artifact_digest'
+                 )=?
+                 AND json_extract(
+                     payload_json, '$.artifact_kind'
+                 )=?
+               ORDER BY sequence, id""",
+            (attempt_id, snapshot.sha256, binding.artifact_kind),
+        ).fetchall()
+        if not rows:
+            raise NotFoundError(
+                "No artifact checkpoint matches the captured artifact and "
+                "exact runner binding."
+            )
+        if len(rows) != 1:
+            raise ConflictError(
+                "Multiple artifact checkpoints match this snapshot; specify "
+                "--artifact-action explicitly."
+            )
+        return rows[0]
+
+    @staticmethod
+    def _artifact_run_projection_guard(
+        connection: sqlite3.Connection,
+        *,
+        attempt_id: str | None = None,
+        claim_id: str | None = None,
+    ) -> None:
+        clauses: list[str] = []
+        parameters: list[Any] = []
+        if attempt_id is not None:
+            clauses.append(
+                "json_extract(event.payload_json, '$.attempt_id')=?"
+            )
+            parameters.append(attempt_id)
+        if claim_id is not None:
+            clauses.append(
+                "json_extract(event.payload_json, '$.claim_id')=?"
+            )
+            parameters.append(claim_id)
+        scope = " AND " + " AND ".join(clauses) if clauses else ""
+        orphan_claim = connection.execute(
+            """SELECT event.event_id FROM events event
+               WHERE event.event_type='PerformanceArtifactRunClaimed'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM performance_artifact_run_claims claim
+                     WHERE claim.event_id=event.event_id
+                 )"""
+            + scope
+            + " ORDER BY event.stream_id, event.stream_version LIMIT 1",
+            tuple(parameters),
+        ).fetchone()
+        if orphan_claim is not None:
+            raise ConflictError(
+                "Artifact-run admission event "
+                f"{orphan_claim['event_id']} is missing its claim projection; "
+                "the runner will not be invoked. Verify integrity and rebuild "
+                "projections on a database copy."
+            )
+        orphan_receipt = connection.execute(
+            """SELECT event.event_id FROM events event
+               WHERE event.event_type='PerformanceArtifactRunObserved'
+                 AND NOT EXISTS (
+                     SELECT 1 FROM performance_artifact_run_receipts receipt
+                     WHERE receipt.event_id=event.event_id
+                 )"""
+            + scope
+            + " ORDER BY event.stream_id, event.stream_version LIMIT 1",
+            tuple(parameters),
+        ).fetchone()
+        if orphan_receipt is not None:
+            raise ConflictError(
+                "Artifact-run observation event "
+                f"{orphan_receipt['event_id']} is missing its receipt "
+                "projection. Verify integrity and rebuild projections on a "
+                "database copy."
+            )
+
+    @classmethod
+    def _artifact_run_view(
+        cls,
+        connection: sqlite3.Connection,
+        claim: sqlite3.Row,
+        *,
+        idempotent_replay: bool = False,
+    ) -> dict[str, Any]:
+        claim_event = connection.execute(
+            "SELECT * FROM events WHERE event_id=?",
+            (claim["event_id"],),
+        ).fetchone()
+        if claim_event is None:
+            raise ConflictError(
+                f"Artifact-run claim {claim['id']} is missing its admission "
+                "event; the operation will not be repeated."
+            )
+        if (
+            claim_event["event_type"] != "PerformanceArtifactRunClaimed"
+            or claim_event["idempotency_key"]
+            != performance_artifact_run_claim_event_key(
+                claim["command_hash"]
+            )
+        ):
+            raise ConflictError(
+                f"Artifact-run claim {claim['id']} has an invalid admission "
+                "event; the operation will not be repeated."
+            )
+        metadata = _json_object(
+            claim_event["metadata_json"],
+            "Stored artifact-run claim metadata",
+        )
+        try:
+            request = ArtifactRunRequest.from_terms(
+                _json_object(
+                    claim["request_json"], "Stored artifact-run request"
+                )
+            )
+            binding = ArtifactRunnerBinding.from_terms(
+                _json_object(
+                    claim["binding_json"], "Stored artifact-run binding"
+                )
+            )
+        except (ArtifactRunnerProtocolError, TypeError, ValueError) as exc:
+            raise ConflictError(
+                f"Artifact-run claim {claim['id']} has invalid request or "
+                "binding terms; the operation will not be repeated."
+            ) from exc
+        if (
+            request.digest != claim["request_digest"]
+            or binding.digest != claim["binding_digest"]
+            or request.runner_binding_digest != binding.digest
+            or request.artifact_sha256 != claim["artifact_digest"]
+            or request.artifact_kind != claim["artifact_kind"]
+            or request.artifact_manifest_digest
+            != claim["artifact_manifest_digest"]
+            or request.check_set_id != claim["check_set_id"]
+            or request.check_set_manifest_digest
+            != claim["check_set_manifest_digest"]
+            or binding.runner_id != claim["runner_id"]
+            or binding.runner_version != claim["runner_version"]
+        ):
+            raise ConflictError(
+                f"Artifact-run claim {claim['id']} has mismatched immutable "
+                "terms; the operation will not be repeated."
+            )
+        receipt_row = connection.execute(
+            """SELECT * FROM performance_artifact_run_receipts
+               WHERE claim_id=?""",
+            (claim["id"],),
+        ).fetchone()
+        process_terms: dict[str, Any] | None = None
+        receipt_terms: dict[str, Any] | None = None
+        receipt_digest: str | None = None
+        check_action: dict[str, Any] | None = None
+        outcome: str | None = None
+        started_at: str | None = None
+        completed_at: str | None = None
+        worker_process_started: bool | None = None
+        terminal = receipt_row is not None
+        if receipt_row is not None:
+            receipt_event = connection.execute(
+                "SELECT * FROM events WHERE event_id=?",
+                (receipt_row["event_id"],),
+            ).fetchone()
+            if (
+                receipt_event is None
+                or receipt_event["event_type"]
+                != "PerformanceArtifactRunObserved"
+                or receipt_event["idempotency_key"]
+                != performance_artifact_run_receipt_event_key(
+                    receipt_row["receipt_digest"]
+                )
+            ):
+                raise ConflictError(
+                    f"Artifact-run claim {claim['id']} has an invalid terminal "
+                    "event; verify integrity."
+                )
+            try:
+                operational = OperationalArtifactRunReceipt.from_terms(
+                    _json_object(
+                        receipt_row["receipt_json"],
+                        "Stored operational artifact-run receipt",
+                    )
+                )
+            except (TypeError, ValueError, ValidationError) as exc:
+                raise ConflictError(
+                    f"Artifact-run claim {claim['id']} has an invalid terminal "
+                    "receipt; verify integrity."
+                ) from exc
+            try:
+                parsed_started = _aware_timestamp(
+                    receipt_row["started_at"],
+                    "Stored artifact-run started_at",
+                )
+                parsed_completed = _aware_timestamp(
+                    receipt_row["completed_at"],
+                    "Stored artifact-run completed_at",
+                )
+                expected_operational = OperationalArtifactRunReceipt(
+                    claim_id=claim["id"],
+                    attempt_id=claim["attempt_id"],
+                    artifact_action_id=claim["artifact_action_id"],
+                    artifact_digest=claim["artifact_digest"],
+                    artifact_kind=claim["artifact_kind"],
+                    artifact_manifest_digest=claim[
+                        "artifact_manifest_digest"
+                    ],
+                    check_set_id=claim["check_set_id"],
+                    check_set_manifest_digest=claim[
+                        "check_set_manifest_digest"
+                    ],
+                    runner_id=claim["runner_id"],
+                    runner_version=claim["runner_version"],
+                    outcome=receipt_row["outcome"],
+                    started_at=receipt_row["started_at"],
+                    completed_at=receipt_row["completed_at"],
+                    result_digest=receipt_row["result_digest"],
+                    request_digest=request.digest,
+                    binding_digest=binding.digest,
+                )
+            except ValidationError as exc:
+                raise ConflictError(
+                    f"Artifact-run claim {claim['id']} has invalid terminal "
+                    "projection fields; verify integrity."
+                ) from exc
+            if (
+                to_timestamp(parsed_started) != receipt_row["started_at"]
+                or to_timestamp(parsed_completed)
+                != receipt_row["completed_at"]
+                or operational != expected_operational
+                or operational.digest != receipt_row["receipt_digest"]
+                or canonical_json(operational.terms())
+                != receipt_row["receipt_json"]
+            ):
+                raise ConflictError(
+                    f"Artifact-run claim {claim['id']} has a mismatched "
+                    "terminal receipt; verify integrity."
+                )
+            outcome = receipt_row["outcome"]
+            started_at = receipt_row["started_at"]
+            completed_at = receipt_row["completed_at"]
+            receipt_terms = expected_operational.terms()
+            receipt_digest = expected_operational.digest
+            successful = outcome in {
+                ArtifactRunOutcome.COMPLETED.value,
+                ArtifactRunOutcome.INVALID_ARTIFACT.value,
+            }
+            if successful:
+                if (
+                    receipt_row["result_json"] is None
+                    or receipt_row["result_digest"] is None
+                    or receipt_row["check_action_id"] is None
+                ):
+                    raise ConflictError(
+                        f"Artifact-run claim {claim['id']} has an incomplete "
+                        "successful observation; verify integrity."
+                    )
+                try:
+                    process = ArtifactProcessReceipt.from_terms(
+                        _json_object(
+                            receipt_row["result_json"],
+                            "Stored artifact process receipt",
+                        )
+                    )
+                except (ArtifactRunnerProtocolError, TypeError, ValueError) as exc:
+                    raise ConflictError(
+                        f"Artifact-run claim {claim['id']} has an invalid "
+                        "process receipt; verify integrity."
+                    ) from exc
+                if (
+                    process.digest != receipt_row["result_digest"]
+                    or process.request != request
+                    or process.binding != binding
+                    or process.result.outcome.value != outcome
+                    or expected_operational.result_digest != process.digest
+                    or canonical_json(process.terms())
+                    != receipt_row["result_json"]
+                ):
+                    raise ConflictError(
+                        f"Artifact-run claim {claim['id']} has a mismatched "
+                        "process receipt; verify integrity."
+                    )
+                process_terms = process.terms()
+                worker_process_started = process.worker_process_started
+                action = connection.execute(
+                    "SELECT * FROM performance_actions WHERE id=?",
+                    (receipt_row["check_action_id"],),
+                ).fetchone()
+                artifact = connection.execute(
+                    "SELECT * FROM performance_actions WHERE id=?",
+                    (claim["artifact_action_id"],),
+                ).fetchone()
+                if action is None or artifact is None:
+                    raise ConflictError(
+                        f"Artifact-run claim {claim['id']} is missing its "
+                        "artifact/check action pair; verify integrity."
+                    )
+                try:
+                    check_payload = _json_object(
+                        action["payload_json"],
+                        "Stored generated artifact check action",
+                    )
+                    _require_exact_fields(
+                        check_payload,
+                        frozenset(
+                            {
+                                "check_set_id",
+                                "passed",
+                                "failed",
+                                "errored",
+                                "skipped",
+                                "result_digest",
+                            }
+                        ),
+                        "Stored generated artifact check action",
+                    )
+                except ValidationError as exc:
+                    raise ConflictError(
+                        f"Artifact-run claim {claim['id']} has an invalid "
+                        "generated check action; verify integrity."
+                    ) from exc
+                result = process.result
+                expected_check_command = _command_hash(
+                    {
+                        "operation": "record_artifact_run_check",
+                        "claim_id": claim["id"],
+                        "result_digest": process.digest,
+                    }
+                )
+                if (
+                    artifact["attempt_id"] != claim["attempt_id"]
+                    or artifact["action_type"]
+                    != ActionKind.ARTIFACT_CHECKPOINT.value
+                    or action["attempt_id"] != claim["attempt_id"]
+                    or action["sequence"] != claim["through_sequence"] + 1
+                    or action["phase"] != artifact["phase"]
+                    or action["action_type"] != ActionKind.CHECK_RUN.value
+                    or action["occurred_at"] != receipt_row["completed_at"]
+                    or action["command_hash"] != expected_check_command
+                    or check_payload["check_set_id"]
+                    != claim["check_set_id"]
+                    or check_payload["passed"] != result.passed
+                    or check_payload["failed"] != result.failed
+                    or check_payload["errored"] != result.errored
+                    or check_payload["skipped"] != result.skipped
+                    or check_payload["result_digest"] != process.digest
+                ):
+                    raise ConflictError(
+                        f"Artifact-run claim {claim['id']} has a mismatched "
+                        "generated check action; verify integrity."
+                    )
+                check_action = cls._action_view(action)
+            elif (
+                outcome
+                not in {
+                    "runner_failed",
+                    ArtifactRunOutcome.TIMED_OUT.value,
+                }
+                or receipt_row["result_json"] is not None
+                or receipt_row["result_digest"] is not None
+                or receipt_row["check_action_id"] is not None
+                or expected_operational.result_digest is not None
+            ):
+                raise ConflictError(
+                    f"Artifact-run claim {claim['id']} has a mismatched failed "
+                    "observation; verify integrity."
+                )
+        return {
+            "id": claim["id"],
+            "claim_id": claim["id"],
+            "event_id": claim["event_id"],
+            "run_id": request.run_id,
+            "attempt_id": claim["attempt_id"],
+            "session_id": claim["session_id"],
+            "session_revision": claim["session_revision"],
+            "artifact_action_id": claim["artifact_action_id"],
+            "through_sequence": claim["through_sequence"],
+            "task_release_id": claim["task_release_id"],
+            "task_id": claim["task_id"],
+            "task_version": claim["task_version"],
+            "task_digest": claim["task_digest"],
+            "artifact_digest": claim["artifact_digest"],
+            "artifact_kind": claim["artifact_kind"],
+            "artifact_manifest_digest": claim[
+                "artifact_manifest_digest"
+            ],
+            "check_set_id": claim["check_set_id"],
+            "check_set_manifest_digest": claim[
+                "check_set_manifest_digest"
+            ],
+            "runner_id": claim["runner_id"],
+            "runner_version": claim["runner_version"],
+            "request": request.terms(),
+            "request_digest": request.digest,
+            "binding": binding.terms(),
+            "binding_digest": binding.digest,
+            "command_hash": claim["command_hash"],
+            "claimed_at": claim["claimed_at"],
+            "status": outcome or "unresolved",
+            "outcome": outcome,
+            "terminal": terminal,
+            "started_at": started_at,
+            "completed_at": completed_at,
+            "check_action": check_action,
+            "process_receipt": process_terms,
+            "operational_receipt": receipt_terms,
+            "receipt_digest": receipt_digest,
+            "caller_idempotency_key_present": (
+                claim["idempotency_key"] is not None
+            ),
+            "admission_mode": metadata.get("admission_mode"),
+            "retry_allowed": False,
+            "automatic_retry_allowed": False,
+            "artifact_content_persisted": False,
+            "artifact_executed": False,
+            "evaluation_created": False,
+            "learner_projection_applied": False,
+            "mastery_applied": False,
+            "certification_applied": False,
+            "skill_authority": False,
+            "shadow_only": True,
+            "process_boundary_configured": binding.process_separated,
+            "process_separated": binding.process_separated,
+            "worker_process_started": worker_process_started,
+            "operating_system_sandboxed": False,
+            "filesystem_isolation_enforced": False,
+            "network_isolation_enforced": False,
+            "idempotent_replay": idempotent_replay,
+        }
+
+    @classmethod
+    def _prior_artifact_run_claim(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        idempotency_key: str | None,
+        command_hash: str,
+    ) -> dict[str, Any] | None:
+        key_claim = None
+        if idempotency_key is not None:
+            key_claim = connection.execute(
+                """SELECT * FROM performance_artifact_run_claims
+                   WHERE idempotency_key=?""",
+                (idempotency_key,),
+            ).fetchone()
+            if (
+                key_claim is not None
+                and key_claim["command_hash"] != command_hash
+            ):
+                raise ConflictError(
+                    "Idempotency key was already reserved for a different "
+                    "artifact-run command."
+                )
+        claim = connection.execute(
+            """SELECT * FROM performance_artifact_run_claims
+               WHERE command_hash=?""",
+            (command_hash,),
+        ).fetchone()
+        if claim is None:
+            orphan = connection.execute(
+                "SELECT event_id FROM events WHERE idempotency_key=?",
+                (performance_artifact_run_claim_event_key(command_hash),),
+            ).fetchone()
+            if orphan is not None:
+                raise ConflictError(
+                    "Artifact-run admission is committed in event history but "
+                    "its claim projection is missing; the runner will not be "
+                    "invoked. Verify integrity and rebuild projections on a "
+                    "database copy."
+                )
+            if key_claim is not None:
+                raise ConflictError(
+                    "Artifact-run idempotency state is inconsistent; the "
+                    "runner will not be invoked."
+                )
+            return None
+        return cls._artifact_run_view(
+            connection,
+            claim,
+            idempotent_replay=True,
+        )
+
+    @staticmethod
+    def _validate_artifact_run_caller_key(
+        connection: sqlite3.Connection,
+        idempotency_key: str | None,
+    ) -> None:
+        if idempotency_key is None:
+            return
+        _require_text(idempotency_key, "idempotency_key", 256)
+        if idempotency_key.startswith(
+            _PERFORMANCE_TECHNICAL_EVENT_KEY_PREFIXES
+        ):
+            raise ValidationError(
+                "Artifact-run idempotency keys cannot use a TSQ reserved "
+                "technical namespace."
+            )
+        collision = connection.execute(
+            """SELECT 1 FROM events event
+               WHERE event.idempotency_key=?
+                  OR (
+                      event.event_type IN (
+                          'PerformanceScoringClaimed',
+                          'PerformanceScoringClaimMigrated',
+                          'PerformanceScoringReconciled'
+                      )
+                      AND json_extract(
+                          event.payload_json, '$.caller_idempotency_key'
+                      )=?
+                  )
+               LIMIT 1""",
+            (idempotency_key, idempotency_key),
+        ).fetchone()
+        if collision is not None:
+            raise ConflictError(
+                "Idempotency key is already reserved outside this "
+                "artifact-run command."
+            )
+
+    @staticmethod
+    def _validate_artifact_run_technical_event_key(
+        connection: sqlite3.Connection,
+        event_key: str,
+    ) -> None:
+        """Keep technical event keys disjoint from historical caller keys."""
+
+        collision = connection.execute(
+            """SELECT 'scoring claim' AS source
+               FROM performance_scoring_claims
+               WHERE idempotency_key=?
+               UNION ALL
+               SELECT 'scoring reconciliation' AS source
+               FROM performance_scoring_reconciliations
+               WHERE idempotency_key=?
+               LIMIT 1""",
+            (event_key, event_key),
+        ).fetchone()
+        if collision is not None:
+            raise ConflictError(
+                "Artifact-run technical event key collides with a historical "
+                f"{collision['source']} caller idempotency key."
+            )
+
+    def list_artifact_runs(
+        self,
+        *,
+        attempt_id: str | None = None,
+        status: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List durable artifact-run admissions without invoking a runner."""
+
+        if attempt_id is not None:
+            _require_id(attempt_id, "attempt_id")
+        allowed_statuses = {
+            None,
+            "unresolved",
+            ArtifactRunOutcome.COMPLETED.value,
+            ArtifactRunOutcome.INVALID_ARTIFACT.value,
+            "runner_failed",
+            ArtifactRunOutcome.TIMED_OUT.value,
+        }
+        if status not in allowed_statuses:
+            raise ValidationError(
+                "Artifact-run status must be unresolved, completed, "
+                "invalid_artifact, runner_failed, or timed_out."
+            )
+        with self.database.read() as connection:
+            if attempt_id is not None and connection.execute(
+                "SELECT 1 FROM performance_attempts WHERE id=?",
+                (attempt_id,),
+            ).fetchone() is None:
+                raise NotFoundError(
+                    f"Performance attempt {attempt_id} does not exist."
+                )
+            self._artifact_run_projection_guard(
+                connection, attempt_id=attempt_id
+            )
+            rows = connection.execute(
+                """SELECT * FROM performance_artifact_run_claims"""
+                + (
+                    " WHERE attempt_id=?"
+                    if attempt_id is not None
+                    else ""
+                )
+                + " ORDER BY claimed_at, id",
+                (() if attempt_id is None else (attempt_id,)),
+            ).fetchall()
+            result = [
+                self._artifact_run_view(connection, row) for row in rows
+            ]
+        if status is None:
+            return result
+        return [item for item in result if item["status"] == status]
+
+    def inspect_artifact_run(self, run_id: str) -> dict[str, Any]:
+        """Inspect one claim, logical run ID, or receipt without executing it."""
+
+        _require_id(run_id, "run_id")
+        with self.database.read() as connection:
+            rows = connection.execute(
+                """SELECT DISTINCT claim.*
+                   FROM performance_artifact_run_claims claim
+                   LEFT JOIN performance_artifact_run_receipts receipt
+                     ON receipt.claim_id=claim.id
+                   WHERE claim.id=?
+                      OR json_extract(claim.request_json, '$.run_id')=?
+                      OR receipt.id=?""",
+                (run_id, run_id, run_id),
+            ).fetchall()
+            if not rows:
+                raise NotFoundError(
+                    f"Performance artifact run {run_id} does not exist."
+                )
+            if len(rows) != 1:
+                raise ConflictError(
+                    "Artifact-run reference is ambiguous; inspect by claim ID."
+                )
+            self._artifact_run_projection_guard(
+                connection, claim_id=rows[0]["id"]
+            )
+            return self._artifact_run_view(connection, rows[0])
+
+    def run_artifact_check(
+        self,
+        attempt_id: str,
+        snapshot: ProductiveArtifactSnapshot,
+        registry: SyntheticArtifactRunnerRegistry,
+        binding: ArtifactRunnerBinding,
+        *,
+        check_set_id: str,
+        artifact_action_id: str | None = None,
+        idempotency_key: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Admit, run, and terminally observe one bundled synthetic checker."""
+
+        _require_id(attempt_id, "attempt_id")
+        _require_id(check_set_id, "check_set_id")
+        if artifact_action_id is not None:
+            _require_id(artifact_action_id, "artifact_action_id")
+        if type(snapshot) is not ProductiveArtifactSnapshot:
+            raise ValidationError(
+                "snapshot must be a ProductiveArtifactSnapshot captured by "
+                "TSQ intake."
+            )
+        if type(registry) is not SyntheticArtifactRunnerRegistry:
+            raise ValidationError(
+                "registry must be the exact synthetic artifact-runner registry."
+            )
+        if type(binding) is not ArtifactRunnerBinding:
+            raise ValidationError(
+                "binding must be an exact ArtifactRunnerBinding."
+            )
+        try:
+            expected_binding = bundled_synthetic_binding()
+            registered_binding = registry.inspect(
+                binding.checker_id, binding.checker_version
+            )
+        except (ArtifactRunnerProtocolError, LookupError, ValueError) as exc:
+            raise ValidationError(
+                f"Artifact checking failed safely before admission: {exc}"
+            ) from exc
+        if (
+            binding != expected_binding
+            or registered_binding != expected_binding
+            or check_set_id != binding.check_set_id
+        ):
+            raise ValidationError(
+                "Artifact checking requires the exact registered bundled "
+                "binding and check set."
+            )
+        if self.database.read_only:
+            raise ConflictError(
+                "A read-only database cannot admit an artifact run."
+            )
+        claimed = _now(now)
+        with self.database.transaction() as connection:
+            attempt = connection.execute(
+                "SELECT * FROM performance_attempts WHERE id=?",
+                (attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                raise NotFoundError(
+                    f"Performance attempt {attempt_id} does not exist."
+                )
+            self.database.require_learner_evidence_safe(
+                attempt["learner_id"], connection
+            )
+            session = connection.execute(
+                "SELECT * FROM sessions WHERE id=?",
+                (attempt["session_id"],),
+            ).fetchone()
+            if session is None:
+                raise ValidationError("Performance attempt has no session.")
+            self._validate_artifact_run_caller_key(
+                connection, idempotency_key
+            )
+            task = self._task_for_attempt(connection, attempt)
+            self._artifact_runner_contract(task, binding)
+            artifact = self._resolve_artifact_action(
+                connection,
+                attempt_id,
+                snapshot,
+                binding,
+                artifact_action_id,
+            )
+            logical_command = {
+                "operation": "run_artifact_check",
+                "attempt_id": attempt_id,
+                "artifact_action_id": artifact["id"],
+                "artifact_digest": snapshot.sha256,
+                "artifact_size_bytes": snapshot.size_bytes,
+                "artifact_kind": binding.artifact_kind,
+                "artifact_manifest_digest": (
+                    binding.artifact_manifest_digest
+                ),
+                "check_set_id": binding.check_set_id,
+                "check_set_manifest_digest": (
+                    binding.check_set_manifest_digest
+                ),
+                "checker_id": binding.checker_id.value,
+                "checker_version": binding.checker_version,
+                "runner_id": binding.runner_id,
+                "runner_version": binding.runner_version,
+                "binding_digest": binding.digest,
+            }
+            command_hash = _command_hash(logical_command)
+            self._validate_artifact_run_technical_event_key(
+                connection,
+                performance_artifact_run_claim_event_key(command_hash),
+            )
+            prior = self._prior_artifact_run_claim(
+                connection,
+                idempotency_key=idempotency_key,
+                command_hash=command_hash,
+            )
+            if prior is not None:
+                return prior
+            if session["status"] != "active":
+                raise ConflictError(
+                    f"Session {attempt['session_id']} is {session['status']}."
+                )
+            if self._attempt_status(connection, attempt_id) != "active":
+                raise ConflictError(
+                    "Artifact checks must be admitted before the attempt's "
+                    "terminal checkpoint."
+                )
+            artifact_occurred = _aware_timestamp(
+                artifact["occurred_at"], "Artifact checkpoint occurrence"
+            )
+            if claimed < artifact_occurred:
+                raise ValidationError(
+                    "Artifact-run admission cannot precede its artifact checkpoint."
+                )
+            try:
+                request = build_artifact_run_request(
+                    "arun_" + command_hash[:24],
+                    snapshot.content,
+                    binding,
+                )
+            except (ArtifactRunnerProtocolError, TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"Artifact checking failed safely before admission: {exc}"
+                ) from exc
+            boundary = connection.execute(
+                """SELECT MAX(sequence) AS sequence
+                   FROM performance_actions WHERE attempt_id=?""",
+                (attempt_id,),
+            ).fetchone()
+            if boundary["sequence"] is None:
+                raise ValidationError(
+                    "Performance attempt has no action-trace head."
+                )
+            through_sequence = boundary["sequence"]
+            claim_id = new_id("parc")
+            claimed_at = to_timestamp(claimed)
+            claim_payload = performance_artifact_run_claim_payload(
+                claim_id=claim_id,
+                caller_idempotency_key=idempotency_key,
+                attempt_id=attempt_id,
+                session_id=attempt["session_id"],
+                session_revision=session["revision"],
+                artifact_action_id=artifact["id"],
+                through_sequence=through_sequence,
+                task_release_id=attempt["task_release_id"],
+                task_id=attempt["task_id"],
+                task_version=attempt["task_version"],
+                task_digest=attempt["task_digest"],
+                artifact_digest=snapshot.sha256,
+                artifact_kind=binding.artifact_kind,
+                artifact_manifest_digest=(
+                    binding.artifact_manifest_digest
+                ),
+                check_set_id=binding.check_set_id,
+                check_set_manifest_digest=(
+                    binding.check_set_manifest_digest
+                ),
+                runner_id=binding.runner_id,
+                runner_version=binding.runner_version,
+                request=request.terms(),
+                request_digest=request.digest,
+                binding=binding.terms(),
+                binding_digest=binding.digest,
+                command_hash=command_hash,
+                claimed_at=claimed_at,
+            )
+            claim_event = self.database.append_event(
+                connection,
+                stream_id=f"learner:{attempt['learner_id']}",
+                event_type="PerformanceArtifactRunClaimed",
+                schema_version=PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION,
+                payload=claim_payload,
+                metadata={
+                    "artifact_run_schema_version": (
+                        PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION
+                    ),
+                    "admission_mode": "pre_runner",
+                    "automatic_retry_allowed": False,
+                    "shadow_only": True,
+                },
+                learner_id=attempt["learner_id"],
+                session_id=attempt["session_id"],
+                idempotency_key=performance_artifact_run_claim_event_key(
+                    command_hash
+                ),
+                correlation_id=attempt_id,
+                causation_id=artifact["event_id"],
+                occurred_at=claimed,
+            )
+            connection.execute(
+                """INSERT INTO performance_artifact_run_claims(
+                       id, event_id, idempotency_key, attempt_id, session_id,
+                       session_revision, artifact_action_id, through_sequence,
+                       task_release_id, task_id, task_version, task_digest,
+                       artifact_digest, artifact_kind,
+                       artifact_manifest_digest, check_set_id,
+                       check_set_manifest_digest, runner_id, runner_version,
+                       request_json, request_digest, binding_json,
+                       binding_digest, command_hash, claimed_at
+                   ) VALUES (
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                       ?, ?, ?, ?, ?, ?, ?
+                   )""",
+                (
+                    claim_id,
+                    claim_event["event_id"],
+                    idempotency_key,
+                    attempt_id,
+                    attempt["session_id"],
+                    session["revision"],
+                    artifact["id"],
+                    through_sequence,
+                    attempt["task_release_id"],
+                    attempt["task_id"],
+                    attempt["task_version"],
+                    attempt["task_digest"],
+                    snapshot.sha256,
+                    binding.artifact_kind,
+                    binding.artifact_manifest_digest,
+                    binding.check_set_id,
+                    binding.check_set_manifest_digest,
+                    binding.runner_id,
+                    binding.runner_version,
+                    canonical_json(request.terms()),
+                    request.digest,
+                    canonical_json(binding.terms()),
+                    binding.digest,
+                    command_hash,
+                    claimed_at,
+                ),
+            )
+
+        started = max(claimed, datetime.now(timezone.utc))
+        try:
+            process_receipt = registry.run(request, snapshot.content)
+        except Exception as exc:
+            raise ValidationError(
+                "Artifact runner failed after durable admission; the claim "
+                "remains unresolved and the operation will not be retried "
+                "automatically."
+            ) from exc
+        if (
+            type(process_receipt) is not ArtifactProcessReceipt
+            or process_receipt.request != request
+            or process_receipt.binding != binding
+            or process_receipt.result.artifact_sha256 != snapshot.sha256
+            or process_receipt.digest
+            != canonical_digest(process_receipt.terms())
+        ):
+            raise ValidationError(
+                "Artifact runner returned an observation that does not match "
+                "its durable claim; the claim remains unresolved."
+            )
+        pure_outcome = process_receipt.result.outcome
+        if pure_outcome in {
+            ArtifactRunOutcome.COMPLETED,
+            ArtifactRunOutcome.INVALID_ARTIFACT,
+        }:
+            outcome = pure_outcome.value
+            process_terms = process_receipt.terms()
+            result_digest = process_receipt.digest
+        elif pure_outcome is ArtifactRunOutcome.TIMED_OUT:
+            outcome = ArtifactRunOutcome.TIMED_OUT.value
+            process_terms = None
+            result_digest = None
+        else:
+            outcome = "runner_failed"
+            process_terms = None
+            result_digest = None
+        completed = max(started, datetime.now(timezone.utc))
+        started_at = to_timestamp(started)
+        completed_at = to_timestamp(completed)
+
+        with self.database.transaction() as connection:
+            claim = connection.execute(
+                """SELECT * FROM performance_artifact_run_claims WHERE id=?""",
+                (claim_id,),
+            ).fetchone()
+            if claim is None:
+                raise ConflictError(
+                    "Artifact-run claim disappeared before finalization."
+                )
+            prior_receipt = connection.execute(
+                """SELECT 1 FROM performance_artifact_run_receipts
+                   WHERE claim_id=?""",
+                (claim_id,),
+            ).fetchone()
+            if prior_receipt is not None:
+                return self._artifact_run_view(
+                    connection, claim, idempotent_replay=True
+                )
+            current_attempt = connection.execute(
+                "SELECT * FROM performance_attempts WHERE id=?",
+                (attempt_id,),
+            ).fetchone()
+            session = connection.execute(
+                "SELECT * FROM sessions WHERE id=?",
+                (claim["session_id"],),
+            ).fetchone()
+            current_head = connection.execute(
+                """SELECT MAX(sequence) AS sequence
+                   FROM performance_actions WHERE attempt_id=?""",
+                (attempt_id,),
+            ).fetchone()["sequence"]
+            current_artifact = connection.execute(
+                "SELECT * FROM performance_actions WHERE id=?",
+                (claim["artifact_action_id"],),
+            ).fetchone()
+            if (
+                current_attempt is None
+                or session is None
+                or session["status"] != "active"
+                or session["revision"] != claim["session_revision"]
+                or current_attempt["task_release_id"]
+                != claim["task_release_id"]
+                or current_attempt["task_id"] != claim["task_id"]
+                or current_attempt["task_version"] != claim["task_version"]
+                or current_attempt["task_digest"] != claim["task_digest"]
+                or current_head != claim["through_sequence"]
+                or current_artifact is None
+            ):
+                raise ConflictError(
+                    "Artifact-run trace, session, task, or release changed "
+                    "after admission; the observation was rejected and the "
+                    "claim remains unresolved."
+                )
+            self.database.require_learner_evidence_safe(
+                current_attempt["learner_id"], connection
+            )
+            check_action: LearningAction | None = None
+            if process_terms is not None:
+                result = process_receipt.result
+                check_action = self._append_action(
+                    connection,
+                    current_attempt,
+                    ActionKind.CHECK_RUN,
+                    ActionPhase(current_artifact["phase"]),
+                    {
+                        "check_set_id": binding.check_set_id,
+                        "passed": result.passed,
+                        "failed": result.failed,
+                        "errored": result.errored,
+                        "skipped": result.skipped,
+                        "result_digest": result_digest,
+                    },
+                    occurred=completed,
+                    idempotency_key=None,
+                    command_hash=_command_hash(
+                        {
+                            "operation": "record_artifact_run_check",
+                            "claim_id": claim_id,
+                            "result_digest": result_digest,
+                        }
+                    ),
+                )
+            operational = OperationalArtifactRunReceipt(
+                claim_id=claim_id,
+                attempt_id=attempt_id,
+                artifact_action_id=claim["artifact_action_id"],
+                artifact_digest=claim["artifact_digest"],
+                artifact_kind=claim["artifact_kind"],
+                artifact_manifest_digest=claim[
+                    "artifact_manifest_digest"
+                ],
+                check_set_id=claim["check_set_id"],
+                check_set_manifest_digest=claim[
+                    "check_set_manifest_digest"
+                ],
+                runner_id=claim["runner_id"],
+                runner_version=claim["runner_version"],
+                outcome=outcome,
+                started_at=started_at,
+                completed_at=completed_at,
+                result_digest=result_digest,
+                request_digest=claim["request_digest"],
+                binding_digest=claim["binding_digest"],
+            )
+            self._validate_artifact_run_technical_event_key(
+                connection,
+                performance_artifact_run_receipt_event_key(
+                    operational.digest
+                ),
+            )
+            receipt_id = new_id("parr")
+            observed_payload = performance_artifact_run_observed_payload(
+                receipt_id=receipt_id,
+                claim_id=claim_id,
+                attempt_id=attempt_id,
+                check_action_id=(
+                    None if check_action is None else check_action.id
+                ),
+                outcome=outcome,
+                result=process_terms,
+                result_digest=result_digest,
+                receipt=operational.terms(),
+                receipt_digest=operational.digest,
+                started_at=started_at,
+                completed_at=completed_at,
+            )
+            observed_event = self.database.append_event(
+                connection,
+                stream_id=f"learner:{current_attempt['learner_id']}",
+                event_type="PerformanceArtifactRunObserved",
+                schema_version=PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION,
+                payload=observed_payload,
+                metadata={
+                    "artifact_run_schema_version": (
+                        PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION
+                    ),
+                    "observational_only": True,
+                    "projection_applied": False,
+                    "certification_applied": False,
+                    "skill_authority": False,
+                    "shadow_only": True,
+                },
+                learner_id=current_attempt["learner_id"],
+                session_id=None,
+                idempotency_key=performance_artifact_run_receipt_event_key(
+                    operational.digest
+                ),
+                correlation_id=attempt_id,
+                causation_id=claim["event_id"],
+                occurred_at=completed,
+            )
+            connection.execute(
+                """INSERT INTO performance_artifact_run_receipts(
+                       id, event_id, claim_id, check_action_id, outcome,
+                       result_json, result_digest, receipt_json,
+                       receipt_digest, started_at, completed_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    receipt_id,
+                    observed_event["event_id"],
+                    claim_id,
+                    None if check_action is None else check_action.id,
+                    outcome,
+                    (
+                        None
+                        if process_terms is None
+                        else canonical_json(process_terms)
+                    ),
+                    result_digest,
+                    canonical_json(operational.terms()),
+                    operational.digest,
+                    started_at,
+                    completed_at,
+                ),
+            )
+            return self._artifact_run_view(connection, claim)
+
     def list_scoring_claims(
         self,
         *,
@@ -2005,6 +3360,218 @@ class PerformanceLedger:
                     f"for {decision.criterion_id}."
                 )
 
+    @staticmethod
+    def _validate_runner_source_authority(
+        connection: sqlite3.Connection,
+        task: LearningTask,
+        result: NormalizedScoringResult,
+        actions: tuple[LearningAction, ...],
+    ) -> None:
+        """Require process-backed provenance for deterministic artifact claims."""
+
+        contracts = {contract.key: contract for contract in task.scorer_contracts}
+        action_by_id = {action.id: action for action in actions}
+        for criterion in result.evaluation.criteria:
+            if criterion.scorer_kind is not ScorerKind.DETERMINISTIC:
+                continue
+            contract = contracts.get(
+                (
+                    criterion.scorer_kind,
+                    criterion.scorer_id,
+                    criterion.scorer_version,
+                )
+            )
+            if contract is None:
+                continue
+            for source_id in criterion.source_action_ids:
+                source = action_by_id.get(source_id)
+                if source is None or source.kind not in {
+                    ActionKind.ARTIFACT_CHECKPOINT,
+                    ActionKind.CHECK_RUN,
+                }:
+                    continue
+                if source.kind is ActionKind.ARTIFACT_CHECKPOINT:
+                    clause = "claim.artifact_action_id=?"
+                else:
+                    clause = "receipt.check_action_id=?"
+                rows = connection.execute(
+                    """SELECT receipt.*,
+                              claim.id AS bound_claim_id,
+                              claim.artifact_action_id
+                                  AS bound_artifact_action_id,
+                              claim.artifact_digest
+                                  AS bound_artifact_digest,
+                              claim.artifact_kind AS bound_artifact_kind,
+                              claim.artifact_manifest_digest
+                                  AS bound_artifact_manifest_digest,
+                              claim.check_set_id AS bound_check_set_id,
+                              claim.check_set_manifest_digest
+                                  AS bound_check_set_manifest_digest,
+                              claim.request_json AS bound_request_json,
+                              claim.request_digest AS bound_request_digest,
+                              claim.binding_json AS bound_binding_json,
+                              claim.binding_digest AS bound_binding_digest
+                       FROM performance_artifact_run_receipts receipt
+                       JOIN performance_artifact_run_claims claim
+                         ON claim.id=receipt.claim_id
+                       WHERE """
+                    + clause
+                    + """
+                         AND receipt.outcome IN (
+                             'completed', 'invalid_artifact'
+                         )""",
+                    (source_id,),
+                ).fetchall()
+                if len(rows) != 1:
+                    raise ValidationError(
+                        "Registered deterministic scoring cannot trust a "
+                        "manually asserted artifact_checkpoint or check_run; "
+                        "the source action requires one exact linked terminal "
+                        "artifact-run receipt."
+                    )
+                row = rows[0]
+                try:
+                    operational = OperationalArtifactRunReceipt.from_terms(
+                        _json_object(
+                            row["receipt_json"],
+                            "Stored operational artifact-run receipt",
+                        )
+                    )
+                    process = ArtifactProcessReceipt.from_terms(
+                        _json_object(
+                            row["result_json"],
+                            "Stored artifact process receipt",
+                        )
+                    )
+                    request = ArtifactRunRequest.from_terms(
+                        _json_object(
+                            row["bound_request_json"],
+                            "Stored artifact-run request",
+                        )
+                    )
+                    binding = ArtifactRunnerBinding.from_terms(
+                        _json_object(
+                            row["bound_binding_json"],
+                            "Stored artifact-run binding",
+                        )
+                    )
+                except (
+                    ArtifactRunnerProtocolError,
+                    TypeError,
+                    ValueError,
+                    ValidationError,
+                ) as exc:
+                    raise ValidationError(
+                        "Linked artifact-run evidence has an invalid receipt "
+                        "or immutable runner binding."
+                    ) from exc
+                exact_contract = (
+                    contract.evidence_action_kinds
+                    == (
+                        ActionKind.ARTIFACT_CHECKPOINT,
+                        ActionKind.CHECK_RUN,
+                    )
+                    and contract.artifact_manifests
+                    == (
+                        (
+                            row["bound_artifact_kind"],
+                            row["bound_artifact_manifest_digest"],
+                        ),
+                    )
+                    and contract.check_set_manifests
+                    == (
+                        (
+                            row["bound_check_set_id"],
+                            row["bound_check_set_manifest_digest"],
+                        ),
+                    )
+                    and contract.requires_attestation is False
+                )
+                process_bound = (
+                    request.digest == row["bound_request_digest"]
+                    and binding.digest == row["bound_binding_digest"]
+                    and process.request == request
+                    and process.binding == binding
+                    and process.digest == row["result_digest"]
+                    and operational.digest == row["receipt_digest"]
+                    and operational.claim_id == row["bound_claim_id"]
+                    and operational.artifact_action_id
+                    == row["bound_artifact_action_id"]
+                    and operational.result_digest == process.digest
+                    and row["outcome"] == operational.outcome
+                    and operational.outcome
+                    == process.result.outcome.value
+                )
+                check_action = connection.execute(
+                    "SELECT * FROM performance_actions WHERE id=?",
+                    (row["check_action_id"],),
+                ).fetchone()
+                check_bound = False
+                if check_action is not None:
+                    check_payload = _json_object(
+                        check_action["payload_json"],
+                        "Stored artifact-run check action",
+                    )
+                    _require_exact_fields(
+                        check_payload,
+                        frozenset(
+                            {
+                                "check_set_id",
+                                "passed",
+                                "failed",
+                                "errored",
+                                "skipped",
+                                "result_digest",
+                            }
+                        ),
+                        "Stored artifact-run check action",
+                    )
+                    check_bound = (
+                        check_action["attempt_id"]
+                        == result.evaluation.trace_id
+                        and check_action["action_type"]
+                        == ActionKind.CHECK_RUN.value
+                        and check_payload.get("check_set_id")
+                        == row["bound_check_set_id"]
+                        and check_payload.get("result_digest")
+                        == process.digest
+                        and check_payload.get("passed")
+                        == process.result.passed
+                        and check_payload.get("failed")
+                        == process.result.failed
+                        and check_payload.get("errored")
+                        == process.result.errored
+                        and check_payload.get("skipped")
+                        == process.result.skipped
+                    )
+                if source.kind is ActionKind.ARTIFACT_CHECKPOINT:
+                    source_bound = (
+                        source.id == row["bound_artifact_action_id"]
+                        and source.payload["artifact_digest"]
+                        == row["bound_artifact_digest"]
+                        and source.payload["artifact_kind"]
+                        == row["bound_artifact_kind"]
+                    )
+                else:
+                    source_bound = (
+                        source.id == row["check_action_id"]
+                        and source.payload["check_set_id"]
+                        == row["bound_check_set_id"]
+                        and source.payload["result_digest"]
+                        == process.digest
+                    )
+                if not (
+                    exact_contract
+                    and process_bound
+                    and check_bound
+                    and source_bound
+                ):
+                    raise ValidationError(
+                        "Registered deterministic scoring source does not "
+                        "match its exact released artifact/check manifests and "
+                        "terminal runner receipt."
+                    )
+
     def _record_result(
         self,
         connection: sqlite3.Connection,
@@ -2070,6 +3637,12 @@ class PerformanceLedger:
                 )
         else:
             self._validate_authority_binding(task, result)
+            self._validate_runner_source_authority(
+                connection,
+                task,
+                result,
+                actions,
+            )
         try:
             bundle = reduce_evidence(task, evaluation, actions)
         except ValueError as exc:
@@ -2199,16 +3772,15 @@ class PerformanceLedger:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         _require_id(attempt_id, "attempt_id")
-        if (
-            idempotency_key is not None
-            and idempotency_key.startswith(
-                PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX
-            )
-        ):
-            raise ValidationError(
-                "Scoring idempotency keys cannot use TSQ's reserved "
-                "callback-admission namespace."
-            )
+        if idempotency_key is not None:
+            _require_text(idempotency_key, "idempotency_key", 256)
+            if idempotency_key.startswith(
+                _PERFORMANCE_TECHNICAL_EVENT_KEY_PREFIXES
+            ):
+                raise ValidationError(
+                    "Scoring idempotency keys cannot use a TSQ reserved "
+                    "technical namespace."
+                )
         if not isinstance(registry, ScoringProviderRegistry):
             raise ValidationError("registry must be a ScoringProviderRegistry.")
         if self.database.read_only:
@@ -2779,14 +4351,11 @@ class PerformanceLedger:
         if idempotency_key is not None:
             _require_text(idempotency_key, "idempotency_key", 256)
             if idempotency_key.startswith(
-                (
-                    PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
-                    PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
-                )
+                _PERFORMANCE_TECHNICAL_EVENT_KEY_PREFIXES
             ):
                 raise ValidationError(
-                    "Reconciliation idempotency keys cannot use TSQ's "
-                    "reserved scoring namespaces."
+                    "Reconciliation idempotency keys cannot use a TSQ "
+                    "reserved technical namespace."
                 )
         if self.database.read_only:
             raise ConflictError(
@@ -5664,6 +7233,12 @@ def performance_integrity_errors(
             projection_name = {
                 "performance_attempts": "attempts",
                 "performance_actions": "actions",
+                "performance_artifact_run_claims": (
+                    "artifact_run_claims"
+                ),
+                "performance_artifact_run_receipts": (
+                    "artifact_run_receipts"
+                ),
                 "performance_scoring_claims": "scoring_claims",
                 "performance_scoring_reconciliations": (
                     "scoring_reconciliations"
@@ -5674,6 +7249,12 @@ def performance_integrity_errors(
             integrity_label = {
                 "performance_attempts": "performance attempt projection",
                 "performance_actions": "performance action projection",
+                "performance_artifact_run_claims": (
+                    "performance artifact-run claim projection"
+                ),
+                "performance_artifact_run_receipts": (
+                    "performance artifact-run receipt projection"
+                ),
                 "performance_scoring_claims": (
                     "performance scoring claim projection"
                 ),
@@ -5699,6 +7280,8 @@ def performance_integrity_errors(
 _PERFORMANCE_PROJECTION_TABLES = (
     "performance_attempts",
     "performance_actions",
+    "performance_artifact_run_claims",
+    "performance_artifact_run_receipts",
     "performance_scoring_claims",
     "performance_scoring_reconciliations",
     "task_evaluations",
@@ -5716,6 +7299,12 @@ def performance_projection_snapshot(
         "actions": (
             "SELECT * FROM performance_actions "
             "ORDER BY attempt_id, sequence, id"
+        ),
+        "artifact_run_claims": (
+            "SELECT * FROM performance_artifact_run_claims ORDER BY id"
+        ),
+        "artifact_run_receipts": (
+            "SELECT * FROM performance_artifact_run_receipts ORDER BY id"
         ),
         "scoring_claims": (
             "SELECT * FROM performance_scoring_claims ORDER BY id"
@@ -5743,20 +7332,32 @@ def performance_projection_snapshot(
     snapshot: dict[str, list[dict[str, Any]]] = {}
     for name, query in queries.items():
         if name in {
+            "artifact_run_claims",
+            "artifact_run_receipts",
             "scoring_claims",
             "scoring_reconciliations",
         } and connection.execute(
             """SELECT 1 FROM sqlite_master
                WHERE type='table' AND name=?""",
             (
-                "performance_scoring_claims"
-                if name == "scoring_claims"
-                else "performance_scoring_reconciliations",
+                {
+                    "artifact_run_claims": (
+                        "performance_artifact_run_claims"
+                    ),
+                    "artifact_run_receipts": (
+                        "performance_artifact_run_receipts"
+                    ),
+                    "scoring_claims": "performance_scoring_claims",
+                    "scoring_reconciliations": (
+                        "performance_scoring_reconciliations"
+                    ),
+                }[name],
             ),
         ).fetchone() is None:
-            # Exact v14 migration fixtures predate callback admission.  An
-            # absent table and the newly installed empty projection represent
-            # the same historical state; no row is synthesized.
+            # Exact historical migration fixtures predate callback admission
+            # and artifact-run receipts. An absent table and the newly
+            # installed empty projection represent the same historical state;
+            # no row is synthesized.
             snapshot[name] = []
             continue
         snapshot[name] = [
@@ -5770,8 +7371,38 @@ def derive_performance_projections(
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     """Derive shadow projection rows exclusively from immutable events."""
 
+    def reject_artifact_technical_key_collision(
+        event_key: object,
+        label: str,
+    ) -> None:
+        if type(event_key) is not str:
+            raise ValidationError(
+                f"{label} has no technical event idempotency key."
+            )
+        collision = connection.execute(
+            """SELECT event_id FROM events
+               WHERE event_type IN (
+                   'PerformanceScoringClaimed',
+                   'PerformanceScoringClaimMigrated',
+                   'PerformanceScoringReconciled'
+               )
+                 AND json_extract(
+                     payload_json, '$.caller_idempotency_key'
+                 )=?
+               ORDER BY stream_id, stream_version
+               LIMIT 1""",
+            (event_key,),
+        ).fetchone()
+        if collision is not None:
+            raise ValidationError(
+                f"{label} technical event key collides with scoring caller "
+                f"event {collision['event_id']}."
+            )
+
     attempts: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
+    artifact_run_claims: list[dict[str, Any]] = []
+    artifact_run_receipts: list[dict[str, Any]] = []
     scoring_claims: list[dict[str, Any]] = []
     scoring_reconciliations: list[dict[str, Any]] = []
     evaluations: list[dict[str, Any]] = []
@@ -5785,9 +7416,31 @@ def derive_performance_projections(
     recovered_evaluations: dict[
         str, tuple[TaskEvaluation, Mapping[str, Any], sqlite3.Row]
     ] = {}
+    attempts_by_id: dict[str, dict[str, Any]] = {}
+    attempt_events_by_id: dict[str, sqlite3.Row] = {}
+    action_contexts_by_id: dict[
+        str, tuple[dict[str, Any], LearningAction, sqlite3.Row]
+    ] = {}
+    artifact_claim_contexts: dict[
+        str,
+        tuple[
+            dict[str, Any],
+            ArtifactRunRequest,
+            ArtifactRunnerBinding,
+            sqlite3.Row,
+            LearningAction,
+            sqlite3.Row,
+        ],
+    ] = {}
+    artifact_receipt_claim_ids: set[str] = set()
+    artifact_caller_keys: set[str] = set()
+    artifact_command_hashes: set[str] = set()
+    artifact_receipt_digests: set[str] = set()
     events = connection.execute(
         """SELECT * FROM events WHERE event_type IN (
                'PerformanceTaskStarted', 'PerformanceActionRecorded',
+               'PerformanceArtifactRunClaimed',
+               'PerformanceArtifactRunObserved',
                'PerformanceScoringClaimed',
                'PerformanceScoringClaimMigrated',
                'PerformanceScoringReconciled',
@@ -5854,24 +7507,30 @@ def derive_performance_projections(
                 raise ValidationError(
                     f"Performance event {event['event_id']} is not shadow-only."
                 )
-            attempts.append(
-                {
-                    "id": payload["attempt_id"],
-                    "event_id": event["event_id"],
-                    "task_release_id": payload["task_release_id"],
-                    "corpus_release_id": payload["corpus_release_id"],
-                    "task_id": payload["task_id"],
-                    "task_version": payload["task_version"],
-                    "task_digest": payload["task_digest"],
-                    "session_id": payload["session_id"],
-                    "learner_id": payload["learner_id"],
-                    "session_revision": payload["session_revision"],
-                    "learner_revision": payload["learner_revision"],
-                    "started_at": event["occurred_at"],
-                    "recorded_at": event["recorded_at"],
-                    "command_hash": metadata["command_hash"],
-                }
-            )
+            attempt_row = {
+                "id": payload["attempt_id"],
+                "event_id": event["event_id"],
+                "task_release_id": payload["task_release_id"],
+                "corpus_release_id": payload["corpus_release_id"],
+                "task_id": payload["task_id"],
+                "task_version": payload["task_version"],
+                "task_digest": payload["task_digest"],
+                "session_id": payload["session_id"],
+                "learner_id": payload["learner_id"],
+                "session_revision": payload["session_revision"],
+                "learner_revision": payload["learner_revision"],
+                "started_at": event["occurred_at"],
+                "recorded_at": event["recorded_at"],
+                "command_hash": metadata["command_hash"],
+            }
+            if attempt_row["id"] in attempts_by_id:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} repeats attempt "
+                    f"{attempt_row['id']}."
+                )
+            attempts.append(attempt_row)
+            attempts_by_id[attempt_row["id"]] = attempt_row
+            attempt_events_by_id[attempt_row["id"]] = event
             checkpoints.append(
                 {
                     "event_id": event["event_id"],
@@ -5915,21 +7574,26 @@ def derive_performance_projections(
                 raise ValidationError(
                     f"Performance event {event['event_id']} action boundary mismatch."
                 )
-            actions.append(
-                {
-                    "id": action.id,
-                    "event_id": event["event_id"],
-                    "attempt_id": action.trace_id,
-                    "sequence": action.sequence,
-                    "phase": action.phase.value,
-                    "action_type": action.kind.value,
-                    "payload_json": canonical_json(action.terms()["payload"]),
-                    "elapsed_ms": action.elapsed_ms,
-                    "occurred_at": event["occurred_at"],
-                    "recorded_at": event["recorded_at"],
-                    "command_hash": metadata["command_hash"],
-                }
-            )
+            action_row = {
+                "id": action.id,
+                "event_id": event["event_id"],
+                "attempt_id": action.trace_id,
+                "sequence": action.sequence,
+                "phase": action.phase.value,
+                "action_type": action.kind.value,
+                "payload_json": canonical_json(action.terms()["payload"]),
+                "elapsed_ms": action.elapsed_ms,
+                "occurred_at": event["occurred_at"],
+                "recorded_at": event["recorded_at"],
+                "command_hash": metadata["command_hash"],
+            }
+            if action.id in action_contexts_by_id:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} repeats action "
+                    f"{action.id}."
+                )
+            actions.append(action_row)
+            action_contexts_by_id[action.id] = (action_row, action, event)
             checkpoints.append(
                 {
                     "event_id": event["event_id"],
@@ -5937,6 +7601,807 @@ def derive_performance_projections(
                     "attempt_id": action.trace_id,
                     "action_id": action.id,
                     "sequence": action.sequence,
+                }
+            )
+        elif event_type == "PerformanceArtifactRunClaimed":
+            label = f"Performance event {event['event_id']} artifact-run claim"
+            if type(payload.get("claim_id")) is str:
+                label += f" {payload['claim_id']}"
+            reject_artifact_technical_key_collision(
+                event["idempotency_key"],
+                label,
+            )
+            _require_exact_fields(
+                payload,
+                frozenset(
+                    {
+                        "claim_id",
+                        "caller_idempotency_key",
+                        "attempt_id",
+                        "session_id",
+                        "session_revision",
+                        "artifact_action_id",
+                        "through_sequence",
+                        "task_release_id",
+                        "task_id",
+                        "task_version",
+                        "task_digest",
+                        "artifact_digest",
+                        "artifact_kind",
+                        "artifact_manifest_digest",
+                        "check_set_id",
+                        "check_set_manifest_digest",
+                        "runner_id",
+                        "runner_version",
+                        "request",
+                        "request_digest",
+                        "binding",
+                        "binding_digest",
+                        "command_hash",
+                        "claimed_at",
+                    }
+                ),
+                f"{label} payload",
+            )
+            _require_exact_fields(
+                metadata,
+                frozenset(
+                    {
+                        "artifact_run_schema_version",
+                        "admission_mode",
+                        "automatic_retry_allowed",
+                        "shadow_only",
+                    }
+                ),
+                f"{label} metadata",
+            )
+            try:
+                request = ArtifactRunRequest.from_terms(payload["request"])
+                binding = ArtifactRunnerBinding.from_terms(
+                    payload["binding"]
+                )
+                expected_binding = bundled_synthetic_binding()
+            except (ArtifactRunnerProtocolError, TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"{label} request or binding is invalid: {exc}"
+                ) from exc
+            for field_name in (
+                "claim_id",
+                "attempt_id",
+                "session_id",
+                "artifact_action_id",
+                "task_release_id",
+                "task_id",
+                "artifact_kind",
+                "check_set_id",
+                "runner_id",
+                "runner_version",
+            ):
+                _require_id(payload[field_name], f"{label} {field_name}")
+            for field_name in (
+                "task_digest",
+                "artifact_digest",
+                "artifact_manifest_digest",
+                "check_set_manifest_digest",
+                "request_digest",
+                "binding_digest",
+                "command_hash",
+            ):
+                _require_digest(payload[field_name], f"{label} {field_name}")
+            if (
+                type(payload["session_revision"]) is not int
+                or payload["session_revision"] < 0
+                or type(payload["through_sequence"]) is not int
+                or payload["through_sequence"] < 0
+                or type(payload["task_version"]) is not int
+                or payload["task_version"] <= 0
+            ):
+                raise ValidationError(
+                    f"{label} has an invalid revision, sequence, or task "
+                    "version."
+                )
+            caller_key = payload["caller_idempotency_key"]
+            if caller_key is not None:
+                _require_text(caller_key, f"{label} caller key", 256)
+                if caller_key.startswith(
+                    (
+                        PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX,
+                        PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX,
+                        PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
+                        PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
+                    )
+                ):
+                    raise ValidationError(
+                        f"{label} uses a reserved caller idempotency key."
+                    )
+                if caller_key in artifact_caller_keys:
+                    raise ValidationError(
+                        f"{label} repeats caller idempotency key {caller_key}."
+                    )
+                caller_collision = connection.execute(
+                    """SELECT event_id FROM events
+                       WHERE idempotency_key=?
+                          OR (
+                              event_type IN (
+                                  'PerformanceScoringClaimed',
+                                  'PerformanceScoringClaimMigrated',
+                                  'PerformanceScoringReconciled'
+                              )
+                              AND json_extract(
+                                  payload_json,
+                                  '$.caller_idempotency_key'
+                              )=?
+                          )
+                       ORDER BY stream_id, stream_version LIMIT 1""",
+                    (caller_key, caller_key),
+                ).fetchone()
+                if caller_collision is not None:
+                    raise ValidationError(
+                        f"{label} caller idempotency key collides with event "
+                        f"{caller_collision['event_id']}."
+                    )
+                artifact_caller_keys.add(caller_key)
+            if payload["command_hash"] in artifact_command_hashes:
+                raise ValidationError(
+                    f"{label} repeats command hash {payload['command_hash']}."
+                )
+            artifact_command_hashes.add(payload["command_hash"])
+            claimed = _aware_timestamp(
+                payload["claimed_at"], f"{label} claimed_at"
+            )
+            if to_timestamp(claimed) != payload["claimed_at"]:
+                raise ValidationError(
+                    f"{label} claimed_at is not canonical UTC."
+                )
+
+            attempt = attempts_by_id.get(payload["attempt_id"])
+            artifact_context = action_contexts_by_id.get(
+                payload["artifact_action_id"]
+            )
+            if attempt is None or artifact_context is None:
+                raise ValidationError(
+                    f"{label} does not follow its attempt and artifact action."
+                )
+            artifact_row, artifact_action, artifact_event = artifact_context
+            attempt_event = attempt_events_by_id[payload["attempt_id"]]
+            attempt_action_contexts = [
+                context
+                for context in action_contexts_by_id.values()
+                if context[0]["attempt_id"] == payload["attempt_id"]
+            ]
+            boundary_context = max(
+                attempt_action_contexts,
+                key=lambda context: context[0]["sequence"],
+                default=None,
+            )
+            if (
+                artifact_action.kind is not ActionKind.ARTIFACT_CHECKPOINT
+                or artifact_row["attempt_id"] != payload["attempt_id"]
+                or artifact_action.sequence > payload["through_sequence"]
+                or boundary_context is None
+                or boundary_context[0]["sequence"]
+                != payload["through_sequence"]
+                or artifact_action.payload["artifact_digest"]
+                != payload["artifact_digest"]
+                or artifact_action.payload["artifact_kind"]
+                != payload["artifact_kind"]
+            ):
+                raise ValidationError(
+                    f"{label} artifact or action-trace boundary mismatch."
+                )
+            boundary_event = boundary_context[2]
+            revision_boundaries = connection.execute(
+                """SELECT event_type FROM events
+                   WHERE stream_id=?
+                     AND stream_version > ?
+                     AND stream_version < ?
+                     AND session_id=?
+                     AND event_type IN (
+                         'QuestionSelected', 'ResponseSubmitted',
+                         'SessionEnded'
+                     )
+                   ORDER BY stream_version""",
+                (
+                    event["stream_id"],
+                    attempt_event["stream_version"],
+                    event["stream_version"],
+                    payload["session_id"],
+                ),
+            ).fetchall()
+            expected_session_revision = attempt["session_revision"] + sum(
+                boundary["event_type"]
+                in {"QuestionSelected", "ResponseSubmitted"}
+                for boundary in revision_boundaries
+            )
+            if (
+                payload["session_revision"] != expected_session_revision
+                or any(
+                    boundary["event_type"] == "SessionEnded"
+                    for boundary in revision_boundaries
+                )
+            ):
+                raise ValidationError(
+                    f"{label} session revision or active interval mismatch."
+                )
+
+            task_row = connection.execute(
+                """SELECT task.definition_json,
+                          task.task_digest AS definition_digest,
+                          member.task_digest AS member_digest,
+                          member.status,
+                          release.corpus_release_id
+                   FROM performance_task_releases release
+                   JOIN release_performance_tasks member
+                     ON member.release_id=release.id
+                   JOIN performance_tasks task
+                     ON task.task_id=member.task_id
+                    AND task.task_version=member.task_version
+                   WHERE release.id=? AND member.task_id=?
+                     AND member.task_version=?""",
+                (
+                    payload["task_release_id"],
+                    payload["task_id"],
+                    payload["task_version"],
+                ),
+            ).fetchone()
+            if task_row is None:
+                raise ValidationError(
+                    f"{label} has no immutable released task."
+                )
+            try:
+                task = LearningTask.from_terms(
+                    _json_object(
+                        task_row["definition_json"],
+                        f"{label} task definition",
+                    )
+                )
+                released_contract = PerformanceLedger._artifact_runner_contract(
+                    task, binding
+                )
+            except (TypeError, ValueError, ValidationError) as exc:
+                raise ValidationError(
+                    f"{label} released runner contract is invalid: {exc}"
+                ) from exc
+            if (
+                attempt["session_id"] != payload["session_id"]
+                or attempt["task_release_id"] != payload["task_release_id"]
+                or attempt["task_id"] != payload["task_id"]
+                or attempt["task_version"] != payload["task_version"]
+                or attempt["task_digest"] != payload["task_digest"]
+                or attempt["corpus_release_id"]
+                != task_row["corpus_release_id"]
+                or task_row["status"] not in SERVICEABLE_TASK_STATUSES
+                or task_row["definition_digest"] != payload["task_digest"]
+                or task_row["member_digest"] != payload["task_digest"]
+                or task.digest != payload["task_digest"]
+                or binding != expected_binding
+                or released_contract.artifact_manifests
+                != (
+                    (
+                        payload["artifact_kind"],
+                        payload["artifact_manifest_digest"],
+                    ),
+                )
+                or released_contract.check_set_manifests
+                != (
+                    (
+                        payload["check_set_id"],
+                        payload["check_set_manifest_digest"],
+                    ),
+                )
+            ):
+                raise ValidationError(
+                    f"{label} task, release, or manifest boundary mismatch."
+                )
+            expected_command_hash = _command_hash(
+                {
+                    "operation": "run_artifact_check",
+                    "attempt_id": payload["attempt_id"],
+                    "artifact_action_id": payload["artifact_action_id"],
+                    "artifact_digest": payload["artifact_digest"],
+                    "artifact_size_bytes": request.artifact_size_bytes,
+                    "artifact_kind": payload["artifact_kind"],
+                    "artifact_manifest_digest": payload[
+                        "artifact_manifest_digest"
+                    ],
+                    "check_set_id": payload["check_set_id"],
+                    "check_set_manifest_digest": payload[
+                        "check_set_manifest_digest"
+                    ],
+                    "checker_id": binding.checker_id.value,
+                    "checker_version": binding.checker_version,
+                    "runner_id": payload["runner_id"],
+                    "runner_version": payload["runner_version"],
+                    "binding_digest": binding.digest,
+                }
+            )
+            expected_payload = performance_artifact_run_claim_payload(
+                claim_id=payload["claim_id"],
+                caller_idempotency_key=caller_key,
+                attempt_id=payload["attempt_id"],
+                session_id=payload["session_id"],
+                session_revision=payload["session_revision"],
+                artifact_action_id=payload["artifact_action_id"],
+                through_sequence=payload["through_sequence"],
+                task_release_id=payload["task_release_id"],
+                task_id=payload["task_id"],
+                task_version=payload["task_version"],
+                task_digest=payload["task_digest"],
+                artifact_digest=payload["artifact_digest"],
+                artifact_kind=payload["artifact_kind"],
+                artifact_manifest_digest=payload[
+                    "artifact_manifest_digest"
+                ],
+                check_set_id=payload["check_set_id"],
+                check_set_manifest_digest=payload[
+                    "check_set_manifest_digest"
+                ],
+                runner_id=payload["runner_id"],
+                runner_version=payload["runner_version"],
+                request=request.terms(),
+                request_digest=request.digest,
+                binding=binding.terms(),
+                binding_digest=binding.digest,
+                command_hash=expected_command_hash,
+                claimed_at=payload["claimed_at"],
+            )
+            if (
+                request.digest != payload["request_digest"]
+                or binding.digest != payload["binding_digest"]
+                or request.runner_binding_digest != binding.digest
+                or request.run_id
+                != "arun_" + expected_command_hash[:24]
+                or request.artifact_sha256 != payload["artifact_digest"]
+                or request.artifact_kind != payload["artifact_kind"]
+                or request.artifact_manifest_digest
+                != payload["artifact_manifest_digest"]
+                or request.check_set_id != payload["check_set_id"]
+                or request.check_set_manifest_digest
+                != payload["check_set_manifest_digest"]
+                or binding.artifact_kind != payload["artifact_kind"]
+                or binding.artifact_manifest_digest
+                != payload["artifact_manifest_digest"]
+                or binding.check_set_id != payload["check_set_id"]
+                or binding.check_set_manifest_digest
+                != payload["check_set_manifest_digest"]
+                or binding.runner_id != payload["runner_id"]
+                or binding.runner_version != payload["runner_version"]
+                or payload["command_hash"] != expected_command_hash
+                or canonical_json(payload) != canonical_json(expected_payload)
+            ):
+                raise ValidationError(
+                    f"{label} request, binding, or command digest mismatch."
+                )
+            if (
+                event["schema_version"]
+                != PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION
+                or metadata["artifact_run_schema_version"]
+                != PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION
+                or metadata["admission_mode"] != "pre_runner"
+                or metadata["automatic_retry_allowed"] is not False
+                or metadata["shadow_only"] is not True
+                or event["stream_id"]
+                != f"learner:{attempt['learner_id']}"
+                or event["learner_id"] != attempt["learner_id"]
+                or event["session_id"] != payload["session_id"]
+                or event["idempotency_key"]
+                != performance_artifact_run_claim_event_key(
+                    expected_command_hash
+                )
+                or event["correlation_id"] != payload["attempt_id"]
+                or event["causation_id"] != artifact_event["event_id"]
+                or event["occurred_at"] != payload["claimed_at"]
+                or attempt_event["stream_id"] != event["stream_id"]
+                or attempt_event["stream_version"]
+                >= event["stream_version"]
+                or artifact_event["stream_id"] != event["stream_id"]
+                or artifact_event["stream_version"]
+                >= event["stream_version"]
+                or boundary_event["stream_id"] != event["stream_id"]
+                or boundary_event["stream_version"]
+                >= event["stream_version"]
+                or claimed
+                < _aware_timestamp(
+                    artifact_event["occurred_at"],
+                    f"{label} artifact occurrence",
+                )
+            ):
+                raise ValidationError(
+                    f"{label} event envelope or trace order mismatch."
+                )
+            claim_row = {
+                "id": payload["claim_id"],
+                "event_id": event["event_id"],
+                "idempotency_key": caller_key,
+                "attempt_id": payload["attempt_id"],
+                "session_id": payload["session_id"],
+                "session_revision": payload["session_revision"],
+                "artifact_action_id": payload["artifact_action_id"],
+                "through_sequence": payload["through_sequence"],
+                "task_release_id": payload["task_release_id"],
+                "task_id": payload["task_id"],
+                "task_version": payload["task_version"],
+                "task_digest": payload["task_digest"],
+                "artifact_digest": payload["artifact_digest"],
+                "artifact_kind": payload["artifact_kind"],
+                "artifact_manifest_digest": payload[
+                    "artifact_manifest_digest"
+                ],
+                "check_set_id": payload["check_set_id"],
+                "check_set_manifest_digest": payload[
+                    "check_set_manifest_digest"
+                ],
+                "runner_id": payload["runner_id"],
+                "runner_version": payload["runner_version"],
+                "request_json": canonical_json(request.terms()),
+                "request_digest": request.digest,
+                "binding_json": canonical_json(binding.terms()),
+                "binding_digest": binding.digest,
+                "command_hash": expected_command_hash,
+                "claimed_at": payload["claimed_at"],
+            }
+            if payload["claim_id"] in artifact_claim_contexts:
+                raise ValidationError(
+                    f"{label} repeats claim {payload['claim_id']}."
+                )
+            artifact_run_claims.append(claim_row)
+            artifact_claim_contexts[payload["claim_id"]] = (
+                claim_row,
+                request,
+                binding,
+                event,
+                artifact_action,
+                artifact_event,
+            )
+            checkpoints.append(
+                {
+                    "event_id": event["event_id"],
+                    "event_type": event_type,
+                    "attempt_id": payload["attempt_id"],
+                    "claim_id": payload["claim_id"],
+                    "artifact_action_id": payload["artifact_action_id"],
+                    "through_sequence": payload["through_sequence"],
+                }
+            )
+        elif event_type == "PerformanceArtifactRunObserved":
+            label = (
+                f"Performance event {event['event_id']} artifact-run "
+                "observation"
+            )
+            if type(payload.get("receipt_id")) is str:
+                label += f" {payload['receipt_id']}"
+            reject_artifact_technical_key_collision(
+                event["idempotency_key"],
+                label,
+            )
+            _require_exact_fields(
+                payload,
+                frozenset(
+                    {
+                        "receipt_id",
+                        "claim_id",
+                        "attempt_id",
+                        "check_action_id",
+                        "outcome",
+                        "result",
+                        "result_digest",
+                        "receipt",
+                        "receipt_digest",
+                        "started_at",
+                        "completed_at",
+                    }
+                ),
+                f"{label} payload",
+            )
+            _require_exact_fields(
+                metadata,
+                frozenset(
+                    {
+                        "artifact_run_schema_version",
+                        "observational_only",
+                        "projection_applied",
+                        "certification_applied",
+                        "skill_authority",
+                        "shadow_only",
+                    }
+                ),
+                f"{label} metadata",
+            )
+            for field_name in ("receipt_id", "claim_id", "attempt_id"):
+                _require_id(payload[field_name], f"{label} {field_name}")
+            _require_digest(
+                payload["receipt_digest"], f"{label} receipt_digest"
+            )
+            claim_context = artifact_claim_contexts.get(payload["claim_id"])
+            if claim_context is None:
+                raise ValidationError(
+                    f"{label} does not follow an artifact-run claim."
+                )
+            (
+                claim,
+                request,
+                binding,
+                claim_event,
+                artifact_action,
+                _artifact_event,
+            ) = claim_context
+            attempt = attempts_by_id[claim["attempt_id"]]
+            session_boundaries = connection.execute(
+                """SELECT event_id, event_type FROM events
+                   WHERE stream_id=?
+                     AND stream_version > ?
+                     AND stream_version < ?
+                     AND session_id=?
+                     AND event_type IN (
+                         'QuestionSelected', 'ResponseSubmitted',
+                         'SessionEnded'
+                     )
+                   ORDER BY stream_version""",
+                (
+                    claim_event["stream_id"],
+                    claim_event["stream_version"],
+                    event["stream_version"],
+                    claim["session_id"],
+                ),
+            ).fetchall()
+            if session_boundaries:
+                raise ValidationError(
+                    f"{label} crosses a session revision or end boundary."
+                )
+            try:
+                operational = OperationalArtifactRunReceipt.from_terms(
+                    payload["receipt"]
+                )
+            except (TypeError, ValueError, ValidationError) as exc:
+                raise ValidationError(
+                    f"{label} operational receipt is invalid: {exc}"
+                ) from exc
+            process: ArtifactProcessReceipt | None
+            if payload["result"] is None:
+                process = None
+            else:
+                try:
+                    process = ArtifactProcessReceipt.from_terms(
+                        payload["result"]
+                    )
+                except (
+                    ArtifactRunnerProtocolError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    raise ValidationError(
+                        f"{label} process receipt is invalid: {exc}"
+                    ) from exc
+            started = _aware_timestamp(
+                payload["started_at"], f"{label} started_at"
+            )
+            completed = _aware_timestamp(
+                payload["completed_at"], f"{label} completed_at"
+            )
+            if (
+                to_timestamp(started) != payload["started_at"]
+                or to_timestamp(completed) != payload["completed_at"]
+            ):
+                raise ValidationError(
+                    f"{label} timestamps are not canonical UTC."
+                )
+            outcome = payload["outcome"]
+            successful_observation = outcome in {
+                ArtifactRunOutcome.COMPLETED.value,
+                ArtifactRunOutcome.INVALID_ARTIFACT.value,
+            }
+            if successful_observation:
+                if process is None:
+                    raise ValidationError(
+                        f"{label} has no typed process receipt."
+                    )
+                expected_process_outcome = process.result.outcome.value
+                if expected_process_outcome != outcome:
+                    raise ValidationError(
+                        f"{label} result outcome does not match its receipt."
+                    )
+                result_digest: str | None = process.digest
+                result_terms: dict[str, Any] | None = process.terms()
+            else:
+                if outcome not in {
+                    "runner_failed",
+                    ArtifactRunOutcome.TIMED_OUT.value,
+                }:
+                    raise ValidationError(
+                        f"{label} has an unknown terminal outcome."
+                    )
+                if process is not None:
+                    raise ValidationError(
+                        f"{label} failed observation carries a process result."
+                    )
+                result_digest = None
+                result_terms = None
+            expected_operational = OperationalArtifactRunReceipt(
+                claim_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                artifact_action_id=claim["artifact_action_id"],
+                artifact_digest=claim["artifact_digest"],
+                artifact_kind=claim["artifact_kind"],
+                artifact_manifest_digest=claim[
+                    "artifact_manifest_digest"
+                ],
+                check_set_id=claim["check_set_id"],
+                check_set_manifest_digest=claim[
+                    "check_set_manifest_digest"
+                ],
+                runner_id=claim["runner_id"],
+                runner_version=claim["runner_version"],
+                outcome=outcome,
+                started_at=payload["started_at"],
+                completed_at=payload["completed_at"],
+                result_digest=result_digest,
+                request_digest=request.digest,
+                binding_digest=binding.digest,
+            )
+            if (
+                payload["claim_id"] in artifact_receipt_claim_ids
+                or payload["receipt_digest"] in artifact_receipt_digests
+            ):
+                raise ValidationError(
+                    f"{label} repeats a terminal claim or receipt digest."
+                )
+            artifact_receipt_claim_ids.add(payload["claim_id"])
+            artifact_receipt_digests.add(payload["receipt_digest"])
+
+            check_action_id = payload["check_action_id"]
+            check_context = (
+                None
+                if check_action_id is None
+                else action_contexts_by_id.get(check_action_id)
+            )
+            actions_between_claim_and_receipt = [
+                context
+                for context in action_contexts_by_id.values()
+                if (
+                    context[0]["attempt_id"] == claim["attempt_id"]
+                    and context[2]["stream_id"] == event["stream_id"]
+                    and claim_event["stream_version"]
+                    < context[2]["stream_version"]
+                    < event["stream_version"]
+                )
+            ]
+            if successful_observation:
+                if check_context is None or process is None:
+                    raise ValidationError(
+                        f"{label} is missing its generated check action."
+                    )
+                check_row, check_action, check_event = check_context
+                result = process.result
+                expected_check_command = _command_hash(
+                    {
+                        "operation": "record_artifact_run_check",
+                        "claim_id": claim["id"],
+                        "result_digest": process.digest,
+                    }
+                )
+                if (
+                    check_action.kind is not ActionKind.CHECK_RUN
+                    or check_action.trace_id != claim["attempt_id"]
+                    or check_action.sequence != claim["through_sequence"] + 1
+                    or check_action.phase is not artifact_action.phase
+                    or check_action.payload["check_set_id"]
+                    != claim["check_set_id"]
+                    or check_action.payload["passed"] != result.passed
+                    or check_action.payload["failed"] != result.failed
+                    or check_action.payload["errored"] != result.errored
+                    or check_action.payload["skipped"] != result.skipped
+                    or check_action.payload["result_digest"] != process.digest
+                    or check_row["command_hash"] != expected_check_command
+                    or check_row["occurred_at"] != payload["completed_at"]
+                    or check_event["stream_id"] != event["stream_id"]
+                    or check_event["stream_version"]
+                    <= claim_event["stream_version"]
+                    or check_event["stream_version"]
+                    >= event["stream_version"]
+                    or [context[0]["id"] for context in actions_between_claim_and_receipt]
+                    != [check_action_id]
+                ):
+                    raise ValidationError(
+                        f"{label} check action counters, outcome, or event "
+                        "order mismatch."
+                    )
+            elif (
+                check_action_id is not None
+                or check_context is not None
+                or actions_between_claim_and_receipt
+            ):
+                raise ValidationError(
+                    f"{label} failed run has an intervening check action."
+                )
+
+            expected_payload = performance_artifact_run_observed_payload(
+                receipt_id=payload["receipt_id"],
+                claim_id=claim["id"],
+                attempt_id=claim["attempt_id"],
+                check_action_id=check_action_id,
+                outcome=outcome,
+                result=result_terms,
+                result_digest=result_digest,
+                receipt=expected_operational.terms(),
+                receipt_digest=expected_operational.digest,
+                started_at=payload["started_at"],
+                completed_at=payload["completed_at"],
+            )
+            if (
+                payload["attempt_id"] != claim["attempt_id"]
+                or process is not None
+                and (
+                    process.request != request
+                    or process.binding != binding
+                    or process.digest != payload["result_digest"]
+                )
+                or payload["result_digest"] != result_digest
+                or operational != expected_operational
+                or operational.digest != payload["receipt_digest"]
+                or canonical_json(payload) != canonical_json(expected_payload)
+                or started
+                < _aware_timestamp(
+                    claim["claimed_at"], f"{label} claim occurrence"
+                )
+                or completed < started
+            ):
+                raise ValidationError(
+                    f"{label} process or operational receipt mismatch."
+                )
+            if (
+                event["schema_version"]
+                != PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION
+                or metadata["artifact_run_schema_version"]
+                != PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION
+                or metadata["observational_only"] is not True
+                or metadata["projection_applied"] is not False
+                or metadata["certification_applied"] is not False
+                or metadata["skill_authority"] is not False
+                or metadata["shadow_only"] is not True
+                or event["stream_id"]
+                != f"learner:{attempt['learner_id']}"
+                or event["learner_id"] != attempt["learner_id"]
+                or event["session_id"] is not None
+                or event["idempotency_key"]
+                != performance_artifact_run_receipt_event_key(
+                    expected_operational.digest
+                )
+                or event["correlation_id"] != claim["attempt_id"]
+                or event["causation_id"] != claim_event["event_id"]
+                or event["occurred_at"] != payload["completed_at"]
+                or claim_event["stream_id"] != event["stream_id"]
+                or claim_event["stream_version"] >= event["stream_version"]
+            ):
+                raise ValidationError(
+                    f"{label} event envelope or claim order mismatch."
+                )
+            receipt_row = {
+                "id": payload["receipt_id"],
+                "event_id": event["event_id"],
+                "claim_id": claim["id"],
+                "check_action_id": check_action_id,
+                "outcome": outcome,
+                "result_json": (
+                    None
+                    if result_terms is None
+                    else canonical_json(result_terms)
+                ),
+                "result_digest": result_digest,
+                "receipt_json": canonical_json(expected_operational.terms()),
+                "receipt_digest": expected_operational.digest,
+                "started_at": payload["started_at"],
+                "completed_at": payload["completed_at"],
+            }
+            artifact_run_receipts.append(receipt_row)
+            checkpoints.append(
+                {
+                    "event_id": event["event_id"],
+                    "event_type": event_type,
+                    "attempt_id": claim["attempt_id"],
+                    "claim_id": claim["id"],
+                    "receipt_id": payload["receipt_id"],
+                    "outcome": outcome,
+                    "check_action_id": check_action_id,
                 }
             )
         elif event_type in {
@@ -6478,6 +8943,14 @@ def derive_performance_projections(
             actions,
             key=lambda item: (item["attempt_id"], item["sequence"], item["id"]),
         ),
+        "artifact_run_claims": sorted(
+            artifact_run_claims,
+            key=lambda item: item["id"],
+        ),
+        "artifact_run_receipts": sorted(
+            artifact_run_receipts,
+            key=lambda item: item["id"],
+        ),
         "scoring_claims": sorted(
             scoring_claims,
             key=lambda item: item["id"],
@@ -6512,6 +8985,8 @@ def rebuild_performance_projections(
         """SELECT name, sql FROM sqlite_master
            WHERE type='trigger' AND tbl_name IN (
                'performance_attempts', 'performance_actions',
+               'performance_artifact_run_claims',
+               'performance_artifact_run_receipts',
                'performance_scoring_claims',
                'performance_scoring_reconciliations', 'task_evaluations',
                'shadow_evidence_bundles'
@@ -6523,7 +8998,9 @@ def rebuild_performance_projections(
     connection.execute("DELETE FROM shadow_evidence_bundles")
     connection.execute("DELETE FROM task_evaluations")
     connection.execute("DELETE FROM performance_scoring_reconciliations")
+    connection.execute("DELETE FROM performance_artifact_run_receipts")
     connection.execute("DELETE FROM performance_scoring_claims")
+    connection.execute("DELETE FROM performance_artifact_run_claims")
     connection.execute("DELETE FROM performance_actions")
     connection.execute("DELETE FROM performance_attempts")
     connection.executemany(
@@ -6549,6 +9026,38 @@ def rebuild_performance_projections(
                :payload_json, :elapsed_ms, :occurred_at, :recorded_at, :command_hash
            )""",
         snapshot["actions"],
+    )
+    connection.executemany(
+        """INSERT INTO performance_artifact_run_claims(
+               id, event_id, idempotency_key, attempt_id, session_id,
+               session_revision, artifact_action_id, through_sequence,
+               task_release_id, task_id, task_version, task_digest,
+               artifact_digest, artifact_kind, artifact_manifest_digest,
+               check_set_id, check_set_manifest_digest, runner_id,
+               runner_version, request_json, request_digest, binding_json,
+               binding_digest, command_hash, claimed_at
+           ) VALUES (
+               :id, :event_id, :idempotency_key, :attempt_id, :session_id,
+               :session_revision, :artifact_action_id, :through_sequence,
+               :task_release_id, :task_id, :task_version, :task_digest,
+               :artifact_digest, :artifact_kind, :artifact_manifest_digest,
+               :check_set_id, :check_set_manifest_digest, :runner_id,
+               :runner_version, :request_json, :request_digest, :binding_json,
+               :binding_digest, :command_hash, :claimed_at
+           )""",
+        snapshot["artifact_run_claims"],
+    )
+    connection.executemany(
+        """INSERT INTO performance_artifact_run_receipts(
+               id, event_id, claim_id, check_action_id, outcome,
+               result_json, result_digest, receipt_json, receipt_digest,
+               started_at, completed_at
+           ) VALUES (
+               :id, :event_id, :claim_id, :check_action_id, :outcome,
+               :result_json, :result_digest, :receipt_json, :receipt_digest,
+               :started_at, :completed_at
+           )""",
+        snapshot["artifact_run_receipts"],
     )
     connection.executemany(
         """INSERT INTO performance_scoring_claims(
@@ -6615,6 +9124,10 @@ def rebuild_performance_projections(
         "checkpoints": checkpoints,
         "attempt_count": len(snapshot["attempts"]),
         "action_count": len(snapshot["actions"]),
+        "artifact_run_claim_count": len(snapshot["artifact_run_claims"]),
+        "artifact_run_receipt_count": len(
+            snapshot["artifact_run_receipts"]
+        ),
         "scoring_claim_count": len(snapshot["scoring_claims"]),
         "scoring_reconciliation_count": len(
             snapshot["scoring_reconciliations"]
@@ -6627,12 +9140,14 @@ def rebuild_performance_projections(
 
 __all__ = [
     "MAX_TASK_RELEASE_BYTES",
+    "PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION",
     "PERFORMANCE_EVENT_SCHEMA_VERSION",
     "SERVICEABLE_TASK_STATUSES",
     "TASK_RELEASE_SCHEMA_VERSION",
     "TASK_STATUSES",
     "PerformanceLedger",
     "PerformanceTaskRelease",
+    "OperationalArtifactRunReceipt",
     "TaskReleaseReview",
     "derive_performance_projections",
     "performance_integrity_errors",

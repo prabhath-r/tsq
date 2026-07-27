@@ -75,11 +75,13 @@ def historical_data_snapshot(
                 """SELECT name FROM sqlite_master
                    WHERE type='table'
                      AND name NOT LIKE 'sqlite_%'
-                     AND name NOT IN (?, ?)
+                     AND name NOT IN (?, ?, ?, ?)
                    ORDER BY name""",
                 (
                     POLICY_SHADOW_TABLE,
                     "performance_scoring_reconciliations",
+                    "performance_artifact_run_claims",
+                    "performance_artifact_run_receipts",
                 ),
             ).fetchall()
         ]
@@ -250,7 +252,7 @@ class PolicyShadowSchemaTests(unittest.TestCase):
             before_data = historical_data_snapshot(database)
             before_events = event_snapshot(database)
 
-            self.assertEqual(SCHEMA_VERSION, 19)
+            self.assertEqual(SCHEMA_VERSION, 20)
             self.assertIsNotNone(decision_id)
             self.assertEqual(
                 schema_contract(database),
@@ -284,18 +286,18 @@ class PolicyShadowSchemaTests(unittest.TestCase):
                              AND tbl_name='policy_shadow_evaluations'"""
                     ).fetchall()
                 }
-            self.assertEqual(version, "19")
+            self.assertEqual(version, "20")
             self.assertEqual(shadow_count, 0)
             self.assertEqual(trigger_names, POLICY_SHADOW_TRIGGERS)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
 
-    def test_reopening_upgraded_v18_is_semantically_idempotent(
+    def test_reopening_current_v20_is_semantically_idempotent(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "reopen-v18.db"
+            path = Path(directory) / "reopen-v20.db"
             database, _decision_id = build_exact_v17(path)
             database.initialize()
             before_data = historical_data_snapshot(database)

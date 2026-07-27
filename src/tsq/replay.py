@@ -765,6 +765,8 @@ class ProjectionReplay:
             return (
                 error.startswith("performance attempt ")
                 or error.startswith("performance action ")
+                or error.startswith("performance artifact-run claim ")
+                or error.startswith("performance artifact-run receipt ")
                 or error.startswith("performance scoring claim ")
                 or error.startswith("performance scoring reconciliation ")
                 or error.startswith("task evaluation ")
@@ -2166,6 +2168,8 @@ class ProjectionReplay:
                 "checkpoints": [],
                 "attempt_count": None,
                 "action_count": None,
+                "artifact_run_claim_count": None,
+                "artifact_run_receipt_count": None,
                 "scoring_claim_count": None,
                 "scoring_reconciliation_count": None,
                 "evaluation_count": None,
@@ -2316,6 +2320,18 @@ class ProjectionReplay:
             "reconstructed_performance_action_count": performance_replay[
                 "action_count"
             ],
+            "source_performance_artifact_run_claim_count": len(
+                source_performance_snapshot["artifact_run_claims"]
+            ),
+            "reconstructed_performance_artifact_run_claim_count": (
+                performance_replay["artifact_run_claim_count"]
+            ),
+            "source_performance_artifact_run_receipt_count": len(
+                source_performance_snapshot["artifact_run_receipts"]
+            ),
+            "reconstructed_performance_artifact_run_receipt_count": (
+                performance_replay["artifact_run_receipt_count"]
+            ),
             "source_performance_scoring_claim_count": len(
                 source_performance_snapshot["scoring_claims"]
             ),
