@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import tempfile
@@ -2366,6 +2367,197 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         self.assertIn("not valid UTF-8", error.getvalue())
         self.assertNotIn("Traceback", error.getvalue())
         self.assertEqual(self.ledger.report(attempt["id"])["action_count"], 1)
+
+    def test_cli_checkpoint_file_commits_real_bytes_without_storing_or_scoring(
+        self,
+    ) -> None:
+        output = io.StringIO()
+        error = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "--db",
+                    str(self.database.path),
+                    "task",
+                    "start",
+                    self.session["id"],
+                    self.task.id,
+                    "--version",
+                    str(self.task.version),
+                    "--release",
+                    self.release_report["release_id"],
+                    "--idempotency-key",
+                    "checkpoint-file-start",
+                    "--json",
+                ]
+            )
+        self.assertEqual(exit_code, 0, error.getvalue())
+        attempt_id = json.loads(output.getvalue())["id"]
+        before = self.projection_snapshot()
+
+        artifact = Path(self.tempdir.name) / "private-repair-source.py"
+        explanation = Path(self.tempdir.name) / "private-explanation.md"
+        submission = Path(self.tempdir.name) / "private-submission.tar"
+        artifact_bytes = b"repair sentinel: mask future keys\n"
+        explanation_bytes = b"causal visibility follows the key boundary\n"
+        submission_bytes = b"sealed productive submission\n"
+        artifact.write_bytes(artifact_bytes)
+        explanation.write_bytes(explanation_bytes)
+        submission.write_bytes(submission_bytes)
+
+        def invoke(*arguments: str) -> tuple[int, str, str]:
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                code = main(
+                    [
+                        "--db",
+                        str(self.database.path),
+                        "task",
+                        "checkpoint-file",
+                        attempt_id,
+                        *arguments,
+                    ]
+                )
+            return code, stdout.getvalue(), stderr.getvalue()
+
+        code, rendered, failure = invoke(
+            str(artifact),
+            "--kind",
+            "artifact",
+            "--artifact-kind",
+            "diagnostic_trace_v1",
+            "--idempotency-key",
+            "checkpoint-file-artifact",
+            "--json",
+        )
+        self.assertEqual(code, 0, failure)
+        recorded = json.loads(rendered)
+        self.assertEqual(
+            recorded["action"]["payload"],
+            {
+                "artifact_digest": hashlib.sha256(
+                    artifact_bytes
+                ).hexdigest(),
+                "artifact_kind": "diagnostic_trace_v1",
+            },
+        )
+        for boundary in (
+            "artifact_content_persisted",
+            "artifact_executed",
+            "evaluation_created",
+            "learner_projection_applied",
+            "certification_applied",
+        ):
+            self.assertFalse(recorded[boundary])
+
+        code, plain, failure = invoke(
+            str(artifact),
+            "--kind",
+            "artifact",
+            "--artifact-kind",
+            "diagnostic_trace_v1",
+            "--idempotency-key",
+            "checkpoint-file-artifact",
+        )
+        self.assertEqual(code, 0, failure)
+        self.assertIn("idempotent replay", plain)
+        self.assertIn("Artifact content persisted: no", plain)
+        self.assertIn("Artifact executed: no", plain)
+        self.assertIn("Evaluation created: no", plain)
+        self.assertIn("Learner projection applied: no", plain)
+        self.assertIn("Certification applied: no", plain)
+
+        artifact.write_bytes(b"different private repair\n")
+        code, conflict_output, failure = invoke(
+            str(artifact),
+            "--kind",
+            "artifact",
+            "--artifact-kind",
+            "diagnostic_trace_v1",
+            "--idempotency-key",
+            "checkpoint-file-artifact",
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("different command", failure)
+        self.assertNotIn(artifact.name, conflict_output + failure)
+        self.assertNotIn("different private repair", conflict_output + failure)
+
+        code, rendered, failure = invoke(
+            str(explanation),
+            "--kind",
+            "explanation",
+            "--idempotency-key",
+            "checkpoint-file-explanation",
+            "--json",
+        )
+        self.assertEqual(code, 0, failure)
+        explanation_result = json.loads(rendered)
+        self.assertEqual(
+            explanation_result["action"]["payload"],
+            {
+                "explanation_digest": hashlib.sha256(
+                    explanation_bytes
+                ).hexdigest()
+            },
+        )
+
+        code, rendered, failure = invoke(
+            str(submission),
+            "--kind",
+            "submission",
+            "--idempotency-key",
+            "checkpoint-file-submission",
+            "--json",
+        )
+        self.assertEqual(code, 0, failure)
+        submission_result = json.loads(rendered)
+        self.assertEqual(
+            submission_result["action"]["payload"],
+            {
+                "submission_digest": hashlib.sha256(
+                    submission_bytes
+                ).hexdigest()
+            },
+        )
+
+        all_output = plain + json.dumps(recorded) + json.dumps(
+            explanation_result
+        ) + json.dumps(submission_result)
+        sensitive_material = (
+            (artifact, artifact_bytes),
+            (artifact, b"different private repair\n"),
+            (explanation, explanation_bytes),
+            (submission, submission_bytes),
+        )
+        for file_path, content in sensitive_material:
+            self.assertNotIn(file_path.name, all_output)
+            self.assertNotIn(content.decode("utf-8").strip(), all_output)
+
+        report = self.ledger.report(attempt_id)
+        self.assertEqual(report["status"], "submitted")
+        self.assertEqual(report["action_count"], 4)
+        self.assertEqual(report["evaluation_count"], 0)
+        self.assertEqual(self.projection_snapshot(), before)
+        with self.database.read() as connection:
+            persisted = "\n".join(
+                str(value)
+                for row in connection.execute(
+                    """SELECT payload_json, metadata_json FROM events
+                       WHERE correlation_id=?
+                       UNION ALL
+                       SELECT payload_json, '' FROM performance_actions
+                       WHERE attempt_id=?""",
+                    (attempt_id, attempt_id),
+                ).fetchall()
+                for value in row
+            )
+        for file_path, content in sensitive_material:
+            self.assertNotIn(file_path.name, persisted)
+            self.assertNotIn(content.decode("utf-8").strip(), persisted)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+        replay = ProjectionReplay(self.database).check("performance-learner")
+        self.assertTrue(replay["ok"], replay["errors"])
 
     def test_cli_synthetic_score_rejects_invalid_units_without_traceback(
         self,

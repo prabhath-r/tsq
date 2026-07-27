@@ -13,6 +13,7 @@ data.  It never executes an artifact or opens the configured/default database.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 import tempfile
@@ -26,6 +27,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
+from tsq.artifact_intake import prepare_file_checkpoint  # noqa: E402
 from tsq.corpus import read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.evidence import (  # noqa: E402
@@ -52,7 +54,7 @@ from tsq.replay import ProjectionReplay  # noqa: E402
 from tsq.store import Database, question_content_hash  # noqa: E402
 
 
-LAB_VERSION = "productive-probe-lab-v1"
+LAB_VERSION = "productive-probe-lab-v2"
 START = datetime(2115, 3, 4, 9, 0, tzinfo=timezone.utc)
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "productive_probe_lab.json"
@@ -74,6 +76,28 @@ def _projection_boundary(database: Database, learner_id: str, session_id: str) -
                 learner_id, connection
             ),
         }
+
+
+def _persisted_database_text(database: Database) -> str:
+    """Render every persisted value so private fixture sentinels can be sought."""
+
+    values: list[str] = []
+    with database.read() as connection:
+        table_names = [
+            row["name"]
+            for row in connection.execute(
+                """SELECT name FROM sqlite_master
+                   WHERE type='table' AND name NOT LIKE 'sqlite_%'
+                   ORDER BY name"""
+            ).fetchall()
+        ]
+        for table_name in table_names:
+            quoted_name = '"' + table_name.replace('"', '""') + '"'
+            for row in connection.execute(f"SELECT * FROM {quoted_name}"):
+                values.extend(
+                    str(value) for value in row if value is not None
+                )
+    return "\n".join(values)
 
 
 def _source_manifest(
@@ -263,6 +287,27 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         idempotency_key="productive-lab-hint",
         now=START + timedelta(minutes=6),
     )
+    artifact_sentinels = (
+        "TSQ_PRIVATE_DIAGNOSIS_719 future keys precede normalization",
+        "TSQ_PRIVATE_REPAIR_719 preserve each inclusive causal prefix",
+    )
+    artifact_material = ("\n".join(artifact_sentinels) + "\n").encode("utf-8")
+    expected_artifact_digest = hashlib.sha256(artifact_material).hexdigest()
+    artifact_path = database_path.parent / "learner-repair-artifact.txt"
+    artifact_path.write_bytes(artifact_material)
+    artifact_checkpoint = prepare_file_checkpoint(
+        artifact_path,
+        kind="artifact",
+        artifact_kind="causal_mask_repair_v1",
+    )
+    recorded_artifact = ledger.record_action(
+        attempt["id"],
+        artifact_checkpoint.action_kind.value,
+        artifact_checkpoint.payload,
+        phase="assisted",
+        idempotency_key="productive-lab-artifact",
+        now=START + timedelta(minutes=7),
+    )
     ledger.record_action(
         attempt["id"],
         "check_run",
@@ -278,10 +323,14 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         idempotency_key="productive-lab-check",
         now=START + timedelta(minutes=8),
     )
+    submission_checkpoint = prepare_file_checkpoint(
+        artifact_path,
+        kind="submission",
+    )
     submitted = ledger.record_action(
         attempt["id"],
-        "submitted",
-        {"submission_digest": _D2},
+        submission_checkpoint.action_kind.value,
+        submission_checkpoint.payload,
         phase="assisted",
         idempotency_key="productive-lab-submit",
         now=START + timedelta(minutes=10),
@@ -325,6 +374,15 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
     )
     replay = ProjectionReplay(database).check(learner_id)
     integrity = database.verify_integrity()
+    persisted_database_text = _persisted_database_text(database)
+    artifact_private_material_absent = all(
+        private_value not in persisted_database_text
+        for private_value in (
+            artifact_path.name,
+            str(artifact_path),
+            *artifact_sentinels,
+        )
+    )
 
     normalized_reasons = sorted(
         {
@@ -352,6 +410,25 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         "shadow_reason_codes": normalized_reasons,
         "attempt_status": attempt_report["status"],
         "action_count": attempt_report["action_count"],
+        "artifact_checkpoint_digest": recorded_artifact["payload"][
+            "artifact_digest"
+        ],
+        "submission_checkpoint_digest": submitted["payload"][
+            "submission_digest"
+        ],
+        "artifact_digest_matches_submission": (
+            recorded_artifact["payload"]["artifact_digest"]
+            == submitted["payload"]["submission_digest"]
+        ),
+        "artifact_digest_matches_bytes": (
+            recorded_artifact["payload"]["artifact_digest"]
+            == expected_artifact_digest
+            == submitted["payload"]["submission_digest"]
+        ),
+        "artifact_private_material_absent": (
+            artifact_private_material_absent
+        ),
+        "artifact_executed": False,
         "session_productive_attempts": session_report[
             "productive_skill_shadow"
         ]["attempt_count"],
@@ -376,6 +453,12 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         failures.append("Shadow productive activity changed a learner projection.")
     if stable["shadow_weight"] != 0.0:
         failures.append("Direct imported evaluation acquired evidence authority.")
+    if not stable["artifact_digest_matches_submission"]:
+        failures.append("Artifact and submission commitments diverged.")
+    if not stable["artifact_digest_matches_bytes"]:
+        failures.append("Artifact commitment did not match the fixture bytes.")
+    if not stable["artifact_private_material_absent"]:
+        failures.append("Private artifact material crossed the digest boundary.")
     if not stable["replay_ok"] or not stable["integrity_ok"]:
         failures.append("Event integrity or projection replay failed.")
     return {
