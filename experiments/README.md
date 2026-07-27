@@ -189,6 +189,23 @@ curriculum content. The file is never executed. Its digest proves byte equality
 only: it is not skill evidence, encryption, or protection against guessing
 low-entropy content.
 
+The scoring-reconciliation laboratory exercises provider failure after a
+durable callback admission. Across two fresh databases it keeps ambiguous
+lookups unknown, recovers one authority-free result after `SessionEnded`, and
+closes a second operation as definitely absent only through an adapter with an
+explicit non-acceptance guarantee:
+
+```sh
+python experiments/scoring_reconciliation_lab.py --stdout
+```
+
+The laboratory retries both scoring commands adversarially and proves that the
+provider callback count remains one. Reconciliation events stay outside the
+ended session envelope, recovered evidence remains zero-weight shadow data,
+learner projections do not move, and integrity plus copy replay remain exact.
+The bundled adapter is synthetic; the result does not validate any production
+provider receipt authority.
+
 The family-independence laboratory nominates active cross-family pairs through
 documented token-overlap signals, then counterfactually collapses each review
 cluster before running the exact capacity analyzer:

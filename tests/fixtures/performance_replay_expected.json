@@ -1,0 +1,184 @@
+{
+  "action_count": 4,
+  "action_trace_digest": "3cf5555f33f50ae9e5d7be0df46f530ef03109142d3c616de952ad2c6f993c53",
+  "attempt_count": 1,
+  "bundle_count": 1,
+  "bundle_digest": "e89401cbd9f5e8e8d5826f491a4555c41d3311bfb883dcfdf78fe052d3f43edd",
+  "checkpoints": [
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_004",
+      "event_type": "PerformanceTaskStarted"
+    },
+    {
+      "action_id": "pact_performance_replay_001",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_005",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 0
+    },
+    {
+      "action_id": "pact_performance_replay_002",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_006",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 1
+    },
+    {
+      "action_id": "pact_performance_replay_003",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_007",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 2
+    },
+    {
+      "action_id": "pact_performance_replay_004",
+      "attempt_id": "pta_performance_replay_001",
+      "event_id": "evt_performance_replay_008",
+      "event_type": "PerformanceActionRecorded",
+      "sequence": 3
+    },
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "claim_id": "psc_1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+      "evaluation_id": "teval_performance_replay_001",
+      "event_id": "evt_performance_replay_009",
+      "event_type": "PerformanceScoringClaimed"
+    },
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "claim_id": "psc_1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+      "evaluation_id": "teval_performance_replay_001",
+      "event_id": "evt_performance_replay_010",
+      "event_type": "PerformanceScoringReconciled",
+      "outcome": "unknown",
+      "reconciliation_id": "psr_2350c99f7d0d522945a3e85e382ec6ec4a3d322ce16659bab7bf1c583a0539b9"
+    },
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "claim_id": "psc_1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+      "evaluation_id": "teval_performance_replay_001",
+      "event_id": "evt_performance_replay_011",
+      "event_type": "PerformanceScoringReconciled",
+      "outcome": "completed",
+      "reconciliation_id": "psr_f941e42daa01106158fd0285a3d5f241f56479b4d0a359470573dbd33149d096"
+    },
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "evaluation_id": "teval_performance_replay_001",
+      "event_id": "evt_performance_replay_012",
+      "event_type": "TaskEvaluationRecorded"
+    },
+    {
+      "attempt_id": "pta_performance_replay_001",
+      "bundle_id": "seb_e89401cbd9f5e8e8d5826f49",
+      "evaluation_id": "teval_performance_replay_001",
+      "event_id": "evt_performance_replay_013",
+      "event_type": "ShadowEvidenceReduced"
+    }
+  ],
+  "claim_state": {
+    "automatic_retry_allowed": false,
+    "id": "psc_1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+    "latest_reconciliation_id": "psr_f941e42daa01106158fd0285a3d5f241f56479b4d0a359470573dbd33149d096",
+    "latest_reconciliation_outcome": "completed",
+    "reconciliation_count": 2,
+    "source": "reconciliation",
+    "status": "completed",
+    "terminal": true,
+    "terminal_at": "2112-08-09T10:07:00+00:00"
+  },
+  "criterion_objective_weights": [
+    [
+      "lo_attention_value_routing",
+      1.0
+    ]
+  ],
+  "database_schema_version": 19,
+  "evaluation_count": 1,
+  "evaluation_digest": "9efd38cbd02d9f2452d4c38f98103c1bbc9218470bf6372e9bc1c2bee546e970",
+  "evidence_bundle_schema_version": 2,
+  "evidence_objective_weights": [
+    [
+      "lo_attention_value_routing",
+      1.0
+    ]
+  ],
+  "format_version": 1,
+  "normalized_scoring_result_schema_version": 1,
+  "performance_event_count": 10,
+  "projection_rows": {
+    "bundle": {
+      "certification_applied": false,
+      "digest": "e89401cbd9f5e8e8d5826f491a4555c41d3311bfb883dcfdf78fe052d3f43edd",
+      "event_id": "evt_performance_replay_013",
+      "id": "seb_e89401cbd9f5e8e8d5826f49",
+      "projection_applied": false
+    },
+    "evaluation": {
+      "digest": "9efd38cbd02d9f2452d4c38f98103c1bbc9218470bf6372e9bc1c2bee546e970",
+      "event_id": "evt_performance_replay_012",
+      "id": "teval_performance_replay_001"
+    },
+    "scoring_claims": [
+      {
+        "action_trace_digest": "3cf5555f33f50ae9e5d7be0df46f530ef03109142d3c616de952ad2c6f993c53",
+        "attempt_id": "pta_performance_replay_001",
+        "claim_schema_version": 2,
+        "claimed_at": "2112-08-09T10:05:00+00:00",
+        "command_hash": "1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+        "evaluation_id": "teval_performance_replay_001",
+        "event_id": "evt_performance_replay_009",
+        "id": "psc_1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+        "provider_binding_digest": "b911873d26f3f37da444bd0cf5fe056d3df845cddd17dad5e0d96a060ac71f20",
+        "provider_id": "synthetic.performance-replay-scorer",
+        "provider_operation_digest": "db4c9f5a598da874623943618b965e10c52d8576e40b3eeca77801ea3ac36c3f",
+        "provider_version": "fixture-v1",
+        "scoring_request_digest": "1cf80f17c84e37fce4e009f412e7284833995ac2bde5436f867eb5abd21e2105",
+        "through_sequence": 3
+      }
+    ],
+    "scoring_reconciliations": [
+      {
+        "attempt_id": "pta_performance_replay_001",
+        "claim_id": "psc_1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+        "command_hash": "2350c99f7d0d522945a3e85e382ec6ec4a3d322ce16659bab7bf1c583a0539b9",
+        "evaluation_id": "teval_performance_replay_001",
+        "event_id": "evt_performance_replay_010",
+        "id": "psr_2350c99f7d0d522945a3e85e382ec6ec4a3d322ce16659bab7bf1c583a0539b9",
+        "normalized_result_digest": null,
+        "outcome": "unknown",
+        "provider_binding_digest": "b911873d26f3f37da444bd0cf5fe056d3df845cddd17dad5e0d96a060ac71f20",
+        "provider_operation_digest": "db4c9f5a598da874623943618b965e10c52d8576e40b3eeca77801ea3ac36c3f",
+        "receipt_digest": "fad2c86b7f3c9823804658ce4d2c3365619b719ca508725ce633b068c90f847e",
+        "reconciled_at": "2112-08-09T10:06:00+00:00",
+        "reconciler_id": "synthetic.performance-replay-reconciler",
+        "reconciler_version": "fixture-v1",
+        "reconciliation_binding_digest": "3b6d378848018fd62156a6c3bc07cb8518bf8052bf0e5230781853ecc6f04da0",
+        "scoring_request_digest": "1cf80f17c84e37fce4e009f412e7284833995ac2bde5436f867eb5abd21e2105"
+      },
+      {
+        "attempt_id": "pta_performance_replay_001",
+        "claim_id": "psc_1ba5e17e8937c90df1a12c669f0b318c557dccf9d77a1b42196b86d14c113842",
+        "command_hash": "f941e42daa01106158fd0285a3d5f241f56479b4d0a359470573dbd33149d096",
+        "evaluation_id": "teval_performance_replay_001",
+        "event_id": "evt_performance_replay_011",
+        "id": "psr_f941e42daa01106158fd0285a3d5f241f56479b4d0a359470573dbd33149d096",
+        "normalized_result_digest": "56dbc5a0d887f22c34f7b317ba4008cadc7f7eb9b97578e7fba95e0dfa80b5cc",
+        "outcome": "completed",
+        "provider_binding_digest": "b911873d26f3f37da444bd0cf5fe056d3df845cddd17dad5e0d96a060ac71f20",
+        "provider_operation_digest": "db4c9f5a598da874623943618b965e10c52d8576e40b3eeca77801ea3ac36c3f",
+        "receipt_digest": "9874df5477e20e98d585c7887b525ec0763987808817952be6c8d9d853fa058e",
+        "reconciled_at": "2112-08-09T10:07:00+00:00",
+        "reconciler_id": "synthetic.performance-replay-reconciler",
+        "reconciler_version": "fixture-v1",
+        "reconciliation_binding_digest": "3b6d378848018fd62156a6c3bc07cb8518bf8052bf0e5230781853ecc6f04da0",
+        "scoring_request_digest": "1cf80f17c84e37fce4e009f412e7284833995ac2bde5436f867eb5abd21e2105"
+      }
+    ]
+  },
+  "scoring_claim_count": 1,
+  "scoring_reconciliation_count": 2,
+  "task_digest": "4a457fd72018a1ea2f072d4b76a7e4e84e82b8f57ea4795cf9fdf62abd7f61a4",
+  "task_schema_version": 3
+}

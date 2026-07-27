@@ -11,6 +11,7 @@ import sys
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from importlib.resources import as_file, files
 from math import isfinite
 from pathlib import Path
@@ -38,6 +39,7 @@ from .evidence import (
     ActionPhase,
     EvaluationStatus,
     ScorerKind,
+    canonical_digest,
 )
 from .errors import (
     ConflictError,
@@ -51,6 +53,7 @@ from .quality import audit_corpus
 from .performance import (
     ImportedCriterionResult,
     ImportedEvaluation,
+    RegisteredProvider,
     ScoringProviderRegistry,
     SyntheticDeterministicProvider,
 )
@@ -69,6 +72,13 @@ from .policy_shadow_reporting import (
     SUPPORTED_LOGGING_POLICY_VERSIONS,
     UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
     build_policy_shadow_report,
+)
+from .reconciliation import (
+    ReconciliationObservation,
+    ReconciliationOutcome,
+    ScoringReconciliationReceipt,
+    ScoringReconciliationRegistry,
+    SyntheticReconciliationAdapter,
 )
 from .replay import ProjectionReplay, replay_or_error
 from .store import Database, new_id
@@ -2173,11 +2183,314 @@ def command_task_claims(args: argparse.Namespace) -> None:
             f"{claim['provider_id']}@{claim['provider_version']}  "
             f"attempt={claim['attempt_id']}"
         )
-    if any(claim["status"] == "unresolved" for claim in result):
+    if any(not claim.get("terminal", False) for claim in result):
         print(
             "Unresolved admissions remain fail-closed; TSQ will not retry the "
             "provider automatically."
         )
+
+
+def _claim_operational_output(
+    claim: dict[str, Any],
+    *,
+    synthetic_test_provider: bool,
+    requested_test_outcome: str | None = None,
+) -> dict[str, Any]:
+    """Add explicit non-scoring boundaries without exposing private command data."""
+
+    return {
+        "claim": claim,
+        "synthetic_test_provider": synthetic_test_provider,
+        "requested_test_outcome": requested_test_outcome,
+        "provider_callback_invoked": False,
+        "automatic_retry_allowed": False,
+        "projection_applied": False,
+        "certification_applied": False,
+        "mastery_applied": False,
+        "skill_authority": False,
+    }
+
+
+def command_task_claim(args: argparse.Namespace) -> None:
+    claim = PerformanceLedger(_inspection_database(args)).inspect_scoring_claim(
+        args.claim
+    )
+    output = _claim_operational_output(
+        claim,
+        synthetic_test_provider=False,
+    )
+    if args.json:
+        _emit(output, as_json=True)
+        return
+    print(f"Scoring claim {claim['id']} [{claim['status']}]")
+    print(
+        f"  provider: {claim['provider_id']}@{claim['provider_version']} "
+        f"· attempt={claim['attempt_id']}"
+    )
+    print(
+        f"  reconciliation observations: {claim['reconciliation_count']} "
+        f"· terminal={'yes' if claim['terminal'] else 'no'}"
+    )
+    print("Provider scoring callback invoked: no. Automatic retry allowed: no.")
+    print(
+        "Learner projection applied: no. Certification applied: no. "
+        "Mastery applied: no."
+    )
+
+
+def _validate_test_reconciliation_options(
+    outcome: ReconciliationOutcome,
+    score: float | None,
+    reliability: float | None,
+) -> tuple[float | None, float | None]:
+    if outcome is ReconciliationOutcome.COMPLETED:
+        if score is None:
+            raise ValidationError(
+                "--score is required when --test-outcome is completed."
+            )
+        resolved_reliability = 1.0 if reliability is None else reliability
+        for option, value in (
+            ("--score", score),
+            ("--reliability", resolved_reliability),
+        ):
+            if not isfinite(value) or not 0.0 <= value <= 1.0:
+                raise ValidationError(
+                    f"{option} must be finite and between 0 and 1."
+                )
+        return (score, resolved_reliability)
+    if score is not None or reliability is not None:
+        raise ValidationError(
+            "--score and --reliability are valid only when "
+            "--test-outcome is completed."
+        )
+    return (None, None)
+
+
+def _require_synthetic_scoring_claim_snapshot(
+    database: Database,
+    claim: dict[str, Any],
+) -> None:
+    """Fail closed unless the immutable v2 admission names a synthetic scorer."""
+
+    with database.read() as connection:
+        event = connection.execute(
+            """SELECT event_type, schema_version, payload_json
+               FROM events WHERE event_id=?""",
+            (claim.get("event_id"),),
+        ).fetchone()
+    try:
+        if (
+            event is None
+            or event["event_type"] != "PerformanceScoringClaimed"
+            or event["schema_version"] != 2
+        ):
+            raise ValueError
+        payload = json.loads(
+            event["payload_json"],
+            object_pairs_hook=_strict_action_object,
+            parse_constant=_reject_action_constant,
+        )
+        if type(payload) is not dict:
+            raise ValueError
+        provider = RegisteredProvider.from_terms(payload.get("provider"))
+        if (
+            payload.get("claim_id") != claim.get("id")
+            or payload.get("provider_id") != claim.get("provider_id")
+            or payload.get("provider_version") != claim.get("provider_version")
+            or payload.get("provider_binding_digest")
+            != claim.get("provider_binding_digest")
+            or provider.provider_id != claim.get("provider_id")
+            or provider.provider_version != claim.get("provider_version")
+            or provider.binding_digest != claim.get("provider_binding_digest")
+        ):
+            raise ValueError
+    except (KeyError, TypeError, ValueError, ValidationError) as exc:
+        raise ConflictError(
+            "Scoring claim does not have a valid immutable v2 provider "
+            "snapshot."
+        ) from exc
+    if provider.synthetic is not True:
+        raise ValidationError(
+            "The deterministic test reconciler accepts only claims admitted "
+            "by a synthetic scoring provider."
+        )
+
+
+def command_task_reconcile_claim(args: argparse.Namespace) -> None:
+    if args.provider != "deterministic-test":
+        raise ValidationError(
+            f"Unsupported reconciliation provider: {args.provider!r}."
+        )
+    outcome = ReconciliationOutcome(args.test_outcome)
+    score, reliability = _validate_test_reconciliation_options(
+        outcome,
+        args.score,
+        args.reliability,
+    )
+
+    inspection_database = _inspection_database(args)
+    inspection = PerformanceLedger(inspection_database)
+    claim = inspection.inspect_scoring_claim(args.claim)
+    required_v2_digests = (
+        claim.get("scoring_request_digest"),
+        claim.get("provider_binding_digest"),
+        claim.get("provider_operation_digest"),
+    )
+    if claim.get("claim_schema_version") != 2 or any(
+        type(value) is not str for value in required_v2_digests
+    ):
+        raise ValidationError(
+            "Only scoring claims with a complete v2 provider/request boundary "
+            "can be reconciled."
+        )
+    _require_synthetic_scoring_claim_snapshot(inspection_database, claim)
+
+    imported: ImportedEvaluation | None = None
+    if outcome is ReconciliationOutcome.COMPLETED:
+        report = inspection.report(claim["attempt_id"])
+        submitted = [
+            action
+            for action in report["actions"]
+            if action["action_type"] == "submitted"
+        ]
+        if len(submitted) != 1:
+            raise ValidationError(
+                "Synthetic completed reconciliation requires exactly one "
+                "submitted checkpoint."
+            )
+        imported = ImportedEvaluation(
+            criteria=tuple(
+                ImportedCriterionResult(
+                    criterion_id=criterion["id"],
+                    status=EvaluationStatus.VALID,
+                    score=score,
+                    outcome_code="synthetic_reconciliation_fixture",
+                    phase=ActionPhase(submitted[0]["phase"]),
+                    source_action_ids=(submitted[0]["id"],),
+                    reliability=reliability,
+                )
+                for criterion in report["task"]["criteria"]
+            )
+        )
+
+    reconciler_id = "synthetic.cli-reconciliation"
+    reconciler_version = "test-v1"
+    observed_at = datetime.now(timezone.utc).isoformat()
+    result_digest = None if imported is None else imported.digest
+    provider_receipt_digest = canonical_digest(
+        {
+            "type": "tsq.synthetic_reconciliation_receipt",
+            "claim_id": claim["id"],
+            "provider_operation_digest": claim["provider_operation_digest"],
+            "outcome": outcome.value,
+            "observed_at": observed_at,
+            "result_digest": result_digest,
+        }
+    )
+    attestation_digest = canonical_digest(
+        {
+            "type": "tsq.synthetic_reconciliation_attestation",
+            "reconciler_id": reconciler_id,
+            "reconciler_version": reconciler_version,
+            "provider_receipt_digest": provider_receipt_digest,
+            "synthetic": True,
+        }
+    )
+    receipt = ScoringReconciliationReceipt(
+        claim_id=claim["id"],
+        attempt_id=claim["attempt_id"],
+        evaluation_id=claim["evaluation_id"],
+        through_sequence=claim["through_sequence"],
+        provider_id=claim["provider_id"],
+        provider_version=claim["provider_version"],
+        reconciler_id=reconciler_id,
+        reconciler_version=reconciler_version,
+        action_trace_digest=claim["action_trace_digest"],
+        command_hash=claim["command_hash"],
+        scoring_request_digest=claim["scoring_request_digest"],
+        provider_binding_digest=claim["provider_binding_digest"],
+        outcome=outcome,
+        observed_at=observed_at,
+        completed_at=(
+            observed_at
+            if outcome is ReconciliationOutcome.COMPLETED
+            else None
+        ),
+        result_digest=result_digest,
+        reason_code={
+            ReconciliationOutcome.UNKNOWN: "synthetic_lookup_unknown",
+            ReconciliationOutcome.DEFINITELY_ABSENT: (
+                "synthetic_operation_definitely_absent"
+            ),
+            ReconciliationOutcome.COMPLETED: "synthetic_result_recovered",
+        }[outcome],
+        provider_operation_digest=claim["provider_operation_digest"],
+        provider_receipt_digest=provider_receipt_digest,
+        attestation_digest=attestation_digest,
+    )
+    adapter = SyntheticReconciliationAdapter(
+        ReconciliationObservation(
+            receipt=receipt,
+            imported_evaluation=imported,
+        ),
+        reconciler_id=reconciler_id,
+        reconciler_version=reconciler_version,
+        # This capability is stable for the exact synthetic adapter version,
+        # independent of which fixture outcome it reports.
+        can_prove_absence=True,
+    )
+    registry = ScoringReconciliationRegistry(allow_synthetic=True)
+    registry.register(adapter, adapter.authority_binding)
+    result = PerformanceLedger(_database(args)).reconcile_scoring_claim(
+        claim["id"],
+        registry,
+        reconciler_id,
+        reconciler_version,
+        idempotency_key=args.idempotency_key,
+    )
+    stored_outcome = result.get("reconciliation_outcome")
+    if result.get("idempotent_replay") and stored_outcome is None:
+        raise ConflictError(
+            "The stored reconciliation outcome could not be established for "
+            "this idempotent replay."
+        )
+    if stored_outcome is not None and stored_outcome != outcome.value:
+        raise ConflictError(
+            "Idempotency key was reused with a different reconciliation "
+            "outcome."
+        )
+    if (
+        result.get("idempotent_replay")
+        and outcome is ReconciliationOutcome.COMPLETED
+        and (
+            imported is None
+            or result.get("reconciliation_result_digest")
+            != imported.digest
+        )
+    ):
+        raise ConflictError(
+            "Idempotency key was reused with a different completed "
+            "reconciliation fixture."
+        )
+    output = _claim_operational_output(
+        result,
+        synthetic_test_provider=True,
+        requested_test_outcome=outcome.value,
+    )
+    if args.json:
+        _emit(output, as_json=True)
+        return
+    replay = " (idempotent replay)" if result.get("idempotent_replay") else ""
+    print(
+        f"Synthetic test reconciliation for {claim['id']}: "
+        f"observation={result['reconciliation_outcome']}{replay}; "
+        f"claim={result['status']}."
+    )
+    print("Provider scoring callback invoked: no. Automatic retry allowed: no.")
+    print(
+        "Learner projection applied: no. Certification applied: no. "
+        "Mastery applied: no."
+    )
 
 
 def command_task_score(args: argparse.Namespace) -> None:
@@ -3362,14 +3675,59 @@ def build_parser() -> argparse.ArgumentParser:
 
     task_claims = task_sub.add_parser(
         "claims",
-        help="List completed or unresolved scorer callback admissions",
+        help="List scorer callback admissions and reconciliation states",
     )
     task_claims.add_argument("--attempt")
     task_claims.add_argument(
-        "--status", choices=["completed", "unresolved"]
+        "--status",
+        choices=[
+            "unresolved",
+            "unreconciled",
+            "unknown",
+            "definitely_absent",
+            "completed",
+        ],
     )
     task_claims.add_argument("--json", action="store_true")
     task_claims.set_defaults(func=command_task_claims)
+
+    task_claim = task_sub.add_parser(
+        "claim",
+        help="Inspect one scoring admission without invoking its provider",
+    )
+    task_claim.add_argument("claim")
+    task_claim.add_argument("--json", action="store_true")
+    task_claim.set_defaults(func=command_task_claim)
+
+    task_reconcile_claim = task_sub.add_parser(
+        "reconcile-claim",
+        help="Observe an admitted callback with an explicit synthetic test adapter",
+    )
+    task_reconcile_claim.add_argument("claim")
+    task_reconcile_claim.add_argument(
+        "--provider",
+        choices=["deterministic-test"],
+        required=True,
+        help="Observational adapter (only the synthetic test fixture is bundled)",
+    )
+    task_reconcile_claim.add_argument(
+        "--test-outcome",
+        choices=[outcome.value for outcome in ReconciliationOutcome],
+        required=True,
+    )
+    task_reconcile_claim.add_argument(
+        "--score",
+        type=float,
+        help="Synthetic criterion score; required only for completed",
+    )
+    task_reconcile_claim.add_argument(
+        "--reliability",
+        type=float,
+        help="Synthetic reliability; defaults to 1 only for completed",
+    )
+    task_reconcile_claim.add_argument("--idempotency-key", required=True)
+    task_reconcile_claim.add_argument("--json", action="store_true")
+    task_reconcile_claim.set_defaults(func=command_task_reconcile_claim)
 
     task_score = task_sub.add_parser(
         "score", help="Record a visibly synthetic deterministic test score"

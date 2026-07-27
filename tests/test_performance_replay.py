@@ -21,11 +21,15 @@ from tsq.evidence import (
     RubricCriterion,
     TASK_SCHEMA_VERSION,
     TaskModality,
+    canonical_digest,
 )
+from tsq.errors import ValidationError
 from tsq.performance import (
     NORMALIZED_SCORING_RESULT_SCHEMA_VERSION,
     ImportedCriterionResult,
     ImportedEvaluation,
+    ScoringProviderRegistry,
+    SyntheticDeterministicProvider,
 )
 from tsq.performance_ledger import (
     PerformanceLedger,
@@ -33,17 +37,75 @@ from tsq.performance_ledger import (
     TaskReleaseReview,
     performance_projection_snapshot,
 )
+from tsq.reconciliation import (
+    ReconciliationObservation,
+    ReconciliationOutcome,
+    ScoringReconciliationReceipt,
+    ScoringReconciliationRegistry,
+    SyntheticReconciliationAdapter,
+)
 from tsq.replay import ProjectionReplay
 from tsq.store import SCHEMA_VERSION, Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
-GOLDEN = ROOT / "tests" / "fixtures" / "performance_replay_baseline_expected.json"
+GOLDEN = ROOT / "tests" / "fixtures" / "performance_replay_expected.json"
 START = datetime(2112, 8, 9, 10, 0, tzinfo=timezone.utc)
 DIGEST_A = "4" * 64
 DIGEST_B = "5" * 64
 DIGEST_C = "6" * 64
+RECONCILER_ID = "synthetic.performance-replay-reconciler"
+RECONCILER_VERSION = "fixture-v1"
+
+
+def rehash_event_stream(connection, stream_id: str) -> None:
+    """Recompute one test stream after deliberate semantic event tampering."""
+
+    rows = connection.execute(
+        """SELECT * FROM events WHERE stream_id=?
+           ORDER BY stream_version""",
+        (stream_id,),
+    ).fetchall()
+    previous_hash = None
+    for row in rows:
+        payload_hash = canonical_digest(
+            {
+                "event_id": row["event_id"],
+                "stream_id": row["stream_id"],
+                "stream_version": row["stream_version"],
+                "event_type": row["event_type"],
+                "schema_version": row["schema_version"],
+                "occurred_at": row["occurred_at"],
+                "recorded_at": row["recorded_at"],
+                "learner_id": row["learner_id"],
+                "session_id": row["session_id"],
+                "correlation_id": row["correlation_id"],
+                "causation_id": row["causation_id"],
+                "idempotency_key": row["idempotency_key"],
+                "payload": json.loads(row["payload_json"]),
+                "metadata": json.loads(row["metadata_json"]),
+                "previous_hash": previous_hash,
+            }
+        )
+        connection.execute(
+            """UPDATE events SET previous_hash=?, payload_hash=?
+               WHERE event_id=?""",
+            (previous_hash, payload_hash, row["event_id"]),
+        )
+        previous_hash = payload_hash
+    if rows:
+        connection.execute(
+            """UPDATE stream_heads
+               SET stream_version=?, payload_hash=?, updated_at=?
+               WHERE stream_id=?""",
+            (
+                rows[-1]["stream_version"],
+                previous_hash,
+                rows[-1]["recorded_at"],
+                stream_id,
+            ),
+        )
 
 
 class FixedIds:
@@ -75,7 +137,83 @@ class FixedDateTime(datetime):
         return value if tz is None else value.astimezone(tz)
 
 
-def build_performance_database(path: Path) -> tuple[Database, str]:
+def reconciliation_registry(
+    claim: dict[str, object],
+    *,
+    outcome: ReconciliationOutcome,
+    observed_at: datetime,
+    imported: ImportedEvaluation | None = None,
+) -> ScoringReconciliationRegistry:
+    result_digest = None if imported is None else imported.digest
+    observed_timestamp = observed_at.isoformat()
+    provider_receipt_digest = canonical_digest(
+        {
+            "type": "tsq.performance_replay_provider_receipt",
+            "provider_operation_digest": claim["provider_operation_digest"],
+            "outcome": outcome.value,
+            "observed_at": observed_timestamp,
+            "result_digest": result_digest,
+        }
+    )
+    attestation_digest = canonical_digest(
+        {
+            "type": "tsq.performance_replay_reconciler_attestation",
+            "reconciler_id": RECONCILER_ID,
+            "reconciler_version": RECONCILER_VERSION,
+            "provider_receipt_digest": provider_receipt_digest,
+        }
+    )
+    receipt = ScoringReconciliationReceipt(
+        claim_id=claim["id"],
+        attempt_id=claim["attempt_id"],
+        evaluation_id=claim["evaluation_id"],
+        through_sequence=claim["through_sequence"],
+        provider_id=claim["provider_id"],
+        provider_version=claim["provider_version"],
+        reconciler_id=RECONCILER_ID,
+        reconciler_version=RECONCILER_VERSION,
+        action_trace_digest=claim["action_trace_digest"],
+        command_hash=claim["command_hash"],
+        scoring_request_digest=claim["scoring_request_digest"],
+        provider_binding_digest=claim["provider_binding_digest"],
+        outcome=outcome,
+        observed_at=observed_timestamp,
+        completed_at=(
+            observed_timestamp
+            if outcome is ReconciliationOutcome.COMPLETED
+            else None
+        ),
+        result_digest=result_digest,
+        reason_code={
+            ReconciliationOutcome.UNKNOWN: "fixture_callback_still_unknown",
+            ReconciliationOutcome.COMPLETED: "fixture_result_recovered",
+            ReconciliationOutcome.DEFINITELY_ABSENT: (
+                "fixture_callback_definitely_absent"
+            ),
+        }[outcome],
+        provider_operation_digest=claim["provider_operation_digest"],
+        provider_receipt_digest=provider_receipt_digest,
+        attestation_digest=attestation_digest,
+    )
+    adapter = SyntheticReconciliationAdapter(
+        ReconciliationObservation(
+            receipt=receipt,
+            imported_evaluation=imported,
+        ),
+        reconciler_id=RECONCILER_ID,
+        reconciler_version=RECONCILER_VERSION,
+        can_prove_absence=True,
+    )
+    registry = ScoringReconciliationRegistry(allow_synthetic=True)
+    registry.register(adapter, adapter.authority_binding)
+    return registry
+
+
+def build_performance_database(
+    path: Path,
+    *,
+    with_reconciliation: bool = True,
+) -> tuple[Database, str]:
     identifiers = FixedIds()
     FixedDateTime.ticks = 0
     with (
@@ -191,30 +329,113 @@ def build_performance_database(path: Path) -> tuple[Database, str]:
             idempotency_key="performance-replay-submit",
             now=START + timedelta(minutes=4),
         )
-        ledger.import_evaluation(
-            attempt["id"],
-            ImportedEvaluation(
-                criteria=(
-                    ImportedCriterionResult(
-                        criterion_id="criterion_attention_routing",
-                        status=EvaluationStatus.VALID,
-                        score=0.75,
-                        outcome_code="routing_boundary_partial",
-                        phase=ActionPhase.UNASSISTED,
-                        source_action_ids=(
-                            artifact["id"],
-                            checks["id"],
-                            submitted["id"],
-                        ),
-                        reliability=0.9,
+        recovered_evaluation = ImportedEvaluation(
+            criteria=(
+                ImportedCriterionResult(
+                    criterion_id="criterion_attention_routing",
+                    status=EvaluationStatus.VALID,
+                    score=0.75,
+                    outcome_code="routing_boundary_partial",
+                    phase=ActionPhase.UNASSISTED,
+                    source_action_ids=(
+                        artifact["id"],
+                        checks["id"],
+                        submitted["id"],
                     ),
-                )
-            ),
-            provider_id="reviewed_import_fixture",
-            provider_version="v1",
-            idempotency_key="performance-replay-evaluation",
-            now=START + timedelta(minutes=5),
+                    reliability=0.9,
+                ),
+            )
         )
+
+        if not with_reconciliation:
+            ledger.import_evaluation(
+                attempt["id"],
+                recovered_evaluation,
+                provider_id="reviewed_import_fixture",
+                provider_version="v1",
+                idempotency_key="performance-replay-evaluation",
+                now=START + timedelta(minutes=5),
+            )
+        else:
+
+            class StrandedProvider(SyntheticDeterministicProvider):
+                def __init__(self, evaluation, **kwargs):
+                    super().__init__(evaluation, **kwargs)
+                    self.calls = 0
+
+                def score(self, request):
+                    self.calls += 1
+                    raise RuntimeError(
+                        "deterministic stranded callback fixture"
+                    )
+
+            provider = StrandedProvider(
+                recovered_evaluation,
+                provider_id="synthetic.performance-replay-scorer",
+                provider_version="fixture-v1",
+            )
+            scoring_registry = ScoringProviderRegistry(allow_synthetic=True)
+            scoring_registry.register(provider, provider.authority_binding)
+            try:
+                ledger.score_attempt(
+                    attempt["id"],
+                    scoring_registry,
+                    provider.provider_id,
+                    provider.provider_version,
+                    idempotency_key="performance-replay-scoring-claim",
+                    now=START + timedelta(minutes=5),
+                )
+            except ValidationError as exc:
+                if "failed safely" not in str(exc):
+                    raise AssertionError(
+                        "Stranded scoring fixture failed before its callback."
+                    ) from exc
+            else:
+                raise AssertionError(
+                    "Stranded scoring fixture did not fail closed."
+                )
+            claims = ledger.list_scoring_claims(
+                attempt_id=attempt["id"],
+                status="unreconciled",
+            )
+            if len(claims) != 1:
+                raise AssertionError(
+                    "Stranded scoring fixture has no unique claim."
+                )
+            claim = claims[0]
+            ledger.reconcile_scoring_claim(
+                claim["id"],
+                reconciliation_registry(
+                    claim,
+                    outcome=ReconciliationOutcome.UNKNOWN,
+                    observed_at=START + timedelta(minutes=6),
+                ),
+                RECONCILER_ID,
+                RECONCILER_VERSION,
+                idempotency_key=(
+                    "performance-replay-reconciliation-unknown"
+                ),
+                now=START + timedelta(minutes=6),
+            )
+            ledger.reconcile_scoring_claim(
+                claim["id"],
+                reconciliation_registry(
+                    claim,
+                    outcome=ReconciliationOutcome.COMPLETED,
+                    observed_at=START + timedelta(minutes=7),
+                    imported=recovered_evaluation,
+                ),
+                RECONCILER_ID,
+                RECONCILER_VERSION,
+                idempotency_key=(
+                    "performance-replay-reconciliation-completed"
+                ),
+                now=START + timedelta(minutes=7),
+            )
+            if provider.calls != 1:
+                raise AssertionError(
+                    "Reconciliation retried the stranded scoring callback."
+                )
     return database, attempt["id"]
 
 
@@ -227,6 +448,7 @@ def performance_source_snapshot(database: Database) -> dict[str, object]:
                        'PerformanceTaskStarted', 'PerformanceActionRecorded',
                        'PerformanceScoringClaimed',
                        'PerformanceScoringClaimMigrated',
+                       'PerformanceScoringReconciled',
                        'PerformanceScoringLegacyExempted',
                        'TaskEvaluationRecorded', 'ShadowEvidenceReduced'
                    ) ORDER BY stream_id, stream_version"""
@@ -239,6 +461,7 @@ def performance_source_snapshot(database: Database) -> dict[str, object]:
                    WHERE type='trigger' AND tbl_name IN (
                        'performance_attempts', 'performance_actions',
                        'performance_scoring_claims',
+                       'performance_scoring_reconciliations',
                        'task_evaluations', 'shadow_evidence_bundles'
                    ) ORDER BY name"""
             )
@@ -256,8 +479,12 @@ def golden_performance_projection(
     with database.read() as connection:
         row = connection.execute(
             """SELECT attempt.task_digest, task.definition_json,
+                      evaluation.id AS evaluation_id,
+                      evaluation.event_id AS evaluation_event_id,
                       evaluation.evaluation_digest, evaluation.evaluation_json,
                       evaluation.authority_json,
+                      bundle.id AS bundle_id,
+                      bundle.event_id AS bundle_event_id,
                       bundle.bundle_digest, bundle.bundle_json
                FROM performance_attempts attempt
                JOIN performance_tasks task
@@ -268,10 +495,47 @@ def golden_performance_projection(
                JOIN shadow_evidence_bundles bundle
                  ON bundle.evaluation_id=evaluation.id"""
         ).fetchone()
+        scoring_claims = [
+            dict(item)
+            for item in connection.execute(
+                """SELECT id, event_id, claim_schema_version, attempt_id,
+                          evaluation_id, through_sequence, provider_id,
+                          provider_version, action_trace_digest,
+                          scoring_request_digest, provider_binding_digest,
+                          provider_operation_digest, command_hash, claimed_at
+                   FROM performance_scoring_claims ORDER BY id"""
+            )
+        ]
+        scoring_reconciliations = [
+            dict(item)
+            for item in connection.execute(
+                """SELECT observation.id, observation.event_id,
+                          observation.claim_id, observation.attempt_id,
+                          observation.evaluation_id, observation.outcome,
+                          observation.scoring_request_digest,
+                          observation.provider_binding_digest,
+                          observation.provider_operation_digest,
+                          observation.reconciler_id,
+                          observation.reconciler_version,
+                          observation.reconciliation_binding_digest,
+                          observation.receipt_digest,
+                          observation.normalized_result_digest,
+                          observation.reconciled_at,
+                          observation.command_hash
+                   FROM performance_scoring_reconciliations observation
+                   JOIN events event
+                     ON event.event_id=observation.event_id
+                   ORDER BY event.stream_id, event.stream_version,
+                            observation.id"""
+            )
+        ]
     task = json.loads(row["definition_json"])
     evaluation = json.loads(row["evaluation_json"])
     authority = json.loads(row["authority_json"])
     bundle = json.loads(row["bundle_json"])
+    claim_state = PerformanceLedger(database).inspect_scoring_claim(
+        scoring_claims[0]["id"]
+    )
     return {
         "format_version": report["format_version"],
         "database_schema_version": report["source_schema_version"],
@@ -290,11 +554,47 @@ def golden_performance_projection(
         "action_trace_digest": evaluation["action_trace_digest"],
         "evaluation_digest": row["evaluation_digest"],
         "bundle_digest": row["bundle_digest"],
+        "projection_rows": {
+            "scoring_claims": scoring_claims,
+            "scoring_reconciliations": scoring_reconciliations,
+            "evaluation": {
+                "id": row["evaluation_id"],
+                "event_id": row["evaluation_event_id"],
+                "digest": row["evaluation_digest"],
+            },
+            "bundle": {
+                "id": row["bundle_id"],
+                "event_id": row["bundle_event_id"],
+                "digest": row["bundle_digest"],
+                "projection_applied": False,
+                "certification_applied": False,
+            },
+        },
+        "claim_state": {
+            "id": claim_state["id"],
+            "status": claim_state["status"],
+            "source": claim_state["source"],
+            "terminal": claim_state["terminal"],
+            "terminal_at": claim_state["terminal_at"],
+            "reconciliation_count": claim_state["reconciliation_count"],
+            "latest_reconciliation_id": claim_state[
+                "latest_reconciliation_id"
+            ],
+            "latest_reconciliation_outcome": claim_state[
+                "latest_reconciliation_outcome"
+            ],
+            "automatic_retry_allowed": claim_state[
+                "automatic_retry_allowed"
+            ],
+        },
         "performance_event_count": report["performance_event_count"],
         "attempt_count": report["reconstructed_performance_attempt_count"],
         "action_count": report["reconstructed_performance_action_count"],
         "scoring_claim_count": report[
             "reconstructed_performance_scoring_claim_count"
+        ],
+        "scoring_reconciliation_count": report[
+            "reconstructed_performance_scoring_reconciliation_count"
         ],
         "evaluation_count": report["reconstructed_task_evaluation_count"],
         "bundle_count": report[
@@ -322,7 +622,7 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         report = ProjectionReplay(self.database).check("performance-replay")
 
         self.assertTrue(report["ok"], report["errors"])
-        self.assertEqual(SCHEMA_VERSION, 18)
+        self.assertEqual(SCHEMA_VERSION, 19)
         self.assertEqual(TASK_SCHEMA_VERSION, 3)
         self.assertEqual(EVIDENCE_BUNDLE_SCHEMA_VERSION, 2)
         self.assertEqual(NORMALIZED_SCORING_RESULT_SCHEMA_VERSION, 1)
@@ -361,9 +661,36 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         )
         self.assertEqual(performance_source_snapshot(self.database), before)
         expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+        actual = golden_performance_projection(report, self.database)
+        reconciliation_rows = actual["projection_rows"][
+            "scoring_reconciliations"
+        ]
         self.assertEqual(
-            golden_performance_projection(report, self.database), expected
+            [row["outcome"] for row in reconciliation_rows],
+            ["unknown", "completed"],
         )
+        self.assertIsNone(reconciliation_rows[0]["normalized_result_digest"])
+        self.assertRegex(
+            reconciliation_rows[1]["normalized_result_digest"],
+            r"^[0-9a-f]{64}$",
+        )
+        self.assertEqual(actual["claim_state"]["status"], "completed")
+        self.assertEqual(actual["claim_state"]["source"], "reconciliation")
+        self.assertEqual(actual["claim_state"]["reconciliation_count"], 2)
+        self.assertFalse(
+            actual["claim_state"]["automatic_retry_allowed"]
+        )
+        self.assertEqual(
+            actual["projection_rows"]["evaluation"]["id"],
+            actual["projection_rows"]["scoring_claims"][0]["evaluation_id"],
+        )
+        self.assertFalse(
+            actual["projection_rows"]["bundle"]["projection_applied"]
+        )
+        self.assertFalse(
+            actual["projection_rows"]["bundle"]["certification_applied"]
+        )
+        self.assertEqual(actual, expected)
 
     def test_corruption_is_detected_and_only_the_copy_is_repaired(self) -> None:
         with self.database.transaction() as connection:
@@ -405,6 +732,73 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         self.assertEqual(
             golden_performance_projection(replayed, rebuilt), expected
         )
+
+    def test_semantic_event_corruption_returns_bounded_failure_report(
+        self,
+    ) -> None:
+        with self.database.transaction() as connection:
+            connection.execute("DROP TRIGGER events_no_update")
+            event = connection.execute(
+                """SELECT event_id, stream_id, payload_json
+                   FROM events
+                   WHERE event_type='PerformanceScoringReconciled'
+                     AND json_extract(payload_json, '$.outcome')='completed'
+                   ORDER BY stream_version DESC LIMIT 1"""
+            ).fetchone()
+            payload = json.loads(event["payload_json"])
+            payload["unexpected_semantic_field"] = True
+            connection.execute(
+                "UPDATE events SET payload_json=? WHERE event_id=?",
+                (
+                    json.dumps(
+                        payload,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    event["event_id"],
+                ),
+            )
+            rehash_event_stream(connection, event["stream_id"])
+
+        report = ProjectionReplay(self.database).check(
+            "performance-replay"
+        )
+
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["rebuild_safe"])
+        self.assertFalse(report["performance_projection_matches_replay"])
+        self.assertIsInstance(report["performance_replay_error"], str)
+        self.assertIn(
+            "unexpected_semantic_field",
+            report["performance_replay_error"],
+        )
+        self.assertIsNone(report["performance_event_count"])
+        self.assertIsNone(
+            report["reconstructed_performance_scoring_reconciliation_count"]
+        )
+        self.assertIsNone(
+            report["reconstructed_performance_projection_hash"]
+        )
+        self.assertEqual(report["performance_checkpoints"], [])
+        self.assertTrue(
+            any(
+                error.startswith(
+                    "performance projection replay failed closed:"
+                )
+                for error in report["errors"]
+            ),
+            report["errors"],
+        )
+        target = Path(self.tempdir.name) / "semantic-corruption.db"
+        with self.assertRaisesRegex(
+            ValidationError,
+            "Projection replay did not verify",
+        ):
+            ProjectionReplay(self.database).rebuild_copy(
+                "performance-replay",
+                target,
+            )
+        self.assertFalse(target.exists())
 
 
 if __name__ == "__main__":

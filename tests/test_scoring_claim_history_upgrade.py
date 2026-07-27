@@ -14,7 +14,7 @@ from pathlib import Path
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError, ValidationError
-from tsq.evidence import ActionPhase, EvaluationStatus
+from tsq.evidence import ActionPhase, EvaluationStatus, canonical_json
 from tsq.performance import (
     ImportedCriterionResult,
     ImportedEvaluation,
@@ -31,6 +31,7 @@ from tsq.store import (
     Database,
     _content_hash,
     performance_scoring_claim_event_key,
+    performance_scoring_claim_payload,
 )
 
 
@@ -42,9 +43,149 @@ START = datetime(2116, 4, 5, 10, 0, tzinfo=timezone.utc)
 SUBMISSION_DIGEST = "9" * 64
 
 
+def restore_pre_reconciliation_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    """Restore the exact historical v18 scoring boundary for fixtures.
+
+    Legacy migration tests start with a current database for convenience.
+    Schema v19 widened scoring claims and added reconciliation state, so the
+    fixture must remove that entire prospective boundary before reconstructing
+    v17 or earlier.  A fixture with reconciliation history cannot represent a
+    historical database and is rejected rather than silently erasing events.
+    """
+
+    reconciliation_table = connection.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type='table'
+             AND name='performance_scoring_reconciliations'"""
+    ).fetchone()
+    if reconciliation_table is None:
+        return
+    if connection.execute(
+        "SELECT 1 FROM performance_scoring_reconciliations LIMIT 1"
+    ).fetchone() is not None:
+        raise AssertionError(
+            "Historical fixture cannot discard scoring reconciliation rows."
+        )
+    if connection.execute(
+        """SELECT 1 FROM events
+           WHERE event_type='PerformanceScoringReconciled'
+           LIMIT 1"""
+    ).fetchone() is not None:
+        raise AssertionError(
+            "Historical fixture cannot discard scoring reconciliation events."
+        )
+
+    claims = [
+        dict(row)
+        for row in connection.execute(
+            "SELECT * FROM performance_scoring_claims ORDER BY id"
+        ).fetchall()
+    ]
+    event_guard = connection.execute(
+        """SELECT sql FROM sqlite_master
+           WHERE type='trigger' AND name='events_no_update'"""
+    ).fetchone()
+    if event_guard is None or not event_guard["sql"]:
+        raise AssertionError(
+            "Historical fixture lacks the immutable event update guard."
+        )
+    connection.execute('DROP TRIGGER "events_no_update"')
+    for trigger_name in (
+        "performance_scoring_claims_validate_insert",
+        "performance_scoring_claims_no_update",
+        "performance_scoring_claims_no_delete",
+        "events_respect_performance_scoring_claim",
+        "performance_scoring_reconciliations_validate_insert",
+        "performance_scoring_reconciliations_no_update",
+        "performance_scoring_reconciliations_no_delete",
+        "events_respect_performance_scoring_reconciliation",
+        "task_evaluations_validate_scoring_claim",
+        "task_evaluations_validate_insert",
+        "shadow_evidence_bundles_validate_insert",
+    ):
+        connection.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
+
+    for claim in claims:
+        claim_event = connection.execute(
+            "SELECT event_type FROM events WHERE event_id=?",
+            (claim["event_id"],),
+        ).fetchone()
+        if claim_event is None or claim_event["event_type"] not in {
+            "PerformanceScoringClaimed",
+            "PerformanceScoringClaimMigrated",
+        }:
+            raise AssertionError(
+                f"Historical claim {claim['id']} lacks its admission event."
+            )
+        migrated = (
+            claim_event["event_type"] == "PerformanceScoringClaimMigrated"
+        )
+        payload = performance_scoring_claim_payload(
+            claim_id=claim["id"],
+            caller_idempotency_key=claim["idempotency_key"],
+            attempt_id=claim["attempt_id"],
+            evaluation_id=claim["evaluation_id"],
+            through_sequence=claim["through_sequence"],
+            provider_id=claim["provider_id"],
+            provider_version=claim["provider_version"],
+            action_trace_digest_value=claim["action_trace_digest"],
+            command_hash=claim["command_hash"],
+            claimed_at=claim["claimed_at"],
+        )
+        connection.execute(
+            """UPDATE events
+               SET schema_version=1, payload_json=?, metadata_json=?
+               WHERE event_id=?""",
+            (
+                canonical_json(payload),
+                canonical_json(
+                    {
+                        "claim_schema_version": 1,
+                        "admission_mode": (
+                            "legacy_projection_migration"
+                            if migrated
+                            else "pre_callback"
+                        ),
+                        "source_schema_version": 15 if migrated else None,
+                        "shadow_only": True,
+                    }
+                ),
+                claim["event_id"],
+            ),
+        )
+    rehash_event_streams(connection)
+
+    connection.execute("DROP TABLE performance_scoring_reconciliations")
+    connection.execute(
+        """ALTER TABLE performance_scoring_claims
+           RENAME TO _schema_v19_scoring_claims"""
+    )
+    Database._create_v16_scoring_claim_table(connection)
+    connection.executemany(
+        """INSERT INTO performance_scoring_claims(
+               id, event_id, idempotency_key, attempt_id, evaluation_id,
+               through_sequence, provider_id, provider_version,
+               action_trace_digest, command_hash, claimed_at
+           ) VALUES (
+               :id, :event_id, :idempotency_key, :attempt_id,
+               :evaluation_id, :through_sequence, :provider_id,
+               :provider_version, :action_trace_digest, :command_hash,
+               :claimed_at
+           )""",
+        claims,
+    )
+    connection.execute("DROP TABLE _schema_v19_scoring_claims")
+    Database._install_v18_performance_scoring_triggers(connection)
+    Database._install_v18_shadow_evidence_bundle_trigger(connection)
+    connection.execute(event_guard["sql"])
+
+
 def restore_pre_shadow_schema(connection: sqlite3.Connection) -> None:
     """Strip the prospective v18 shadow boundary from a legacy fixture."""
 
+    restore_pre_reconciliation_schema(connection)
     table = connection.execute(
         """SELECT 1 FROM sqlite_master
            WHERE type='table' AND name='policy_shadow_evaluations'"""
@@ -548,7 +689,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 18)
+            self.assertEqual(SCHEMA_VERSION, 19)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
@@ -557,7 +698,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
                     connection.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()["value"],
-                    "18",
+                    "19",
                 )
                 migrated = connection.execute(
                     """SELECT claim.*, event.event_type, event.stream_id,

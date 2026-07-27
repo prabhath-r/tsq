@@ -424,7 +424,7 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
 
-        self.assertEqual(schema_version, "18")
+        self.assertEqual(schema_version, "19")
         self.assertEqual(
             decision["invalidation_reason"], "learner_projection_advanced"
         )

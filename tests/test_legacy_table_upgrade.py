@@ -240,7 +240,10 @@ class LegacyTableUpgradeTests(unittest.TestCase):
                 ["--db", str(self.path), "topics", "--json"]
             )
         self.assertEqual(exit_code, 2)
-        self.assertIn("current schema 18", error.getvalue())
+        self.assertIn(
+            f"current schema {SCHEMA_VERSION}",
+            error.getvalue(),
+        )
         self.assertEqual(durable_database_fingerprint(self.path), before)
 
         output = io.StringIO()

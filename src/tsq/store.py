@@ -108,9 +108,12 @@ from .versions import (
 )
 
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX = (
     "performance-score-claim:v1:"
+)
+PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX = (
+    "performance-score-reconcile:v1:"
 )
 LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON = (
     "Unreviewed generated question was active in a historical corpus release."
@@ -151,6 +154,7 @@ CURRENT_SCHEMA_TABLES = frozenset(
         "performance_actions",
         "performance_attempts",
         "performance_scoring_claims",
+        "performance_scoring_reconciliations",
         "policy_shadow_evaluations",
         "performance_task_releases",
         "performance_tasks",
@@ -226,6 +230,110 @@ def performance_scoring_claim_payload(
         "action_trace_digest": action_trace_digest_value,
         "command_hash": command_hash,
         "claimed_at": claimed_at,
+    }
+
+
+def performance_scoring_claim_v2_payload(
+    *,
+    claim_id: str,
+    caller_idempotency_key: str | None,
+    attempt_id: str,
+    evaluation_id: str,
+    through_sequence: int,
+    provider_id: str,
+    provider_version: str,
+    action_trace_digest_value: str,
+    command_hash: str,
+    claimed_at: str,
+    scoring_request_digest: str,
+    provider_binding_digest: str,
+    provider_operation_digest: str,
+    provider: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the closed v2 scoring-admission payload.
+
+    The provider snapshot is committed only to immutable event history.  The
+    projection stores the exact identity and the three digests needed to bind
+    reconciliation without duplicating mutable registry terms.
+    """
+
+    return {
+        **performance_scoring_claim_payload(
+            claim_id=claim_id,
+            caller_idempotency_key=caller_idempotency_key,
+            attempt_id=attempt_id,
+            evaluation_id=evaluation_id,
+            through_sequence=through_sequence,
+            provider_id=provider_id,
+            provider_version=provider_version,
+            action_trace_digest_value=action_trace_digest_value,
+            command_hash=command_hash,
+            claimed_at=claimed_at,
+        ),
+        "scoring_request_digest": scoring_request_digest,
+        "provider_binding_digest": provider_binding_digest,
+        "provider_operation_digest": provider_operation_digest,
+        "provider": provider,
+    }
+
+
+def performance_scoring_reconciliation_event_key(command_hash: str) -> str:
+    """Return the reserved key for one reconciliation observation command."""
+
+    if (
+        type(command_hash) is not str
+        or len(command_hash) != 64
+        or any(character not in "0123456789abcdef" for character in command_hash)
+    ):
+        raise ValidationError(
+            "Performance scoring reconciliation command hash must be "
+            "lowercase SHA-256."
+        )
+    return PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX + command_hash
+
+
+def performance_scoring_reconciliation_payload(
+    *,
+    reconciliation_id: str,
+    caller_idempotency_key: str | None,
+    claim_id: str,
+    attempt_id: str,
+    evaluation_id: str,
+    outcome: str,
+    scoring_request_digest: str,
+    provider_binding_digest: str,
+    provider_operation_digest: str,
+    reconciler_id: str,
+    reconciler_version: str,
+    reconciliation_binding_digest: str,
+    receipt: dict[str, Any],
+    receipt_digest: str,
+    normalized_result_digest: str | None,
+    reconciled_at: str,
+    command_hash: str,
+    reconciler: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the closed event payload for one reconciliation observation."""
+
+    return {
+        "reconciliation_id": reconciliation_id,
+        "caller_idempotency_key": caller_idempotency_key,
+        "claim_id": claim_id,
+        "attempt_id": attempt_id,
+        "evaluation_id": evaluation_id,
+        "outcome": outcome,
+        "scoring_request_digest": scoring_request_digest,
+        "provider_binding_digest": provider_binding_digest,
+        "provider_operation_digest": provider_operation_digest,
+        "reconciler_id": reconciler_id,
+        "reconciler_version": reconciler_version,
+        "reconciliation_binding_digest": reconciliation_binding_digest,
+        "receipt": receipt,
+        "receipt_digest": receipt_digest,
+        "normalized_result_digest": normalized_result_digest,
+        "reconciled_at": reconciled_at,
+        "command_hash": command_hash,
+        "reconciler": reconciler,
     }
 
 
@@ -1239,6 +1347,9 @@ ON performance_actions(attempt_id, sequence);
 CREATE TABLE IF NOT EXISTS performance_scoring_claims (
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
     event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    claim_schema_version INTEGER NOT NULL DEFAULT 1 CHECK(
+        claim_schema_version IN (1, 2)
+    ),
     idempotency_key TEXT UNIQUE CHECK(
         idempotency_key IS NULL
         OR (
@@ -1259,14 +1370,129 @@ CREATE TABLE IF NOT EXISTS performance_scoring_claims (
         length(action_trace_digest) = 64
         AND action_trace_digest NOT GLOB '*[^0-9a-f]*'
     ),
+    scoring_request_digest TEXT CHECK(
+        scoring_request_digest IS NULL
+        OR (
+            length(scoring_request_digest) = 64
+            AND scoring_request_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    provider_binding_digest TEXT CHECK(
+        provider_binding_digest IS NULL
+        OR (
+            length(provider_binding_digest) = 64
+            AND provider_binding_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    provider_operation_digest TEXT CHECK(
+        provider_operation_digest IS NULL
+        OR (
+            length(provider_operation_digest) = 64
+            AND provider_operation_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
     command_hash TEXT NOT NULL UNIQUE CHECK(
         length(command_hash) = 64
         AND command_hash NOT GLOB '*[^0-9a-f]*'
     ),
     claimed_at TEXT NOT NULL,
+    CHECK(
+        (
+            claim_schema_version = 1
+            AND scoring_request_digest IS NULL
+            AND provider_binding_digest IS NULL
+            AND provider_operation_digest IS NULL
+        )
+        OR (
+            claim_schema_version = 2
+            AND scoring_request_digest IS NOT NULL
+            AND provider_binding_digest IS NOT NULL
+            AND provider_operation_digest IS NOT NULL
+        )
+    ),
     FOREIGN KEY(attempt_id) REFERENCES performance_attempts(id)
         DEFERRABLE INITIALLY DEFERRED
 );
+
+-- Reconciliation is observational and append-only.  Repeated unknown
+-- receipts preserve uncertainty.  At most one terminal observation can close
+-- a claim, and no observation may follow that terminal boundary.
+CREATE TABLE IF NOT EXISTS performance_scoring_reconciliations (
+    id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 128),
+    event_id TEXT NOT NULL UNIQUE REFERENCES events(event_id),
+    idempotency_key TEXT UNIQUE CHECK(
+        idempotency_key IS NULL
+        OR (
+            length(idempotency_key) BETWEEN 1 AND 256
+            AND idempotency_key = trim(idempotency_key)
+        )
+    ),
+    claim_id TEXT NOT NULL REFERENCES performance_scoring_claims(id),
+    attempt_id TEXT NOT NULL REFERENCES performance_attempts(id),
+    evaluation_id TEXT NOT NULL CHECK(length(evaluation_id) BETWEEN 1 AND 128),
+    outcome TEXT NOT NULL CHECK(
+        outcome IN ('unknown', 'completed', 'definitely_absent')
+    ),
+    scoring_request_digest TEXT NOT NULL CHECK(
+        length(scoring_request_digest) = 64
+        AND scoring_request_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    provider_binding_digest TEXT NOT NULL CHECK(
+        length(provider_binding_digest) = 64
+        AND provider_binding_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    provider_operation_digest TEXT NOT NULL CHECK(
+        length(provider_operation_digest) = 64
+        AND provider_operation_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    reconciler_id TEXT NOT NULL CHECK(
+        length(trim(reconciler_id)) BETWEEN 1 AND 128
+    ),
+    reconciler_version TEXT NOT NULL CHECK(
+        length(trim(reconciler_version)) BETWEEN 1 AND 128
+    ),
+    reconciliation_binding_digest TEXT NOT NULL CHECK(
+        length(reconciliation_binding_digest) = 64
+        AND reconciliation_binding_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    receipt_json TEXT NOT NULL CHECK(
+        length(receipt_json) <= 131072
+        AND json_valid(receipt_json)
+        AND json_type(receipt_json) = 'object'
+    ),
+    -- SQLite has no built-in SHA-256.  Admission checks lowercase digest
+    -- shape and exact event/projection receipt equality; verify_integrity()
+    -- parses the closed receipt and cryptographically recomputes this digest.
+    receipt_digest TEXT NOT NULL CHECK(
+        length(receipt_digest) = 64
+        AND receipt_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    normalized_result_digest TEXT CHECK(
+        normalized_result_digest IS NULL
+        OR (
+            length(normalized_result_digest) = 64
+            AND normalized_result_digest NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    reconciled_at TEXT NOT NULL,
+    command_hash TEXT NOT NULL UNIQUE CHECK(
+        length(command_hash) = 64
+        AND command_hash NOT GLOB '*[^0-9a-f]*'
+    ),
+    CHECK(
+        (outcome = 'completed' AND normalized_result_digest IS NOT NULL)
+        OR (
+            outcome IN ('unknown', 'definitely_absent')
+            AND normalized_result_digest IS NULL
+        )
+    ),
+    UNIQUE(claim_id, receipt_digest)
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS
+idx_performance_scoring_reconciliations_terminal
+ON performance_scoring_reconciliations(claim_id)
+WHERE outcome IN ('completed', 'definitely_absent');
 
 CREATE TABLE IF NOT EXISTS task_evaluations (
     id TEXT PRIMARY KEY,
@@ -2742,6 +2968,34 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         connection.close()
 
 
+@lru_cache(maxsize=1)
+def _expected_v18_schema_contract() -> _CurrentSchemaContract:
+    """Return the one exact v18 structure accepted as a migration source."""
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    reference = Database(":memory:")
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(DDL)
+        reference._migrate_v11_to_v12(connection)
+        reference._migrate_v12_to_v13(connection)
+        reference._migrate_v13_to_v14(connection)
+        reference._migrate_v14_to_v15(connection)
+        reference._install_current_performance_scoring_triggers(connection)
+        reference._install_v5_indexes(connection)
+        reference._install_v6_authoring_triggers(connection)
+        reference._install_v4_attempt_triggers(connection)
+        reference._install_v8_learning_action_triggers(connection)
+        reference._install_release_snapshot_triggers(connection)
+        reference._install_corpus_registry_triggers(connection)
+        reference._downgrade_v19_contract_to_v18(connection)
+        connection.commit()
+        return _capture_current_schema_contract(connection)
+    finally:
+        connection.close()
+
+
 _POLICY_SHADOW_TABLE = "policy_shadow_evaluations"
 _POLICY_SHADOW_TRIGGER_NAMES = frozenset(
     {
@@ -2756,7 +3010,7 @@ _POLICY_SHADOW_TRIGGER_NAMES = frozenset(
 def _expected_v17_schema_contract() -> _CurrentSchemaContract:
     """Return the one exact v17 structure accepted as a migration source."""
 
-    current = _expected_current_schema_contract()
+    current = _expected_v18_schema_contract()
     return _CurrentSchemaContract(
         tables=tuple(
             table
@@ -3320,7 +3574,16 @@ class Database:
                             )
                             self._enforce_historical_generated_safety()
                             return
-                        if existing_version == 17:
+                        if existing_version == 18:
+                            actual_v18 = _capture_current_schema_contract(
+                                existing_connection
+                            )
+                            if actual_v18 != _expected_v18_schema_contract():
+                                raise ConflictError(
+                                    "Schema v18 structure is not the exact "
+                                    "supported v19 migration source."
+                                )
+                        elif existing_version == 17:
                             actual_v17 = _capture_current_schema_contract(
                                 existing_connection
                             )
@@ -3445,7 +3708,16 @@ class Database:
                 raise ConflictError(
                     f"Database schema is {current_version}; engine expects at most {SCHEMA_VERSION}."
                 )
-            if current_version == 17:
+            if current_version == 18:
+                if (
+                    _capture_current_schema_contract(connection)
+                    != _expected_v18_schema_contract()
+                ):
+                    raise ConflictError(
+                        "Schema v18 structure is not the exact supported "
+                        "v19 migration source."
+                    )
+            elif current_version == 17:
                 if (
                     _capture_current_schema_contract(connection)
                     != _expected_v17_schema_contract()
@@ -3554,6 +3826,13 @@ class Database:
             if current_version < 18:
                 self._migrate_v17_to_v18(connection)
                 current_version = 18
+            # v19 binds new scoring claims to immutable request/provider/
+            # operation commitments and adds a prospective, observational
+            # reconciliation ledger.  Historical v18 claim bytes remain v1
+            # evidence with NULL v2 commitments; no event is fabricated.
+            if current_version < 19:
+                self._migrate_v18_to_v19(connection)
+                current_version = 19
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -5362,6 +5641,100 @@ class Database:
         )
 
     @staticmethod
+    def _install_v18_shadow_evidence_bundle_trigger(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Install the exact session-bound bundle guard used by schema v18."""
+
+        _execute_sql_script(
+            connection,
+            """
+            DROP TRIGGER IF EXISTS shadow_evidence_bundles_validate_insert;
+            CREATE TRIGGER shadow_evidence_bundles_validate_insert
+            BEFORE INSERT ON shadow_evidence_bundles BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM task_evaluations evaluation
+                    JOIN performance_attempts attempt
+                      ON attempt.id = evaluation.attempt_id
+                    JOIN events bundle_event
+                      ON bundle_event.event_id = NEW.event_id
+                    WHERE evaluation.id = NEW.evaluation_id
+                      AND evaluation.attempt_id = NEW.attempt_id
+                      AND bundle_event.event_type = 'ShadowEvidenceReduced'
+                      AND bundle_event.schema_version = 1
+                      AND bundle_event.stream_id =
+                          'learner:' || attempt.learner_id
+                      AND bundle_event.learner_id = attempt.learner_id
+                      AND bundle_event.session_id = attempt.session_id
+                      AND bundle_event.causation_id = evaluation.id
+                      AND bundle_event.recorded_at = NEW.recorded_at
+                      AND json_extract(
+                          bundle_event.payload_json, '$.bundle_id'
+                      ) = NEW.id
+                      AND json_extract(
+                          bundle_event.payload_json, '$.bundle_digest'
+                      ) = NEW.bundle_digest
+                      AND json_extract(
+                          bundle_event.payload_json, '$.projection_applied'
+                      ) = 0
+                      AND json_extract(
+                          bundle_event.payload_json, '$.certification_applied'
+                      ) = 0
+                ) THEN RAISE(
+                    ABORT, 'shadow evidence does not match its evaluation/event'
+                ) END;
+            END;
+            """,
+        )
+
+    @classmethod
+    def _downgrade_v19_contract_to_v18(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Derive the exact empty v18 contract for migration preflight.
+
+        This helper is used only against a fresh in-memory reference schema.
+        It never rewrites a user database.
+        """
+
+        for trigger in (
+            "performance_scoring_claims_validate_insert",
+            "performance_scoring_claims_no_update",
+            "performance_scoring_claims_no_delete",
+            "events_respect_performance_scoring_claim",
+            "performance_scoring_reconciliations_validate_insert",
+            "performance_scoring_reconciliations_no_update",
+            "performance_scoring_reconciliations_no_delete",
+            "events_respect_performance_scoring_reconciliation",
+            "task_evaluations_validate_scoring_claim",
+            "task_evaluations_validate_insert",
+            "shadow_evidence_bundles_validate_insert",
+        ):
+            connection.execute(
+                "DROP TRIGGER IF EXISTS "
+                + _quote_sqlite_identifier(trigger)
+            )
+        if connection.execute(
+            "SELECT 1 FROM performance_scoring_claims LIMIT 1"
+        ).fetchone() is not None:
+            raise RuntimeError(
+                "The v18 contract can only be derived from an empty reference."
+            )
+        if connection.execute(
+            "SELECT 1 FROM performance_scoring_reconciliations LIMIT 1"
+        ).fetchone() is not None:
+            raise RuntimeError(
+                "The v18 contract can only be derived from an empty reference."
+            )
+        connection.execute("DROP TABLE performance_scoring_reconciliations")
+        connection.execute("DROP TABLE performance_scoring_claims")
+        cls._create_v16_scoring_claim_table(connection)
+        cls._install_v18_performance_scoring_triggers(connection)
+        cls._install_v18_shadow_evidence_bundle_trigger(connection)
+
+    @staticmethod
     def _legacy_scoring_claim_trace(
         connection: sqlite3.Connection,
         row: sqlite3.Row,
@@ -5718,6 +6091,102 @@ class Database:
             )
 
     @staticmethod
+    def _migrate_v18_to_v19(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Bind prospective claims and install empty reconciliation history.
+
+        Exact v18 preflight proves the source projection shape.  Existing
+        claim/event bytes predate request and provider-operation commitments,
+        so they are copied verbatim as claim-schema v1 with NULL v2 fields.
+        No historical reconciliation or upgraded claim event is invented.
+        """
+
+        historical_event = connection.execute(
+            """SELECT event_id FROM events
+               WHERE event_type='PerformanceScoringReconciled'
+               ORDER BY event_id LIMIT 1"""
+        ).fetchone()
+        if historical_event is not None:
+            raise ConflictError(
+                "Schema v18 contains a PerformanceScoringReconciled event "
+                "without a v19 event-backed projection; explicit repair is "
+                f"required before v19 ({historical_event['event_id']})."
+            )
+        projected = connection.execute(
+            """SELECT id FROM performance_scoring_reconciliations
+               ORDER BY id LIMIT 1"""
+        ).fetchone()
+        if projected is not None:
+            raise ConflictError(
+                "Schema v19 reconciliation migration requires an empty "
+                "prospective projection."
+            )
+
+        old_rows = connection.execute(
+            "SELECT * FROM performance_scoring_claims ORDER BY id"
+        ).fetchall()
+        for trigger in (
+            "performance_scoring_claims_validate_insert",
+            "performance_scoring_claims_no_update",
+            "performance_scoring_claims_no_delete",
+            "events_respect_performance_scoring_claim",
+            "performance_scoring_reconciliations_validate_insert",
+            "performance_scoring_reconciliations_no_update",
+            "performance_scoring_reconciliations_no_delete",
+            "events_respect_performance_scoring_reconciliation",
+            "task_evaluations_validate_scoring_claim",
+            "task_evaluations_validate_insert",
+        ):
+            connection.execute(
+                "DROP TRIGGER IF EXISTS "
+                + _quote_sqlite_identifier(trigger)
+            )
+        connection.execute(
+            "DROP TABLE performance_scoring_reconciliations"
+        )
+        connection.execute(
+            """ALTER TABLE performance_scoring_claims
+               RENAME TO _tsq_v19_scoring_claims_old"""
+        )
+        # Re-executing idempotent DDL after the two intentional removals
+        # creates the exact current tables and static guards.  All other exact
+        # v18 objects already exist and are therefore left byte-for-byte alone.
+        _execute_sql_script(connection, DDL)
+        # A completed v18 claim legitimately has a later evaluation event
+        # using its caller idempotency key.  The prospective insert guard is
+        # correct at admission time but cannot be reapplied while copying that
+        # already-established immutable history.
+        connection.execute(
+            "DROP TRIGGER performance_scoring_claims_validate_insert"
+        )
+        for row in old_rows:
+            connection.execute(
+                """INSERT INTO performance_scoring_claims(
+                       id, event_id, claim_schema_version, idempotency_key,
+                       attempt_id, evaluation_id, through_sequence,
+                       provider_id, provider_version, action_trace_digest,
+                       scoring_request_digest, provider_binding_digest,
+                       provider_operation_digest, command_hash, claimed_at
+                   ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL,
+                             ?, ?)""",
+                (
+                    row["id"],
+                    row["event_id"],
+                    row["idempotency_key"],
+                    row["attempt_id"],
+                    row["evaluation_id"],
+                    row["through_sequence"],
+                    row["provider_id"],
+                    row["provider_version"],
+                    row["action_trace_digest"],
+                    row["command_hash"],
+                    row["claimed_at"],
+                ),
+            )
+        connection.execute("DROP TABLE _tsq_v19_scoring_claims_old")
+
+    @staticmethod
     def _drop_policy_shadow_triggers(
         connection: sqlite3.Connection,
     ) -> None:
@@ -5752,10 +6221,10 @@ class Database:
             connection.execute(expected[trigger_name])
 
     @staticmethod
-    def _install_current_performance_scoring_triggers(
+    def _install_v18_performance_scoring_triggers(
         connection: sqlite3.Connection,
     ) -> None:
-        """Install the event/projection bijection for callback admissions."""
+        """Install the exact callback-admission guards used by schema v18."""
 
         _execute_sql_script(
             connection,
@@ -5989,6 +6458,1782 @@ class Database:
                       ) = NEW.through_sequence
                 ) THEN RAISE(
                     ABORT, 'task evaluation does not match its event'
+                ) END;
+            END;
+            """,
+        )
+
+    @staticmethod
+    def _install_current_performance_scoring_triggers(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Install the v19 scoring, reconciliation, and recovery guards.
+
+        SQLite can enforce closed JSON shape, scalar types, fixed flags,
+        projection equality, and canonical UTC temporal ordering.  It cannot
+        compute SHA-256: request, trace, command, provider-binding, operation,
+        and receipt digest recomputation deliberately remains an integrity and
+        deterministic-replay responsibility.
+        """
+
+        _execute_sql_script(
+            connection,
+            """
+            DROP TRIGGER IF EXISTS performance_scoring_claims_validate_insert;
+            DROP TRIGGER IF EXISTS performance_scoring_claims_no_update;
+            DROP TRIGGER IF EXISTS performance_scoring_claims_no_delete;
+            DROP TRIGGER IF EXISTS events_respect_performance_scoring_claim;
+            DROP TRIGGER IF EXISTS
+                performance_scoring_reconciliations_validate_insert;
+            DROP TRIGGER IF EXISTS
+                performance_scoring_reconciliations_no_update;
+            DROP TRIGGER IF EXISTS
+                performance_scoring_reconciliations_no_delete;
+            DROP TRIGGER IF EXISTS
+                events_respect_performance_scoring_reconciliation;
+            DROP TRIGGER IF EXISTS task_evaluations_validate_scoring_claim;
+            DROP TRIGGER IF EXISTS task_evaluations_validate_insert;
+            DROP TRIGGER IF EXISTS shadow_evidence_bundles_validate_insert;
+
+            CREATE TRIGGER performance_scoring_claims_validate_insert
+            BEFORE INSERT ON performance_scoring_claims BEGIN
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM performance_scoring_reconciliations reconciliation
+                      WHERE reconciliation.idempotency_key =
+                          NEW.idempotency_key
+                  )
+                THEN RAISE(
+                    ABORT,
+                    'scoring claim idempotency key belongs to a reconciliation'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM events event
+                    WHERE event.idempotency_key = NEW.idempotency_key
+                      AND event.event_id != NEW.event_id
+                ) THEN RAISE(
+                    ABORT, 'scoring claim idempotency key already has an event'
+                ) END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM performance_attempts attempt
+                    JOIN performance_actions submission
+                      ON submission.attempt_id = attempt.id
+                     AND submission.sequence = NEW.through_sequence
+                     AND submission.action_type = 'submitted'
+                    WHERE attempt.id = NEW.attempt_id
+                ) THEN RAISE(
+                    ABORT, 'scoring claim lacks its submitted trace boundary'
+                ) END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM events claim_event
+                    JOIN performance_attempts attempt
+                      ON attempt.id = NEW.attempt_id
+                    JOIN performance_actions submission
+                      ON submission.attempt_id = attempt.id
+                     AND submission.sequence = NEW.through_sequence
+                     AND submission.action_type = 'submitted'
+                    JOIN events submission_event
+                      ON submission_event.event_id = submission.event_id
+                    WHERE claim_event.event_id = NEW.event_id
+                      AND claim_event.stream_id =
+                          'learner:' || attempt.learner_id
+                      AND claim_event.learner_id = attempt.learner_id
+                      AND submission_event.stream_id = claim_event.stream_id
+                      AND claim_event.stream_version >
+                          submission_event.stream_version
+                      AND julianday(NEW.claimed_at) >=
+                          julianday(submission_event.occurred_at)
+                      AND claim_event.idempotency_key =
+                          'performance-score-claim:v1:' || NEW.command_hash
+                      AND claim_event.correlation_id = NEW.attempt_id
+                      AND claim_event.causation_id = NEW.attempt_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.claim_id'
+                      ) = NEW.id
+                      AND json_extract(
+                          claim_event.payload_json,
+                          '$.caller_idempotency_key'
+                      ) IS NEW.idempotency_key
+                      AND json_extract(
+                          claim_event.payload_json, '$.attempt_id'
+                      ) = NEW.attempt_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.evaluation_id'
+                      ) = NEW.evaluation_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.through_sequence'
+                      ) = NEW.through_sequence
+                      AND json_extract(
+                          claim_event.payload_json, '$.provider_id'
+                      ) = NEW.provider_id
+                      AND json_extract(
+                          claim_event.payload_json, '$.provider_version'
+                      ) = NEW.provider_version
+                      AND json_extract(
+                          claim_event.payload_json, '$.action_trace_digest'
+                      ) = NEW.action_trace_digest
+                      AND json_extract(
+                          claim_event.payload_json, '$.command_hash'
+                      ) = NEW.command_hash
+                      AND json_extract(
+                          claim_event.payload_json, '$.claimed_at'
+                      ) = NEW.claimed_at
+                      -- Runtime admission is v2-only.  Historical v1 rows
+                      -- are copied/replayed while this trigger is explicitly
+                      -- absent, then protected immutably after installation.
+                      AND NEW.claim_schema_version = 2
+                      AND (
+                          (
+                              NEW.claim_schema_version = 1
+                              AND claim_event.event_type IN (
+                                  'PerformanceScoringClaimed',
+                                  'PerformanceScoringClaimMigrated'
+                              )
+                              AND claim_event.schema_version = 1
+                              AND json_extract(
+                                  claim_event.metadata_json,
+                                  '$.claim_schema_version'
+                              ) = 1
+                              AND (
+                                  SELECT count(*)
+                                  FROM json_each(claim_event.payload_json)
+                              ) = 10
+                              AND (
+                                  (
+                                      claim_event.event_type =
+                                          'PerformanceScoringClaimed'
+                                      AND claim_event.session_id =
+                                          attempt.session_id
+                                  )
+                                  OR (
+                                      claim_event.event_type =
+                                          'PerformanceScoringClaimMigrated'
+                                      AND (
+                                          claim_event.session_id IS NULL
+                                          OR claim_event.session_id =
+                                              attempt.session_id
+                                      )
+                                  )
+                              )
+                          )
+                          OR (
+                              NEW.claim_schema_version = 2
+                              AND claim_event.event_type =
+                                  'PerformanceScoringClaimed'
+                              AND claim_event.schema_version = 2
+                              AND claim_event.session_id = attempt.session_id
+                              AND claim_event.occurred_at = NEW.claimed_at
+                              AND json_extract(
+                                  claim_event.metadata_json,
+                                  '$.claim_schema_version'
+                              ) = 2
+                              AND json_type(
+                                  claim_event.metadata_json,
+                                  '$.claim_schema_version'
+                              ) = 'integer'
+                              AND json_extract(
+                                  claim_event.metadata_json,
+                                  '$.admission_mode'
+                              ) = 'pre_callback'
+                              AND json_type(
+                                  claim_event.metadata_json,
+                                  '$.admission_mode'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.metadata_json,
+                                  '$.source_schema_version'
+                              ) = 'null'
+                              AND json_type(
+                                  claim_event.metadata_json,
+                                  '$.shadow_only'
+                              ) = 'true'
+                              AND (
+                                  SELECT count(*)
+                                  FROM json_each(claim_event.metadata_json)
+                              ) = 4
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM json_each(claim_event.metadata_json)
+                                  WHERE key NOT IN (
+                                      'claim_schema_version',
+                                      'admission_mode',
+                                      'source_schema_version',
+                                      'shadow_only'
+                                  )
+                              )
+                              AND (
+                                  SELECT count(*)
+                                  FROM json_each(claim_event.payload_json)
+                              ) = 14
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM json_each(claim_event.payload_json)
+                                  WHERE key NOT IN (
+                                      'claim_id',
+                                      'caller_idempotency_key',
+                                      'attempt_id',
+                                      'evaluation_id',
+                                      'through_sequence',
+                                      'provider_id',
+                                      'provider_version',
+                                      'action_trace_digest',
+                                      'command_hash',
+                                      'claimed_at',
+                                      'scoring_request_digest',
+                                      'provider_binding_digest',
+                                      'provider_operation_digest',
+                                      'provider'
+                                  )
+                              )
+                              AND json_type(
+                                  claim_event.payload_json, '$.claim_id'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.caller_idempotency_key'
+                              ) IN ('null', 'text')
+                              AND json_type(
+                                  claim_event.payload_json, '$.attempt_id'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json, '$.evaluation_id'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.through_sequence'
+                              ) = 'integer'
+                              AND json_type(
+                                  claim_event.payload_json, '$.provider_id'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider_version'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.action_trace_digest'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json, '$.command_hash'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json, '$.claimed_at'
+                              ) = 'text'
+                              AND (
+                                  (
+                                      length(NEW.claimed_at) = 25
+                                      AND NEW.claimed_at GLOB
+                                          '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+                                  )
+                                  OR (
+                                      length(NEW.claimed_at) = 32
+                                      AND NEW.claimed_at GLOB
+                                          '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+                                      AND substr(
+                                          NEW.claimed_at, 21, 6
+                                      ) != '000000'
+                                  )
+                              )
+                              AND substr(NEW.claimed_at, 1, 4) != '0000'
+                              AND substr(NEW.claimed_at, 5, 1) = '-'
+                              AND substr(NEW.claimed_at, 8, 1) = '-'
+                              AND substr(NEW.claimed_at, 11, 1) = 'T'
+                              AND substr(NEW.claimed_at, 14, 1) = ':'
+                              AND substr(NEW.claimed_at, 17, 1) = ':'
+                              AND substr(NEW.claimed_at, -6) = '+00:00'
+                              AND substr(NEW.claimed_at, 12, 2)
+                                  BETWEEN '00' AND '23'
+                              AND substr(NEW.claimed_at, 15, 2)
+                                  BETWEEN '00' AND '59'
+                              AND substr(NEW.claimed_at, 18, 2)
+                                  BETWEEN '00' AND '59'
+                              AND julianday(NEW.claimed_at) IS NOT NULL
+                              AND strftime(
+                                  '%Y-%m-%d', NEW.claimed_at
+                              ) = substr(NEW.claimed_at, 1, 10)
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.scoring_request_digest'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider_binding_digest'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider_operation_digest'
+                              ) = 'text'
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.scoring_request_digest'
+                              ) = NEW.scoring_request_digest
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider_binding_digest'
+                              ) = NEW.provider_binding_digest
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider_operation_digest'
+                              ) = NEW.provider_operation_digest
+                              AND json_type(
+                                  claim_event.payload_json, '$.provider'
+                              ) = 'object'
+                              AND (
+                                  SELECT count(*)
+                                  FROM json_each(
+                                      claim_event.payload_json, '$.provider'
+                                  )
+                              ) = 11
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM json_each(
+                                      claim_event.payload_json, '$.provider'
+                                  )
+                                  WHERE key NOT IN (
+                                      'provider_id',
+                                      'provider_version',
+                                      'declared_kind',
+                                      'authority_id',
+                                      'authority_manifest_digest',
+                                      'binding_digest',
+                                      'check_set_manifests',
+                                      'artifact_manifests',
+                                      'verified',
+                                      'synthetic',
+                                      'shadow_only'
+                                  )
+                              )
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.provider_id'
+                              ) = NEW.provider_id
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.provider_version'
+                              ) = NEW.provider_version
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.binding_digest'
+                              ) = NEW.provider_binding_digest
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.provider_id'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.provider_version'
+                              ) = 'text'
+                              AND substr(NEW.provider_id, 1, 1)
+                                  GLOB '[A-Za-z0-9]'
+                              AND NEW.provider_id NOT GLOB
+                                  '*[^A-Za-z0-9._:-]*'
+                              AND substr(NEW.provider_version, 1, 1)
+                                  GLOB '[A-Za-z0-9]'
+                              AND NEW.provider_version NOT GLOB
+                                  '*[^A-Za-z0-9._:-]*'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.declared_kind'
+                              ) = 'text'
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.declared_kind'
+                              ) IN (
+                                  'deterministic',
+                                  'human',
+                                  'model',
+                                  'imported'
+                              )
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.authority_id'
+                              ) = 'text'
+                              AND length(json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.authority_id'
+                              )) BETWEEN 1 AND 128
+                              AND substr(json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.authority_id'
+                              ), 1, 1) GLOB '[A-Za-z0-9]'
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.authority_id'
+                              ) NOT GLOB '*[^A-Za-z0-9._:-]*'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.authority_manifest_digest'
+                              ) = 'text'
+                              AND length(json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.authority_manifest_digest'
+                              )) = 64
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.authority_manifest_digest'
+                              ) NOT GLOB '*[^0-9a-f]*'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.binding_digest'
+                              ) = 'text'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.check_set_manifests'
+                              ) = 'array'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.artifact_manifests'
+                              ) = 'array'
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.verified'
+                              ) IN ('true', 'false')
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.synthetic'
+                              ) IN ('true', 'false')
+                              AND json_type(
+                                  claim_event.payload_json,
+                                  '$.provider.shadow_only'
+                              ) IN ('true', 'false')
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM json_each(
+                                      claim_event.payload_json,
+                                      '$.provider.check_set_manifests'
+                                  ) manifest
+                                  WHERE json_type(manifest.value) != 'object'
+                                     OR (
+                                         SELECT count(*)
+                                         FROM json_each(manifest.value)
+                                     ) != 2
+                                     OR EXISTS (
+                                         SELECT 1
+                                         FROM json_each(manifest.value)
+                                         WHERE key NOT IN (
+                                             'check_set_id',
+                                             'manifest_digest'
+                                         )
+                                     )
+                                     OR (
+                                         SELECT count(*)
+                                         FROM json_each(manifest.value)
+                                         WHERE key = 'check_set_id'
+                                     ) != 1
+                                     OR (
+                                         SELECT count(*)
+                                         FROM json_each(manifest.value)
+                                         WHERE key = 'manifest_digest'
+                                     ) != 1
+                                     OR json_type(
+                                         manifest.value, '$.check_set_id'
+                                     ) != 'text'
+                                     OR length(json_extract(
+                                         manifest.value, '$.check_set_id'
+                                     )) NOT BETWEEN 1 AND 128
+                                     OR substr(json_extract(
+                                         manifest.value, '$.check_set_id'
+                                     ), 1, 1) NOT GLOB '[A-Za-z0-9]'
+                                     OR json_extract(
+                                         manifest.value, '$.check_set_id'
+                                     ) GLOB '*[^A-Za-z0-9._:-]*'
+                                     OR json_type(
+                                         manifest.value, '$.manifest_digest'
+                                     ) != 'text'
+                                     OR length(json_extract(
+                                         manifest.value, '$.manifest_digest'
+                                     )) != 64
+                                     OR json_extract(
+                                         manifest.value, '$.manifest_digest'
+                                     ) GLOB '*[^0-9a-f]*'
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM json_each(
+                                      claim_event.payload_json,
+                                      '$.provider.artifact_manifests'
+                                  ) manifest
+                                  WHERE json_type(manifest.value) != 'object'
+                                     OR (
+                                         SELECT count(*)
+                                         FROM json_each(manifest.value)
+                                     ) != 2
+                                     OR EXISTS (
+                                         SELECT 1
+                                         FROM json_each(manifest.value)
+                                         WHERE key NOT IN (
+                                             'artifact_kind',
+                                             'manifest_digest'
+                                         )
+                                     )
+                                     OR (
+                                         SELECT count(*)
+                                         FROM json_each(manifest.value)
+                                         WHERE key = 'artifact_kind'
+                                     ) != 1
+                                     OR (
+                                         SELECT count(*)
+                                         FROM json_each(manifest.value)
+                                         WHERE key = 'manifest_digest'
+                                     ) != 1
+                                     OR json_type(
+                                         manifest.value, '$.artifact_kind'
+                                     ) != 'text'
+                                     OR length(json_extract(
+                                         manifest.value, '$.artifact_kind'
+                                     )) NOT BETWEEN 1 AND 128
+                                     OR substr(json_extract(
+                                         manifest.value, '$.artifact_kind'
+                                     ), 1, 1) NOT GLOB '[A-Za-z0-9]'
+                                     OR json_extract(
+                                         manifest.value, '$.artifact_kind'
+                                     ) GLOB '*[^A-Za-z0-9._:-]*'
+                                     OR json_type(
+                                         manifest.value, '$.manifest_digest'
+                                     ) != 'text'
+                                     OR length(json_extract(
+                                         manifest.value, '$.manifest_digest'
+                                     )) != 64
+                                     OR json_extract(
+                                         manifest.value, '$.manifest_digest'
+                                     ) GLOB '*[^0-9a-f]*'
+                              )
+                              AND (
+                                  SELECT count(*)
+                                  FROM json_each(
+                                      claim_event.payload_json,
+                                      '$.provider.check_set_manifests'
+                                  )
+                              ) = (
+                                  SELECT count(DISTINCT json_extract(
+                                      value, '$.check_set_id'
+                                  ))
+                                  FROM json_each(
+                                      claim_event.payload_json,
+                                      '$.provider.check_set_manifests'
+                                  )
+                              )
+                              AND (
+                                  SELECT count(*)
+                                  FROM json_each(
+                                      claim_event.payload_json,
+                                      '$.provider.artifact_manifests'
+                                  )
+                              ) = (
+                                  SELECT count(DISTINCT json_extract(
+                                      value, '$.artifact_kind'
+                                  ))
+                                  FROM json_each(
+                                      claim_event.payload_json,
+                                      '$.provider.artifact_manifests'
+                                  )
+                              )
+                              AND (
+                                  (
+                                      json_extract(
+                                          claim_event.payload_json,
+                                          '$.provider.synthetic'
+                                      ) = 1
+                                      AND NEW.provider_id LIKE 'synthetic.%'
+                                      AND json_extract(
+                                          claim_event.payload_json,
+                                          '$.provider.verified'
+                                      ) = 0
+                                  )
+                                  OR (
+                                      json_extract(
+                                          claim_event.payload_json,
+                                          '$.provider.synthetic'
+                                      ) = 0
+                                      AND NEW.provider_id NOT LIKE
+                                          'synthetic.%'
+                                  )
+                              )
+                              AND json_extract(
+                                  claim_event.payload_json,
+                                  '$.provider.shadow_only'
+                              ) = CASE
+                                  WHEN json_extract(
+                                      claim_event.payload_json,
+                                      '$.provider.synthetic'
+                                  ) = 1
+                                    OR json_extract(
+                                      claim_event.payload_json,
+                                      '$.provider.verified'
+                                  ) = 0
+                                    OR json_extract(
+                                      claim_event.payload_json,
+                                      '$.provider.declared_kind'
+                                  ) IN ('model', 'imported')
+                                  THEN 1 ELSE 0 END
+                              AND NOT (
+                                  json_extract(
+                                      claim_event.payload_json,
+                                      '$.provider.verified'
+                                  ) = 1
+                                  AND json_extract(
+                                      claim_event.payload_json,
+                                      '$.provider.declared_kind'
+                                  ) IN ('model', 'imported')
+                              )
+                              AND (
+                                  json_extract(
+                                      claim_event.payload_json,
+                                      '$.provider.verified'
+                                  ) = 0
+                                  OR json_extract(
+                                      claim_event.payload_json,
+                                      '$.provider.declared_kind'
+                                  ) != 'deterministic'
+                                  OR json_array_length(
+                                      claim_event.payload_json,
+                                      '$.provider.check_set_manifests'
+                                  ) > 0
+                                  OR json_array_length(
+                                      claim_event.payload_json,
+                                      '$.provider.artifact_manifests'
+                                  ) > 0
+                              )
+                          )
+                      )
+                ) THEN RAISE(
+                    ABORT, 'scoring claim does not match its event'
+                ) END;
+            END;
+
+            CREATE TRIGGER performance_scoring_claims_no_update
+            BEFORE UPDATE ON performance_scoring_claims BEGIN
+                SELECT RAISE(ABORT, 'performance scoring claims are immutable');
+            END;
+
+            CREATE TRIGGER performance_scoring_claims_no_delete
+            BEFORE DELETE ON performance_scoring_claims BEGIN
+                SELECT RAISE(ABORT, 'performance scoring claims are immutable');
+            END;
+
+            CREATE TRIGGER events_respect_performance_scoring_claim
+            BEFORE INSERT ON events
+            WHEN NEW.idempotency_key IS NOT NULL
+             AND EXISTS (
+                 SELECT 1 FROM performance_scoring_claims claim
+                 WHERE claim.idempotency_key = NEW.idempotency_key
+             )
+            BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM performance_scoring_claims claim
+                    WHERE claim.idempotency_key = NEW.idempotency_key
+                      AND NEW.event_type = 'TaskEvaluationRecorded'
+                      AND json_extract(
+                          NEW.metadata_json, '$.command_hash'
+                      ) = claim.command_hash
+                      AND json_extract(
+                          NEW.payload_json, '$.attempt_id'
+                      ) = claim.attempt_id
+                      AND json_extract(
+                          NEW.payload_json, '$.through_sequence'
+                      ) = claim.through_sequence
+                      AND json_extract(
+                          NEW.payload_json, '$.evaluation.id'
+                      ) = claim.evaluation_id
+                ) THEN RAISE(
+                    ABORT, 'event does not complete its performance scoring claim'
+                ) END;
+            END;
+
+            CREATE TRIGGER
+            performance_scoring_reconciliations_validate_insert
+            BEFORE INSERT ON performance_scoring_reconciliations BEGIN
+                SELECT CASE WHEN NEW.idempotency_key IS NOT NULL
+                  AND EXISTS (
+                      SELECT 1
+                      FROM performance_scoring_claims claim
+                      WHERE claim.idempotency_key = NEW.idempotency_key
+                  )
+                THEN RAISE(
+                    ABORT,
+                    'reconciliation idempotency key belongs to a scoring claim'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1 FROM events event
+                    WHERE event.idempotency_key = NEW.idempotency_key
+                      AND event.event_id != NEW.event_id
+                ) THEN RAISE(
+                    ABORT,
+                    'reconciliation idempotency key already has an event'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM performance_scoring_reconciliations prior
+                    WHERE prior.claim_id = NEW.claim_id
+                      AND prior.outcome IN (
+                          'completed', 'definitely_absent'
+                      )
+                ) THEN RAISE(
+                    ABORT, 'performance scoring claim is already reconciled'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM task_evaluations evaluation
+                    WHERE evaluation.id = NEW.evaluation_id
+                      AND evaluation.attempt_id = NEW.attempt_id
+                ) THEN RAISE(
+                    ABORT,
+                    'completed performance scoring claim cannot be reconciled'
+                ) END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM performance_scoring_claims claim
+                    JOIN performance_attempts attempt
+                      ON attempt.id = claim.attempt_id
+                    JOIN events claim_event
+                      ON claim_event.event_id = claim.event_id
+                    JOIN events reconciliation_event
+                      ON reconciliation_event.event_id = NEW.event_id
+                    WHERE claim.id = NEW.claim_id
+                      AND claim.claim_schema_version = 2
+                      AND claim.attempt_id = NEW.attempt_id
+                      AND claim.evaluation_id = NEW.evaluation_id
+                      AND claim.scoring_request_digest =
+                          NEW.scoring_request_digest
+                      AND claim.provider_binding_digest =
+                          NEW.provider_binding_digest
+                      AND claim.provider_operation_digest =
+                          NEW.provider_operation_digest
+                      AND reconciliation_event.event_type =
+                          'PerformanceScoringReconciled'
+                      AND reconciliation_event.schema_version = 1
+                      AND reconciliation_event.stream_id =
+                          'learner:' || attempt.learner_id
+                      AND reconciliation_event.learner_id =
+                          attempt.learner_id
+                      AND reconciliation_event.session_id IS NULL
+                      AND reconciliation_event.idempotency_key =
+                          'performance-score-reconcile:v1:' ||
+                          NEW.command_hash
+                      AND reconciliation_event.correlation_id =
+                          NEW.attempt_id
+                      AND reconciliation_event.causation_id =
+                          claim.event_id
+                      AND reconciliation_event.occurred_at =
+                          NEW.reconciled_at
+                      AND reconciliation_event.stream_version >
+                          claim_event.stream_version
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM performance_scoring_reconciliations prior
+                          JOIN events prior_event
+                            ON prior_event.event_id = prior.event_id
+                          WHERE prior.claim_id = NEW.claim_id
+                            AND (
+                                prior_event.stream_id !=
+                                    reconciliation_event.stream_id
+                                OR prior_event.stream_version >=
+                                    reconciliation_event.stream_version
+                            )
+                      )
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.reconciliation_schema_version'
+                      ) = 1
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.command_hash'
+                      ) = NEW.command_hash
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.shadow_only'
+                      ) = 1
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.observational_only'
+                      ) = 1
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.automatic_retry_allowed'
+                      ) = 0
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.projection_applied'
+                      ) = 0
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.certification_applied'
+                      ) = 0
+                      AND json_extract(
+                          reconciliation_event.metadata_json,
+                          '$.skill_authority'
+                      ) = 0
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.reconciliation_schema_version'
+                      ) = 'integer'
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.command_hash'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.shadow_only'
+                      ) = 'true'
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.observational_only'
+                      ) = 'true'
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.automatic_retry_allowed'
+                      ) = 'false'
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.projection_applied'
+                      ) = 'false'
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.certification_applied'
+                      ) = 'false'
+                      AND json_type(
+                          reconciliation_event.metadata_json,
+                          '$.skill_authority'
+                      ) = 'false'
+                      AND (
+                          SELECT count(*)
+                          FROM json_each(
+                              reconciliation_event.metadata_json
+                          )
+                      ) = 8
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM json_each(
+                              reconciliation_event.metadata_json
+                          )
+                          WHERE key NOT IN (
+                              'reconciliation_schema_version',
+                              'command_hash',
+                              'observational_only',
+                              'automatic_retry_allowed',
+                              'projection_applied',
+                              'certification_applied',
+                              'skill_authority',
+                              'shadow_only'
+                          )
+                      )
+                      AND (
+                          SELECT count(*)
+                          FROM json_each(
+                              reconciliation_event.payload_json
+                          )
+                      ) = 18
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM json_each(
+                              reconciliation_event.payload_json
+                          )
+                          WHERE key NOT IN (
+                              'reconciliation_id',
+                              'caller_idempotency_key',
+                              'claim_id',
+                              'attempt_id',
+                              'evaluation_id',
+                              'outcome',
+                              'scoring_request_digest',
+                              'provider_binding_digest',
+                              'provider_operation_digest',
+                              'reconciler_id',
+                              'reconciler_version',
+                              'reconciliation_binding_digest',
+                              'receipt',
+                              'receipt_digest',
+                              'normalized_result_digest',
+                              'reconciled_at',
+                              'command_hash',
+                              'reconciler'
+                          )
+                      )
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciliation_id'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.caller_idempotency_key'
+                      ) IN ('null', 'text')
+                      AND json_type(
+                          reconciliation_event.payload_json, '$.claim_id'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json, '$.attempt_id'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json, '$.evaluation_id'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json, '$.outcome'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.scoring_request_digest'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.provider_binding_digest'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.provider_operation_digest'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler_id'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler_version'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciliation_binding_digest'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json, '$.receipt'
+                      ) = 'object'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.receipt_digest'
+                      ) = 'text'
+                      AND (
+                          (
+                              NEW.outcome = 'completed'
+                              AND json_type(
+                                  reconciliation_event.payload_json,
+                                  '$.normalized_result_digest'
+                              ) = 'text'
+                          )
+                          OR (
+                              NEW.outcome IN (
+                                  'unknown', 'definitely_absent'
+                              )
+                              AND json_type(
+                                  reconciliation_event.payload_json,
+                                  '$.normalized_result_digest'
+                              ) = 'null'
+                          )
+                      )
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciled_at'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json, '$.command_hash'
+                      ) = 'text'
+                      AND (
+                          (
+                              length(NEW.reconciled_at) = 25
+                              AND NEW.reconciled_at GLOB
+                                  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+                          )
+                          OR (
+                              length(NEW.reconciled_at) = 32
+                              AND NEW.reconciled_at GLOB
+                                  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+                              AND substr(
+                                  NEW.reconciled_at, 21, 6
+                              ) != '000000'
+                          )
+                      )
+                      AND substr(NEW.reconciled_at, 1, 4) != '0000'
+                      AND substr(NEW.reconciled_at, 5, 1) = '-'
+                      AND substr(NEW.reconciled_at, 8, 1) = '-'
+                      AND substr(NEW.reconciled_at, 11, 1) = 'T'
+                      AND substr(NEW.reconciled_at, 14, 1) = ':'
+                      AND substr(NEW.reconciled_at, 17, 1) = ':'
+                      AND substr(NEW.reconciled_at, -6) = '+00:00'
+                      AND substr(NEW.reconciled_at, 12, 2)
+                          BETWEEN '00' AND '23'
+                      AND substr(NEW.reconciled_at, 15, 2)
+                          BETWEEN '00' AND '59'
+                      AND substr(NEW.reconciled_at, 18, 2)
+                          BETWEEN '00' AND '59'
+                      AND julianday(NEW.reconciled_at) IS NOT NULL
+                      AND strftime(
+                          '%Y-%m-%d', NEW.reconciled_at
+                      ) = substr(NEW.reconciled_at, 1, 10)
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciliation_id'
+                      ) = NEW.id
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.caller_idempotency_key'
+                      ) IS NEW.idempotency_key
+                      AND json_extract(
+                          reconciliation_event.payload_json, '$.claim_id'
+                      ) = NEW.claim_id
+                      AND json_extract(
+                          reconciliation_event.payload_json, '$.attempt_id'
+                      ) = NEW.attempt_id
+                      AND json_extract(
+                          reconciliation_event.payload_json, '$.evaluation_id'
+                      ) = NEW.evaluation_id
+                      AND json_extract(
+                          reconciliation_event.payload_json, '$.outcome'
+                      ) = NEW.outcome
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.scoring_request_digest'
+                      ) = NEW.scoring_request_digest
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.provider_binding_digest'
+                      ) = NEW.provider_binding_digest
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.provider_operation_digest'
+                      ) = NEW.provider_operation_digest
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler_id'
+                      ) = NEW.reconciler_id
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler_version'
+                      ) = NEW.reconciler_version
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciliation_binding_digest'
+                      ) = NEW.reconciliation_binding_digest
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.receipt_digest'
+                      ) = NEW.receipt_digest
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.normalized_result_digest'
+                      ) IS NEW.normalized_result_digest
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciled_at'
+                      ) = NEW.reconciled_at
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.command_hash'
+                      ) = NEW.command_hash
+                      AND json_extract(
+                          reconciliation_event.payload_json, '$.receipt'
+                      ) = json(NEW.receipt_json)
+                      AND json_type(
+                          reconciliation_event.payload_json, '$.reconciler'
+                      ) = 'object'
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.provider_id'
+                      ) = claim.provider_id
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.provider_version'
+                      ) = claim.provider_version
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.reconciler_id'
+                      ) = NEW.reconciler_id
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.reconciler_version'
+                      ) = NEW.reconciler_version
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.binding_digest'
+                      ) = NEW.reconciliation_binding_digest
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.observational_only'
+                      ) = 1
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.skill_authority'
+                      ) = 0
+                      AND (
+                          NEW.outcome != 'definitely_absent'
+                          OR json_extract(
+                              reconciliation_event.payload_json,
+                              '$.reconciler.can_prove_absence'
+                          ) = 1
+                      )
+                      AND (
+                          SELECT count(*)
+                          FROM json_each(
+                              reconciliation_event.payload_json,
+                              '$.reconciler'
+                          )
+                      ) = 10
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM json_each(
+                              reconciliation_event.payload_json,
+                              '$.reconciler'
+                          )
+                          WHERE key NOT IN (
+                              'provider_id',
+                              'provider_version',
+                              'reconciler_id',
+                              'reconciler_version',
+                              'manifest_digest',
+                              'binding_digest',
+                              'synthetic',
+                              'can_prove_absence',
+                              'observational_only',
+                              'skill_authority'
+                          )
+                      )
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.provider_id'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.provider_version'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.reconciler_id'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.reconciler_version'
+                      ) = 'text'
+                      AND substr(NEW.reconciler_id, 1, 1)
+                          GLOB '[A-Za-z0-9]'
+                      AND NEW.reconciler_id NOT GLOB
+                          '*[^A-Za-z0-9._:-]*'
+                      AND substr(NEW.reconciler_version, 1, 1)
+                          GLOB '[A-Za-z0-9]'
+                      AND NEW.reconciler_version NOT GLOB
+                          '*[^A-Za-z0-9._:-]*'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.manifest_digest'
+                      ) = 'text'
+                      AND length(json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.manifest_digest'
+                      )) = 64
+                      AND json_extract(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.manifest_digest'
+                      ) NOT GLOB '*[^0-9a-f]*'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.binding_digest'
+                      ) = 'text'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.synthetic'
+                      ) IN ('true', 'false')
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.can_prove_absence'
+                      ) IN ('true', 'false')
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.observational_only'
+                      ) = 'true'
+                      AND json_type(
+                          reconciliation_event.payload_json,
+                          '$.reconciler.skill_authority'
+                      ) = 'false'
+                      AND (
+                          (
+                              json_extract(
+                                  reconciliation_event.payload_json,
+                                  '$.reconciler.synthetic'
+                              ) = 1
+                              AND NEW.reconciler_id LIKE 'synthetic.%'
+                          )
+                          OR (
+                              json_extract(
+                                  reconciliation_event.payload_json,
+                                  '$.reconciler.synthetic'
+                              ) = 0
+                              AND NEW.reconciler_id NOT LIKE 'synthetic.%'
+                          )
+                      )
+                      AND (
+                          SELECT count(*) FROM json_each(NEW.receipt_json)
+                      ) = 21
+                      AND NOT EXISTS (
+                          SELECT 1 FROM json_each(NEW.receipt_json)
+                          WHERE key NOT IN (
+                              'claim_id',
+                              'attempt_id',
+                              'evaluation_id',
+                              'through_sequence',
+                              'provider_id',
+                              'provider_version',
+                              'reconciler_id',
+                              'reconciler_version',
+                              'action_trace_digest',
+                              'command_hash',
+                              'scoring_request_digest',
+                              'provider_binding_digest',
+                              'outcome',
+                              'observed_at',
+                              'completed_at',
+                              'result_digest',
+                              'reason_code',
+                              'provider_operation_digest',
+                              'provider_receipt_digest',
+                              'attestation_digest',
+                              'schema_version'
+                          )
+                      )
+                      AND json_extract(
+                          NEW.receipt_json, '$.schema_version'
+                      ) = 1
+                      AND json_type(
+                          NEW.receipt_json, '$.schema_version'
+                      ) = 'integer'
+                      AND json_type(
+                          NEW.receipt_json, '$.claim_id'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.attempt_id'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.evaluation_id'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.through_sequence'
+                      ) = 'integer'
+                      AND json_type(
+                          NEW.receipt_json, '$.provider_id'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.provider_version'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.reconciler_id'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.reconciler_version'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.action_trace_digest'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.command_hash'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.scoring_request_digest'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.provider_binding_digest'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.outcome'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.observed_at'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.reason_code'
+                      ) = 'text'
+                      AND length(json_extract(
+                          NEW.receipt_json, '$.reason_code'
+                      )) BETWEEN 1 AND 128
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.reason_code'
+                      ), 1, 1) GLOB '[A-Za-z0-9]'
+                      AND json_extract(
+                          NEW.receipt_json, '$.reason_code'
+                      ) NOT GLOB '*[^A-Za-z0-9._:-]*'
+                      AND json_type(
+                          NEW.receipt_json, '$.provider_operation_digest'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.provider_receipt_digest'
+                      ) = 'text'
+                      AND json_type(
+                          NEW.receipt_json, '$.attestation_digest'
+                      ) = 'text'
+                      AND (
+                          (
+                              length(json_extract(
+                                  NEW.receipt_json, '$.observed_at'
+                              )) = 25
+                              AND json_extract(
+                                  NEW.receipt_json, '$.observed_at'
+                              ) GLOB
+                                  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+                          )
+                          OR (
+                              length(json_extract(
+                                  NEW.receipt_json, '$.observed_at'
+                              )) = 32
+                              AND json_extract(
+                                  NEW.receipt_json, '$.observed_at'
+                              ) GLOB
+                                  '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.observed_at'
+                              ), 21, 6) != '000000'
+                          )
+                      )
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 1, 4) != '0000'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 5, 1) = '-'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 8, 1) = '-'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 11, 1) = 'T'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 14, 1) = ':'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 17, 1) = ':'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), -6) = '+00:00'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 12, 2) BETWEEN '00' AND '23'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 15, 2) BETWEEN '00' AND '59'
+                      AND substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 18, 2) BETWEEN '00' AND '59'
+                      AND julianday(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      )) IS NOT NULL
+                      AND strftime(
+                          '%Y-%m-%d',
+                          json_extract(
+                              NEW.receipt_json, '$.observed_at'
+                          )
+                      ) = substr(json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ), 1, 10)
+                      AND json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ) >= claim.claimed_at
+                      AND json_extract(
+                          NEW.receipt_json, '$.observed_at'
+                      ) <= NEW.reconciled_at
+                      AND json_extract(
+                          NEW.receipt_json, '$.claim_id'
+                      ) = claim.id
+                      AND json_extract(
+                          NEW.receipt_json, '$.attempt_id'
+                      ) = claim.attempt_id
+                      AND json_extract(
+                          NEW.receipt_json, '$.evaluation_id'
+                      ) = claim.evaluation_id
+                      AND json_extract(
+                          NEW.receipt_json, '$.through_sequence'
+                      ) = claim.through_sequence
+                      AND json_extract(
+                          NEW.receipt_json, '$.provider_id'
+                      ) = claim.provider_id
+                      AND json_extract(
+                          NEW.receipt_json, '$.provider_version'
+                      ) = claim.provider_version
+                      AND json_extract(
+                          NEW.receipt_json, '$.reconciler_id'
+                      ) = NEW.reconciler_id
+                      AND json_extract(
+                          NEW.receipt_json, '$.reconciler_version'
+                      ) = NEW.reconciler_version
+                      AND json_extract(
+                          NEW.receipt_json, '$.action_trace_digest'
+                      ) = claim.action_trace_digest
+                      AND json_extract(
+                          NEW.receipt_json, '$.command_hash'
+                      ) = claim.command_hash
+                      AND json_extract(
+                          NEW.receipt_json, '$.scoring_request_digest'
+                      ) = claim.scoring_request_digest
+                      AND json_extract(
+                          NEW.receipt_json, '$.provider_binding_digest'
+                      ) = claim.provider_binding_digest
+                      AND json_extract(
+                          NEW.receipt_json, '$.provider_operation_digest'
+                      ) = claim.provider_operation_digest
+                      AND json_extract(
+                          NEW.receipt_json, '$.outcome'
+                      ) = NEW.outcome
+                      AND length(json_extract(
+                          NEW.receipt_json, '$.provider_receipt_digest'
+                      )) = 64
+                      AND json_extract(
+                          NEW.receipt_json, '$.provider_receipt_digest'
+                      ) NOT GLOB '*[^0-9a-f]*'
+                      AND length(json_extract(
+                          NEW.receipt_json, '$.attestation_digest'
+                      )) = 64
+                      AND json_extract(
+                          NEW.receipt_json, '$.attestation_digest'
+                      ) NOT GLOB '*[^0-9a-f]*'
+                      AND (
+                          (
+                              NEW.outcome = 'completed'
+                              AND json_type(
+                                  NEW.receipt_json, '$.completed_at'
+                              ) = 'text'
+                              AND (
+                                  (
+                                      length(json_extract(
+                                          NEW.receipt_json, '$.completed_at'
+                                      )) = 25
+                                      AND json_extract(
+                                          NEW.receipt_json, '$.completed_at'
+                                      ) GLOB
+                                          '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9]+00:00'
+                                  )
+                                  OR (
+                                      length(json_extract(
+                                          NEW.receipt_json, '$.completed_at'
+                                      )) = 32
+                                      AND json_extract(
+                                          NEW.receipt_json, '$.completed_at'
+                                      ) GLOB
+                                          '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9][0-9][0-9][0-9]+00:00'
+                                      AND substr(json_extract(
+                                          NEW.receipt_json, '$.completed_at'
+                                      ), 21, 6) != '000000'
+                                  )
+                              )
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 1, 4) != '0000'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 5, 1) = '-'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 8, 1) = '-'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 11, 1) = 'T'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 14, 1) = ':'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 17, 1) = ':'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), -6) = '+00:00'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 12, 2) BETWEEN '00' AND '23'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 15, 2) BETWEEN '00' AND '59'
+                              AND substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 18, 2) BETWEEN '00' AND '59'
+                              AND julianday(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              )) IS NOT NULL
+                              AND strftime(
+                                  '%Y-%m-%d',
+                                  json_extract(
+                                      NEW.receipt_json, '$.completed_at'
+                                  )
+                              ) = substr(json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ), 1, 10)
+                              AND json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ) >= claim.claimed_at
+                              AND json_extract(
+                                  NEW.receipt_json, '$.completed_at'
+                              ) <= json_extract(
+                                  NEW.receipt_json, '$.observed_at'
+                              )
+                              AND json_type(
+                                  NEW.receipt_json, '$.result_digest'
+                              ) = 'text'
+                              AND length(json_extract(
+                                  NEW.receipt_json, '$.result_digest'
+                              )) = 64
+                              AND json_extract(
+                                  NEW.receipt_json, '$.result_digest'
+                              ) NOT GLOB '*[^0-9a-f]*'
+                          )
+                          OR (
+                              NEW.outcome IN (
+                                  'unknown', 'definitely_absent'
+                              )
+                              AND json_type(
+                                  NEW.receipt_json, '$.completed_at'
+                              ) = 'null'
+                              AND json_type(
+                                  NEW.receipt_json, '$.result_digest'
+                              ) = 'null'
+                          )
+                      )
+                ) THEN RAISE(
+                    ABORT,
+                    'performance scoring reconciliation does not match its claim/event/receipt'
+                ) END;
+            END;
+
+            CREATE TRIGGER performance_scoring_reconciliations_no_update
+            BEFORE UPDATE ON performance_scoring_reconciliations BEGIN
+                SELECT RAISE(
+                    ABORT, 'performance scoring reconciliations are immutable'
+                );
+            END;
+
+            CREATE TRIGGER performance_scoring_reconciliations_no_delete
+            BEFORE DELETE ON performance_scoring_reconciliations BEGIN
+                SELECT RAISE(
+                    ABORT, 'performance scoring reconciliations are immutable'
+                );
+            END;
+
+            CREATE TRIGGER
+            events_respect_performance_scoring_reconciliation
+            BEFORE INSERT ON events
+            WHEN NEW.idempotency_key IS NOT NULL
+             AND EXISTS (
+                 SELECT 1
+                 FROM performance_scoring_reconciliations reconciliation
+                 WHERE reconciliation.idempotency_key = NEW.idempotency_key
+             )
+            BEGIN
+                SELECT RAISE(
+                    ABORT,
+                    'event idempotency key is reserved by a reconciliation'
+                );
+            END;
+
+            CREATE TRIGGER task_evaluations_validate_scoring_claim
+            BEFORE INSERT ON task_evaluations BEGIN
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM performance_scoring_claims claim
+                    JOIN events evaluation_event
+                      ON evaluation_event.event_id = NEW.event_id
+                    WHERE claim.command_hash = NEW.command_hash
+                      AND (
+                          claim.attempt_id != NEW.attempt_id
+                          OR claim.evaluation_id != NEW.id
+                          OR claim.through_sequence != NEW.through_sequence
+                          OR (
+                              evaluation_event.idempotency_key
+                                  IS NOT claim.idempotency_key
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM performance_scoring_reconciliations
+                                       reconciliation
+                                  WHERE reconciliation.claim_id = claim.id
+                                    AND reconciliation.event_id =
+                                        evaluation_event.causation_id
+                                    AND reconciliation.outcome = 'completed'
+                                    AND evaluation_event.idempotency_key IS NULL
+                              )
+                          )
+                      )
+                ) THEN RAISE(
+                    ABORT, 'task evaluation does not complete its scoring claim'
+                ) END;
+                SELECT CASE WHEN EXISTS (
+                    SELECT 1
+                    FROM performance_scoring_claims claim
+                    JOIN performance_scoring_reconciliations reconciliation
+                      ON reconciliation.claim_id = claim.id
+                    WHERE claim.command_hash = NEW.command_hash
+                      AND claim.attempt_id = NEW.attempt_id
+                      AND claim.evaluation_id = NEW.id
+                      AND reconciliation.outcome = 'definitely_absent'
+                ) THEN RAISE(
+                    ABORT,
+                    'definitely absent scoring operation cannot be evaluated'
+                ) END;
+                SELECT CASE WHEN json_extract(
+                    NEW.authority_json,
+                    '$.normalized_result.normalization_mode'
+                ) = 'registered_provider' AND NOT EXISTS (
+                    SELECT 1 FROM performance_scoring_claims claim
+                    WHERE claim.command_hash = NEW.command_hash
+                      AND claim.attempt_id = NEW.attempt_id
+                      AND claim.evaluation_id = NEW.id
+                      AND claim.through_sequence = NEW.through_sequence
+                ) AND NOT EXISTS (
+                    SELECT 1 FROM events exemption
+                    WHERE exemption.event_type =
+                          'PerformanceScoringLegacyExempted'
+                      AND exemption.schema_version = 1
+                      AND json_extract(
+                          exemption.payload_json, '$.evaluation_id'
+                      ) = NEW.id
+                      AND json_extract(
+                          exemption.payload_json, '$.attempt_id'
+                      ) = NEW.attempt_id
+                      AND json_extract(
+                          exemption.payload_json, '$.command_hash'
+                      ) = NEW.command_hash
+                ) THEN RAISE(
+                    ABORT, 'registered evaluation lacks its scoring claim'
+                ) END;
+            END;
+
+            CREATE TRIGGER task_evaluations_validate_insert
+            BEFORE INSERT ON task_evaluations BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1 FROM performance_actions submission
+                    WHERE submission.attempt_id = NEW.attempt_id
+                      AND submission.action_type = 'submitted'
+                      AND submission.sequence = NEW.through_sequence
+                ) THEN RAISE(
+                    ABORT, 'task evaluation lacks its submitted trace boundary'
+                ) END;
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM performance_attempts attempt
+                    JOIN events evaluation_event
+                      ON evaluation_event.event_id = NEW.event_id
+                    WHERE attempt.id = NEW.attempt_id
+                      AND evaluation_event.event_type = 'TaskEvaluationRecorded'
+                      AND evaluation_event.schema_version = 1
+                      AND evaluation_event.stream_id =
+                          'learner:' || attempt.learner_id
+                      AND evaluation_event.learner_id = attempt.learner_id
+                      AND (
+                          (
+                              evaluation_event.session_id =
+                                  attempt.session_id
+                              AND (
+                                  evaluation_event.causation_id =
+                                      NEW.attempt_id
+                                  OR EXISTS (
+                                      SELECT 1
+                                      FROM performance_scoring_claims claim
+                                      WHERE claim.event_id =
+                                            evaluation_event.causation_id
+                                        AND claim.attempt_id = NEW.attempt_id
+                                        AND claim.evaluation_id = NEW.id
+                                        AND claim.command_hash =
+                                            NEW.command_hash
+                                  )
+                              )
+                              AND NOT EXISTS (
+                                  SELECT 1
+                                  FROM performance_scoring_claims claim
+                                  JOIN performance_scoring_reconciliations
+                                       reconciliation
+                                    ON reconciliation.claim_id = claim.id
+                                  WHERE claim.attempt_id = NEW.attempt_id
+                                    AND claim.evaluation_id = NEW.id
+                                    AND claim.command_hash =
+                                        NEW.command_hash
+                                    AND reconciliation.outcome IN (
+                                        'completed', 'definitely_absent'
+                                    )
+                              )
+                          )
+                          OR (
+                              evaluation_event.session_id IS NULL
+                              AND EXISTS (
+                                  SELECT 1
+                                  FROM performance_scoring_reconciliations
+                                       reconciliation
+                                  JOIN performance_scoring_claims claim
+                                    ON claim.id =
+                                       reconciliation.claim_id
+                                  JOIN events reconciliation_event
+                                    ON reconciliation_event.event_id =
+                                       reconciliation.event_id
+                                  WHERE reconciliation.event_id =
+                                        evaluation_event.causation_id
+                                    AND reconciliation.outcome = 'completed'
+                                    AND reconciliation.attempt_id =
+                                        NEW.attempt_id
+                                    AND reconciliation.evaluation_id = NEW.id
+                                    AND claim.command_hash =
+                                        NEW.command_hash
+                                    AND json_extract(
+                                        NEW.authority_json,
+                                        '$.normalized_result_digest'
+                                    ) =
+                                        reconciliation.normalized_result_digest
+                                    AND json_extract(
+                                        evaluation_event.payload_json,
+                                        '$.authority.normalized_result_digest'
+                                    ) =
+                                        reconciliation.normalized_result_digest
+                                    AND evaluation_event.stream_version >
+                                        reconciliation_event.stream_version
+                              )
+                          )
+                      )
+                      AND evaluation_event.recorded_at = NEW.recorded_at
+                      AND json_extract(
+                          evaluation_event.payload_json, '$.evaluation.id'
+                      ) = NEW.id
+                      AND json_extract(
+                          evaluation_event.payload_json, '$.evaluation_digest'
+                      ) = NEW.evaluation_digest
+                      AND json_extract(
+                          evaluation_event.payload_json, '$.authority'
+                      ) = json(NEW.authority_json)
+                      AND json_extract(
+                          evaluation_event.payload_json, '$.through_sequence'
+                      ) = NEW.through_sequence
+                ) THEN RAISE(
+                    ABORT, 'task evaluation does not match its event'
+                ) END;
+            END;
+
+            CREATE TRIGGER shadow_evidence_bundles_validate_insert
+            BEFORE INSERT ON shadow_evidence_bundles BEGIN
+                SELECT CASE WHEN NOT EXISTS (
+                    SELECT 1
+                    FROM task_evaluations evaluation
+                    JOIN performance_attempts attempt
+                      ON attempt.id = evaluation.attempt_id
+                    JOIN events evaluation_event
+                      ON evaluation_event.event_id = evaluation.event_id
+                    JOIN events bundle_event
+                      ON bundle_event.event_id = NEW.event_id
+                    WHERE evaluation.id = NEW.evaluation_id
+                      AND evaluation.attempt_id = NEW.attempt_id
+                      AND bundle_event.event_type = 'ShadowEvidenceReduced'
+                      AND bundle_event.schema_version = 1
+                      AND bundle_event.stream_id =
+                          'learner:' || attempt.learner_id
+                      AND bundle_event.learner_id = attempt.learner_id
+                      AND bundle_event.session_id IS
+                          evaluation_event.session_id
+                      AND bundle_event.causation_id = evaluation.id
+                      AND bundle_event.stream_version >
+                          evaluation_event.stream_version
+                      AND bundle_event.recorded_at = NEW.recorded_at
+                      AND json_extract(
+                          bundle_event.payload_json, '$.bundle_id'
+                      ) = NEW.id
+                      AND json_extract(
+                          bundle_event.payload_json, '$.bundle_digest'
+                      ) = NEW.bundle_digest
+                      AND json_extract(
+                          bundle_event.payload_json, '$.projection_applied'
+                      ) = 0
+                      AND json_extract(
+                          bundle_event.payload_json, '$.certification_applied'
+                      ) = 0
+                ) THEN RAISE(
+                    ABORT, 'shadow evidence does not match its evaluation/event'
                 ) END;
             END;
             """,

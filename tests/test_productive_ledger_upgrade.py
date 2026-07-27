@@ -101,7 +101,7 @@ class ProductiveLedgerUpgradeTests(unittest.TestCase):
             before_learner = learner_fingerprint(database)
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 18)
+            self.assertEqual(SCHEMA_VERSION, 19)
             self.assertEqual(event_fingerprint(database), before_events)
             self.assertEqual(learner_fingerprint(database), before_learner)
             with database.read() as connection:
@@ -125,7 +125,7 @@ class ProductiveLedgerUpgradeTests(unittest.TestCase):
                        FROM performance_scoring_claims"""
                 ).fetchone()["n"]
 
-            self.assertEqual(version, "18")
+            self.assertEqual(version, "19")
             self.assertTrue(V14_PERFORMANCE_TABLES <= tables)
             self.assertEqual(set(counts.values()), {0})
             self.assertEqual(scoring_claim_count, 0)
