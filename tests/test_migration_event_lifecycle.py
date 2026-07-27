@@ -77,6 +77,7 @@ def data_snapshot(
     *,
     omit_schema_version: bool = False,
     omit_policy_shadow: bool = False,
+    omit_scoring_reconciliation: bool = False,
 ) -> tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]:
     """Capture all application table rows independently of row order."""
 
@@ -94,6 +95,11 @@ def data_snapshot(
             if (
                 omit_policy_shadow
                 and table == "policy_shadow_evaluations"
+            ):
+                continue
+            if (
+                omit_scoring_reconciliation
+                and table == "performance_scoring_reconciliations"
             ):
                 continue
             quoted = '"' + table.replace('"', '""') + '"'
@@ -146,17 +152,25 @@ def claim_trigger_sql(database: Database) -> str:
 def downgrade_to_exact_v16(database: Database) -> None:
     """Reconstruct the one historical v16 structural boundary."""
 
-    current_sql = claim_trigger_sql(database)
-    if current_sql.count(V17_SESSION_CLAUSE) != 1:
-        raise AssertionError(
-            "Current scoring-claim trigger has an unexpected session clause."
-        )
-    legacy_sql = current_sql.replace(
-        V17_SESSION_CLAUSE,
-        V16_SESSION_CLAUSE,
-    )
     with database.transaction() as connection:
         restore_pre_shadow_schema(connection)
+        trigger = connection.execute(
+            """SELECT sql FROM sqlite_master
+               WHERE type='trigger' AND name=?""",
+            (CLAIM_TRIGGER,),
+        ).fetchone()
+        if trigger is None or not trigger["sql"]:
+            raise AssertionError("Scoring-claim trigger is absent.")
+        current_sql = trigger["sql"]
+        if current_sql.count(V17_SESSION_CLAUSE) != 1:
+            raise AssertionError(
+                "Historical v17 scoring-claim trigger has an unexpected "
+                "session clause."
+            )
+        legacy_sql = current_sql.replace(
+            V17_SESSION_CLAUSE,
+            V16_SESSION_CLAUSE,
+        )
         connection.execute(f'DROP TRIGGER "{CLAIM_TRIGGER}"')
         connection.execute(legacy_sql)
         connection.execute(
@@ -356,11 +370,12 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 database,
                 omit_schema_version=True,
                 omit_policy_shadow=True,
+                omit_scoring_reconciliation=True,
             )
             before_events = event_snapshot(database)
             before_schema = schema_contract(database)
 
-            self.assertEqual(SCHEMA_VERSION, 18)
+            self.assertEqual(SCHEMA_VERSION, 19)
             self.assertEqual(
                 before_schema,
                 _expected_v16_schema_contract(),
@@ -381,6 +396,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     database,
                     omit_schema_version=True,
                     omit_policy_shadow=True,
+                    omit_scoring_reconciliation=True,
                 ),
                 before_data,
             )
@@ -394,9 +410,16 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "18")
+            self.assertEqual(version, "19")
             upgraded_trigger = claim_trigger_sql(database)
-            self.assertIn(V17_SESSION_CLAUSE, upgraded_trigger)
+            self.assertIn(
+                "NEW.claim_schema_version = 1",
+                upgraded_trigger,
+            )
+            self.assertIn(
+                "NEW.claim_schema_version = 2",
+                upgraded_trigger,
+            )
             self.assertIn(
                 "claim_event.session_id IS NULL",
                 upgraded_trigger,
@@ -665,12 +688,16 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                                 "Race fixture lacks the scoring-claim trigger."
                             )
                         tampered_sql = row[0].replace(
-                            V17_SESSION_CLAUSE,
-                            "AND 1 = 1",
+                            "WHERE claim_event.event_id = NEW.event_id",
+                            (
+                                "WHERE 1 = 1 "
+                                "AND claim_event.event_id = NEW.event_id"
+                            ),
+                            1,
                         )
                         if tampered_sql == row[0]:
                             raise AssertionError(
-                                "Race fixture did not alter the v17 trigger."
+                                "Race fixture did not alter the current trigger."
                             )
                         competing.execute(
                             f'DROP TRIGGER "{CLAIM_TRIGGER}"'
@@ -702,7 +729,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "18")
+            self.assertEqual(version, "19")
 
     def test_scoring_claim_fk_deferrability_is_part_of_schema_contract(
         self,
@@ -741,7 +768,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 "DEFERRABLE INITIALLY DEFERRED",
                 row["sql"].upper(),
             )
-            self.assertEqual(version, "18")
+            self.assertEqual(version, "19")
 
     def test_current_v18_fk_corruption_fails_before_safety_writes(
         self,
@@ -802,7 +829,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
             self.assertEqual(after_violations, before_violations)
-            self.assertEqual(version, "18")
+            self.assertEqual(version, "19")
 
 
 if __name__ == "__main__":

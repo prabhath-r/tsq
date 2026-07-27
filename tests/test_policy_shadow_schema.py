@@ -66,7 +66,7 @@ def event_snapshot(database: Database) -> tuple[tuple[object, ...], ...]:
 def historical_data_snapshot(
     database: Database,
 ) -> tuple[tuple[str, tuple[tuple[object, ...], ...]], ...]:
-    """Capture every pre-v18 row while excluding schema-version metadata."""
+    """Capture historical rows without prospective empty projections."""
 
     with database.read() as connection:
         table_names = [
@@ -75,9 +75,12 @@ def historical_data_snapshot(
                 """SELECT name FROM sqlite_master
                    WHERE type='table'
                      AND name NOT LIKE 'sqlite_%'
-                     AND name != ?
+                     AND name NOT IN (?, ?)
                    ORDER BY name""",
-                (POLICY_SHADOW_TABLE,),
+                (
+                    POLICY_SHADOW_TABLE,
+                    "performance_scoring_reconciliations",
+                ),
             ).fetchall()
         ]
         snapshot: list[
@@ -247,7 +250,7 @@ class PolicyShadowSchemaTests(unittest.TestCase):
             before_data = historical_data_snapshot(database)
             before_events = event_snapshot(database)
 
-            self.assertEqual(SCHEMA_VERSION, 18)
+            self.assertEqual(SCHEMA_VERSION, 19)
             self.assertIsNotNone(decision_id)
             self.assertEqual(
                 schema_contract(database),
@@ -281,7 +284,7 @@ class PolicyShadowSchemaTests(unittest.TestCase):
                              AND tbl_name='policy_shadow_evaluations'"""
                     ).fetchall()
                 }
-            self.assertEqual(version, "18")
+            self.assertEqual(version, "19")
             self.assertEqual(shadow_count, 0)
             self.assertEqual(trigger_names, POLICY_SHADOW_TRIGGERS)
             database.validate_current_schema()

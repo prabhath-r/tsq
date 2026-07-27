@@ -38,6 +38,7 @@ from .evidence import (
     summarize_actions,
 )
 from .performance import (
+    ImportedCriterionResult,
     ImportedEvaluation,
     NORMALIZED_SCORING_RESULT_SCHEMA_VERSION,
     NormalizationMode,
@@ -52,13 +53,25 @@ from .performance_boundaries import (
     missing_objective_misconception_bindings,
     release_misconception_objectives,
 )
+from .reconciliation import (
+    ReconciliationOutcome,
+    RegisteredReconciler,
+    ScoringReconciliationRegistry,
+    ScoringReconciliationReceipt,
+    ScoringReconciliationRequest,
+    provider_scoring_operation_digest,
+)
 from .store import (
     PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
+    PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
     Database,
     from_timestamp,
     new_id,
     performance_scoring_claim_event_key,
     performance_scoring_claim_payload,
+    performance_scoring_claim_v2_payload,
+    performance_scoring_reconciliation_event_key,
+    performance_scoring_reconciliation_payload,
     to_timestamp,
 )
 
@@ -358,6 +371,59 @@ def _command_hash(value: Mapping[str, Any]) -> str:
 
 def _event_metadata(event: sqlite3.Row) -> dict[str, Any]:
     return _json_object(event["metadata_json"], f"Event {event['event_id']} metadata")
+
+
+def _authority_free_imported_evaluation(
+    evaluation: TaskEvaluation,
+) -> ImportedEvaluation:
+    """Recover the exact authority-free observation from a normalized record."""
+
+    return ImportedEvaluation(
+        criteria=tuple(
+            ImportedCriterionResult(
+                criterion_id=criterion.criterion_id,
+                status=criterion.status,
+                score=criterion.score,
+                outcome_code=criterion.outcome_code,
+                phase=criterion.phase,
+                source_action_ids=criterion.source_action_ids,
+                attestation_digest=criterion.attestation_digest,
+                misconception_ids=criterion.misconception_ids,
+                reliability=criterion.reliability,
+            )
+            for criterion in evaluation.criteria
+        )
+    )
+
+
+def _normalize_recovered_imported_evaluation(
+    scoring_request: ScoringRequest,
+    imported: ImportedEvaluation,
+    provider: RegisteredProvider,
+    provider_operation_digest: str,
+) -> NormalizedScoringResult:
+    """Apply the closed, shadow-only normalization used for recovered results."""
+
+    direct_request = ScoringRequest(
+        evaluation_id=scoring_request.evaluation_id,
+        trace_id=scoring_request.trace_id,
+        task_id=scoring_request.task_id,
+        task_version=scoring_request.task_version,
+        task_digest=scoring_request.task_digest,
+        action_trace_digest=scoring_request.action_trace_digest,
+        criterion_ids=scoring_request.criterion_ids,
+        scorer_contract=None,
+    )
+    direct_provider_id = provider.provider_id
+    if direct_provider_id.startswith("synthetic."):
+        direct_provider_id = "recovered." + provider_operation_digest[:24]
+    return normalize_imported_evaluation(
+        direct_request,
+        imported,
+        provider_id=direct_provider_id,
+        provider_version=provider.provider_version,
+        declared_kind=provider.declared_kind,
+    )
 
 
 class PerformanceLedger:
@@ -791,6 +857,15 @@ class PerformanceLedger:
 
         key_claim = None
         if idempotency_key is not None:
+            if connection.execute(
+                """SELECT 1 FROM performance_scoring_reconciliations
+                   WHERE idempotency_key=?""",
+                (idempotency_key,),
+            ).fetchone() is not None:
+                raise ConflictError(
+                    "Idempotency key is already reserved by a scoring "
+                    "reconciliation and cannot admit a provider callback."
+                )
             key_claim = connection.execute(
                 """SELECT * FROM performance_scoring_claims
                    WHERE idempotency_key=?""",
@@ -1366,19 +1441,24 @@ class PerformanceLedger:
 
         if attempt_id is not None:
             _require_id(attempt_id, "attempt_id")
-        if status not in {None, "completed", "unresolved"}:
+        if status not in {
+            None,
+            "unreconciled",
+            "unknown",
+            "definitely_absent",
+            "completed",
+            # Compatibility query for callers written before reconciliation.
+            "unresolved",
+        }:
             raise ValidationError(
-                "Scoring claim status must be completed or unresolved."
+                "Scoring claim status must be unreconciled, unknown, "
+                "definitely_absent, completed, or unresolved."
             )
         clauses: list[str] = []
         parameters: list[Any] = []
         if attempt_id is not None:
             clauses.append("claim.attempt_id=?")
             parameters.append(attempt_id)
-        if status == "completed":
-            clauses.append("evaluation.id IS NOT NULL")
-        elif status == "unresolved":
-            clauses.append("evaluation.id IS NULL")
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.database.read() as connection:
             if attempt_id is not None and connection.execute(
@@ -1419,6 +1499,24 @@ class PerformanceLedger:
                     "its claim projection; run integrity verification and "
                     "rebuild on a database copy."
                 )
+            orphan_reconciliation = connection.execute(
+                """SELECT event.event_id
+                   FROM events event
+                   WHERE event.event_type='PerformanceScoringReconciled'
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM performance_scoring_reconciliations observation
+                         WHERE observation.event_id=event.event_id
+                     )
+                   ORDER BY event.event_id LIMIT 1"""
+            ).fetchone()
+            if orphan_reconciliation is not None:
+                raise ConflictError(
+                    "Scoring reconciliation event "
+                    f"{orphan_reconciliation['event_id']} is missing its "
+                    "projection; run integrity verification and rebuild on "
+                    "a database copy."
+                )
             rows = connection.execute(
                 """SELECT claim.*, claim_event.event_type,
                           claim_event.metadata_json,
@@ -1432,40 +1530,324 @@ class PerformanceLedger:
                 + " ORDER BY claim.claimed_at, claim.id",
                 tuple(parameters),
             ).fetchall()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            if row["event_type"] is None or row["metadata_json"] is None:
+            result = [
+                self._scoring_claim_view(connection, row) for row in rows
+            ]
+        if status is None:
+            return result
+        if status == "unresolved":
+            return [
+                item
+                for item in result
+                if item["status"] in {"unreconciled", "unknown"}
+            ]
+        return [item for item in result if item["status"] == status]
+
+    @staticmethod
+    def _scoring_claim_view(
+        connection: sqlite3.Connection,
+        row: sqlite3.Row,
+        *,
+        idempotent_replay: bool = False,
+    ) -> dict[str, Any]:
+        if row["event_type"] is None or row["metadata_json"] is None:
+            raise ConflictError(
+                f"Scoring claim {row['id']} is missing its admission event; "
+                "run integrity verification."
+            )
+        metadata = _json_object(
+            row["metadata_json"], "Stored scoring claim event metadata"
+        )
+        observations = connection.execute(
+            """SELECT observation.*
+               FROM performance_scoring_reconciliations observation
+               WHERE observation.claim_id=?
+               ORDER BY (
+                   SELECT event.stream_version FROM events event
+                   WHERE event.event_id=observation.event_id
+               ), observation.id""",
+            (row["id"],),
+        ).fetchall()
+        missing_event = next(
+            (
+                observation["event_id"]
+                for observation in observations
+                if connection.execute(
+                    "SELECT 1 FROM events WHERE event_id=?",
+                    (observation["event_id"],),
+                ).fetchone()
+                is None
+            ),
+            None,
+        )
+        if missing_event is not None:
+            raise ConflictError(
+                f"Scoring claim {row['id']} has reconciliation projection "
+                f"without event {missing_event}; run integrity verification."
+            )
+        terminal = [
+            item
+            for item in observations
+            if item["outcome"] in {
+                ReconciliationOutcome.COMPLETED.value,
+                ReconciliationOutcome.DEFINITELY_ABSENT.value,
+            }
+        ]
+        if len(terminal) > 1:
+            raise ConflictError(
+                f"Scoring claim {row['id']} has multiple terminal "
+                "reconciliation observations; run integrity verification."
+            )
+        completed_at = row["completed_at"]
+        if (
+            terminal
+            and terminal[0]["outcome"]
+            == ReconciliationOutcome.COMPLETED.value
+        ):
+            completion = terminal[0]
+            if (
+                completed_at is None
+                or completion["evaluation_id"] != row["evaluation_id"]
+                or completion["normalized_result_digest"] is None
+            ):
                 raise ConflictError(
-                    f"Scoring claim {row['id']} is missing its admission event; "
-                    "run integrity verification."
+                    f"Scoring claim {row['id']} has a completed "
+                    "reconciliation without its exact recovered evaluation; "
+                    "run integrity verification and rebuild on a database copy."
                 )
-            metadata = _json_object(
-                row["metadata_json"], "Stored scoring claim event metadata"
+            try:
+                completion_receipt = ScoringReconciliationReceipt.from_json(
+                    completion["receipt_json"]
+                )
+            except (TypeError, ValueError) as exc:
+                raise ConflictError(
+                    f"Scoring claim {row['id']} has an invalid completed "
+                    "reconciliation receipt; run integrity verification."
+                ) from exc
+            evaluation_boundary = connection.execute(
+                """SELECT evaluation.authority_json,
+                          evaluation_event.causation_id,
+                          evaluation_event.session_id,
+                          evaluation_event.occurred_at AS evaluation_occurred_at,
+                          evaluation_event.stream_id AS evaluation_stream_id,
+                          evaluation_event.stream_version
+                              AS evaluation_stream_version,
+                          reconciliation_event.stream_id
+                              AS reconciliation_stream_id,
+                          reconciliation_event.stream_version
+                              AS reconciliation_stream_version
+                   FROM task_evaluations evaluation
+                   JOIN events evaluation_event
+                     ON evaluation_event.event_id=evaluation.event_id
+                   JOIN events reconciliation_event
+                     ON reconciliation_event.event_id=?
+                   WHERE evaluation.id=?""",
+                (completion["event_id"], row["evaluation_id"]),
+            ).fetchone()
+            try:
+                authority = (
+                    None
+                    if evaluation_boundary is None
+                    else _json_object(
+                        evaluation_boundary["authority_json"],
+                        "Recovered evaluation authority",
+                    )
+                )
+            except (TypeError, ValueError, ValidationError) as exc:
+                raise ConflictError(
+                    f"Scoring claim {row['id']} has an invalid recovered "
+                    "evaluation authority; run integrity verification."
+                ) from exc
+            if (
+                evaluation_boundary is None
+                or evaluation_boundary["causation_id"] != completion["event_id"]
+                or evaluation_boundary["session_id"] is not None
+                or evaluation_boundary["evaluation_occurred_at"]
+                != completion_receipt.completed_at
+                or evaluation_boundary["evaluation_stream_id"]
+                != evaluation_boundary["reconciliation_stream_id"]
+                or evaluation_boundary["evaluation_stream_version"]
+                <= evaluation_boundary["reconciliation_stream_version"]
+                or completion_receipt.result_digest is None
+                or type(authority) is not dict
+                or authority.get("normalized_result_digest")
+                != completion["normalized_result_digest"]
+            ):
+                raise ConflictError(
+                    f"Scoring claim {row['id']} has a completed "
+                    "reconciliation that does not bind its recovered "
+                    "evaluation; run integrity verification."
+                )
+        terminal_at: str | None = None
+        if completed_at is not None:
+            if (
+                terminal
+                and terminal[0]["outcome"]
+                == ReconciliationOutcome.DEFINITELY_ABSENT.value
+            ):
+                raise ConflictError(
+                    f"Scoring claim {row['id']} has both a completion and a "
+                    "definitely-absent terminal; run integrity verification."
+                )
+            claim_status = "completed"
+            source = (
+                "reconciliation"
+                if terminal
+                and terminal[0]["outcome"]
+                == ReconciliationOutcome.COMPLETED.value
+                else "provider_callback"
             )
-            completed = row["completed_at"] is not None
-            result.append(
-                {
-                    "id": row["id"],
-                    "event_id": row["event_id"],
-                    "event_type": row["event_type"],
-                    "admission_mode": metadata.get("admission_mode"),
-                    "attempt_id": row["attempt_id"],
-                    "evaluation_id": row["evaluation_id"],
-                    "through_sequence": row["through_sequence"],
-                    "provider_id": row["provider_id"],
-                    "provider_version": row["provider_version"],
-                    "action_trace_digest": row["action_trace_digest"],
-                    "command_hash": row["command_hash"],
-                    "claimed_at": row["claimed_at"],
-                    "status": "completed" if completed else "unresolved",
-                    "completed_at": row["completed_at"],
-                    "caller_idempotency_key_present": (
-                        row["idempotency_key"] is not None
-                    ),
-                    "automatic_retry_allowed": False,
-                }
+            is_terminal = True
+            terminal_at = (
+                terminal[0]["reconciled_at"]
+                if terminal
+                else completed_at
             )
-        return result
+        elif terminal:
+            claim_status = terminal[0]["outcome"]
+            source = "reconciliation"
+            is_terminal = True
+            terminal_at = terminal[0]["reconciled_at"]
+        elif observations:
+            claim_status = "unknown"
+            source = "reconciliation"
+            is_terminal = False
+        else:
+            claim_status = "unreconciled"
+            source = (
+                "legacy_claim"
+                if row["claim_schema_version"] == 1
+                else "callback_admission"
+            )
+            is_terminal = False
+        latest = observations[-1] if observations else None
+        return {
+            "id": row["id"],
+            "event_id": row["event_id"],
+            "event_type": row["event_type"],
+            "claim_schema_version": row["claim_schema_version"],
+            "admission_mode": metadata.get("admission_mode"),
+            "attempt_id": row["attempt_id"],
+            "evaluation_id": row["evaluation_id"],
+            "through_sequence": row["through_sequence"],
+            "provider_id": row["provider_id"],
+            "provider_version": row["provider_version"],
+            "action_trace_digest": row["action_trace_digest"],
+            "scoring_request_digest": row["scoring_request_digest"],
+            "provider_binding_digest": row["provider_binding_digest"],
+            "provider_operation_digest": row["provider_operation_digest"],
+            "command_hash": row["command_hash"],
+            "claimed_at": row["claimed_at"],
+            "status": claim_status,
+            "source": source,
+            "status_source": source,
+            "terminal": is_terminal,
+            "completed_at": completed_at,
+            "terminal_at": terminal_at,
+            "reconciliation_count": len(observations),
+            "latest_reconciliation_id": (
+                None if latest is None else latest["id"]
+            ),
+            "latest_reconciliation_outcome": (
+                None if latest is None else latest["outcome"]
+            ),
+            "caller_idempotency_key_present": (
+                row["idempotency_key"] is not None
+            ),
+            "automatic_retry_allowed": False,
+            "idempotent_replay": idempotent_replay,
+        }
+
+    @classmethod
+    def _scoring_reconciliation_view(
+        cls,
+        connection: sqlite3.Connection,
+        observation: sqlite3.Row,
+        *,
+        idempotent_replay: bool,
+    ) -> dict[str, Any]:
+        claim = connection.execute(
+            """SELECT claim.*, claim_event.event_type,
+                      claim_event.metadata_json,
+                      evaluation.recorded_at AS completed_at
+               FROM performance_scoring_claims claim
+               LEFT JOIN events claim_event
+                 ON claim_event.event_id=claim.event_id
+               LEFT JOIN task_evaluations evaluation
+                 ON evaluation.id=claim.evaluation_id
+               WHERE claim.id=?""",
+            (observation["claim_id"],),
+        ).fetchone()
+        if claim is None:
+            raise ConflictError(
+                "Scoring reconciliation is missing its claim projection."
+            )
+        try:
+            receipt = ScoringReconciliationReceipt.from_json(
+                observation["receipt_json"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConflictError(
+                "Scoring reconciliation has an invalid receipt projection; "
+                "run integrity verification."
+            ) from exc
+        return {
+            **cls._scoring_claim_view(
+                connection,
+                claim,
+                idempotent_replay=idempotent_replay,
+            ),
+            "reconciliation_id": observation["id"],
+            "reconciliation_outcome": observation["outcome"],
+            "reconciliation_receipt_digest": observation["receipt_digest"],
+            "reconciliation_result_digest": receipt.result_digest,
+            "reconciled_at": observation["reconciled_at"],
+        }
+
+    def inspect_scoring_claim(self, claim_id: str) -> dict[str, Any]:
+        """Inspect one claim without invoking either scorer or reconciler."""
+
+        _require_id(claim_id, "claim_id")
+        with self.database.read() as connection:
+            orphan_reconciliation = connection.execute(
+                """SELECT event.event_id
+                   FROM events event
+                   WHERE event.event_type='PerformanceScoringReconciled'
+                     AND json_extract(
+                         event.payload_json, '$.claim_id'
+                     )=?
+                     AND NOT EXISTS (
+                         SELECT 1
+                         FROM performance_scoring_reconciliations observation
+                         WHERE observation.event_id=event.event_id
+                     )
+                   ORDER BY event.event_id LIMIT 1""",
+                (claim_id,),
+            ).fetchone()
+            if orphan_reconciliation is not None:
+                raise ConflictError(
+                    "Scoring reconciliation event "
+                    f"{orphan_reconciliation['event_id']} is missing its "
+                    "projection; run integrity verification and rebuild on "
+                    "a database copy."
+                )
+            row = connection.execute(
+                """SELECT claim.*, claim_event.event_type,
+                          claim_event.metadata_json,
+                          evaluation.recorded_at AS completed_at
+                   FROM performance_scoring_claims claim
+                   LEFT JOIN events claim_event
+                     ON claim_event.event_id=claim.event_id
+                   LEFT JOIN task_evaluations evaluation
+                     ON evaluation.id=claim.evaluation_id
+                   WHERE claim.id=?""",
+                (claim_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError(
+                    f"Performance scoring claim {claim_id} does not exist."
+                )
+            return self._scoring_claim_view(connection, row)
 
     @staticmethod
     def _typed_actions(
@@ -1636,12 +2018,20 @@ class PerformanceLedger:
         occurred: datetime,
         command_hash: str,
         claim_event_id: str | None = None,
+        reconciliation_event_id: str | None = None,
     ) -> dict[str, Any]:
-        self._require_active_session_interval(
-            connection,
-            attempt,
-            occurred,
-        )
+        if claim_event_id is not None and reconciliation_event_id is not None:
+            raise ValidationError(
+                "A task evaluation cannot have both callback and "
+                "reconciliation causation."
+            )
+        recovered = reconciliation_event_id is not None
+        if not recovered:
+            self._require_active_session_interval(
+                connection,
+                attempt,
+                occurred,
+            )
         evaluation = result.evaluation
         if (
             evaluation.trace_id != attempt["id"]
@@ -1669,7 +2059,17 @@ class PerformanceLedger:
             raise ValidationError(
                 "Task evaluation cannot occur before its submitted checkpoint."
             )
-        self._validate_authority_binding(task, result)
+        if recovered:
+            if (
+                result.normalization_mode is not NormalizationMode.DIRECT_IMPORT
+                or not result.shadow_only
+            ):
+                raise ValidationError(
+                    "A recovered scoring result must remain an authority-free "
+                    "shadow-only direct import."
+                )
+        else:
+            self._validate_authority_binding(task, result)
         try:
             bundle = reduce_evidence(task, evaluation, actions)
         except ValueError as exc:
@@ -1703,10 +2103,14 @@ class PerformanceLedger:
                 "certification_applied": False,
             },
             learner_id=attempt["learner_id"],
-            session_id=attempt["session_id"],
-            idempotency_key=idempotency_key,
+            session_id=None if recovered else attempt["session_id"],
+            idempotency_key=None if recovered else idempotency_key,
             correlation_id=attempt["id"],
-            causation_id=claim_event_id or attempt["id"],
+            causation_id=(
+                reconciliation_event_id
+                or claim_event_id
+                or attempt["id"]
+            ),
             occurred_at=occurred,
         )
         connection.execute(
@@ -1751,7 +2155,7 @@ class PerformanceLedger:
                 "shadow_only": True,
             },
             learner_id=attempt["learner_id"],
-            session_id=attempt["session_id"],
+            session_id=None if recovered else attempt["session_id"],
             correlation_id=attempt["id"],
             causation_id=evaluation.id,
             occurred_at=occurred,
@@ -1891,6 +2295,17 @@ class PerformanceLedger:
                 ),
                 scorer_contract=scorer_contract,
             )
+            scoring_request_digest = canonical_digest(request.terms())
+            provider_binding_digest = provider.binding_digest
+            claim_id = "psc_" + command_hash
+            provider_operation_digest_value = (
+                provider_scoring_operation_digest(
+                    claim_id=claim_id,
+                    evaluation_id=request.evaluation_id,
+                    scoring_request_digest=scoring_request_digest,
+                    provider_binding_digest=provider_binding_digest,
+                )
+            )
 
         # Reserve the logical scoring command before crossing the provider
         # boundary.  The transaction is deliberately short and is committed
@@ -1970,13 +2385,12 @@ class PerformanceLedger:
                 occurred,
             )
             claimed_at = to_timestamp(occurred)
-            claim_id = "psc_" + command_hash
             claim_event = self.database.append_event(
                 connection,
                 stream_id=f"learner:{current_attempt['learner_id']}",
                 event_type="PerformanceScoringClaimed",
-                schema_version=PERFORMANCE_EVENT_SCHEMA_VERSION,
-                payload=performance_scoring_claim_payload(
+                schema_version=2,
+                payload=performance_scoring_claim_v2_payload(
                     claim_id=claim_id,
                     caller_idempotency_key=idempotency_key,
                     attempt_id=attempt_id,
@@ -1987,9 +2401,15 @@ class PerformanceLedger:
                     action_trace_digest_value=current_action_trace_digest,
                     command_hash=command_hash,
                     claimed_at=claimed_at,
+                    scoring_request_digest=scoring_request_digest,
+                    provider_binding_digest=provider_binding_digest,
+                    provider_operation_digest=(
+                        provider_operation_digest_value
+                    ),
+                    provider=provider.terms(),
                 ),
                 metadata={
-                    "claim_schema_version": 1,
+                    "claim_schema_version": 2,
                     "admission_mode": "pre_callback",
                     "source_schema_version": None,
                     "shadow_only": True,
@@ -2005,10 +2425,12 @@ class PerformanceLedger:
             )
             connection.execute(
                 """INSERT INTO performance_scoring_claims(
-                       id, event_id, idempotency_key, attempt_id, evaluation_id,
-                       through_sequence, provider_id, provider_version,
-                       action_trace_digest, command_hash, claimed_at
-                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       id, event_id, claim_schema_version, idempotency_key,
+                       attempt_id, evaluation_id, through_sequence,
+                       provider_id, provider_version, action_trace_digest,
+                       scoring_request_digest, provider_binding_digest,
+                       provider_operation_digest, command_hash, claimed_at
+                   ) VALUES (?, ?, 2, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (
                     claim_id,
                     claim_event["event_id"],
@@ -2019,6 +2441,9 @@ class PerformanceLedger:
                     provider_id,
                     provider_version,
                     current_action_trace_digest,
+                    scoring_request_digest,
+                    provider_binding_digest,
+                    provider_operation_digest_value,
                     command_hash,
                     claimed_at,
                 ),
@@ -2076,6 +2501,30 @@ class PerformanceLedger:
                 return self._evaluation_report(
                     connection, payload["evaluation"]["id"], True
                 )
+            recovered_evaluation = connection.execute(
+                "SELECT id FROM task_evaluations WHERE id=?",
+                (request.evaluation_id,),
+            ).fetchone()
+            if recovered_evaluation is not None:
+                return self._evaluation_report(
+                    connection,
+                    recovered_evaluation["id"],
+                    True,
+                )
+            terminal_reconciliation = connection.execute(
+                """SELECT outcome
+                   FROM performance_scoring_reconciliations
+                   WHERE claim_id=?
+                     AND outcome IN ('completed', 'definitely_absent')""",
+                (claim_id,),
+            ).fetchone()
+            if terminal_reconciliation is not None:
+                raise ConflictError(
+                    "Provider completion arrived after the scoring claim had "
+                    "already reached terminal reconciliation state "
+                    f"{terminal_reconciliation['outcome']!r}; no second "
+                    "completion was recorded."
+                )
             if (
                 current_command_hash != command_hash
                 or current_through_sequence != through_sequence
@@ -2100,6 +2549,702 @@ class PerformanceLedger:
                 command_hash=current_command_hash,
                 claim_event_id=claim_event_id,
             )
+
+    def _reconciliation_claim_context(
+        self,
+        connection: sqlite3.Connection,
+        claim_id: str,
+    ) -> tuple[
+        sqlite3.Row,
+        sqlite3.Row,
+        sqlite3.Row,
+        LearningTask,
+        tuple[LearningAction, ...],
+        RegisteredProvider,
+        ScoringRequest,
+        ScoringReconciliationRequest,
+    ]:
+        claim = connection.execute(
+            "SELECT * FROM performance_scoring_claims WHERE id=?",
+            (claim_id,),
+        ).fetchone()
+        if claim is None:
+            raise NotFoundError(
+                f"Performance scoring claim {claim_id} does not exist."
+            )
+        if claim["claim_schema_version"] != 2:
+            raise ConflictError(
+                f"Performance scoring claim {claim_id} uses legacy schema v1; "
+                "its provider/request boundary was not recorded completely "
+                "enough for safe reconciliation."
+            )
+        claim_event = connection.execute(
+            "SELECT * FROM events WHERE event_id=?",
+            (claim["event_id"],),
+        ).fetchone()
+        if claim_event is None:
+            raise ConflictError(
+                f"Performance scoring claim {claim_id} is missing its "
+                "immutable admission event."
+            )
+        if (
+            claim_event["event_type"] != "PerformanceScoringClaimed"
+            or claim_event["schema_version"] != 2
+        ):
+            raise ConflictError(
+                f"Performance scoring claim {claim_id} does not have a v2 "
+                "admission event."
+            )
+        payload = _json_object(
+            claim_event["payload_json"],
+            f"Scoring claim {claim_id} admission payload",
+        )
+        metadata = _json_object(
+            claim_event["metadata_json"],
+            f"Scoring claim {claim_id} admission metadata",
+        )
+        _require_exact_fields(
+            payload,
+            frozenset(
+                {
+                    "claim_id",
+                    "caller_idempotency_key",
+                    "attempt_id",
+                    "evaluation_id",
+                    "through_sequence",
+                    "provider_id",
+                    "provider_version",
+                    "action_trace_digest",
+                    "command_hash",
+                    "claimed_at",
+                    "scoring_request_digest",
+                    "provider_binding_digest",
+                    "provider_operation_digest",
+                    "provider",
+                }
+            ),
+            f"Scoring claim {claim_id} admission payload",
+        )
+        _require_exact_fields(
+            metadata,
+            frozenset(
+                {
+                    "claim_schema_version",
+                    "admission_mode",
+                    "source_schema_version",
+                    "shadow_only",
+                }
+            ),
+            f"Scoring claim {claim_id} admission metadata",
+        )
+        if (
+            metadata["claim_schema_version"] != 2
+            or metadata["admission_mode"] != "pre_callback"
+            or metadata["source_schema_version"] is not None
+            or metadata["shadow_only"] is not True
+        ):
+            raise ConflictError(
+                f"Scoring claim {claim_id} has an invalid v2 admission "
+                "metadata boundary."
+            )
+        attempt = connection.execute(
+            "SELECT * FROM performance_attempts WHERE id=?",
+            (claim["attempt_id"],),
+        ).fetchone()
+        if attempt is None:
+            raise ConflictError(
+                f"Scoring claim {claim_id} has no performance attempt."
+            )
+        try:
+            provider = RegisteredProvider.from_terms(payload["provider"])
+        except (TypeError, ValueError) as exc:
+            raise ConflictError(
+                f"Scoring claim {claim_id} has an invalid provider snapshot: "
+                f"{exc}"
+            ) from exc
+        task = self._task_for_attempt(connection, attempt)
+        actions = self._typed_actions(
+            connection,
+            claim["attempt_id"],
+            through_sequence=claim["through_sequence"],
+        )
+        trace_digest = action_trace_digest(actions)
+        scorer_contract = next(
+            (
+                contract
+                for contract in task.scorer_contracts
+                if contract.key
+                == (
+                    provider.declared_kind,
+                    provider.provider_id,
+                    provider.provider_version,
+                )
+            ),
+            None,
+        )
+        scoring_request = ScoringRequest(
+            evaluation_id=claim["evaluation_id"],
+            trace_id=claim["attempt_id"],
+            task_id=task.id,
+            task_version=task.version,
+            task_digest=task.digest,
+            action_trace_digest=trace_digest,
+            criterion_ids=(
+                scorer_contract.criterion_ids
+                if scorer_contract is not None
+                else tuple(criterion.id for criterion in task.criteria)
+            ),
+            scorer_contract=scorer_contract,
+        )
+        expected_request_digest = canonical_digest(scoring_request.terms())
+        expected_operation_digest = provider_scoring_operation_digest(
+            claim_id=claim["id"],
+            evaluation_id=claim["evaluation_id"],
+            scoring_request_digest=expected_request_digest,
+            provider_binding_digest=provider.binding_digest,
+        )
+        expected_payload = performance_scoring_claim_v2_payload(
+            claim_id=claim["id"],
+            caller_idempotency_key=claim["idempotency_key"],
+            attempt_id=claim["attempt_id"],
+            evaluation_id=claim["evaluation_id"],
+            through_sequence=claim["through_sequence"],
+            provider_id=claim["provider_id"],
+            provider_version=claim["provider_version"],
+            action_trace_digest_value=claim["action_trace_digest"],
+            command_hash=claim["command_hash"],
+            claimed_at=claim["claimed_at"],
+            scoring_request_digest=claim["scoring_request_digest"],
+            provider_binding_digest=claim["provider_binding_digest"],
+            provider_operation_digest=claim["provider_operation_digest"],
+            provider=provider.terms(),
+        )
+        if (
+            canonical_json(payload) != canonical_json(expected_payload)
+            or claim["provider_id"] != provider.provider_id
+            or claim["provider_version"] != provider.provider_version
+            or claim["action_trace_digest"] != trace_digest
+            or claim["scoring_request_digest"] != expected_request_digest
+            or claim["provider_binding_digest"] != provider.binding_digest
+            or claim["provider_operation_digest"]
+            != expected_operation_digest
+        ):
+            raise ConflictError(
+                f"Scoring claim {claim_id} no longer matches its immutable "
+                "request/provider/trace commitments."
+            )
+        request = ScoringReconciliationRequest(
+            claim_id=claim["id"],
+            attempt_id=claim["attempt_id"],
+            evaluation_id=claim["evaluation_id"],
+            through_sequence=claim["through_sequence"],
+            provider_id=claim["provider_id"],
+            provider_version=claim["provider_version"],
+            action_trace_digest=claim["action_trace_digest"],
+            command_hash=claim["command_hash"],
+            scoring_request_digest=claim["scoring_request_digest"],
+            provider_binding_digest=claim["provider_binding_digest"],
+            provider_operation_digest=claim["provider_operation_digest"],
+        )
+        return (
+            claim,
+            claim_event,
+            attempt,
+            task,
+            actions,
+            provider,
+            scoring_request,
+            request,
+        )
+
+    def reconcile_scoring_claim(
+        self,
+        claim_id: str,
+        registry: ScoringReconciliationRegistry,
+        reconciler_id: str,
+        reconciler_version: str,
+        *,
+        idempotency_key: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Observe one admitted callback without retrying or rescoring it."""
+
+        _require_id(claim_id, "claim_id")
+        _require_id(reconciler_id, "reconciler_id")
+        _require_id(reconciler_version, "reconciler_version")
+        if not isinstance(registry, ScoringReconciliationRegistry):
+            raise ValidationError(
+                "registry must be a ScoringReconciliationRegistry."
+            )
+        if idempotency_key is not None:
+            _require_text(idempotency_key, "idempotency_key", 256)
+            if idempotency_key.startswith(
+                (
+                    PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
+                    PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
+                )
+            ):
+                raise ValidationError(
+                    "Reconciliation idempotency keys cannot use TSQ's "
+                    "reserved scoring namespaces."
+                )
+        if self.database.read_only:
+            raise ConflictError(
+                "A read-only database cannot record reconciliation."
+            )
+        reconciled_at_value = _now(now)
+
+        with self.database.read() as connection:
+            learner = connection.execute(
+                """SELECT attempt.learner_id
+                   FROM performance_scoring_claims claim
+                   JOIN performance_attempts attempt
+                     ON attempt.id=claim.attempt_id
+                   WHERE claim.id=?""",
+                (claim_id,),
+            ).fetchone()
+            if learner is None:
+                raise NotFoundError(
+                    f"Performance scoring claim {claim_id} does not exist."
+                )
+            # Reconciliation may append a recovered evaluation, so it obeys
+            # the same learner-wide quarantine boundary as new scoring and
+            # direct imports. Check before even invoking the observational
+            # adapter; an exact-key replay is also withheld while evidence is
+            # unsafe.
+            self.database.require_learner_evidence_safe(
+                learner["learner_id"],
+                connection,
+            )
+            if idempotency_key is not None:
+                prior_observation = connection.execute(
+                    """SELECT * FROM performance_scoring_reconciliations
+                       WHERE idempotency_key=?""",
+                    (idempotency_key,),
+                ).fetchone()
+                if prior_observation is not None:
+                    if (
+                        prior_observation["claim_id"] != claim_id
+                        or prior_observation["reconciler_id"]
+                        != reconciler_id
+                        or prior_observation["reconciler_version"]
+                        != reconciler_version
+                    ):
+                        raise ConflictError(
+                            "Idempotency key was already used for a different "
+                            "reconciliation command."
+                        )
+                    return self._scoring_reconciliation_view(
+                        connection,
+                        prior_observation,
+                        idempotent_replay=True,
+                    )
+                if connection.execute(
+                    """SELECT 1 FROM performance_scoring_claims
+                       WHERE idempotency_key=?""",
+                    (idempotency_key,),
+                ).fetchone() is not None or connection.execute(
+                    "SELECT 1 FROM events WHERE idempotency_key=?",
+                    (idempotency_key,),
+                ).fetchone() is not None:
+                    raise ConflictError(
+                        "Idempotency key was already used for a different "
+                        "command."
+                    )
+            (
+                claim,
+                _claim_event,
+                _attempt,
+                _task,
+                _actions,
+                _provider,
+                _scoring_request,
+                request,
+            ) = self._reconciliation_claim_context(connection, claim_id)
+            existing_evaluation = connection.execute(
+                "SELECT 1 FROM task_evaluations WHERE id=?",
+                (claim["evaluation_id"],),
+            ).fetchone()
+            terminal = connection.execute(
+                """SELECT * FROM performance_scoring_reconciliations
+                   WHERE claim_id=?
+                     AND outcome IN ('completed', 'definitely_absent')""",
+                (claim_id,),
+            ).fetchone()
+            if terminal is not None:
+                raise ConflictError(
+                    "Scoring claim already has terminal reconciliation "
+                    f"{terminal['outcome']!r} under a different command; "
+                    "inspect the claim instead of recording another "
+                    "observation."
+                )
+            if existing_evaluation is not None:
+                raise ConflictError(
+                    "Scoring claim is already completed; inspect it instead "
+                    "of recording a reconciliation observation."
+                )
+            try:
+                registered_reconciler = registry.inspect(
+                    claim["provider_id"],
+                    claim["provider_version"],
+                    reconciler_id,
+                    reconciler_version,
+                )
+            except (LookupError, RuntimeError, ValueError) as exc:
+                raise ValidationError(
+                    f"Scoring reconciliation failed safely: {exc}"
+                ) from exc
+
+        # This is the sole external boundary.  The reconciliation registry
+        # accepts lookup-only adapters and rejects anything exposing score().
+        # It runs without SQLite's writer lock.
+        try:
+            reconciliation = registry.reconcile(
+                reconciler_id,
+                reconciler_version,
+                request,
+            )
+        except (LookupError, RuntimeError, ValueError) as exc:
+            raise ValidationError(
+                f"Scoring reconciliation failed safely: {exc}"
+            ) from exc
+        if (
+            reconciliation.reconciler.binding_digest
+            != registered_reconciler.binding_digest
+            or reconciliation.request.digest != request.digest
+        ):
+            raise ValidationError(
+                "Scoring reconciliation changed its registered request or "
+                "authority boundary."
+            )
+        if (
+            reconciliation.outcome
+            is ReconciliationOutcome.DEFINITELY_ABSENT
+            and not reconciliation.reconciler.can_prove_absence
+        ):
+            raise ValidationError(
+                "A reconciler without durable absence authority cannot close "
+                "a claim as definitely absent."
+            )
+
+        receipt = reconciliation.observation.receipt
+        try:
+            claim_time = from_timestamp(claim["claimed_at"])
+            observed_time = from_timestamp(receipt.observed_at)
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"Reconciliation temporal boundary is invalid: {exc}"
+            ) from exc
+        if observed_time < claim_time:
+            raise ValidationError(
+                "A reconciliation observation cannot predate callback "
+                "admission."
+            )
+        if observed_time > reconciled_at_value:
+            raise ValidationError(
+                "A reconciliation observation cannot be recorded before its "
+                "claimed observation time."
+            )
+        normalized_result: NormalizedScoringResult | None = None
+        completion_time: datetime | None = None
+        if reconciliation.outcome is ReconciliationOutcome.COMPLETED:
+            imported = reconciliation.imported_evaluation
+            if imported is None or receipt.completed_at is None:
+                raise ValidationError(
+                    "Completed reconciliation omitted its imported result or "
+                    "completion time."
+                )
+            try:
+                normalized_result = _normalize_recovered_imported_evaluation(
+                    _scoring_request,
+                    imported,
+                    _provider,
+                    request.provider_operation_digest,
+                )
+                completion_time = from_timestamp(receipt.completed_at)
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"Recovered scoring result failed safely: {exc}"
+                ) from exc
+            if completion_time < claim_time:
+                raise ValidationError(
+                    "Recovered scoring completion cannot predate callback "
+                    "admission."
+                )
+
+        receipt_digest = receipt.digest
+        command_hash = _command_hash(
+            {
+                "operation": "reconcile_scoring_claim",
+                "claim_id": claim_id,
+                "provider_operation_digest": request.provider_operation_digest,
+                "reconciler_id": reconciler_id,
+                "reconciler_version": reconciler_version,
+                "reconciliation_binding_digest": (
+                    reconciliation.reconciler.binding_digest
+                ),
+                "receipt_digest": receipt_digest,
+                "caller_idempotency_key": idempotency_key,
+            }
+        )
+        reconciliation_id = "psr_" + command_hash
+        reconciled_at = to_timestamp(reconciled_at_value)
+
+        with self.database.transaction() as connection:
+            current_learner = connection.execute(
+                """SELECT attempt.learner_id
+                   FROM performance_scoring_claims claim
+                   JOIN performance_attempts attempt
+                     ON attempt.id=claim.attempt_id
+                   WHERE claim.id=?""",
+                (claim_id,),
+            ).fetchone()
+            if current_learner is None:
+                raise ConflictError(
+                    "Performance scoring claim disappeared during "
+                    "reconciliation."
+                )
+            # Recheck under the writer transaction so a quarantine committed
+            # while the external observer ran wins the race and leaves no
+            # reconciliation event or projection row.
+            self.database.require_learner_evidence_safe(
+                current_learner["learner_id"],
+                connection,
+            )
+            if idempotency_key is not None:
+                prior_observation = connection.execute(
+                    """SELECT * FROM performance_scoring_reconciliations
+                       WHERE idempotency_key=?""",
+                    (idempotency_key,),
+                ).fetchone()
+                if prior_observation is not None:
+                    if (
+                        prior_observation["claim_id"] != claim_id
+                        or prior_observation["reconciler_id"]
+                        != reconciler_id
+                        or prior_observation["reconciler_version"]
+                        != reconciler_version
+                    ):
+                        raise ConflictError(
+                            "Idempotency key was concurrently used for a "
+                            "different reconciliation command."
+                        )
+                    return self._scoring_reconciliation_view(
+                        connection,
+                        prior_observation,
+                        idempotent_replay=True,
+                    )
+            (
+                current_claim,
+                current_claim_event,
+                current_attempt,
+                current_task,
+                current_actions,
+                current_provider,
+                current_scoring_request,
+                current_request,
+            ) = self._reconciliation_claim_context(connection, claim_id)
+            if (
+                current_request.digest != request.digest
+                or current_provider.terms() != _provider.terms()
+                or current_scoring_request.terms()
+                != _scoring_request.terms()
+            ):
+                raise ConflictError(
+                    "Scoring claim changed during reconciliation."
+                )
+            existing_evaluation = connection.execute(
+                "SELECT id FROM task_evaluations WHERE id=?",
+                (current_claim["evaluation_id"],),
+            ).fetchone()
+            if existing_evaluation is not None:
+                raise ConflictError(
+                    "Scoring completed while reconciliation lookup was in "
+                    "flight; the observation was not recorded. Inspect the "
+                    "claim before taking any further action."
+                )
+            prior_receipt = connection.execute(
+                """SELECT * FROM performance_scoring_reconciliations
+                   WHERE claim_id=? AND receipt_digest=?""",
+                (claim_id, receipt_digest),
+            ).fetchone()
+            if prior_receipt is not None:
+                raise ConflictError(
+                    "The same reconciliation receipt was already recorded "
+                    "under a different command; inspect that immutable "
+                    "observation instead."
+                )
+            terminal = connection.execute(
+                """SELECT *
+                   FROM performance_scoring_reconciliations
+                   WHERE claim_id=?
+                     AND outcome IN ('completed', 'definitely_absent')""",
+                (claim_id,),
+            ).fetchone()
+            if terminal is not None:
+                raise ConflictError(
+                    "Another reconciliation reached terminal state while "
+                    "this lookup was in flight; this observation was not "
+                    "recorded."
+                )
+            reserved_key = performance_scoring_reconciliation_event_key(
+                command_hash
+            )
+            orphan_event = connection.execute(
+                "SELECT event_id FROM events WHERE idempotency_key=?",
+                (reserved_key,),
+            ).fetchone()
+            if orphan_event is not None:
+                raise ConflictError(
+                    "Reconciliation event history already contains this "
+                    "observation but its projection is missing."
+                )
+            normalized_result_digest = (
+                None
+                if normalized_result is None
+                else normalized_result.digest
+            )
+            reconciliation_event = self.database.append_event(
+                connection,
+                stream_id=f"learner:{current_attempt['learner_id']}",
+                event_type="PerformanceScoringReconciled",
+                schema_version=PERFORMANCE_EVENT_SCHEMA_VERSION,
+                payload=performance_scoring_reconciliation_payload(
+                    reconciliation_id=reconciliation_id,
+                    caller_idempotency_key=idempotency_key,
+                    claim_id=claim_id,
+                    attempt_id=current_claim["attempt_id"],
+                    evaluation_id=current_claim["evaluation_id"],
+                    outcome=reconciliation.outcome.value,
+                    scoring_request_digest=(
+                        current_claim["scoring_request_digest"]
+                    ),
+                    provider_binding_digest=(
+                        current_claim["provider_binding_digest"]
+                    ),
+                    provider_operation_digest=(
+                        current_claim["provider_operation_digest"]
+                    ),
+                    reconciler_id=reconciler_id,
+                    reconciler_version=reconciler_version,
+                    reconciliation_binding_digest=(
+                        reconciliation.reconciler.binding_digest
+                    ),
+                    receipt=receipt.terms(),
+                    receipt_digest=receipt_digest,
+                    normalized_result_digest=normalized_result_digest,
+                    reconciled_at=reconciled_at,
+                    command_hash=command_hash,
+                    reconciler=reconciliation.reconciler.terms(),
+                ),
+                metadata={
+                    "reconciliation_schema_version": 1,
+                    "command_hash": command_hash,
+                    "observational_only": True,
+                    "automatic_retry_allowed": False,
+                    "projection_applied": False,
+                    "certification_applied": False,
+                    "skill_authority": False,
+                    "shadow_only": True,
+                },
+                learner_id=current_attempt["learner_id"],
+                session_id=None,
+                idempotency_key=reserved_key,
+                correlation_id=current_attempt["id"],
+                causation_id=current_claim_event["event_id"],
+                occurred_at=reconciled_at_value,
+            )
+            connection.execute(
+                """INSERT INTO performance_scoring_reconciliations(
+                       id, event_id, idempotency_key, claim_id, attempt_id,
+                       evaluation_id, outcome, scoring_request_digest,
+                       provider_binding_digest, provider_operation_digest,
+                       reconciler_id, reconciler_version,
+                       reconciliation_binding_digest, receipt_json,
+                       receipt_digest, normalized_result_digest,
+                       reconciled_at, command_hash
+                   ) VALUES (
+                       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                   )""",
+                (
+                    reconciliation_id,
+                    reconciliation_event["event_id"],
+                    idempotency_key,
+                    claim_id,
+                    current_claim["attempt_id"],
+                    current_claim["evaluation_id"],
+                    reconciliation.outcome.value,
+                    current_claim["scoring_request_digest"],
+                    current_claim["provider_binding_digest"],
+                    current_claim["provider_operation_digest"],
+                    reconciler_id,
+                    reconciler_version,
+                    reconciliation.reconciler.binding_digest,
+                    canonical_json(receipt.terms()),
+                    receipt_digest,
+                    normalized_result_digest,
+                    reconciled_at,
+                    command_hash,
+                ),
+            )
+            if normalized_result is not None:
+                if completion_time is None:
+                    raise ValidationError(
+                        "Completed reconciliation has no completion timestamp."
+                    )
+                report = self._record_result(
+                    connection,
+                    current_attempt,
+                    current_task,
+                    current_actions,
+                    current_claim["through_sequence"],
+                    normalized_result,
+                    idempotency_key=None,
+                    occurred=completion_time,
+                    command_hash=current_claim["command_hash"],
+                    reconciliation_event_id=(
+                        reconciliation_event["event_id"]
+                    ),
+                )
+                return {
+                    **report,
+                    "claim_id": claim_id,
+                    "status": "completed",
+                    "status_source": "reconciliation",
+                    "terminal": True,
+                    "reconciliation_id": reconciliation_id,
+                    "reconciliation_outcome": reconciliation.outcome.value,
+                    "reconciliation_receipt_digest": receipt_digest,
+                    "reconciliation_result_digest": receipt.result_digest,
+                    "reconciled_at": reconciled_at,
+                    "reconciliation_count": connection.execute(
+                        """SELECT COUNT(*) AS n
+                           FROM performance_scoring_reconciliations
+                           WHERE claim_id=?""",
+                        (claim_id,),
+                    ).fetchone()["n"],
+                    "automatic_retry_allowed": False,
+                }
+            row = connection.execute(
+                """SELECT claim.*, claim_event.event_type,
+                          claim_event.metadata_json,
+                          evaluation.recorded_at AS completed_at
+                   FROM performance_scoring_claims claim
+                   LEFT JOIN events claim_event
+                     ON claim_event.event_id=claim.event_id
+                   LEFT JOIN task_evaluations evaluation
+                     ON evaluation.id=claim.evaluation_id
+                   WHERE claim.id=?""",
+                (claim_id,),
+            ).fetchone()
+            return {
+                **self._scoring_claim_view(connection, row),
+                "reconciliation_id": reconciliation_id,
+                "reconciliation_outcome": reconciliation.outcome.value,
+                "reconciliation_receipt_digest": receipt_digest,
+                "reconciliation_result_digest": receipt.result_digest,
+                "reconciled_at": reconciled_at,
+            }
 
     def import_evaluation(
         self,
@@ -2934,6 +4079,7 @@ def performance_integrity_errors(
                'PerformanceTaskStarted', 'PerformanceActionRecorded',
                'PerformanceScoringClaimed',
                'PerformanceScoringClaimMigrated',
+               'PerformanceScoringReconciled',
                'PerformanceScoringLegacyExempted',
                'TaskEvaluationRecorded', 'ShadowEvidenceReduced'
            ) ORDER BY stream_id, stream_version"""
@@ -2945,6 +4091,7 @@ def performance_integrity_errors(
             "PerformanceActionRecorded",
             "PerformanceScoringClaimed",
             "PerformanceScoringClaimMigrated",
+            "PerformanceScoringReconciled",
             "PerformanceScoringLegacyExempted",
             "TaskEvaluationRecorded",
             "ShadowEvidenceReduced",
@@ -3411,18 +4558,31 @@ def performance_integrity_errors(
                WHERE claim.evaluation_id=?""",
             (row["id"],),
         ).fetchone()
+        reconciliation_causation = connection.execute(
+            """SELECT reconciliation.event_id
+               FROM performance_scoring_reconciliations reconciliation
+               WHERE reconciliation.evaluation_id=?
+                 AND reconciliation.outcome='completed'""",
+            (row["id"],),
+        ).fetchone()
+        recovered = reconciliation_causation is not None
         expected_causation_id = (
-            scoring_causation["event_id"]
-            if scoring_causation is not None
-            and scoring_causation["event_type"]
-            == "PerformanceScoringClaimed"
-            else attempt["id"]
+            reconciliation_causation["event_id"]
+            if recovered
+            else (
+                scoring_causation["event_id"]
+                if scoring_causation is not None
+                and scoring_causation["event_type"]
+                == "PerformanceScoringClaimed"
+                else attempt["id"]
+            )
         )
+        expected_session_id = None if recovered else attempt["session_id"]
         if (
             event["schema_version"] != PERFORMANCE_EVENT_SCHEMA_VERSION
             or event["stream_id"] != f"learner:{attempt['learner_id']}"
             or event["learner_id"] != attempt["learner_id"]
-            or event["session_id"] != attempt["session_id"]
+            or event["session_id"] != expected_session_id
             or event["correlation_id"] != attempt["id"]
             or event["causation_id"] != expected_causation_id
             or event["recorded_at"] != row["recorded_at"]
@@ -3450,6 +4610,11 @@ def performance_integrity_errors(
         """SELECT * FROM performance_scoring_claims
            ORDER BY id"""
     ).fetchall()
+    scoring_claim_rows_by_id = {
+        row["id"]: row for row in scoring_claim_rows
+    }
+    claim_provider_snapshots: dict[str, RegisteredProvider] = {}
+    claim_scoring_requests: dict[str, ScoringRequest] = {}
     projected_claim_events: set[str] = set()
     claim_rows_by_evaluation: dict[str, list[sqlite3.Row]] = {}
     for row in scoring_claim_rows:
@@ -3457,6 +4622,7 @@ def performance_integrity_errors(
         attempt = attempts.get(row["attempt_id"])
         claim_rows_by_evaluation.setdefault(row["evaluation_id"], []).append(row)
         expected_claim_event_key: str | None = None
+        provider_snapshot: RegisteredProvider | None = None
         try:
             _require_id(row["id"], "claim_id")
             _require_id(row["event_id"], "claim_event_id")
@@ -3469,6 +4635,30 @@ def performance_integrity_errors(
             _require_id(row["provider_version"], "provider_version")
             _require_digest(row["action_trace_digest"], "action_trace_digest")
             _require_digest(row["command_hash"], "command_hash")
+            if row["claim_schema_version"] not in {1, 2}:
+                raise ValidationError(
+                    "claim_schema_version must be 1 or 2."
+                )
+            if row["claim_schema_version"] == 1:
+                if any(
+                    row[field] is not None
+                    for field in (
+                        "scoring_request_digest",
+                        "provider_binding_digest",
+                        "provider_operation_digest",
+                    )
+                ):
+                    raise ValidationError(
+                        "legacy claim carries prospective reconciliation "
+                        "digests."
+                    )
+            else:
+                for field in (
+                    "scoring_request_digest",
+                    "provider_binding_digest",
+                    "provider_operation_digest",
+                ):
+                    _require_digest(row[field], field)
             expected_claim_event_key = performance_scoring_claim_event_key(
                 row["command_hash"]
             )
@@ -3494,20 +4684,29 @@ def performance_integrity_errors(
             claim_metadata = decode(
                 claim_event["metadata_json"], f"{label} admission metadata"
             )
+            claim_schema_version = row["claim_schema_version"]
+            claim_payload_fields = {
+                "claim_id",
+                "caller_idempotency_key",
+                "attempt_id",
+                "evaluation_id",
+                "through_sequence",
+                "provider_id",
+                "provider_version",
+                "action_trace_digest",
+                "command_hash",
+                "claimed_at",
+            }
+            if claim_schema_version == 2:
+                claim_payload_fields |= {
+                    "scoring_request_digest",
+                    "provider_binding_digest",
+                    "provider_operation_digest",
+                    "provider",
+                }
             exact(
                 claim_payload,
-                {
-                    "claim_id",
-                    "caller_idempotency_key",
-                    "attempt_id",
-                    "evaluation_id",
-                    "through_sequence",
-                    "provider_id",
-                    "provider_version",
-                    "action_trace_digest",
-                    "command_hash",
-                    "claimed_at",
-                },
+                claim_payload_fields,
                 f"{label} admission payload",
             )
             exact(
@@ -3520,17 +4719,53 @@ def performance_integrity_errors(
                 },
                 f"{label} admission metadata",
             )
-            expected_payload = performance_scoring_claim_payload(
-                claim_id=row["id"],
-                caller_idempotency_key=row["idempotency_key"],
-                attempt_id=row["attempt_id"],
-                evaluation_id=row["evaluation_id"],
-                through_sequence=row["through_sequence"],
-                provider_id=row["provider_id"],
-                provider_version=row["provider_version"],
-                action_trace_digest_value=row["action_trace_digest"],
-                command_hash=row["command_hash"],
-                claimed_at=row["claimed_at"],
+            if claim_schema_version == 2 and claim_payload is not None:
+                try:
+                    provider_snapshot = RegisteredProvider.from_terms(
+                        claim_payload.get("provider")
+                    )
+                except (TypeError, ValueError) as exc:
+                    errors.append(
+                        f"{label}: invalid provider snapshot ({exc})"
+                    )
+            expected_payload = (
+                performance_scoring_claim_v2_payload(
+                    claim_id=row["id"],
+                    caller_idempotency_key=row["idempotency_key"],
+                    attempt_id=row["attempt_id"],
+                    evaluation_id=row["evaluation_id"],
+                    through_sequence=row["through_sequence"],
+                    provider_id=row["provider_id"],
+                    provider_version=row["provider_version"],
+                    action_trace_digest_value=row["action_trace_digest"],
+                    command_hash=row["command_hash"],
+                    claimed_at=row["claimed_at"],
+                    scoring_request_digest=row["scoring_request_digest"],
+                    provider_binding_digest=row[
+                        "provider_binding_digest"
+                    ],
+                    provider_operation_digest=row[
+                        "provider_operation_digest"
+                    ],
+                    provider=(
+                        provider_snapshot.terms()
+                        if provider_snapshot is not None
+                        else {}
+                    ),
+                )
+                if claim_schema_version == 2
+                else performance_scoring_claim_payload(
+                    claim_id=row["id"],
+                    caller_idempotency_key=row["idempotency_key"],
+                    attempt_id=row["attempt_id"],
+                    evaluation_id=row["evaluation_id"],
+                    through_sequence=row["through_sequence"],
+                    provider_id=row["provider_id"],
+                    provider_version=row["provider_version"],
+                    action_trace_digest_value=row["action_trace_digest"],
+                    command_hash=row["command_hash"],
+                    claimed_at=row["claimed_at"],
+                )
             )
             if claim_payload is not None and canonical_json(
                 claim_payload
@@ -3552,7 +4787,8 @@ def performance_integrity_errors(
                 else {None, attempt["session_id"]}
             )
             if claim_metadata is not None and (
-                claim_metadata.get("claim_schema_version") != 1
+                claim_metadata.get("claim_schema_version")
+                != claim_schema_version
                 or claim_metadata.get("admission_mode") != expected_mode
                 or claim_metadata.get("source_schema_version")
                 != expected_source_version
@@ -3561,7 +4797,7 @@ def performance_integrity_errors(
                 errors.append(f"{label}: admission event metadata mismatch")
             if (
                 claim_event["schema_version"]
-                != PERFORMANCE_EVENT_SCHEMA_VERSION
+                != (2 if claim_schema_version == 2 else 1)
                 or claim_event["stream_id"]
                 != f"learner:{attempt['learner_id']}"
                 or claim_event["learner_id"] != attempt["learner_id"]
@@ -3609,6 +4845,84 @@ def performance_integrity_errors(
             or row["id"] != "psc_" + expected_command_hash
         ):
             errors.append(f"{label}: submitted trace or command commitment mismatch")
+        if row["claim_schema_version"] == 2:
+            task = attempt_tasks.get(row["attempt_id"])
+            if task is None or provider_snapshot is None:
+                errors.append(
+                    f"{label}: cannot reconstruct v2 request/provider boundary"
+                )
+            else:
+                scorer_contract = next(
+                    (
+                        contract
+                        for contract in task.scorer_contracts
+                        if contract.key
+                        == (
+                            provider_snapshot.declared_kind,
+                            provider_snapshot.provider_id,
+                            provider_snapshot.provider_version,
+                        )
+                    ),
+                    None,
+                )
+                try:
+                    scoring_request = ScoringRequest(
+                        evaluation_id=row["evaluation_id"],
+                        trace_id=row["attempt_id"],
+                        task_id=task.id,
+                        task_version=task.version,
+                        task_digest=task.digest,
+                        action_trace_digest=trace_digest,
+                        criterion_ids=(
+                            scorer_contract.criterion_ids
+                            if scorer_contract is not None
+                            else tuple(
+                                criterion.id
+                                for criterion in task.criteria
+                            )
+                        ),
+                        scorer_contract=scorer_contract,
+                    )
+                    expected_scoring_request_digest = canonical_digest(
+                        scoring_request.terms()
+                    )
+                    expected_provider_operation_digest = (
+                        provider_scoring_operation_digest(
+                            claim_id=row["id"],
+                            evaluation_id=row["evaluation_id"],
+                            scoring_request_digest=(
+                                expected_scoring_request_digest
+                            ),
+                            provider_binding_digest=(
+                                provider_snapshot.binding_digest
+                            ),
+                        )
+                    )
+                except (TypeError, ValueError) as exc:
+                    errors.append(
+                        f"{label}: cannot reconstruct v2 scoring request "
+                        f"({exc})"
+                    )
+                else:
+                    if (
+                        provider_snapshot.provider_id != row["provider_id"]
+                        or provider_snapshot.provider_version
+                        != row["provider_version"]
+                        or provider_snapshot.binding_digest
+                        != row["provider_binding_digest"]
+                        or row["scoring_request_digest"]
+                        != expected_scoring_request_digest
+                        or row["provider_operation_digest"]
+                        != expected_provider_operation_digest
+                    ):
+                        errors.append(
+                            f"{label}: v2 request/provider commitment mismatch"
+                        )
+                    else:
+                        claim_provider_snapshots[row["id"]] = (
+                            provider_snapshot
+                        )
+                        claim_scoring_requests[row["id"]] = scoring_request
         submission_event = action_events_by_attempt_sequence.get(
             (row["attempt_id"], row["through_sequence"])
         )
@@ -3652,9 +4966,19 @@ def performance_integrity_errors(
             if type(normalized_terms) is dict
             else None
         )
+        completion_reconciliation = connection.execute(
+            """SELECT reconciliation.event_id,
+                      reconciliation.normalized_result_digest
+               FROM performance_scoring_reconciliations reconciliation
+               WHERE reconciliation.claim_id=?
+                 AND reconciliation.outcome='completed'""",
+            (row["id"],),
+        ).fetchone()
+        recovered_completion = completion_reconciliation is not None
         if (
             event["event_type"] != "TaskEvaluationRecorded"
-            or event["idempotency_key"] != row["idempotency_key"]
+            or event["idempotency_key"]
+            != (None if recovered_completion else row["idempotency_key"])
             or metadata is None
             or metadata.get("command_hash") != row["command_hash"]
             or payload is None
@@ -3664,12 +4988,38 @@ def performance_integrity_errors(
             or evaluation_terms.get("id") != row["evaluation_id"]
             or type(normalized_terms) is not dict
             or normalized_terms.get("normalization_mode")
-            != NormalizationMode.REGISTERED_PROVIDER.value
+            != (
+                NormalizationMode.DIRECT_IMPORT.value
+                if recovered_completion
+                else NormalizationMode.REGISTERED_PROVIDER.value
+            )
             or type(provider_terms) is not dict
-            or provider_terms.get("provider_id") != row["provider_id"]
-            or provider_terms.get("provider_version") != row["provider_version"]
             or (
-                claim_event is not None
+                not recovered_completion
+                and (
+                    provider_terms.get("provider_id") != row["provider_id"]
+                    or provider_terms.get("provider_version")
+                    != row["provider_version"]
+                )
+            )
+            or (
+                recovered_completion
+                and (
+                    event["session_id"] is not None
+                    or event["causation_id"]
+                    != completion_reconciliation["event_id"]
+                    or (
+                        type(authority_terms) is not dict
+                        or authority_terms.get("normalized_result_digest")
+                        != completion_reconciliation[
+                            "normalized_result_digest"
+                        ]
+                    )
+                )
+            )
+            or (
+                not recovered_completion
+                and claim_event is not None
                 and claim_event["event_type"] == "PerformanceScoringClaimed"
                 and (
                     event["causation_id"] != claim_event["event_id"]
@@ -3689,6 +5039,408 @@ def performance_integrity_errors(
                 errors.append(
                     f"event {event_id}: {event_type} has no scoring claim projection"
                 )
+
+    reconciliation_rows = connection.execute(
+        """SELECT observation.*
+           FROM performance_scoring_reconciliations observation
+           ORDER BY (
+               SELECT event.stream_id FROM events event
+               WHERE event.event_id=observation.event_id
+           ), (
+               SELECT event.stream_version FROM events event
+               WHERE event.event_id=observation.event_id
+           ), observation.id"""
+    ).fetchall()
+    projected_reconciliation_events: set[str] = set()
+    terminal_claims: set[str] = set()
+    for row in reconciliation_rows:
+        label = f"performance scoring reconciliation {row['id']}"
+        claim = scoring_claim_rows_by_id.get(row["claim_id"])
+        attempt = attempts.get(row["attempt_id"])
+        event = events_by_type["PerformanceScoringReconciled"].get(
+            row["event_id"]
+        )
+        if event is None:
+            errors.append(f"{label}: missing PerformanceScoringReconciled event")
+            continue
+        projected_reconciliation_events.add(event["event_id"])
+        payload = decode(event["payload_json"], f"{label} event payload")
+        metadata = decode(event["metadata_json"], f"{label} event metadata")
+        exact(
+            payload,
+            {
+                "reconciliation_id",
+                "caller_idempotency_key",
+                "claim_id",
+                "attempt_id",
+                "evaluation_id",
+                "outcome",
+                "scoring_request_digest",
+                "provider_binding_digest",
+                "provider_operation_digest",
+                "reconciler_id",
+                "reconciler_version",
+                "reconciliation_binding_digest",
+                "receipt",
+                "receipt_digest",
+                "normalized_result_digest",
+                "reconciled_at",
+                "command_hash",
+                "reconciler",
+            },
+            f"{label} event payload",
+        )
+        exact(
+            metadata,
+            {
+                "reconciliation_schema_version",
+                "command_hash",
+                "observational_only",
+                "automatic_retry_allowed",
+                "projection_applied",
+                "certification_applied",
+                "skill_authority",
+                "shadow_only",
+            },
+            f"{label} event metadata",
+        )
+        receipt: ScoringReconciliationReceipt | None = None
+        reconciler: RegisteredReconciler | None = None
+        try:
+            receipt_terms = _json_object(
+                row["receipt_json"], f"{label} receipt projection"
+            )
+            receipt = ScoringReconciliationReceipt.from_terms(receipt_terms)
+            if payload is not None:
+                reconciler = RegisteredReconciler.from_terms(
+                    payload.get("reconciler")
+                )
+            _require_id(row["id"], "reconciliation_id")
+            if row["idempotency_key"] is not None:
+                _require_text(
+                    row["idempotency_key"], "idempotency_key", 256
+                )
+            _require_digest(
+                row["reconciliation_binding_digest"],
+                "reconciliation_binding_digest",
+            )
+            _require_digest(row["receipt_digest"], "receipt_digest")
+            _require_digest(row["command_hash"], "command_hash")
+            _aware_timestamp(row["reconciled_at"], f"{label} reconciled_at")
+            if row["normalized_result_digest"] is not None:
+                _require_digest(
+                    row["normalized_result_digest"],
+                    "normalized_result_digest",
+                )
+        except (TypeError, ValueError, ValidationError) as exc:
+            errors.append(f"{label}: invalid reconciliation terms ({exc})")
+        if claim is None or attempt is None:
+            errors.append(f"{label}: missing claim or performance attempt")
+            continue
+        if claim["claim_schema_version"] != 2:
+            errors.append(f"{label}: legacy claim cannot be reconciled")
+        if row["claim_id"] in terminal_claims:
+            errors.append(
+                f"{label}: observation follows the claim's first terminal "
+                "reconciliation"
+            )
+        if row["outcome"] in {
+            ReconciliationOutcome.COMPLETED.value,
+            ReconciliationOutcome.DEFINITELY_ABSENT.value,
+        }:
+            terminal_claims.add(row["claim_id"])
+        try:
+            outcome = ReconciliationOutcome(row["outcome"])
+        except (TypeError, ValueError):
+            errors.append(f"{label}: unknown reconciliation outcome")
+            outcome = None
+        expected_command_hash = (
+            _command_hash(
+                {
+                    "operation": "reconcile_scoring_claim",
+                    "claim_id": row["claim_id"],
+                    "provider_operation_digest": row[
+                        "provider_operation_digest"
+                    ],
+                    "reconciler_id": row["reconciler_id"],
+                    "reconciler_version": row["reconciler_version"],
+                    "reconciliation_binding_digest": row[
+                        "reconciliation_binding_digest"
+                    ],
+                    "receipt_digest": row["receipt_digest"],
+                    "caller_idempotency_key": row["idempotency_key"],
+                }
+            )
+            if all(
+                row[field] is not None
+                for field in (
+                    "provider_operation_digest",
+                    "reconciler_id",
+                    "reconciler_version",
+                    "reconciliation_binding_digest",
+                    "receipt_digest",
+                )
+            )
+            else None
+        )
+        expected_payload = (
+            performance_scoring_reconciliation_payload(
+                reconciliation_id=row["id"],
+                caller_idempotency_key=row["idempotency_key"],
+                claim_id=row["claim_id"],
+                attempt_id=row["attempt_id"],
+                evaluation_id=row["evaluation_id"],
+                outcome=row["outcome"],
+                scoring_request_digest=row["scoring_request_digest"],
+                provider_binding_digest=row["provider_binding_digest"],
+                provider_operation_digest=row["provider_operation_digest"],
+                reconciler_id=row["reconciler_id"],
+                reconciler_version=row["reconciler_version"],
+                reconciliation_binding_digest=row[
+                    "reconciliation_binding_digest"
+                ],
+                receipt=receipt.terms() if receipt is not None else {},
+                receipt_digest=row["receipt_digest"],
+                normalized_result_digest=row["normalized_result_digest"],
+                reconciled_at=row["reconciled_at"],
+                command_hash=row["command_hash"],
+                reconciler=(
+                    reconciler.terms() if reconciler is not None else {}
+                ),
+            )
+            if payload is not None
+            else None
+        )
+        if payload is not None and expected_payload is not None and (
+            canonical_json(payload) != canonical_json(expected_payload)
+        ):
+            errors.append(f"{label}: event payload mismatch")
+        if metadata is not None and (
+            metadata.get("reconciliation_schema_version") != 1
+            or metadata.get("command_hash") != row["command_hash"]
+            or metadata.get("observational_only") is not True
+            or metadata.get("automatic_retry_allowed") is not False
+            or metadata.get("projection_applied") is not False
+            or metadata.get("certification_applied") is not False
+            or metadata.get("skill_authority") is not False
+            or metadata.get("shadow_only") is not True
+        ):
+            errors.append(f"{label}: unsafe or mismatched event metadata")
+        claim_event = (
+            events_by_type["PerformanceScoringClaimed"].get(
+                claim["event_id"]
+            )
+            or events_by_type["PerformanceScoringClaimMigrated"].get(
+                claim["event_id"]
+            )
+        )
+        if (
+            row["attempt_id"] != claim["attempt_id"]
+            or row["evaluation_id"] != claim["evaluation_id"]
+            or row["scoring_request_digest"]
+            != claim["scoring_request_digest"]
+            or row["provider_binding_digest"]
+            != claim["provider_binding_digest"]
+            or row["provider_operation_digest"]
+            != claim["provider_operation_digest"]
+            or expected_command_hash is None
+            or row["command_hash"] != expected_command_hash
+            or row["id"] != "psr_" + str(expected_command_hash)
+            or event["schema_version"] != PERFORMANCE_EVENT_SCHEMA_VERSION
+            or event["stream_id"] != f"learner:{attempt['learner_id']}"
+            or event["learner_id"] != attempt["learner_id"]
+            or event["session_id"] is not None
+            or event["idempotency_key"]
+            != (
+                performance_scoring_reconciliation_event_key(
+                    expected_command_hash
+                )
+                if expected_command_hash is not None
+                else None
+            )
+            or event["correlation_id"] != attempt["id"]
+            or claim_event is None
+            or event["causation_id"] != claim["event_id"]
+            or event["occurred_at"] != row["reconciled_at"]
+            or (
+                claim_event is not None
+                and event["stream_version"] <= claim_event["stream_version"]
+            )
+        ):
+            errors.append(f"{label}: claim/event boundary mismatch")
+        if receipt is not None and (
+            receipt.digest != row["receipt_digest"]
+            or receipt.claim_id != claim["id"]
+            or receipt.attempt_id != claim["attempt_id"]
+            or receipt.evaluation_id != claim["evaluation_id"]
+            or receipt.through_sequence != claim["through_sequence"]
+            or receipt.provider_id != claim["provider_id"]
+            or receipt.provider_version != claim["provider_version"]
+            or receipt.action_trace_digest
+            != claim["action_trace_digest"]
+            or receipt.command_hash != claim["command_hash"]
+            or receipt.scoring_request_digest
+            != claim["scoring_request_digest"]
+            or receipt.provider_binding_digest
+            != claim["provider_binding_digest"]
+            or receipt.provider_operation_digest
+            != claim["provider_operation_digest"]
+            or receipt.reconciler_id != row["reconciler_id"]
+            or receipt.reconciler_version != row["reconciler_version"]
+            or outcome is None
+            or receipt.outcome is not outcome
+        ):
+            errors.append(f"{label}: receipt does not match its claim")
+        if reconciler is not None and (
+            reconciler.provider_id != claim["provider_id"]
+            or reconciler.provider_version != claim["provider_version"]
+            or reconciler.reconciler_id != row["reconciler_id"]
+            or reconciler.reconciler_version != row["reconciler_version"]
+            or reconciler.binding_digest
+            != row["reconciliation_binding_digest"]
+            or (
+                outcome is ReconciliationOutcome.DEFINITELY_ABSENT
+                and not reconciler.can_prove_absence
+            )
+        ):
+            errors.append(f"{label}: reconciler authority mismatch")
+        evaluation_row = evaluation_rows_by_id.get(row["evaluation_id"])
+        if outcome is ReconciliationOutcome.COMPLETED:
+            if (
+                row["normalized_result_digest"] is None
+                or evaluation_row is None
+            ):
+                errors.append(
+                    f"{label}: completed outcome lacks its recovered evaluation"
+                )
+            else:
+                evaluation_event = events_by_type[
+                    "TaskEvaluationRecorded"
+                ].get(evaluation_row["event_id"])
+                if (
+                    receipt is None
+                    or evaluation_event is None
+                    or evaluation_event["occurred_at"]
+                    != receipt.completed_at
+                ):
+                    errors.append(
+                        f"{label}: recovered evaluation occurrence does not "
+                        "match its receipt completion"
+                    )
+                if (
+                    evaluation_event is None
+                    or evaluation_event["stream_id"] != event["stream_id"]
+                    or evaluation_event["stream_version"]
+                    <= event["stream_version"]
+                ):
+                    errors.append(
+                        f"{label}: recovered evaluation does not follow its "
+                        "reconciliation event"
+                    )
+                evaluation = evaluations.get(row["evaluation_id"])
+                provider = claim_provider_snapshots.get(row["claim_id"])
+                scoring_request = claim_scoring_requests.get(row["claim_id"])
+                authority = decode(
+                    evaluation_row["authority_json"],
+                    f"{label} recovered evaluation authority",
+                )
+                normalized_terms = (
+                    authority.get("normalized_result")
+                    if authority is not None
+                    else None
+                )
+                if (
+                    receipt is None
+                    or evaluation is None
+                    or provider is None
+                    or scoring_request is None
+                    or type(normalized_terms) is not dict
+                ):
+                    errors.append(
+                        f"{label}: recovered result boundary cannot be "
+                        "reconstructed"
+                    )
+                else:
+                    try:
+                        imported = _authority_free_imported_evaluation(
+                            evaluation
+                        )
+                        expected_result = (
+                            _normalize_recovered_imported_evaluation(
+                                scoring_request,
+                                imported,
+                                provider,
+                                row["provider_operation_digest"],
+                            )
+                        )
+                        stored_result = NormalizedScoringResult.from_terms(
+                            normalized_terms
+                        )
+                    except (TypeError, ValueError) as exc:
+                        errors.append(
+                            f"{label}: recovered result is invalid ({exc})"
+                        )
+                    else:
+                        if receipt.result_digest != imported.digest:
+                            errors.append(
+                                f"{label}: recovered imported result digest "
+                                "does not match its receipt"
+                            )
+                        if (
+                            row["normalized_result_digest"]
+                            != expected_result.digest
+                            or authority.get("normalized_result_digest")
+                            != expected_result.digest
+                            or canonical_json(stored_result.terms())
+                            != canonical_json(expected_result.terms())
+                        ):
+                            errors.append(
+                                f"{label}: recovered normalized result does "
+                                "not match its claim-bound shadow "
+                                "normalization"
+                            )
+        elif (
+            row["normalized_result_digest"] is not None
+            or (
+                outcome is ReconciliationOutcome.DEFINITELY_ABSENT
+                and evaluation_row is not None
+            )
+        ):
+            errors.append(f"{label}: non-completed outcome has a result")
+        if receipt is not None:
+            try:
+                claim_time = _aware_timestamp(
+                    claim["claimed_at"], f"{label} claim admission"
+                )
+                observed_time = _aware_timestamp(
+                    receipt.observed_at, f"{label} observed_at"
+                )
+                reconciliation_time = _aware_timestamp(
+                    row["reconciled_at"], f"{label} reconciled_at"
+                )
+                if observed_time < claim_time:
+                    errors.append(
+                        f"{label}: observation predates callback admission"
+                    )
+                if observed_time > reconciliation_time:
+                    errors.append(
+                        f"{label}: observation is later than its ledger record"
+                    )
+                if receipt.completed_at is not None and _aware_timestamp(
+                    receipt.completed_at, f"{label} completed_at"
+                ) < claim_time:
+                    errors.append(
+                        f"{label}: completion predates callback admission"
+                    )
+            except ValidationError as exc:
+                errors.append(str(exc))
+
+    for event_id in events_by_type["PerformanceScoringReconciled"]:
+        if event_id not in projected_reconciliation_events:
+            errors.append(
+                f"event {event_id}: PerformanceScoringReconciled has no "
+                "reconciliation projection"
+            )
 
     legacy_exemptions: dict[str, sqlite3.Row] = {}
     for event in events_by_type["PerformanceScoringLegacyExempted"].values():
@@ -3756,10 +5508,32 @@ def performance_integrity_errors(
                     f"task evaluation {evaluation_id}: registered provider "
                     "does not have exactly one claim or schema-v14 exemption"
                 )
-        elif claims or exemption is not None:
+        elif claims:
+            recovered_claims = [
+                claim
+                for claim in claims
+                if connection.execute(
+                    """SELECT 1
+                       FROM performance_scoring_reconciliations
+                       WHERE claim_id=? AND outcome='completed'
+                         AND evaluation_id=?""",
+                    (claim["id"], evaluation_id),
+                ).fetchone()
+                is not None
+            ]
+            if (
+                len(claims) != 1
+                or len(recovered_claims) != 1
+                or exemption is not None
+            ):
+                errors.append(
+                    f"task evaluation {evaluation_id}: direct import has an "
+                    "unreconciled provider-callback claim or legacy exemption"
+                )
+        elif exemption is not None:
             errors.append(
                 f"task evaluation {evaluation_id}: direct import cannot have "
-                "a provider-callback claim or legacy exemption"
+                "a legacy provider exemption"
             )
 
     bundle_rows = connection.execute(
@@ -3838,19 +5612,20 @@ def performance_integrity_errors(
             or event_metadata.get("shadow_only") is not True
         ):
             errors.append(f"{label}: event metadata mismatch")
+        evaluation_event = events_by_type["TaskEvaluationRecorded"].get(
+            evaluation_row["event_id"]
+        )
         if (
             event["schema_version"] != PERFORMANCE_EVENT_SCHEMA_VERSION
             or event["stream_id"] != f"learner:{attempt['learner_id']}"
             or event["learner_id"] != attempt["learner_id"]
-            or event["session_id"] != attempt["session_id"]
+            or evaluation_event is None
+            or event["session_id"] != evaluation_event["session_id"]
             or event["correlation_id"] != attempt["id"]
             or event["causation_id"] != row["evaluation_id"]
             or event["recorded_at"] != row["recorded_at"]
         ):
             errors.append(f"{label}: event envelope mismatch")
-        evaluation_event = events_by_type["TaskEvaluationRecorded"].get(
-            evaluation_row["event_id"]
-        )
         if (
             evaluation_event is None
             or evaluation_event["stream_id"] != event["stream_id"]
@@ -3877,6 +5652,47 @@ def performance_integrity_errors(
             errors.append(
                 f"event {event_id}: ShadowEvidenceReduced has no bundle projection"
             )
+    try:
+        derived_projection, _ = derive_performance_projections(connection)
+        stored_projection = performance_projection_snapshot(connection)
+    except (TypeError, ValueError, ValidationError) as exc:
+        errors.append(
+            f"performance projection cannot be derived from events ({exc})"
+        )
+    else:
+        for name in _PERFORMANCE_PROJECTION_TABLES:
+            projection_name = {
+                "performance_attempts": "attempts",
+                "performance_actions": "actions",
+                "performance_scoring_claims": "scoring_claims",
+                "performance_scoring_reconciliations": (
+                    "scoring_reconciliations"
+                ),
+                "task_evaluations": "evaluations",
+                "shadow_evidence_bundles": "bundles",
+            }[name]
+            integrity_label = {
+                "performance_attempts": "performance attempt projection",
+                "performance_actions": "performance action projection",
+                "performance_scoring_claims": (
+                    "performance scoring claim projection"
+                ),
+                "performance_scoring_reconciliations": (
+                    "performance scoring reconciliation projection"
+                ),
+                "task_evaluations": "task evaluation projection",
+                "shadow_evidence_bundles": (
+                    "shadow evidence bundle projection"
+                ),
+            }[name]
+            if (
+                canonical_json(stored_projection[projection_name])
+                != canonical_json(derived_projection[projection_name])
+            ):
+                errors.append(
+                    f"{integrity_label}: stored projection differs from "
+                    "immutable events"
+                )
     return errors
 
 
@@ -3884,6 +5700,7 @@ _PERFORMANCE_PROJECTION_TABLES = (
     "performance_attempts",
     "performance_actions",
     "performance_scoring_claims",
+    "performance_scoring_reconciliations",
     "task_evaluations",
     "shadow_evidence_bundles",
 )
@@ -3903,6 +5720,17 @@ def performance_projection_snapshot(
         "scoring_claims": (
             "SELECT * FROM performance_scoring_claims ORDER BY id"
         ),
+        "scoring_reconciliations": (
+            "SELECT observation.* "
+            "FROM performance_scoring_reconciliations observation "
+            "ORDER BY ("
+            "SELECT event.stream_id FROM events event "
+            "WHERE event.event_id=observation.event_id"
+            "), ("
+            "SELECT event.stream_version FROM events event "
+            "WHERE event.event_id=observation.event_id"
+            "), observation.id"
+        ),
         "evaluations": (
             "SELECT * FROM task_evaluations "
             "ORDER BY attempt_id, recorded_at, id"
@@ -3914,9 +5742,17 @@ def performance_projection_snapshot(
     }
     snapshot: dict[str, list[dict[str, Any]]] = {}
     for name, query in queries.items():
-        if name == "scoring_claims" and connection.execute(
+        if name in {
+            "scoring_claims",
+            "scoring_reconciliations",
+        } and connection.execute(
             """SELECT 1 FROM sqlite_master
-               WHERE type='table' AND name='performance_scoring_claims'"""
+               WHERE type='table' AND name=?""",
+            (
+                "performance_scoring_claims"
+                if name == "scoring_claims"
+                else "performance_scoring_reconciliations",
+            ),
         ).fetchone() is None:
             # Exact v14 migration fixtures predate callback admission.  An
             # absent table and the newly installed empty projection represent
@@ -3937,20 +5773,36 @@ def derive_performance_projections(
     attempts: list[dict[str, Any]] = []
     actions: list[dict[str, Any]] = []
     scoring_claims: list[dict[str, Any]] = []
+    scoring_reconciliations: list[dict[str, Any]] = []
     evaluations: list[dict[str, Any]] = []
     bundles: list[dict[str, Any]] = []
     checkpoints: list[dict[str, Any]] = []
+    claim_provider_snapshots: dict[str, RegisteredProvider] = {}
+    reconciliation_receipts: dict[
+        str, ScoringReconciliationReceipt
+    ] = {}
+    reconciliation_events: dict[str, sqlite3.Row] = {}
+    recovered_evaluations: dict[
+        str, tuple[TaskEvaluation, Mapping[str, Any], sqlite3.Row]
+    ] = {}
     events = connection.execute(
         """SELECT * FROM events WHERE event_type IN (
                'PerformanceTaskStarted', 'PerformanceActionRecorded',
                'PerformanceScoringClaimed',
                'PerformanceScoringClaimMigrated',
+               'PerformanceScoringReconciled',
                'PerformanceScoringLegacyExempted',
                'TaskEvaluationRecorded', 'ShadowEvidenceReduced'
            ) ORDER BY stream_id, stream_version"""
     ).fetchall()
     for event in events:
-        if event["schema_version"] != PERFORMANCE_EVENT_SCHEMA_VERSION:
+        event_type = event["event_type"]
+        supported_schema = (
+            event["schema_version"] in {1, 2}
+            if event_type == "PerformanceScoringClaimed"
+            else event["schema_version"] == PERFORMANCE_EVENT_SCHEMA_VERSION
+        )
+        if not supported_schema:
             raise ValidationError(
                 f"Performance event {event['event_id']} uses unsupported schema "
                 f"{event['schema_version']}."
@@ -3962,7 +5814,6 @@ def derive_performance_projections(
             event["metadata_json"],
             f"Performance event {event['event_id']} metadata",
         )
-        event_type = event["event_type"]
         if event_type == "PerformanceTaskStarted":
             _require_exact_fields(
                 payload,
@@ -4092,21 +5943,33 @@ def derive_performance_projections(
             "PerformanceScoringClaimed",
             "PerformanceScoringClaimMigrated",
         }:
+            claim_schema_version = metadata.get("claim_schema_version")
+            base_payload_fields = {
+                "claim_id",
+                "caller_idempotency_key",
+                "attempt_id",
+                "evaluation_id",
+                "through_sequence",
+                "provider_id",
+                "provider_version",
+                "action_trace_digest",
+                "command_hash",
+                "claimed_at",
+            }
             _require_exact_fields(
                 payload,
                 frozenset(
-                    {
-                        "claim_id",
-                        "caller_idempotency_key",
-                        "attempt_id",
-                        "evaluation_id",
-                        "through_sequence",
-                        "provider_id",
-                        "provider_version",
-                        "action_trace_digest",
-                        "command_hash",
-                        "claimed_at",
-                    }
+                    base_payload_fields
+                    | (
+                        {
+                            "scoring_request_digest",
+                            "provider_binding_digest",
+                            "provider_operation_digest",
+                            "provider",
+                        }
+                        if claim_schema_version == 2
+                        else set()
+                    )
                 ),
                 f"Performance event {event['event_id']} payload",
             )
@@ -4127,8 +5990,16 @@ def derive_performance_projections(
                 if event_type == "PerformanceScoringClaimed"
                 else "legacy_projection_migration"
             )
+            expected_event_schema = (
+                2 if claim_schema_version == 2 else 1
+            )
             if (
-                metadata["claim_schema_version"] != 1
+                claim_schema_version not in {1, 2}
+                or (
+                    claim_schema_version == 2
+                    and event_type != "PerformanceScoringClaimed"
+                )
+                or event["schema_version"] != expected_event_schema
                 or metadata["admission_mode"] != expected_mode
                 or metadata["source_schema_version"]
                 != (None if expected_mode == "pre_callback" else 15)
@@ -4142,10 +6013,47 @@ def derive_performance_projections(
                     f"Performance event {event['event_id']} scoring claim "
                     "boundary mismatch."
                 )
+            if claim_schema_version == 2:
+                try:
+                    provider = RegisteredProvider.from_terms(
+                        payload["provider"]
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError(
+                        f"Performance event {event['event_id']} provider "
+                        f"snapshot is invalid: {exc}"
+                    ) from exc
+                expected_operation_digest = (
+                    provider_scoring_operation_digest(
+                        claim_id=payload["claim_id"],
+                        evaluation_id=payload["evaluation_id"],
+                        scoring_request_digest=payload[
+                            "scoring_request_digest"
+                        ],
+                        provider_binding_digest=payload[
+                            "provider_binding_digest"
+                        ],
+                    )
+                )
+                if (
+                    provider.provider_id != payload["provider_id"]
+                    or provider.provider_version
+                    != payload["provider_version"]
+                    or provider.binding_digest
+                    != payload["provider_binding_digest"]
+                    or payload["provider_operation_digest"]
+                    != expected_operation_digest
+                ):
+                    raise ValidationError(
+                        f"Performance event {event['event_id']} provider "
+                        "operation boundary mismatch."
+                    )
+                claim_provider_snapshots[payload["claim_id"]] = provider
             scoring_claims.append(
                 {
                     "id": payload["claim_id"],
                     "event_id": event["event_id"],
+                    "claim_schema_version": claim_schema_version,
                     "idempotency_key": payload["caller_idempotency_key"],
                     "attempt_id": payload["attempt_id"],
                     "evaluation_id": payload["evaluation_id"],
@@ -4153,6 +6061,15 @@ def derive_performance_projections(
                     "provider_id": payload["provider_id"],
                     "provider_version": payload["provider_version"],
                     "action_trace_digest": payload["action_trace_digest"],
+                    "scoring_request_digest": payload.get(
+                        "scoring_request_digest"
+                    ),
+                    "provider_binding_digest": payload.get(
+                        "provider_binding_digest"
+                    ),
+                    "provider_operation_digest": payload.get(
+                        "provider_operation_digest"
+                    ),
                     "command_hash": payload["command_hash"],
                     "claimed_at": payload["claimed_at"],
                 }
@@ -4164,6 +6081,163 @@ def derive_performance_projections(
                     "attempt_id": payload["attempt_id"],
                     "claim_id": payload["claim_id"],
                     "evaluation_id": payload["evaluation_id"],
+                }
+            )
+        elif event_type == "PerformanceScoringReconciled":
+            _require_exact_fields(
+                payload,
+                frozenset(
+                    {
+                        "reconciliation_id",
+                        "caller_idempotency_key",
+                        "claim_id",
+                        "attempt_id",
+                        "evaluation_id",
+                        "outcome",
+                        "scoring_request_digest",
+                        "provider_binding_digest",
+                        "provider_operation_digest",
+                        "reconciler_id",
+                        "reconciler_version",
+                        "reconciliation_binding_digest",
+                        "receipt",
+                        "receipt_digest",
+                        "normalized_result_digest",
+                        "reconciled_at",
+                        "command_hash",
+                        "reconciler",
+                    }
+                ),
+                f"Performance event {event['event_id']} payload",
+            )
+            _require_exact_fields(
+                metadata,
+                frozenset(
+                    {
+                        "reconciliation_schema_version",
+                        "command_hash",
+                        "observational_only",
+                        "automatic_retry_allowed",
+                        "projection_applied",
+                        "certification_applied",
+                        "skill_authority",
+                        "shadow_only",
+                    }
+                ),
+                f"Performance event {event['event_id']} metadata",
+            )
+            try:
+                receipt = ScoringReconciliationReceipt.from_terms(
+                    payload["receipt"]
+                )
+                reconciler = RegisteredReconciler.from_terms(
+                    payload["reconciler"]
+                )
+                outcome = ReconciliationOutcome(payload["outcome"])
+            except (TypeError, ValueError) as exc:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} reconciliation "
+                    f"terms are invalid: {exc}"
+                ) from exc
+            expected_command_hash = _command_hash(
+                {
+                    "operation": "reconcile_scoring_claim",
+                    "claim_id": payload["claim_id"],
+                    "provider_operation_digest": payload[
+                        "provider_operation_digest"
+                    ],
+                    "reconciler_id": payload["reconciler_id"],
+                    "reconciler_version": payload[
+                        "reconciler_version"
+                    ],
+                    "reconciliation_binding_digest": payload[
+                        "reconciliation_binding_digest"
+                    ],
+                    "receipt_digest": payload["receipt_digest"],
+                    "caller_idempotency_key": payload[
+                        "caller_idempotency_key"
+                    ],
+                }
+            )
+            if (
+                receipt.digest != payload["receipt_digest"]
+                or receipt.outcome is not outcome
+                or receipt.claim_id != payload["claim_id"]
+                or receipt.evaluation_id != payload["evaluation_id"]
+                or receipt.provider_operation_digest
+                != payload["provider_operation_digest"]
+                or reconciler.reconciler_id != payload["reconciler_id"]
+                or reconciler.reconciler_version
+                != payload["reconciler_version"]
+                or reconciler.binding_digest
+                != payload["reconciliation_binding_digest"]
+                or metadata["reconciliation_schema_version"] != 1
+                or metadata["command_hash"] != expected_command_hash
+                or metadata["observational_only"] is not True
+                or metadata["automatic_retry_allowed"] is not False
+                or metadata["projection_applied"] is not False
+                or metadata["certification_applied"] is not False
+                or metadata["skill_authority"] is not False
+                or metadata["shadow_only"] is not True
+                or payload["command_hash"] != expected_command_hash
+                or event["idempotency_key"]
+                != performance_scoring_reconciliation_event_key(
+                    expected_command_hash
+                )
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} reconciliation "
+                    "boundary mismatch."
+                )
+            scoring_reconciliations.append(
+                {
+                    "id": payload["reconciliation_id"],
+                    "event_id": event["event_id"],
+                    "idempotency_key": payload[
+                        "caller_idempotency_key"
+                    ],
+                    "claim_id": payload["claim_id"],
+                    "attempt_id": payload["attempt_id"],
+                    "evaluation_id": payload["evaluation_id"],
+                    "outcome": outcome.value,
+                    "scoring_request_digest": payload[
+                        "scoring_request_digest"
+                    ],
+                    "provider_binding_digest": payload[
+                        "provider_binding_digest"
+                    ],
+                    "provider_operation_digest": payload[
+                        "provider_operation_digest"
+                    ],
+                    "reconciler_id": payload["reconciler_id"],
+                    "reconciler_version": payload[
+                        "reconciler_version"
+                    ],
+                    "reconciliation_binding_digest": payload[
+                        "reconciliation_binding_digest"
+                    ],
+                    "receipt_json": canonical_json(receipt.terms()),
+                    "receipt_digest": receipt.digest,
+                    "normalized_result_digest": payload[
+                        "normalized_result_digest"
+                    ],
+                    "reconciled_at": payload["reconciled_at"],
+                    "command_hash": expected_command_hash,
+                }
+            )
+            reconciliation_receipts[
+                payload["reconciliation_id"]
+            ] = receipt
+            reconciliation_events[payload["reconciliation_id"]] = event
+            checkpoints.append(
+                {
+                    "event_id": event["event_id"],
+                    "event_type": event_type,
+                    "attempt_id": payload["attempt_id"],
+                    "claim_id": payload["claim_id"],
+                    "evaluation_id": payload["evaluation_id"],
+                    "reconciliation_id": payload["reconciliation_id"],
+                    "outcome": outcome.value,
                 }
             )
         elif event_type == "PerformanceScoringLegacyExempted":
@@ -4261,6 +6335,11 @@ def derive_performance_projections(
                     "command_hash": metadata["command_hash"],
                 }
             )
+            recovered_evaluations[evaluation.id] = (
+                evaluation,
+                payload["authority"],
+                event,
+            )
             checkpoints.append(
                 {
                     "event_id": event["event_id"],
@@ -4324,6 +6403,75 @@ def derive_performance_projections(
                     "bundle_id": payload["bundle_id"],
                 }
             )
+    for observation in scoring_reconciliations:
+        if observation["outcome"] != ReconciliationOutcome.COMPLETED.value:
+            continue
+        receipt = reconciliation_receipts.get(observation["id"])
+        reconciliation_event = reconciliation_events.get(observation["id"])
+        provider = claim_provider_snapshots.get(observation["claim_id"])
+        recovered = recovered_evaluations.get(observation["evaluation_id"])
+        if (
+            receipt is None
+            or reconciliation_event is None
+            or provider is None
+            or recovered is None
+        ):
+            raise ValidationError(
+                "Completed scoring reconciliation cannot reconstruct its "
+                "claim-bound recovered result."
+            )
+        evaluation, authority, evaluation_event = recovered
+        if (
+            evaluation_event["occurred_at"] != receipt.completed_at
+            or evaluation_event["stream_id"]
+            != reconciliation_event["stream_id"]
+            or evaluation_event["stream_version"]
+            <= reconciliation_event["stream_version"]
+        ):
+            raise ValidationError(
+                "Completed scoring reconciliation recovered evaluation has "
+                "an invalid completion time or event order."
+            )
+        normalized_terms = authority.get("normalized_result")
+        if type(normalized_terms) is not dict:
+            raise ValidationError(
+                "Completed scoring reconciliation has malformed recovered "
+                "authority."
+            )
+        try:
+            stored_result = NormalizedScoringResult.from_terms(
+                normalized_terms
+            )
+            imported = _authority_free_imported_evaluation(evaluation)
+            expected_result = _normalize_recovered_imported_evaluation(
+                stored_result.request,
+                imported,
+                provider,
+                observation["provider_operation_digest"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                "Completed scoring reconciliation has an invalid recovered "
+                f"result: {exc}"
+            ) from exc
+        if receipt.result_digest != imported.digest:
+            raise ValidationError(
+                "Completed scoring reconciliation receipt does not match "
+                "its recovered imported result."
+            )
+        if (
+            observation["normalized_result_digest"]
+            != expected_result.digest
+            or authority.get("normalized_result_digest")
+            != expected_result.digest
+            or canonical_json(stored_result.terms())
+            != canonical_json(expected_result.terms())
+        ):
+            raise ValidationError(
+                "Completed scoring reconciliation does not match its "
+                "claim-bound shadow normalization."
+            )
+
     snapshot = {
         "attempts": sorted(attempts, key=lambda item: item["id"]),
         "actions": sorted(
@@ -4334,6 +6482,10 @@ def derive_performance_projections(
             scoring_claims,
             key=lambda item: item["id"],
         ),
+        # Events were read in canonical stream order.  Do not substitute wall
+        # clock order: reconciled_at may move backward without changing the
+        # append-only first-terminal boundary.
+        "scoring_reconciliations": scoring_reconciliations,
         "evaluations": sorted(
             evaluations,
             key=lambda item: (item["attempt_id"], item["recorded_at"], item["id"]),
@@ -4360,7 +6512,8 @@ def rebuild_performance_projections(
         """SELECT name, sql FROM sqlite_master
            WHERE type='trigger' AND tbl_name IN (
                'performance_attempts', 'performance_actions',
-               'performance_scoring_claims', 'task_evaluations',
+               'performance_scoring_claims',
+               'performance_scoring_reconciliations', 'task_evaluations',
                'shadow_evidence_bundles'
            ) ORDER BY name"""
     ).fetchall()
@@ -4369,6 +6522,7 @@ def rebuild_performance_projections(
         connection.execute(f'DROP TRIGGER "{escaped}"')
     connection.execute("DELETE FROM shadow_evidence_bundles")
     connection.execute("DELETE FROM task_evaluations")
+    connection.execute("DELETE FROM performance_scoring_reconciliations")
     connection.execute("DELETE FROM performance_scoring_claims")
     connection.execute("DELETE FROM performance_actions")
     connection.execute("DELETE FROM performance_attempts")
@@ -4398,15 +6552,37 @@ def rebuild_performance_projections(
     )
     connection.executemany(
         """INSERT INTO performance_scoring_claims(
-               id, event_id, idempotency_key, attempt_id, evaluation_id,
-               through_sequence, provider_id, provider_version,
-               action_trace_digest, command_hash, claimed_at
+               id, event_id, claim_schema_version, idempotency_key,
+               attempt_id, evaluation_id, through_sequence, provider_id,
+               provider_version, action_trace_digest,
+               scoring_request_digest, provider_binding_digest,
+               provider_operation_digest, command_hash, claimed_at
            ) VALUES (
-               :id, :event_id, :idempotency_key, :attempt_id, :evaluation_id,
-               :through_sequence, :provider_id, :provider_version,
-               :action_trace_digest, :command_hash, :claimed_at
+               :id, :event_id, :claim_schema_version, :idempotency_key,
+               :attempt_id, :evaluation_id, :through_sequence, :provider_id,
+               :provider_version, :action_trace_digest,
+               :scoring_request_digest, :provider_binding_digest,
+               :provider_operation_digest, :command_hash, :claimed_at
            )""",
         snapshot["scoring_claims"],
+    )
+    connection.executemany(
+        """INSERT INTO performance_scoring_reconciliations(
+               id, event_id, idempotency_key, claim_id, attempt_id,
+               evaluation_id, outcome, scoring_request_digest,
+               provider_binding_digest, provider_operation_digest,
+               reconciler_id, reconciler_version,
+               reconciliation_binding_digest, receipt_json, receipt_digest,
+               normalized_result_digest, reconciled_at, command_hash
+           ) VALUES (
+               :id, :event_id, :idempotency_key, :claim_id, :attempt_id,
+               :evaluation_id, :outcome, :scoring_request_digest,
+               :provider_binding_digest, :provider_operation_digest,
+               :reconciler_id, :reconciler_version,
+               :reconciliation_binding_digest, :receipt_json, :receipt_digest,
+               :normalized_result_digest, :reconciled_at, :command_hash
+           )""",
+        snapshot["scoring_reconciliations"],
     )
     connection.executemany(
         """INSERT INTO task_evaluations(
@@ -4440,6 +6616,9 @@ def rebuild_performance_projections(
         "attempt_count": len(snapshot["attempts"]),
         "action_count": len(snapshot["actions"]),
         "scoring_claim_count": len(snapshot["scoring_claims"]),
+        "scoring_reconciliation_count": len(
+            snapshot["scoring_reconciliations"]
+        ),
         "evaluation_count": len(snapshot["evaluations"]),
         "bundle_count": len(snapshot["bundles"]),
         "projection_hash": canonical_digest(snapshot),

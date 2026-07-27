@@ -766,6 +766,7 @@ class ProjectionReplay:
                 error.startswith("performance attempt ")
                 or error.startswith("performance action ")
                 or error.startswith("performance scoring claim ")
+                or error.startswith("performance scoring reconciliation ")
                 or error.startswith("task evaluation ")
                 or error.startswith("shadow evidence bundle ")
                 or "PerformanceTaskStarted has no attempt projection" in error
@@ -773,6 +774,8 @@ class ProjectionReplay:
                 or "PerformanceScoringClaimed has no scoring claim projection"
                 in error
                 or "PerformanceScoringClaimMigrated has no scoring claim projection"
+                in error
+                or "PerformanceScoringReconciled has no reconciliation projection"
                 in error
                 or "TaskEvaluationRecorded has no evaluation projection" in error
                 or "ShadowEvidenceReduced has no bundle projection" in error
@@ -2140,8 +2143,35 @@ class ProjectionReplay:
         recoverable = [*source_schema_guard_errors, *recoverable]
         replay = self._rebuild_projection(work_database, learner_id)
         action_replay = self._rebuild_action_projections(work_database)
-        with work_database.transaction() as connection:
-            performance_replay = rebuild_performance_projections(connection)
+        performance_replay_error: str | None = None
+        try:
+            with work_database.transaction() as connection:
+                performance_replay = rebuild_performance_projections(
+                    connection
+                )
+        except (
+            sqlite3.DatabaseError,
+            TypeError,
+            ValueError,
+            ValidationError,
+            OverflowError,
+        ) as exc:
+            # A malformed immutable performance event is blocking semantic
+            # corruption, not a projection mismatch that replay may repair.
+            # Return a bounded diagnostic report instead of leaking the
+            # derivation exception or publishing a partial reconstruction.
+            performance_replay_error = str(exc)
+            performance_replay = {
+                "snapshot": None,
+                "checkpoints": [],
+                "attempt_count": None,
+                "action_count": None,
+                "scoring_claim_count": None,
+                "scoring_reconciliation_count": None,
+                "evaluation_count": None,
+                "bundle_count": None,
+                "projection_hash": None,
+            }
         policy_shadow_replay_error: str | None = None
         try:
             with work_database.transaction() as connection:
@@ -2173,7 +2203,8 @@ class ProjectionReplay:
             source_action_snapshot == action_replay["snapshot"]
         )
         performance_source_matches = (
-            source_performance_snapshot == performance_replay["snapshot"]
+            performance_replay_error is None
+            and source_performance_snapshot == performance_replay["snapshot"]
         )
         policy_shadow_source_matches = (
             policy_shadow_replay_error is None
@@ -2202,9 +2233,17 @@ class ProjectionReplay:
             errors.append(
                 "stored learning-action projection differs from deterministic replay"
             )
-        if not performance_source_matches:
+        if (
+            performance_replay_error is None
+            and not performance_source_matches
+        ):
             errors.append(
                 "stored performance projection differs from deterministic replay"
+            )
+        if performance_replay_error is not None:
+            errors.append(
+                "performance projection replay failed closed: "
+                + performance_replay_error
             )
         if (
             policy_shadow_replay_error is None
@@ -2225,6 +2264,7 @@ class ProjectionReplay:
         rebuild_safe = (
             not blocking
             and not replay["replay_errors"]
+            and performance_replay_error is None
             and policy_shadow_replay_error is None
             and commitment_matches
             and rebuilt_integrity["ok"]
@@ -2259,7 +2299,11 @@ class ProjectionReplay:
             ],
             "action_projection_matches_replay": action_source_matches,
             "action_checkpoints": action_replay["checkpoints"],
-            "performance_event_count": len(performance_replay["checkpoints"]),
+            "performance_event_count": (
+                None
+                if performance_replay_error is not None
+                else len(performance_replay["checkpoints"])
+            ),
             "source_performance_attempt_count": len(
                 source_performance_snapshot["attempts"]
             ),
@@ -2278,6 +2322,12 @@ class ProjectionReplay:
             "reconstructed_performance_scoring_claim_count": performance_replay[
                 "scoring_claim_count"
             ],
+            "source_performance_scoring_reconciliation_count": len(
+                source_performance_snapshot["scoring_reconciliations"]
+            ),
+            "reconstructed_performance_scoring_reconciliation_count": (
+                performance_replay["scoring_reconciliation_count"]
+            ),
             "source_task_evaluation_count": len(
                 source_performance_snapshot["evaluations"]
             ),
@@ -2298,6 +2348,7 @@ class ProjectionReplay:
             ],
             "performance_projection_matches_replay": performance_source_matches,
             "performance_checkpoints": performance_replay["checkpoints"],
+            "performance_replay_error": performance_replay_error,
             "policy_shadow_event_count": source_policy_shadow_event_count,
             "source_policy_shadow_evaluation_count": len(
                 source_policy_shadow_snapshot["evaluations"]

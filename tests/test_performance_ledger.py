@@ -13,6 +13,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from tsq.corpus import read_and_parse
 from tsq.cli import main
@@ -43,12 +44,24 @@ from tsq.performance_ledger import (
     PerformanceLedger,
     PerformanceTaskRelease,
     TaskReleaseReview,
+    derive_performance_projections,
     performance_integrity_errors,
     read_task_release,
 )
 from tsq.performance_selection import recommend_performance_tasks
+from tsq.reconciliation import (
+    ReconciliationObservation,
+    ReconciliationOutcome,
+    ScoringReconciliationReceipt,
+    ScoringReconciliationRegistry,
+    SyntheticReconciliationAdapter,
+)
 from tsq.replay import ProjectionReplay
-from tsq.store import Database, performance_scoring_claim_event_key
+from tsq.store import (
+    Database,
+    performance_scoring_claim_event_key,
+    performance_scoring_reconciliation_event_key,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -190,6 +203,130 @@ class PerformanceLedgerTestCase(unittest.TestCase):
             now=START + timedelta(minutes=5),
         )
 
+    def failed_scoring_claim(
+        self,
+        *,
+        provider_id: str = "synthetic.reconciliation-source",
+        key: str = "score-for-reconciliation",
+    ) -> tuple[
+        dict,
+        dict,
+        dict,
+        SyntheticDeterministicProvider,
+        ImportedEvaluation,
+    ]:
+        attempt = self.start()
+        submitted = self.submit(attempt["id"])
+        imported = ImportedEvaluation(
+            criteria=(
+                ImportedCriterionResult(
+                    criterion_id="criterion_mask_invariant",
+                    status=EvaluationStatus.VALID,
+                    score=0.8,
+                    outcome_code="recovered_observation",
+                    phase=ActionPhase.UNASSISTED,
+                    source_action_ids=(submitted["id"],),
+                ),
+            )
+        )
+
+        class FailingProvider(SyntheticDeterministicProvider):
+            calls = 0
+
+            def score(self, request):
+                self.calls += 1
+                raise RuntimeError("admitted callback outcome is unknown")
+
+        provider = FailingProvider(imported, provider_id=provider_id)
+        registry = ScoringProviderRegistry(allow_synthetic=True)
+        registry.register(provider, provider.authority_binding)
+        with self.assertRaisesRegex(ValidationError, "failed safely"):
+            self.ledger.score_attempt(
+                attempt["id"],
+                registry,
+                provider.provider_id,
+                provider.provider_version,
+                idempotency_key=key,
+                now=START + timedelta(minutes=6),
+            )
+        claim = self.ledger.list_scoring_claims(
+            attempt_id=attempt["id"]
+        )[0]
+        return attempt, submitted, claim, provider, imported
+
+    def reconciliation_registry(
+        self,
+        claim: dict,
+        *,
+        outcome: ReconciliationOutcome,
+        imported: ImportedEvaluation | None = None,
+        observed_at: datetime | None = None,
+        completed_at: datetime | None = None,
+        reconciler_version: str = "test-v1",
+        can_prove_absence: bool = False,
+    ) -> tuple[ScoringReconciliationRegistry, SyntheticReconciliationAdapter]:
+        observed = observed_at or START + timedelta(minutes=7)
+        receipt = ScoringReconciliationReceipt(
+            claim_id=claim["id"],
+            attempt_id=claim["attempt_id"],
+            evaluation_id=claim["evaluation_id"],
+            through_sequence=claim["through_sequence"],
+            provider_id=claim["provider_id"],
+            provider_version=claim["provider_version"],
+            reconciler_id="synthetic.fixed-reconciler",
+            reconciler_version=reconciler_version,
+            action_trace_digest=claim["action_trace_digest"],
+            command_hash=claim["command_hash"],
+            scoring_request_digest=claim["scoring_request_digest"],
+            provider_binding_digest=claim["provider_binding_digest"],
+            outcome=outcome,
+            observed_at=observed.isoformat(),
+            completed_at=(
+                None if completed_at is None else completed_at.isoformat()
+            ),
+            result_digest=(
+                None if imported is None else imported.digest
+            ),
+            reason_code={
+                ReconciliationOutcome.UNKNOWN: "provider_status_unknown",
+                ReconciliationOutcome.DEFINITELY_ABSENT: (
+                    "fenced_operation_absent"
+                ),
+                ReconciliationOutcome.COMPLETED: "provider_result_recovered",
+            }[outcome],
+            provider_operation_digest=claim[
+                "provider_operation_digest"
+            ],
+            provider_receipt_digest=canonical_digest(
+                {
+                    "claim_id": claim["id"],
+                    "outcome": outcome.value,
+                    "observed_at": observed.isoformat(),
+                    "reconciler_version": reconciler_version,
+                }
+            ),
+            attestation_digest=canonical_digest(
+                {
+                    "provider_operation_digest": claim[
+                        "provider_operation_digest"
+                    ],
+                    "outcome": outcome.value,
+                    "reconciler_version": reconciler_version,
+                }
+            ),
+        )
+        adapter = SyntheticReconciliationAdapter(
+            ReconciliationObservation(
+                receipt=receipt,
+                imported_evaluation=imported,
+            ),
+            reconciler_version=reconciler_version,
+            can_prove_absence=can_prove_absence,
+        )
+        registry = ScoringReconciliationRegistry(allow_synthetic=True)
+        registry.register(adapter, adapter.authority_binding)
+        return registry, adapter
+
     def test_complete_synthetic_flow_is_replayable_shadow_and_projection_neutral(
         self,
     ) -> None:
@@ -256,6 +393,997 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         self.assertEqual(report["action_count"], 3)
         self.assertEqual(report["evaluation_count"], 1)
         self.assertFalse(report["family_shadow_history"]["mastery_claim"])
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_v2_claim_binds_exact_request_provider_and_operation(self) -> None:
+        _attempt, _submitted, claim, provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        self.assertEqual(claim["claim_schema_version"], 2)
+        self.assertEqual(claim["status"], "unreconciled")
+        self.assertEqual(claim["status_source"], "callback_admission")
+        self.assertFalse(claim["terminal"])
+        self.assertFalse(claim["automatic_retry_allowed"])
+        self.assertEqual(
+            claim["provider_binding_digest"],
+            provider.authority_binding.digest,
+        )
+        with self.database.read() as connection:
+            event = connection.execute(
+                "SELECT * FROM events WHERE event_id=?",
+                (claim["event_id"],),
+            ).fetchone()
+        payload = json.loads(event["payload_json"])
+        self.assertEqual(event["schema_version"], 2)
+        self.assertEqual(
+            payload["provider"]["binding_digest"],
+            claim["provider_binding_digest"],
+        )
+        self.assertEqual(
+            payload["scoring_request_digest"],
+            claim["scoring_request_digest"],
+        )
+        self.assertEqual(
+            payload["provider_operation_digest"],
+            claim["provider_operation_digest"],
+        )
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_unknown_reconciliation_is_repeatable_but_exact_key_replays(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        registry_one, adapter_one = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+            reconciler_version="test-v1",
+        )
+        first = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry_one,
+            adapter_one.reconciler_id,
+            adapter_one.reconciler_version,
+            idempotency_key="reconcile-unknown-one",
+            now=START + timedelta(minutes=9),
+        )
+        replay = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry_one,
+            adapter_one.reconciler_id,
+            adapter_one.reconciler_version,
+            idempotency_key="reconcile-unknown-one",
+            now=START + timedelta(minutes=10),
+        )
+        self.assertEqual(adapter_one.lookup_calls, 1)
+        self.assertTrue(replay["idempotent_replay"])
+        self.assertEqual(
+            replay["reconciliation_id"], first["reconciliation_id"]
+        )
+        self.assertEqual(replay["reconciliation_outcome"], "unknown")
+        with self.assertRaisesRegex(
+            ConflictError, "same reconciliation receipt"
+        ):
+            self.ledger.reconcile_scoring_claim(
+                claim["id"],
+                registry_one,
+                adapter_one.reconciler_id,
+                adapter_one.reconciler_version,
+                idempotency_key="different-key-same-receipt",
+                now=START + timedelta(minutes=10),
+            )
+        self.assertEqual(adapter_one.lookup_calls, 2)
+        score_registry = ScoringProviderRegistry(allow_synthetic=True)
+        score_registry.register(provider, provider.authority_binding)
+        with self.assertRaisesRegex(
+            ConflictError, "reserved by a scoring reconciliation"
+        ):
+            self.ledger.score_attempt(
+                claim["attempt_id"],
+                score_registry,
+                provider.provider_id,
+                provider.provider_version,
+                idempotency_key="reconcile-unknown-one",
+                now=START + timedelta(minutes=10),
+            )
+        self.assertEqual(provider.calls, 1)
+
+        registry_two, adapter_two = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+            observed_at=START + timedelta(minutes=7, seconds=30),
+            reconciler_version="test-v2",
+        )
+        second = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry_two,
+            adapter_two.reconciler_id,
+            adapter_two.reconciler_version,
+            idempotency_key="reconcile-unknown-two",
+            # Deliberately earlier than the first ledger timestamp. Append
+            # order, not wall-clock order, defines the latest observation.
+            now=START + timedelta(minutes=8),
+        )
+        inspected = self.ledger.inspect_scoring_claim(claim["id"])
+        self.assertEqual(second["status"], "unknown")
+        self.assertEqual(inspected["reconciliation_count"], 2)
+        self.assertEqual(
+            inspected["latest_reconciliation_id"],
+            second["reconciliation_id"],
+        )
+        self.assertFalse(inspected["automatic_retry_allowed"])
+        replay_report = ProjectionReplay(self.database).check(
+            "performance-learner"
+        )
+        self.assertTrue(replay_report["ok"], replay_report["errors"])
+        self.assertEqual(
+            replay_report[
+                "reconstructed_performance_scoring_reconciliation_count"
+            ],
+            2,
+        )
+        rebuilt_path = Path(self.tempdir.name) / "reconciled-rebuild.db"
+        rebuilt_report = ProjectionReplay(self.database).rebuild_copy(
+            "performance-learner", rebuilt_path
+        )
+        self.assertTrue(rebuilt_report["ok"], rebuilt_report["errors"])
+        self.assertEqual(
+            rebuilt_report[
+                "reconstructed_performance_scoring_reconciliation_count"
+            ],
+            2,
+        )
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_definite_absence_requires_fenced_authority_and_is_terminal(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        weak_registry, weak_adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.DEFINITELY_ABSENT,
+            can_prove_absence=False,
+        )
+        with self.assertRaisesRegex(ValidationError, "failed safely"):
+            self.ledger.reconcile_scoring_claim(
+                claim["id"],
+                weak_registry,
+                weak_adapter.reconciler_id,
+                weak_adapter.reconciler_version,
+                idempotency_key="weak-absence",
+                now=START + timedelta(minutes=8),
+            )
+        strong_registry, strong_adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.DEFINITELY_ABSENT,
+            reconciler_version="fenced-v1",
+            can_prove_absence=True,
+        )
+        closed = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            strong_registry,
+            strong_adapter.reconciler_id,
+            strong_adapter.reconciler_version,
+            idempotency_key="strong-absence",
+            now=START + timedelta(minutes=8),
+        )
+        self.assertEqual(closed["status"], "definitely_absent")
+        self.assertTrue(closed["terminal"])
+        self.assertFalse(closed["automatic_retry_allowed"])
+        self.assertEqual(strong_adapter.lookup_calls, 1)
+        with self.assertRaisesRegex(ConflictError, "terminal reconciliation"):
+            self.ledger.reconcile_scoring_claim(
+                claim["id"],
+                strong_registry,
+                strong_adapter.reconciler_id,
+                strong_adapter.reconciler_version,
+                idempotency_key="different-after-terminal",
+                now=START + timedelta(minutes=9),
+            )
+        self.assertEqual(strong_adapter.lookup_calls, 1)
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) AS n FROM task_evaluations"
+                ).fetchone()["n"],
+                0,
+            )
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_completed_reconciliation_recovers_shadow_evidence_after_end(
+        self,
+    ) -> None:
+        attempt, _submitted, claim, _provider, imported = (
+            self.failed_scoring_claim()
+        )
+        self.engine.end_session(
+            self.session["id"],
+            now=START + timedelta(minutes=7),
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.COMPLETED,
+            imported=imported,
+            observed_at=START + timedelta(minutes=8),
+            completed_at=START + timedelta(minutes=7, seconds=30),
+        )
+        result = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="recover-after-session",
+            now=START + timedelta(minutes=9),
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(result["status_source"], "reconciliation")
+        self.assertFalse(result["projection_applied"])
+        self.assertFalse(result["certification_applied"])
+        self.assertTrue(
+            result["authority"]["normalized_result"]["shadow_only"]
+        )
+        self.assertEqual(
+            result["authority"]["normalized_result"]["normalization_mode"],
+            "direct_import",
+        )
+        with self.database.read() as connection:
+            events = connection.execute(
+                """SELECT event_type, session_id, causation_id
+                   FROM events
+                   WHERE event_type IN (
+                       'PerformanceScoringReconciled',
+                       'TaskEvaluationRecorded',
+                       'ShadowEvidenceReduced'
+                   )
+                   AND correlation_id=?
+                   ORDER BY stream_version""",
+                (attempt["id"],),
+            ).fetchall()
+        self.assertEqual(
+            [event["event_type"] for event in events],
+            [
+                "PerformanceScoringReconciled",
+                "TaskEvaluationRecorded",
+                "ShadowEvidenceReduced",
+            ],
+        )
+        self.assertTrue(all(event["session_id"] is None for event in events))
+        # The exact causation is the immutable reconciliation event, not the
+        # ended session or original callback claim.
+        with self.database.read() as connection:
+            reconciliation_event_id = connection.execute(
+                """SELECT event_id
+                   FROM performance_scoring_reconciliations
+                   WHERE id=?""",
+                (result["reconciliation_id"],),
+            ).fetchone()["event_id"]
+        self.assertEqual(events[1]["causation_id"], reconciliation_event_id)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_completed_reconciliation_semantically_binds_recovered_result(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, imported = (
+            self.failed_scoring_claim()
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.COMPLETED,
+            imported=imported,
+            observed_at=START + timedelta(minutes=8),
+            completed_at=START + timedelta(minutes=7, seconds=30),
+        )
+        result = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="semantic-recovery-binding",
+            now=START + timedelta(minutes=9),
+        )
+        with self.database.read() as connection:
+            observation = connection.execute(
+                """SELECT * FROM performance_scoring_reconciliations
+                   WHERE id=?""",
+                (result["reconciliation_id"],),
+            ).fetchone()
+            event = connection.execute(
+                "SELECT * FROM events WHERE event_id=?",
+                (observation["event_id"],),
+            ).fetchone()
+
+        receipt_terms = json.loads(observation["receipt_json"])
+        receipt_terms["result_digest"] = "f" * 64
+        mutated_receipt = ScoringReconciliationReceipt.from_terms(
+            receipt_terms
+        )
+        payload = json.loads(event["payload_json"])
+        payload["receipt"] = mutated_receipt.terms()
+        payload["receipt_digest"] = mutated_receipt.digest
+        command_hash = canonical_digest(
+            {
+                "type": "tsq.performance_command",
+                "operation": "reconcile_scoring_claim",
+                "claim_id": observation["claim_id"],
+                "provider_operation_digest": observation[
+                    "provider_operation_digest"
+                ],
+                "reconciler_id": observation["reconciler_id"],
+                "reconciler_version": observation["reconciler_version"],
+                "reconciliation_binding_digest": observation[
+                    "reconciliation_binding_digest"
+                ],
+                "receipt_digest": mutated_receipt.digest,
+                "caller_idempotency_key": observation["idempotency_key"],
+            }
+        )
+        reconciliation_id = "psr_" + command_hash
+        payload["reconciliation_id"] = reconciliation_id
+        payload["command_hash"] = command_hash
+        metadata = json.loads(event["metadata_json"])
+        metadata["command_hash"] = command_hash
+
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DROP TRIGGER performance_scoring_reconciliations_no_update"
+            )
+            connection.execute("DROP TRIGGER events_no_update")
+            connection.execute(
+                """UPDATE events
+                   SET idempotency_key=?, payload_json=?, metadata_json=?
+                   WHERE event_id=?""",
+                (
+                    performance_scoring_reconciliation_event_key(command_hash),
+                    canonical_json(payload),
+                    canonical_json(metadata),
+                    event["event_id"],
+                ),
+            )
+            connection.execute(
+                """UPDATE performance_scoring_reconciliations
+                   SET id=?, receipt_json=?, receipt_digest=?, command_hash=?
+                   WHERE event_id=?""",
+                (
+                    reconciliation_id,
+                    canonical_json(mutated_receipt.terms()),
+                    mutated_receipt.digest,
+                    command_hash,
+                    event["event_id"],
+                ),
+            )
+
+        with self.database.read() as connection:
+            errors = performance_integrity_errors(connection)
+            with self.assertRaisesRegex(
+                ValidationError,
+                "receipt does not match its recovered imported result",
+            ):
+                derive_performance_projections(connection)
+        self.assertTrue(
+            any(
+                "recovered imported result digest does not match its receipt"
+                in error
+                for error in errors
+            ),
+            errors,
+        )
+
+    def test_claim_inspection_rejects_completed_projection_without_result(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+        )
+        result = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="corrupt-completed-read-boundary",
+            now=START + timedelta(minutes=8),
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DROP TRIGGER performance_scoring_reconciliations_no_update"
+            )
+            connection.execute(
+                """UPDATE performance_scoring_reconciliations
+                   SET outcome='completed', normalized_result_digest=?
+                   WHERE id=?""",
+                ("a" * 64, result["reconciliation_id"]),
+            )
+        with self.assertRaisesRegex(
+            ConflictError,
+            "without its exact recovered evaluation",
+        ):
+            self.ledger.inspect_scoring_claim(claim["id"])
+        with self.assertRaisesRegex(
+            ConflictError,
+            "without its exact recovered evaluation",
+        ):
+            self.ledger.list_scoring_claims(attempt_id=claim["attempt_id"])
+
+    def test_claim_inspection_rejects_orphan_reconciliation_event(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, imported = (
+            self.failed_scoring_claim()
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.COMPLETED,
+            imported=imported,
+            observed_at=START + timedelta(minutes=8),
+            completed_at=START + timedelta(minutes=7, seconds=30),
+        )
+        result = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="orphan-reconciliation-read-boundary",
+            now=START + timedelta(minutes=9),
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DROP TRIGGER performance_scoring_reconciliations_no_delete"
+            )
+            connection.execute(
+                """DELETE FROM performance_scoring_reconciliations
+                   WHERE id=?""",
+                (result["reconciliation_id"],),
+            )
+        for operation in (
+            lambda: self.ledger.inspect_scoring_claim(claim["id"]),
+            lambda: self.ledger.list_scoring_claims(
+                attempt_id=claim["attempt_id"]
+            ),
+        ):
+            with self.subTest(operation=operation):
+                with self.assertRaisesRegex(
+                    ConflictError,
+                    "reconciliation event .* is missing its projection",
+                ):
+                    operation()
+
+    def test_integrity_binds_recovery_completion_time_and_event_order(
+        self,
+    ) -> None:
+        attempt, _submitted, claim, _provider, imported = (
+            self.failed_scoring_claim()
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.COMPLETED,
+            imported=imported,
+            observed_at=START + timedelta(minutes=8),
+            completed_at=START + timedelta(minutes=7, seconds=30),
+        )
+        result = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="recovery-time-order-binding",
+            now=START + timedelta(minutes=9),
+        )
+        with self.database.read() as connection:
+            reconciliation_event = connection.execute(
+                """SELECT event.*
+                   FROM performance_scoring_reconciliations observation
+                   JOIN events event ON event.event_id=observation.event_id
+                   WHERE observation.id=?""",
+                (result["reconciliation_id"],),
+            ).fetchone()
+            evaluation_event = connection.execute(
+                """SELECT event.*
+                   FROM task_evaluations evaluation
+                   JOIN events event ON event.event_id=evaluation.event_id
+                   WHERE evaluation.id=?""",
+                (claim["evaluation_id"],),
+            ).fetchone()
+            maximum_version = connection.execute(
+                """SELECT MAX(stream_version) AS version FROM events
+                   WHERE stream_id=?""",
+                (reconciliation_event["stream_id"],),
+            ).fetchone()["version"]
+
+        with self.database.transaction() as connection:
+            connection.execute("DROP TRIGGER events_no_update")
+            connection.execute(
+                "UPDATE events SET stream_version=? WHERE event_id=?",
+                (
+                    maximum_version + 100,
+                    reconciliation_event["event_id"],
+                ),
+            )
+            connection.execute(
+                """UPDATE events
+                   SET stream_version=?, occurred_at=?
+                   WHERE event_id=?""",
+                (
+                    reconciliation_event["stream_version"],
+                    (START + timedelta(minutes=7, seconds=45)).isoformat(),
+                    evaluation_event["event_id"],
+                ),
+            )
+            connection.execute(
+                "UPDATE events SET stream_version=? WHERE event_id=?",
+                (
+                    evaluation_event["stream_version"],
+                    reconciliation_event["event_id"],
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            ConflictError,
+            "does not bind its recovered evaluation",
+        ):
+            self.ledger.inspect_scoring_claim(claim["id"])
+        with self.database.read() as connection:
+            errors = performance_integrity_errors(connection)
+        self.assertTrue(
+            any(
+                "recovered evaluation occurrence does not match its receipt"
+                in error
+                for error in errors
+            ),
+            errors,
+        )
+        self.assertTrue(
+            any(
+                "recovered evaluation does not follow its reconciliation event"
+                in error
+                for error in errors
+            ),
+            errors,
+        )
+        self.assertEqual(attempt["id"], claim["attempt_id"])
+
+    def test_reconciliation_rejects_preclaim_and_future_timestamps(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        preclaim_registry, preclaim_adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+            observed_at=START + timedelta(minutes=5),
+        )
+        with self.assertRaisesRegex(ValidationError, "predate"):
+            self.ledger.reconcile_scoring_claim(
+                claim["id"],
+                preclaim_registry,
+                preclaim_adapter.reconciler_id,
+                preclaim_adapter.reconciler_version,
+                idempotency_key="preclaim-observation",
+                now=START + timedelta(minutes=8),
+            )
+        future_registry, future_adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+            observed_at=START + timedelta(minutes=10),
+            reconciler_version="future-v1",
+        )
+        with self.assertRaisesRegex(ValidationError, "before its claimed"):
+            self.ledger.reconcile_scoring_claim(
+                claim["id"],
+                future_registry,
+                future_adapter.reconciler_id,
+                future_adapter.reconciler_version,
+                idempotency_key="future-observation",
+                now=START + timedelta(minutes=9),
+            )
+        inspected = self.ledger.inspect_scoring_claim(claim["id"])
+        self.assertEqual(inspected["status"], "unreconciled")
+        self.assertEqual(inspected["reconciliation_count"], 0)
+
+    def test_reconciliation_obeys_learner_quarantine_before_lookup_and_commit(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+        )
+        with patch.object(
+            self.database,
+            "require_learner_evidence_safe",
+            side_effect=ConflictError("learner evidence is quarantined"),
+        ):
+            with self.assertRaisesRegex(ConflictError, "quarantined"):
+                self.ledger.reconcile_scoring_claim(
+                    claim["id"],
+                    registry,
+                    adapter.reconciler_id,
+                    adapter.reconciler_version,
+                    idempotency_key="unsafe-before-lookup",
+                    now=START + timedelta(minutes=8),
+                )
+        self.assertEqual(adapter.lookup_calls, 0)
+
+        with patch.object(
+            self.database,
+            "require_learner_evidence_safe",
+            side_effect=(
+                None,
+                ConflictError("learner evidence became quarantined"),
+            ),
+        ):
+            with self.assertRaisesRegex(ConflictError, "became quarantined"):
+                self.ledger.reconcile_scoring_claim(
+                    claim["id"],
+                    registry,
+                    adapter.reconciler_id,
+                    adapter.reconciler_version,
+                    idempotency_key="unsafe-during-lookup",
+                    now=START + timedelta(minutes=8),
+                )
+        self.assertEqual(adapter.lookup_calls, 1)
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n
+                       FROM performance_scoring_reconciliations
+                       WHERE claim_id=?""",
+                    (claim["id"],),
+                ).fetchone()["n"],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n FROM events
+                       WHERE event_type='PerformanceScoringReconciled'
+                         AND json_extract(payload_json, '$.claim_id')=?""",
+                    (claim["id"],),
+                ).fetchone()["n"],
+                0,
+            )
+
+        safe_registry, safe_adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+            reconciler_version="safe-replay-v1",
+        )
+        recorded = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            safe_registry,
+            safe_adapter.reconciler_id,
+            safe_adapter.reconciler_version,
+            idempotency_key="safe-then-quarantined",
+            now=START + timedelta(minutes=8),
+        )
+        self.assertEqual(recorded["status"], "unknown")
+        self.assertEqual(safe_adapter.lookup_calls, 1)
+        with patch.object(
+            self.database,
+            "require_learner_evidence_safe",
+            side_effect=ConflictError("learner evidence is quarantined"),
+        ):
+            with self.assertRaisesRegex(ConflictError, "quarantined"):
+                self.ledger.reconcile_scoring_claim(
+                    claim["id"],
+                    safe_registry,
+                    safe_adapter.reconciler_id,
+                    safe_adapter.reconciler_version,
+                    idempotency_key="safe-then-quarantined",
+                    now=START + timedelta(minutes=9),
+                )
+        self.assertEqual(safe_adapter.lookup_calls, 1)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_reconciliation_crash_before_commit_leaves_no_partial_state(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+        )
+        append_event = self.database.append_event
+
+        def crash_on_reconciliation(connection, **kwargs):
+            if kwargs.get("event_type") == "PerformanceScoringReconciled":
+                raise RuntimeError("simulated crash before atomic append")
+            return append_event(connection, **kwargs)
+
+        with patch.object(
+            self.database,
+            "append_event",
+            side_effect=crash_on_reconciliation,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                self.ledger.reconcile_scoring_claim(
+                    claim["id"],
+                    registry,
+                    adapter.reconciler_id,
+                    adapter.reconciler_version,
+                    idempotency_key="crash-before-reconcile-commit",
+                    now=START + timedelta(minutes=8),
+                )
+        self.assertEqual(adapter.lookup_calls, 1)
+        inspected = self.ledger.inspect_scoring_claim(claim["id"])
+        self.assertEqual(inspected["status"], "unreconciled")
+        self.assertEqual(inspected["reconciliation_count"], 0)
+
+        recovered = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="crash-before-reconcile-commit",
+            now=START + timedelta(minutes=8),
+        )
+        self.assertEqual(adapter.lookup_calls, 2)
+        self.assertEqual(recovered["status"], "unknown")
+        self.assertEqual(recovered["reconciliation_count"], 1)
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_inline_callback_completion_rejects_stale_reconciliation(
+        self,
+    ) -> None:
+        attempt = self.start(key="start-stale-reconciliation-race")
+        submitted = self.submit(attempt["id"])
+        imported = ImportedEvaluation(
+            criteria=(
+                ImportedCriterionResult(
+                    criterion_id="criterion_mask_invariant",
+                    status=EvaluationStatus.VALID,
+                    score=0.75,
+                    outcome_code="inline_completion_wins",
+                    phase=ActionPhase.UNASSISTED,
+                    source_action_ids=(submitted["id"],),
+                ),
+            )
+        )
+
+        class BlockingProvider(SyntheticDeterministicProvider):
+            def __init__(self):
+                super().__init__(
+                    imported,
+                    provider_id="synthetic.inline-wins-race",
+                )
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def score(self, request):
+                self.entered.set()
+                if not self.release.wait(timeout=5):
+                    raise RuntimeError("inline race timed out")
+                return super().score(request)
+
+        provider = BlockingProvider()
+        score_registry = ScoringProviderRegistry(allow_synthetic=True)
+        score_registry.register(provider, provider.authority_binding)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            scoring = executor.submit(
+                self.ledger.score_attempt,
+                attempt["id"],
+                score_registry,
+                provider.provider_id,
+                provider.provider_version,
+                idempotency_key="inline-wins-score",
+                now=START + timedelta(minutes=6),
+            )
+            self.assertTrue(provider.entered.wait(timeout=5))
+            claim = self.ledger.list_scoring_claims(
+                attempt_id=attempt["id"]
+            )[0]
+            reconciliation_registry, adapter = (
+                self.reconciliation_registry(
+                    claim,
+                    outcome=ReconciliationOutcome.UNKNOWN,
+                    observed_at=START + timedelta(minutes=7),
+                )
+            )
+            lookup_entered = threading.Event()
+            lookup_release = threading.Event()
+            ordinary_lookup = adapter.lookup
+
+            def blocking_lookup(request):
+                lookup_entered.set()
+                if not lookup_release.wait(timeout=5):
+                    raise RuntimeError("stale lookup timed out")
+                return ordinary_lookup(request)
+
+            adapter.lookup = blocking_lookup
+            reconciling = executor.submit(
+                self.ledger.reconcile_scoring_claim,
+                claim["id"],
+                reconciliation_registry,
+                adapter.reconciler_id,
+                adapter.reconciler_version,
+                idempotency_key="stale-reconciliation",
+                now=START + timedelta(minutes=8),
+            )
+            self.assertTrue(lookup_entered.wait(timeout=5))
+            provider.release.set()
+            scored = scoring.result(timeout=5)
+            lookup_release.set()
+            with self.assertRaisesRegex(
+                ConflictError, "while reconciliation lookup was in flight"
+            ):
+                reconciling.result(timeout=5)
+
+        self.assertFalse(scored["idempotent_replay"])
+        self.assertEqual(adapter.lookup_calls, 1)
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n
+                       FROM performance_scoring_reconciliations
+                       WHERE claim_id=?""",
+                    (claim["id"],),
+                ).fetchone()["n"],
+                0,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n
+                       FROM task_evaluations WHERE attempt_id=?""",
+                    (attempt["id"],),
+                ).fetchone()["n"],
+                1,
+            )
+        self.assertTrue(self.database.verify_integrity()["ok"])
+
+    def test_reconciliation_tampering_is_detected_and_copy_replays_event(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+        )
+        recorded = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="tamper-reconciliation",
+            now=START + timedelta(minutes=8),
+        )
+        with self.database.transaction() as connection:
+            connection.execute(
+                "DROP TRIGGER performance_scoring_reconciliations_no_update"
+            )
+            connection.execute(
+                """UPDATE performance_scoring_reconciliations
+                   SET receipt_digest=?
+                   WHERE id=?""",
+                ("0" * 64, recorded["reconciliation_id"]),
+            )
+        integrity = self.database.verify_integrity()
+        self.assertFalse(integrity["ok"])
+        self.assertTrue(
+            any(
+                "performance scoring reconciliation" in error
+                or "performance_scoring_reconciliations" in error
+                for error in integrity["errors"]
+            ),
+            integrity["errors"],
+        )
+        replay = ProjectionReplay(self.database).check(
+            "performance-learner"
+        )
+        self.assertFalse(replay["ok"])
+        self.assertFalse(replay["performance_projection_matches_replay"])
+        target = Path(self.tempdir.name) / "reconciliation-repaired.db"
+        rebuilt = ProjectionReplay(self.database).rebuild_copy(
+            "performance-learner", target
+        )
+        self.assertTrue(rebuilt["ok"], rebuilt["errors"])
+        repaired = Database(target, read_only=True)
+        self.assertTrue(repaired.verify_integrity()["ok"])
+
+    def test_recovered_completion_wins_race_with_original_callback_once(
+        self,
+    ) -> None:
+        attempt = self.start(key="start-reconciliation-race")
+        submitted = self.submit(attempt["id"])
+        imported = ImportedEvaluation(
+            criteria=(
+                ImportedCriterionResult(
+                    criterion_id="criterion_mask_invariant",
+                    status=EvaluationStatus.VALID,
+                    score=0.9,
+                    outcome_code="reconciliation_race_completion",
+                    phase=ActionPhase.UNASSISTED,
+                    source_action_ids=(submitted["id"],),
+                ),
+            )
+        )
+
+        class BlockingProvider(SyntheticDeterministicProvider):
+            def __init__(self):
+                super().__init__(
+                    imported,
+                    provider_id="synthetic.reconciliation-race",
+                )
+                self.entered = threading.Event()
+                self.release = threading.Event()
+
+            def score(self, request):
+                self.entered.set()
+                if not self.release.wait(timeout=5):
+                    raise RuntimeError("reconciliation race timed out")
+                return super().score(request)
+
+        provider = BlockingProvider()
+        score_registry = ScoringProviderRegistry(allow_synthetic=True)
+        score_registry.register(provider, provider.authority_binding)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            scoring = executor.submit(
+                self.ledger.score_attempt,
+                attempt["id"],
+                score_registry,
+                provider.provider_id,
+                provider.provider_version,
+                idempotency_key="original-racing-score",
+                now=START + timedelta(minutes=6),
+            )
+            self.assertTrue(provider.entered.wait(timeout=5))
+            claim = self.ledger.list_scoring_claims(
+                attempt_id=attempt["id"]
+            )[0]
+            reconciliation_registry, adapter = (
+                self.reconciliation_registry(
+                    claim,
+                    outcome=ReconciliationOutcome.COMPLETED,
+                    imported=imported,
+                    observed_at=START + timedelta(minutes=7),
+                    completed_at=START + timedelta(minutes=7),
+                )
+            )
+            recovered = self.ledger.reconcile_scoring_claim(
+                claim["id"],
+                reconciliation_registry,
+                adapter.reconciler_id,
+                adapter.reconciler_version,
+                idempotency_key="reconciliation-wins-race",
+                now=START + timedelta(minutes=8),
+            )
+            provider.release.set()
+            original_result = scoring.result(timeout=5)
+
+        self.assertEqual(recovered["status"], "completed")
+        self.assertTrue(original_result["idempotent_replay"])
+        self.assertEqual(
+            original_result["evaluation"]["id"],
+            recovered["evaluation"]["id"],
+        )
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n
+                       FROM task_evaluations WHERE attempt_id=?""",
+                    (attempt["id"],),
+                ).fetchone()["n"],
+                1,
+            )
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n
+                       FROM performance_scoring_reconciliations
+                       WHERE claim_id=? AND outcome='completed'""",
+                    (claim["id"],),
+                ).fetchone()["n"],
+                1,
+            )
         self.assertTrue(self.database.verify_integrity()["ok"])
 
     def test_task_start_wins_race_with_inflight_question_selection(self) -> None:
@@ -753,7 +1881,7 @@ class PerformanceLedgerTestCase(unittest.TestCase):
             attempt_id=attempt["id"], status="unresolved"
         )
         self.assertEqual(len(unresolved), 1)
-        self.assertEqual(unresolved[0]["status"], "unresolved")
+        self.assertEqual(unresolved[0]["status"], "unreconciled")
         self.assertIsNone(unresolved[0]["completed_at"])
         self.assertFalse(unresolved[0]["automatic_retry_allowed"])
         with self.assertRaisesRegex(

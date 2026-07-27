@@ -255,7 +255,7 @@ class ActionLedgerTestCase(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        self.assertEqual(schema_version, "18")
+        self.assertEqual(schema_version, "19")
         self.assertEqual(after_events, before_events)
         self.assertEqual(after_releases, before_releases)
         self.assertIn("learning_actions", tables)

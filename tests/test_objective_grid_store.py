@@ -152,7 +152,7 @@ class ObjectiveGridStoreTestCase(unittest.TestCase):
             ).fetchone()
 
         self.assertEqual(schema_version, str(SCHEMA_VERSION))
-        self.assertEqual(SCHEMA_VERSION, 18)
+        self.assertEqual(SCHEMA_VERSION, 19)
         self.assertEqual(row["posterior_schema_version"], OBJECTIVE_POSTERIOR_SCHEMA_VERSION)
         self.assertEqual(row["algorithm"], OBJECTIVE_POSTERIOR_ALGORITHM)
         self.assertEqual(row["grid_id"], OBJECTIVE_POSTERIOR_GRID_ID)
