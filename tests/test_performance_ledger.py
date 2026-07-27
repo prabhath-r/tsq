@@ -58,6 +58,10 @@ from tsq.reconciliation import (
 )
 from tsq.replay import ProjectionReplay
 from tsq.store import (
+    PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX,
+    PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX,
+    PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
+    PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
     Database,
     performance_scoring_claim_event_key,
     performance_scoring_reconciliation_event_key,
@@ -326,6 +330,50 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         registry = ScoringReconciliationRegistry(allow_synthetic=True)
         registry.register(adapter, adapter.authority_binding)
         return registry, adapter
+
+    def test_scoring_operations_reject_all_technical_event_namespaces(
+        self,
+    ) -> None:
+        _attempt, _submitted, claim, _provider, _imported = (
+            self.failed_scoring_claim()
+        )
+        reconciliation_registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.UNKNOWN,
+        )
+        scoring_registry = ScoringProviderRegistry()
+        for prefix in (
+            PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX,
+            PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX,
+            PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
+            PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
+        ):
+            key = prefix + ("a" * 64)
+            with self.subTest(operation="score", prefix=prefix):
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "reserved technical namespace",
+                ):
+                    self.ledger.score_attempt(
+                        claim["attempt_id"],
+                        scoring_registry,
+                        "unused.provider",
+                        "v1",
+                        idempotency_key=key,
+                    )
+            with self.subTest(operation="reconcile", prefix=prefix):
+                with self.assertRaisesRegex(
+                    ValidationError,
+                    "reserved technical namespace",
+                ):
+                    self.ledger.reconcile_scoring_claim(
+                        claim["id"],
+                        reconciliation_registry,
+                        adapter.reconciler_id,
+                        adapter.reconciler_version,
+                        idempotency_key=key,
+                    )
+        self.assertEqual(adapter.lookup_calls, 0)
 
     def test_complete_synthetic_flow_is_replayable_shadow_and_projection_neutral(
         self,
@@ -2863,7 +2911,7 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         integrity = self.database.verify_integrity()
         self.assertTrue(integrity["ok"], integrity["errors"])
 
-    def test_registered_scorer_can_observe_its_authorized_rubric_subset(
+    def test_registered_scorer_rejects_manually_asserted_check_source(
         self,
     ) -> None:
         authority = ProviderAuthorityBinding(
@@ -2987,49 +3035,24 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         registry = ScoringProviderRegistry()
         provider = PartialProvider()
         registry.register(provider, authority)
-        result = self.ledger.score_attempt(
-            attempt["id"],
-            registry,
-            authority.provider_id,
-            authority.provider_version,
-            now=START + timedelta(minutes=4),
-        )
-        replay = self.ledger.score_attempt(
-            attempt["id"],
-            registry,
-            authority.provider_id,
-            authority.provider_version,
-            now=START + timedelta(minutes=4),
-        )
-        self.assertEqual(replay["evaluation"], result["evaluation"])
-        self.assertTrue(replay["idempotent_replay"])
+        with self.assertRaisesRegex(ValidationError, "manually asserted"):
+            self.ledger.score_attempt(
+                attempt["id"],
+                registry,
+                authority.provider_id,
+                authority.provider_version,
+                now=START + timedelta(minutes=4),
+            )
         self.assertEqual(provider.calls, 1)
-
-        records = {
-            record["criterion_id"]: record
-            for record in result["shadow_evidence"]["records"]
-        }
-        self.assertGreater(
-            records["criterion_checked_behavior"]["effective_weight"], 0.0
-        )
-        self.assertTrue(
-            records["criterion_checked_behavior"]["certification_eligible"]
-        )
-        self.assertEqual(
-            records["criterion_unreviewed_explanation"]["effective_weight"],
-            0.0,
-        )
-        self.assertIn(
-            "missing_evaluation",
-            records["criterion_unreviewed_explanation"]["reason_codes"],
-        )
-        normalized = result["authority"]["normalized_result"]
-        self.assertEqual(
-            normalized["request"]["criterion_ids"],
-            ["criterion_checked_behavior"],
-        )
-        self.assertFalse(result["projection_applied"])
-        self.assertFalse(result["certification_applied"])
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    """SELECT COUNT(*) AS n FROM task_evaluations
+                       WHERE attempt_id=?""",
+                    (attempt["id"],),
+                ).fetchone()["n"],
+                0,
+            )
         self.assertTrue(self.database.verify_integrity()["ok"])
 
     def test_lifecycle_and_semantic_time_boundaries_fail_closed(self) -> None:

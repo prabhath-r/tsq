@@ -16,7 +16,7 @@ from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError, NotFoundError, ValidationError
 from tsq.replay import ProjectionReplay
-from tsq.store import Database
+from tsq.store import SCHEMA_VERSION, Database
 
 from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
 
@@ -255,7 +255,7 @@ class ActionLedgerTestCase(unittest.TestCase):
                     "SELECT name FROM sqlite_master WHERE type='table'"
                 )
             }
-        self.assertEqual(schema_version, "19")
+        self.assertEqual(schema_version, str(SCHEMA_VERSION))
         self.assertEqual(after_events, before_events)
         self.assertEqual(after_releases, before_releases)
         self.assertIn("learning_actions", tables)

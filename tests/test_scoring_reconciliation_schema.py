@@ -83,6 +83,7 @@ def _downgrade_to_exact_v18(database: Database) -> None:
     """Construct the exact historical source without inventing v18 claims."""
 
     with database.transaction() as connection:
+        Database._downgrade_v20_contract_to_v19(connection)
         if connection.execute(
             "SELECT 1 FROM performance_scoring_reconciliations LIMIT 1"
         ).fetchone() is not None:
@@ -388,7 +389,7 @@ class ScoringReconciliationUpgradeTests(unittest.TestCase):
                     """SELECT COUNT(*) AS n
                        FROM performance_scoring_reconciliations"""
                 ).fetchone()["n"]
-            self.assertEqual(version, "19")
+            self.assertEqual(version, "20")
             self.assertEqual(
                 tuple(tuple(row)[:11] for row in rows),
                 before_claims,

@@ -1,6 +1,8 @@
 {
   "action_count": 4,
   "action_trace_digest": "3cf5555f33f50ae9e5d7be0df46f530ef03109142d3c616de952ad2c6f993c53",
+  "artifact_run_claim_count": 0,
+  "artifact_run_receipt_count": 0,
   "attempt_count": 1,
   "bundle_count": 1,
   "bundle_digest": "e89401cbd9f5e8e8d5826f491a4555c41d3311bfb883dcfdf78fe052d3f43edd",
@@ -94,7 +96,7 @@
       1.0
     ]
   ],
-  "database_schema_version": 19,
+  "database_schema_version": 20,
   "evaluation_count": 1,
   "evaluation_digest": "9efd38cbd02d9f2452d4c38f98103c1bbc9218470bf6372e9bc1c2bee546e970",
   "evidence_bundle_schema_version": 2,
@@ -108,6 +110,8 @@
   "normalized_scoring_result_schema_version": 1,
   "performance_event_count": 10,
   "projection_rows": {
+    "artifact_run_claims": [],
+    "artifact_run_receipts": [],
     "bundle": {
       "certification_applied": false,
       "digest": "e89401cbd9f5e8e8d5826f491a4555c41d3311bfb883dcfdf78fe052d3f43edd",

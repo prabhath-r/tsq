@@ -17,7 +17,16 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Iterator
 
-from .artifact_intake import CheckpointFileKind, prepare_file_checkpoint
+from .artifact_intake import (
+    CheckpointFileKind,
+    capture_productive_artifact,
+    prepare_file_checkpoint,
+)
+from .artifact_runner import (
+    CAUSAL_MASK_CHECK_SET_ID,
+    SyntheticArtifactRunnerRegistry,
+    bundled_synthetic_binding,
+)
 from .capacity import (
     DEFAULT_STATE_LIMIT,
     CapacityAnalysisLimitError,
@@ -2154,6 +2163,126 @@ def command_task_checkpoint_file(args: argparse.Namespace) -> None:
     )
 
 
+def command_task_run_check(args: argparse.Namespace) -> None:
+    # Stable capture, binding validation, and registry construction all finish
+    # before a writable database can be initialized. No local path or learner
+    # bytes cross the ledger boundary.
+    snapshot = capture_productive_artifact(args.path)
+    binding = bundled_synthetic_binding()
+    registry = SyntheticArtifactRunnerRegistry(allow_synthetic=True)
+    registry.register(binding)
+    result = PerformanceLedger(_database(args)).run_artifact_check(
+        args.attempt,
+        snapshot,
+        registry,
+        binding,
+        check_set_id=args.check_set,
+        artifact_action_id=args.artifact_action,
+        idempotency_key=args.idempotency_key,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(f"Artifact run {result['claim_id']} [{result['status']}]")
+    print(
+        f"  attempt={result['attempt_id']} · "
+        f"artifact_action={result['artifact_action_id']} · "
+        f"check_set={result['check_set_id']}"
+    )
+    if result["check_action"] is not None:
+        payload = result["check_action"]["payload"]
+        print(
+            "  checks: "
+            f"{payload['passed']} passed · {payload['failed']} failed · "
+            f"{payload['errored']} errored · {payload['skipped']} skipped"
+        )
+    print(
+        "Artifact content persisted: no. Artifact executed: no. "
+        "Automatic retry allowed: no."
+    )
+    print(
+        "Shadow observation only: yes. Learner projection applied: no. "
+        "Mastery applied: no. Certification applied: no."
+    )
+    worker_started = result["worker_process_started"]
+    worker_started_label = (
+        "yes"
+        if worker_started is True
+        else "no"
+        if worker_started is False
+        else "not recorded"
+    )
+    print(
+        "Process boundary configured: yes. "
+        f"Worker process started: {worker_started_label}."
+    )
+    print(
+        "Operating-system sandboxed: no. Filesystem isolation: no. "
+        "Network isolation: no."
+    )
+
+
+def command_task_runs(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(_inspection_database(args)).list_artifact_runs(
+        attempt_id=args.attempt,
+        status=args.status,
+    )
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    if not result:
+        print("No artifact-run admissions matched.")
+        return
+    for run in result:
+        print(
+            f"{run['status']:<16} {run['claim_id']}  "
+            f"{run['check_set_id']}  attempt={run['attempt_id']}"
+        )
+    if any(not run["terminal"] for run in result):
+        print(
+            "Unresolved artifact runs remain fail-closed; TSQ will not retry "
+            "them automatically."
+        )
+    print("All listed runs are shadow-only and carry no mastery authority.")
+
+
+def command_task_run(args: argparse.Namespace) -> None:
+    result = PerformanceLedger(
+        _inspection_database(args)
+    ).inspect_artifact_run(args.run)
+    if args.json:
+        _emit(result, as_json=True)
+        return
+    print(f"Artifact run {result['claim_id']} [{result['status']}]")
+    print(
+        f"  logical run: {result['run_id']} · attempt={result['attempt_id']}"
+    )
+    print(
+        f"  artifact action: {result['artifact_action_id']} · "
+        f"check set: {result['check_set_id']}"
+    )
+    print(
+        "Retry allowed: no. Shadow-only: yes. Skill authority: no. "
+        "Learner projection applied: no."
+    )
+    worker_started = result["worker_process_started"]
+    worker_started_label = (
+        "yes"
+        if worker_started is True
+        else "no"
+        if worker_started is False
+        else "not recorded"
+    )
+    print(
+        "Process boundary configured: yes. "
+        f"Worker process started: {worker_started_label}."
+    )
+    print(
+        "Operating-system sandboxed: no. Filesystem isolation: no. "
+        "Network isolation: no."
+    )
+
+
 def command_task_actions(args: argparse.Namespace) -> None:
     result = PerformanceLedger(_inspection_database(args)).list_actions(args.attempt)
     if args.json:
@@ -3665,6 +3794,51 @@ def build_parser() -> argparse.ArgumentParser:
     task_checkpoint_file.add_argument("--idempotency-key")
     task_checkpoint_file.add_argument("--json", action="store_true")
     task_checkpoint_file.set_defaults(func=command_task_checkpoint_file)
+
+    task_run_check = task_sub.add_parser(
+        "run-check",
+        help="Run one fixed synthetic checker against a captured artifact",
+    )
+    task_run_check.add_argument("attempt")
+    task_run_check.add_argument("path", type=Path)
+    task_run_check.add_argument(
+        "--check-set",
+        choices=[CAUSAL_MASK_CHECK_SET_ID],
+        required=True,
+    )
+    task_run_check.add_argument(
+        "--artifact-action",
+        help="Exact matching artifact_checkpoint action ID",
+    )
+    task_run_check.add_argument("--idempotency-key")
+    task_run_check.add_argument("--json", action="store_true")
+    task_run_check.set_defaults(func=command_task_run_check)
+
+    task_runs = task_sub.add_parser(
+        "runs",
+        help="List artifact-run admissions without invoking a checker",
+    )
+    task_runs.add_argument("--attempt")
+    task_runs.add_argument(
+        "--status",
+        choices=[
+            "unresolved",
+            "completed",
+            "invalid_artifact",
+            "runner_failed",
+            "timed_out",
+        ],
+    )
+    task_runs.add_argument("--json", action="store_true")
+    task_runs.set_defaults(func=command_task_runs)
+
+    task_run = task_sub.add_parser(
+        "run",
+        help="Inspect one artifact run without invoking its checker",
+    )
+    task_run.add_argument("run")
+    task_run.add_argument("--json", action="store_true")
+    task_run.set_defaults(func=command_task_run)
 
     task_actions = task_sub.add_parser(
         "actions", help="List one performance attempt's semantic trace"

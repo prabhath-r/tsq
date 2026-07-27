@@ -55,6 +55,14 @@ def restore_pre_reconciliation_schema(
     historical database and is rejected rather than silently erasing events.
     """
 
+    artifact_run_table = connection.execute(
+        """SELECT 1 FROM sqlite_master
+           WHERE type='table'
+             AND name='performance_artifact_run_claims'"""
+    ).fetchone()
+    if artifact_run_table is not None:
+        Database._downgrade_v20_contract_to_v19(connection)
+
     reconciliation_table = connection.execute(
         """SELECT 1 FROM sqlite_master
            WHERE type='table'
@@ -689,7 +697,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 19)
+            self.assertEqual(SCHEMA_VERSION, 20)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
@@ -698,7 +706,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
                     connection.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()["value"],
-                    "19",
+                    "20",
                 )
                 migrated = connection.execute(
                     """SELECT claim.*, event.event_type, event.stream_id,

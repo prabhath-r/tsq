@@ -15,6 +15,8 @@ from tsq.artifact_intake import (
     CheckpointFileKind,
     MAX_PRODUCTIVE_ARTIFACT_BYTES,
     PreparedFileCheckpoint,
+    ProductiveArtifactSnapshot,
+    capture_productive_artifact,
     hash_productive_artifact,
     prepare_file_checkpoint,
 )
@@ -38,6 +40,13 @@ class ProductiveArtifactIntakeTests(unittest.TestCase):
         expected = hashlib.sha256(material).hexdigest()
 
         self.assertEqual(hash_productive_artifact(artifact), expected)
+        snapshot = capture_productive_artifact(artifact)
+        self.assertIsInstance(snapshot, ProductiveArtifactSnapshot)
+        self.assertEqual(snapshot.content, material)
+        self.assertEqual(snapshot.sha256, expected)
+        self.assertEqual(snapshot.size_bytes, len(material))
+        self.assertNotIn("diagnostic trace", repr(snapshot))
+        self.assertNotIn(artifact.name, repr(snapshot))
         prepared = {
             kind: prepare_file_checkpoint(
                 artifact,
@@ -116,7 +125,11 @@ class ProductiveArtifactIntakeTests(unittest.TestCase):
         maximum = self.root / "maximum.bin"
         with maximum.open("wb") as stream:
             stream.truncate(MAX_PRODUCTIVE_ARTIFACT_BYTES)
-        self.assertRegex(hash_productive_artifact(maximum), r"^[0-9a-f]{64}$")
+        for reader in (hash_productive_artifact, capture_productive_artifact):
+            with self.subTest(reader=reader.__name__, case="maximum"):
+                result = reader(maximum)
+                digest = result if isinstance(result, str) else result.sha256
+                self.assertRegex(digest, r"^[0-9a-f]{64}$")
         oversized = self.root / "oversized.bin"
         with oversized.open("wb") as stream:
             stream.truncate(MAX_PRODUCTIVE_ARTIFACT_BYTES + 1)
@@ -131,11 +144,14 @@ class ProductiveArtifactIntakeTests(unittest.TestCase):
             fifo = self.root / "artifact.fifo"
             os.mkfifo(fifo)
             unsafe += ((fifo, "regular file"),)
-        for path, message in unsafe:
-            with self.subTest(path=path.name):
-                with self.assertRaisesRegex(ValidationError, message) as raised:
-                    hash_productive_artifact(path)
-                self.assertNotIn(path.name, str(raised.exception))
+        for reader in (hash_productive_artifact, capture_productive_artifact):
+            for path, message in unsafe:
+                with self.subTest(reader=reader.__name__, path=path.name):
+                    with self.assertRaisesRegex(
+                        ValidationError, message
+                    ) as raised:
+                        reader(path)
+                    self.assertNotIn(path.name, str(raised.exception))
 
     def test_symlink_and_missing_path_are_rejected_without_path_disclosure(
         self,
@@ -147,16 +163,23 @@ class ProductiveArtifactIntakeTests(unittest.TestCase):
             link.symlink_to(target)
         except (NotImplementedError, OSError):
             self.skipTest("symlinks are unavailable")
-        with self.assertRaisesRegex(ValidationError, "symlinks") as raised:
-            hash_productive_artifact(link)
-        self.assertNotIn(link.name, str(raised.exception))
-
         missing = self.root / "missing-private-name"
-        with self.assertRaisesRegex(
-            ValidationError, "could not be inspected"
-        ) as missing_error:
-            hash_productive_artifact(missing)
-        self.assertNotIn(missing.name, str(missing_error.exception))
+        for reader in (hash_productive_artifact, capture_productive_artifact):
+            with self.subTest(reader=reader.__name__, case="symlink"):
+                with self.assertRaisesRegex(
+                    ValidationError, "symlinks"
+                ) as raised:
+                    reader(link)
+                self.assertNotIn(link.name, str(raised.exception))
+            with self.subTest(reader=reader.__name__, case="missing"):
+                with self.assertRaisesRegex(
+                    ValidationError, "could not be inspected"
+                ) as missing_error:
+                    reader(missing)
+                self.assertNotIn(
+                    missing.name,
+                    str(missing_error.exception),
+                )
 
     def test_path_replacement_between_lstat_and_open_fails_before_read(
         self,
@@ -184,37 +207,44 @@ class ProductiveArtifactIntakeTests(unittest.TestCase):
         artifact = self.root / "mutable.bin"
         original = b"A" * 4096
         artifact.write_bytes(original)
-        original_stat = artifact.stat()
         real_read = os.read
-        mutated = False
+        for reader in (hash_productive_artifact, capture_productive_artifact):
+            with self.subTest(reader=reader.__name__, case="mutation"):
+                artifact.write_bytes(original)
+                original_stat = artifact.stat()
+                mutated = False
 
-        def mutating_read(descriptor, count):
-            nonlocal mutated
-            chunk = real_read(descriptor, count)
-            if chunk and not mutated:
-                mutated = True
-                artifact.write_bytes(b"B" * len(original))
-                os.utime(
-                    artifact,
-                    ns=(
-                        original_stat.st_atime_ns,
-                        original_stat.st_mtime_ns + 1_000_000,
-                    ),
-                )
-            return chunk
+                def mutating_read(descriptor, count):
+                    nonlocal mutated
+                    chunk = real_read(descriptor, count)
+                    if chunk and not mutated:
+                        mutated = True
+                        artifact.write_bytes(b"B" * len(original))
+                        os.utime(
+                            artifact,
+                            ns=(
+                                original_stat.st_atime_ns,
+                                original_stat.st_mtime_ns + 1_000_000,
+                            ),
+                        )
+                    return chunk
 
-        with patch("tsq.artifact_intake.os.read", side_effect=mutating_read):
-            with self.assertRaisesRegex(
-                ValidationError, "changed while"
-            ):
-                hash_productive_artifact(artifact)
+                with patch(
+                    "tsq.artifact_intake.os.read",
+                    side_effect=mutating_read,
+                ):
+                    with self.assertRaisesRegex(
+                        ValidationError, "changed while"
+                    ):
+                        reader(artifact)
 
-        artifact.write_bytes(original)
-        with patch("tsq.artifact_intake.os.read", return_value=b""):
-            with self.assertRaisesRegex(
-                ValidationError, "changed while"
-            ):
-                hash_productive_artifact(artifact)
+            with self.subTest(reader=reader.__name__, case="short-read"):
+                artifact.write_bytes(original)
+                with patch("tsq.artifact_intake.os.read", return_value=b""):
+                    with self.assertRaisesRegex(
+                        ValidationError, "changed while"
+                    ):
+                        reader(artifact)
 
     def test_fifo_replacement_and_close_errors_fail_closed(self) -> None:
         artifact = self.root / "race-target.bin"
