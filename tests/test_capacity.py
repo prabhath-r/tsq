@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import random
@@ -1044,6 +1045,241 @@ class CapacityCliTestCase(unittest.TestCase):
         self.assertEqual(output, "")
         self.assertIn("analysis is incomplete", errors)
         self.assertIn("no heuristic result", errors)
+
+    def test_quarantine_impact_finds_exact_agent_bridge_without_activation(
+        self,
+    ) -> None:
+        before = hashlib.sha256(CORPUS.read_bytes()).hexdigest()
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_llm_agents",
+                "--quarantine-impact",
+                "--json",
+            ]
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(
+            hashlib.sha256(CORPUS.read_bytes()).hexdigest(), before
+        )
+        self.assertTrue(
+            payload["exact_within_declared_search_space"]
+        )
+        self.assertTrue(payload["non_activating"])
+        self.assertEqual(payload["corpus_sha256"], before)
+        self.assertEqual(payload["baseline"]["status"], "thin")
+        self.assertEqual(payload["minimal_closing_combination_size"], 1)
+        self.assertEqual(
+            {
+                tuple(row["question_ids"])
+                for row in payload["closing_combinations"]
+            },
+            {
+                ("q_agent_dry_run_effect_boundary_001",),
+                ("q_agent_revision_ordering_001",),
+                ("q_agent_saga_compensation_001",),
+                ("q_agent_snapshot_observation_completeness_001",),
+            },
+        )
+        self.assertFalse(
+            payload["boundary"]["activation_performed_by_analyzer"]
+        )
+        self.assertFalse(
+            payload["boundary"]["source_corpus_mutated_by_analyzer"]
+        )
+        self.assertTrue(
+            payload["boundary"]["human_review_required_before_activation"]
+        )
+        for candidate in payload["candidates"]:
+            self.assertEqual(
+                candidate["original_question_status"], "quarantined"
+            )
+            self.assertFalse(
+                candidate[
+                    "original_question_eligible_for_adaptation"
+                ]
+            )
+            self.assertRegex(
+                candidate["question_input_digest"], r"^[0-9a-f]{64}$"
+            )
+            self.assertNotIn("stem", candidate)
+            self.assertNotIn("options", candidate)
+
+    def test_quarantine_impact_finds_rag_pair_and_reports_truncation(self) -> None:
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_retrieval_augmented_generation",
+                "--quarantine-impact",
+                "--result-limit",
+                "1",
+                "--json",
+            ]
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(payload["candidate_count"], 8)
+        self.assertEqual(payload["evaluated_combination_count"], 36)
+        self.assertEqual(payload["baseline"]["status"], "thin")
+        self.assertEqual(payload["minimal_closing_combination_size"], 2)
+        self.assertEqual(
+            payload["closing_combination_count_at_minimum"], 16
+        )
+        self.assertEqual(len(payload["closing_combinations"]), 1)
+        self.assertTrue(payload["closing_combinations_truncated"])
+        self.assertEqual(
+            payload["search_outcome"],
+            "minimal_closing_combination_found",
+        )
+
+    def test_quarantine_impact_bounded_nonclosure_is_not_impossibility(
+        self,
+    ) -> None:
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_llm_agents",
+                "--target-main-count",
+                "10",
+                "--quarantine-impact",
+                "--maximum-combination-size",
+                "3",
+                "--json",
+            ]
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(payload["candidate_count"], 10)
+        self.assertEqual(
+            payload["preflight_admissible_combination_count"], 175
+        )
+        self.assertEqual(payload["evaluated_combination_count"], 175)
+        self.assertIsNone(payload["minimal_closing_combination_size"])
+        self.assertFalse(
+            payload["admissible_candidate_search_space_fully_exhausted"]
+        )
+        self.assertFalse(
+            payload[
+                "closure_absence_is_exact_within_declared_candidate_space"
+            ]
+        )
+        self.assertEqual(
+            payload["search_outcome"],
+            "no_closing_combination_within_bound",
+        )
+
+    def test_quarantine_impact_requires_one_scope_and_is_not_a_strict_gate(
+        self,
+    ) -> None:
+        for arguments, expected in (
+            (
+                [
+                    "capacity",
+                    str(CORPUS),
+                    "--quarantine-impact",
+                    "--json",
+                ],
+                "requires exactly one",
+            ),
+            (
+                [
+                    "capacity",
+                    str(CORPUS),
+                    "--topic",
+                    "t_llm_agents",
+                    "--quarantine-impact",
+                    "--strict",
+                    "--json",
+                ],
+                "not a live corpus gate",
+            ),
+            (
+                [
+                    "capacity",
+                    str(CORPUS),
+                    "--candidate-limit",
+                    "3",
+                    "--json",
+                ],
+                "require --quarantine-impact",
+            ),
+            (
+                [
+                    "capacity",
+                    str(CORPUS),
+                    "--topic",
+                    "t_llm_agents",
+                    "--quarantine-impact",
+                    "--candidate-limit",
+                    "0",
+                    "--json",
+                ],
+                "candidate_limit must be between",
+            ),
+        ):
+            with self.subTest(arguments=arguments):
+                code, output, errors = self.run_cli(arguments)
+                self.assertEqual(code, 2)
+                self.assertEqual(output, "")
+                self.assertIn(expected, errors)
+
+    def test_quarantine_impact_candidate_limit_fails_instead_of_truncating(
+        self,
+    ) -> None:
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_llm_agents",
+                "--quarantine-impact",
+                "--candidate-limit",
+                "9",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(output, "")
+        self.assertIn("refuses to truncate 10 candidates", errors)
+
+    def test_quarantine_impact_evaluation_budget_emits_no_partial_report(
+        self,
+    ) -> None:
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_llm_agents",
+                "--target-main-count",
+                "10",
+                "--quarantine-impact",
+                "--maximum-combination-size",
+                "3",
+                "--evaluation-limit",
+                "174",
+                "--json",
+            ]
+        )
+
+        self.assertEqual(code, 2)
+        self.assertEqual(output, "")
+        self.assertIn(
+            "requires 175 admissible candidate-subset evaluations",
+            errors,
+        )
+        self.assertIn("No heuristic or partial result was used", errors)
 
     def test_capacity_selectors_are_mutually_exclusive(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):

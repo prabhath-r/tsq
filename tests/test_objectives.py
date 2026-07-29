@@ -752,6 +752,25 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
         )
         self.assertEqual(completed.next_phase, SessionPhase.LEARN)
 
+        report = self.engine.session_report(
+            session["id"], now=START + timedelta(minutes=7)
+        )
+        routing = report["adaptive_routing"]
+        self.assertEqual(routing["parent_resumptions"], 1)
+        self.assertEqual(routing["prerequisite_resumptions"], 0)
+        self.assertEqual(routing["cross_objective_parent_resumptions"], 1)
+        self.assertEqual(routing["unclassified_parent_resumptions"], 0)
+        resumed_step = next(
+            step
+            for step in report["adaptive_path"]
+            if step["transition_reason"]
+            == "prerequisite_verified_resume_parent"
+        )
+        self.assertEqual(
+            resumed_step["parent_resume_origin"],
+            "cross_objective_diagnostic",
+        )
+
         trace = list(reversed(self.engine.trace(session["id"])))
         self.assertEqual(
             [row["question_id"] for row in trace],

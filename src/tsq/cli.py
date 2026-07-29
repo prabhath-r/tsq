@@ -82,6 +82,13 @@ from .policy_shadow_reporting import (
     UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
     build_policy_shadow_report,
 )
+from .quarantine_impact import (
+    MAX_CANDIDATE_LIMIT,
+    MAX_COMBINATION_SIZE,
+    MAX_EVALUATION_LIMIT,
+    MAX_RESULT_LIMIT,
+    analyze_quarantine_capacity_impact,
+)
 from .reconciliation import (
     ReconciliationObservation,
     ReconciliationOutcome,
@@ -464,7 +471,36 @@ def command_capacity(args: argparse.Namespace) -> int:
             _,
             topics,
         ) = read_and_parse(corpus_path, include_catalog=True)
+        corpus_sha256 = (
+            hashlib.sha256(corpus_path.read_bytes()).hexdigest()
+            if args.quarantine_impact
+            else None
+        )
     try:
+        if args.quarantine_impact:
+            if args.strict:
+                raise ValueError(
+                    "--strict cannot be combined with --quarantine-impact; "
+                    "counterfactual review analysis is not a live corpus gate."
+                )
+            if args.all or not (args.concept or args.topic):
+                raise ValueError(
+                    "--quarantine-impact requires exactly one --concept or "
+                    "--topic target."
+                )
+        elif any(
+            value is not None
+            for value in (
+                args.maximum_combination_size,
+                args.candidate_limit,
+                args.evaluation_limit,
+                args.result_limit,
+            )
+        ):
+            raise ValueError(
+                "Combination, candidate, evaluation, and result limits require "
+                "--quarantine-impact."
+            )
         if args.concept:
             targets = (
                 concept_target(
@@ -493,6 +529,108 @@ def command_capacity(args: argparse.Namespace) -> int:
                 )
                 for topic in sorted(topics, key=lambda value: value.id)
             )
+        if args.quarantine_impact:
+            impact = analyze_quarantine_capacity_impact(
+                questions,
+                KnowledgeGraph(concepts, edges),
+                misconceptions,
+                targets[0],
+                maximum_combination_size=(
+                    2
+                    if args.maximum_combination_size is None
+                    else args.maximum_combination_size
+                ),
+                candidate_limit=(
+                    16
+                    if args.candidate_limit is None
+                    else args.candidate_limit
+                ),
+                result_limit=(
+                    20
+                    if args.result_limit is None
+                    else args.result_limit
+                ),
+                evaluation_limit=(
+                    500
+                    if args.evaluation_limit is None
+                    else args.evaluation_limit
+                ),
+                state_limit=args.state_limit,
+            )
+            payload = {
+                "path": corpus_label,
+                "corpus_sha256": corpus_sha256,
+                "exact_within_declared_search_space": True,
+                "non_activating": True,
+                **impact,
+            }
+            if args.json:
+                _emit(payload, as_json=True)
+                return 0
+
+            baseline = impact["baseline"]
+            print(
+                "Exact target-owned quarantine capacity impact "
+                f"(counterfactual only): {corpus_label}"
+            )
+            print(
+                "  NO ACTIVATION: source questions remain quarantined; "
+                "no database or learner evidence is used."
+            )
+            print(
+                f"  target={targets[0].target_id}  "
+                f"baseline={baseline['status']}  "
+                f"robust={baseline['order_robust_main_capacity']}  "
+                f"achievable={baseline['achievable_main_capacity']}  "
+                f"concept-floor="
+                f"{baseline['owned_concept_order_robust_floor']}/"
+                f"{baseline['owned_concept_achievable_floor']}"
+            )
+            print(
+                f"  quarantined target-owned candidates="
+                f"{impact['candidate_count']}  "
+                f"evaluated combinations="
+                f"{impact['evaluated_combination_count']}  "
+                f"search bound={impact['maximum_combination_size']}  "
+                "preflight maximum="
+                f"{impact['preflight_admissible_combination_count']}"
+            )
+            minimum = impact["minimal_closing_combination_size"]
+            if minimum is None:
+                print(
+                    "  no closing combination found within the declared "
+                    "combination-size bound"
+                )
+            elif minimum == 0:
+                print(
+                    "  live baseline already meets the configured target; "
+                    "no quarantined review set is required for closure"
+                )
+            else:
+                print(
+                    "  exact minimum within the declared target-owned, "
+                    f"one-question-per-family search={minimum}; "
+                    f"{impact['closing_combination_count_at_minimum']} "
+                    "combination(s)"
+                    + (
+                        f" (showing {len(impact['closing_combinations'])})"
+                        if impact["closing_combinations_truncated"]
+                        else ""
+                    )
+                )
+                for row in impact["closing_combinations"]:
+                    print(
+                        "    "
+                        + ", ".join(row["question_ids"])
+                        + "  -> "
+                        + row["impact"]["capacity"]["status"]
+                    )
+            print(
+                "  Human source, correctness, misconception, semantic-family, "
+                "and release review remain required before activation."
+            )
+            print(f"  report digest: {impact['report_digest']}")
+            return 0
         report = analyze_sustained_capacity(
             questions,
             KnowledgeGraph(concepts, edges),
@@ -1129,12 +1267,32 @@ def command_session_report(args: argparse.Namespace) -> None:
             )
             print(f"      evidence note: {flags}")
     routing = report["adaptive_routing"]
-    if routing["prerequisite_descents"] or routing["bounded_exits"]:
-        print(
-            f"  adaptive routing: {routing['prerequisite_descents']} prerequisite "
-            f"descent(s) · {routing['prerequisite_resumptions']} resumed parent(s) · "
-            f"{routing['prevented_reopenings']} verified boundary reopening(s) prevented"
+    if (
+        routing["prerequisite_descents"]
+        or routing["parent_resumptions"]
+        or routing["bounded_exits"]
+    ):
+        routing_parts = [
+            f"{routing['prerequisite_descents']} prerequisite descent(s)",
+            (
+                f"{routing['prerequisite_resumptions']} prerequisite parent "
+                "resumption(s)"
+            ),
+            (
+                f"{routing['cross_objective_parent_resumptions']} diagnostic "
+                "parent resumption(s)"
+            ),
+        ]
+        if routing["unclassified_parent_resumptions"]:
+            routing_parts.append(
+                f"{routing['unclassified_parent_resumptions']} unclassified "
+                "legacy parent resumption(s)"
+            )
+        routing_parts.append(
+            f"{routing['prevented_reopenings']} verified boundary reopening(s) "
+            "prevented"
         )
+        print(f"  adaptive routing: {' · '.join(routing_parts)}")
     if report["diagnostic_findings"]:
         print("  evidence-backed learning boundaries:")
         for finding in report["diagnostic_findings"][:5]:
@@ -3357,6 +3515,52 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_STATE_LIMIT,
         help="Maximum exact search states per target (never falls back to a heuristic)",
+    )
+    capacity.add_argument(
+        "--quarantine-impact",
+        action="store_true",
+        help=(
+            "Counterfactually rank target-owned quarantined review sets without "
+            "activating content or opening a database"
+        ),
+    )
+    capacity.add_argument(
+        "--maximum-combination-size",
+        "--max-combination-size",
+        dest="maximum_combination_size",
+        type=int,
+        default=None,
+        help=(
+            "Largest exact quarantined subset to exhaust "
+            f"(1-{MAX_COMBINATION_SIZE}; requires --quarantine-impact)"
+        ),
+    )
+    capacity.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=None,
+        help=(
+            "Fail rather than truncate above this many candidates "
+            f"(1-{MAX_CANDIDATE_LIMIT}; requires --quarantine-impact)"
+        ),
+    )
+    capacity.add_argument(
+        "--result-limit",
+        type=int,
+        default=None,
+        help=(
+            "Maximum ranked combinations to render "
+            f"(1-{MAX_RESULT_LIMIT}; requires --quarantine-impact)"
+        ),
+    )
+    capacity.add_argument(
+        "--evaluation-limit",
+        type=int,
+        default=None,
+        help=(
+            "Fail before subset analysis above this exact evaluation budget "
+            f"(1-{MAX_EVALUATION_LIMIT}; requires --quarantine-impact)"
+        ),
     )
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)

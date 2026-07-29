@@ -899,9 +899,18 @@ class BehavioralSimulationTests(unittest.TestCase):
         ]
         self.assertIn("descend_to_evidence_boundary", reasons)
         self.assertIn("prerequisite_verified_resume_parent", reasons)
+        routing = session_report["adaptive_routing"]
+        self.assertEqual(routing["parent_resumptions"], 1)
+        self.assertEqual(routing["prerequisite_resumptions"], 1)
+        self.assertEqual(routing["cross_objective_parent_resumptions"], 0)
+        self.assertEqual(routing["unclassified_parent_resumptions"], 0)
         path = session_report["adaptive_path"]
         resume_index = reasons.index(
             "prerequisite_verified_resume_parent"
+        )
+        self.assertEqual(
+            path[resume_index]["parent_resume_origin"],
+            "prerequisite_boundary",
         )
         self.assertEqual(path[resume_index]["to_phase"], "verify")
         self.assertEqual(
