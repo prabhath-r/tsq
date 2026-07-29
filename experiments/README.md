@@ -167,27 +167,29 @@ rerun. The laboratory includes implementation, debugging, explanation, and
 design scenarios; assisted and post-feedback work; missing evidence; restricted
 tool use; and shadow-only model/imported scores.
 
-The productive-probe laboratory drives the complete mixed path through two
+The productive-probe laboratory drives an honest quarantine path through two
 fresh databases: a real wrong MCQ answer localizes an objective and named
-misconception, reviewed release-pinned debugging and explanation tasks are
-ranked, one productive attempt records assisted semantic actions, an imported
-evaluation is reduced into shadow evidence, and a fresh family is recommended
-next. It hashes a real temporary learner file at both the artifact and
-submission boundaries, confirms both commitments match the fixture bytes, and
-scans every persisted table for distinctive private sentinels. It also proves
-that MCQ and productive attempts cannot overlap, the selected-response
-projection does not change, and the performance projection replays exactly:
+misconception, then an explicit synthetic-lab v2 release pins two
+zero-authority debugging/explanation fixtures to that curriculum release.
+The normal recommendation and start paths remain closed; a read-only
+laboratory inspector ranks the exact quarantine and applies fresh-family
+novelty only to an explicit in-memory lab history. No productive attempt,
+evaluation, evidence bundle, or learner-facing productive metric is written.
+The lab also hashes a real temporary learner file at the artifact and
+submission boundaries, confirms both commitments match the fixture bytes,
+scans every persisted table for private sentinels, and checks ordinary replay
+and integrity:
 
 ```sh
 python experiments/productive_probe_lab.py --stdout
 ```
 
 The ignored artifact is written to
-`experiments/results/productive_probe_lab.json`. The fixture tasks exist only
-inside disposable laboratory databases; TSQ does not ship them as reviewed
-curriculum content. The file is never executed. Its digest proves byte equality
-only: it is not skill evidence, encryption, or protection against guessing
-low-entropy content.
+`experiments/results/productive_probe_lab.json`. The fixtures exist only inside
+disposable laboratory databases and explicitly claim neither human review nor
+activation authority. The file is never executed. Its digest proves byte
+equality only: it is not skill evidence, encryption, or protection against
+guessing low-entropy content.
 
 The artifact-runner laboratory exercises the fixed data-only causal-mask
 checker and its durable admission/receipt ledger across two fresh databases:

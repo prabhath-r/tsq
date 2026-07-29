@@ -6,14 +6,25 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from tsq.artifact_runner import (
+    ArtifactRunRequest,
+    bundled_synthetic_binding,
+)
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError
-from tsq.evidence import canonical_digest, canonical_json
-from tsq.performance_ledger import PerformanceLedger
+from tsq.evidence import (
+    ActionKind,
+    ScorerContract,
+    ScorerKind,
+    canonical_digest,
+    canonical_json,
+)
+from tsq.performance_ledger import PerformanceLedger, _command_hash
 from tsq.store import (
     Database,
     PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX,
@@ -43,8 +54,9 @@ from tests.test_migration_event_lifecycle import durable_database_fingerprint
 
 START = datetime(2110, 7, 1, 9, 0, tzinfo=timezone.utc)
 ARTIFACT_DIGEST = "3" * 64
-ARTIFACT_MANIFEST_DIGEST = "4" * 64
-CHECK_SET_MANIFEST_DIGEST = "5" * 64
+_RUNNER_BINDING = bundled_synthetic_binding()
+ARTIFACT_MANIFEST_DIGEST = _RUNNER_BINDING.artifact_manifest_digest
+CHECK_SET_MANIFEST_DIGEST = _RUNNER_BINDING.check_set_manifest_digest
 
 _CLAIM_INSERT = """
 INSERT INTO performance_artifact_run_claims(
@@ -209,6 +221,37 @@ def _build_fixture(path: Path, suffix: str = "fixture") -> dict[str, object]:
             "SELECT value FROM meta WHERE key='active_corpus_release'"
         ).fetchone()["value"]
     bundle = declared_task_release_fixture(corpus_release_id)
+    status, task = bundle.tasks[0]
+    contract = ScorerContract(
+        kind=ScorerKind.DETERMINISTIC,
+        scorer_id="checks.causal-mask-matrix",
+        scorer_version="v1",
+        authority_id="authority.synthetic.causal-mask",
+        authority_manifest_digest="7" * 64,
+        criterion_ids=tuple(
+            criterion.id for criterion in task.criteria
+        ),
+        evidence_action_kinds=(
+            ActionKind.ARTIFACT_CHECKPOINT,
+            ActionKind.CHECK_RUN,
+        ),
+        check_set_manifests=(
+            (
+                _RUNNER_BINDING.check_set_id,
+                _RUNNER_BINDING.check_set_manifest_digest,
+            ),
+        ),
+        artifact_manifests=(
+            (
+                _RUNNER_BINDING.artifact_kind,
+                _RUNNER_BINDING.artifact_manifest_digest,
+            ),
+        ),
+    )
+    bundle = replace(
+        bundle,
+        tasks=((status, replace(task, scorer_contracts=(contract,))),),
+    )
     ledger = PerformanceLedger(database)
     release = ledger.publish_release(
         bundle,
@@ -228,7 +271,7 @@ def _build_fixture(path: Path, suffix: str = "fixture") -> dict[str, object]:
         "artifact_checkpoint",
         {
             "artifact_digest": ARTIFACT_DIGEST,
-            "artifact_kind": "patch_digest",
+            "artifact_kind": _RUNNER_BINDING.artifact_kind,
         },
         idempotency_key=f"artifact-run-checkpoint-{suffix}",
         now=START + timedelta(minutes=2),
@@ -272,30 +315,48 @@ def _claim_terms(fixture: dict[str, object]) -> dict[str, object]:
     assert isinstance(session, dict)
     assert isinstance(artifact, dict)
     assert isinstance(suffix, str)
-    request = {
-        "artifact_digest": ARTIFACT_DIGEST,
-        "check_set_id": "checks.fixture.v1",
-        "schema_version": 1,
-    }
-    binding = {
-        "isolation": "subprocess",
-        "runner_id": "synthetic.runner",
-        "runner_version": "test-v1",
-        "schema_version": 1,
-    }
-    request_digest = canonical_digest(request)
-    binding_digest = canonical_digest(binding)
-    command_hash = canonical_digest(
+    claim_id = f"artifact-run-claim-{suffix}"
+    binding_value = _RUNNER_BINDING
+    binding = binding_value.terms()
+    binding_digest = binding_value.digest
+    command_hash = _command_hash(
         {
+            "operation": "run_artifact_check",
+            "attempt_id": attempt["id"],
             "artifact_action_id": artifact["id"],
+            "artifact_digest": ARTIFACT_DIGEST,
+            "artifact_size_bytes": 0,
+            "artifact_kind": binding_value.artifact_kind,
+            "artifact_manifest_digest": (
+                binding_value.artifact_manifest_digest
+            ),
+            "check_set_id": binding_value.check_set_id,
+            "check_set_manifest_digest": (
+                binding_value.check_set_manifest_digest
+            ),
+            "checker_id": binding_value.checker_id.value,
+            "checker_version": binding_value.checker_version,
+            "runner_id": binding_value.runner_id,
+            "runner_version": binding_value.runner_version,
             "binding_digest": binding_digest,
-            "check_set_manifest_digest": CHECK_SET_MANIFEST_DIGEST,
-            "operation": "run_performance_artifact",
-            "request_digest": request_digest,
         }
     )
+    request_value = ArtifactRunRequest(
+        run_id="arun_" + command_hash[:24],
+        checker_id=binding_value.checker_id,
+        checker_version=binding_value.checker_version,
+        artifact_kind=binding_value.artifact_kind,
+        artifact_manifest_digest=binding_value.artifact_manifest_digest,
+        artifact_sha256=ARTIFACT_DIGEST,
+        artifact_size_bytes=0,
+        check_set_id=binding_value.check_set_id,
+        check_set_manifest_digest=binding_value.check_set_manifest_digest,
+        runner_binding_digest=binding_digest,
+    )
+    request = request_value.terms()
+    request_digest = canonical_digest(request)
     return {
-        "id": f"artifact-run-claim-{suffix}",
+        "id": claim_id,
         "event_id": None,
         "idempotency_key": f"artifact-run-caller-{suffix}",
         "attempt_id": attempt["id"],
@@ -308,12 +369,12 @@ def _claim_terms(fixture: dict[str, object]) -> dict[str, object]:
         "task_version": attempt["task_version"],
         "task_digest": attempt["task_digest"],
         "artifact_digest": ARTIFACT_DIGEST,
-        "artifact_kind": "patch_digest",
+        "artifact_kind": binding_value.artifact_kind,
         "artifact_manifest_digest": ARTIFACT_MANIFEST_DIGEST,
-        "check_set_id": "checks.fixture.v1",
+        "check_set_id": binding_value.check_set_id,
         "check_set_manifest_digest": CHECK_SET_MANIFEST_DIGEST,
-        "runner_id": "synthetic.runner",
-        "runner_version": "test-v1",
+        "runner_id": binding_value.runner_id,
+        "runner_version": binding_value.runner_version,
         "request": request,
         "request_json": canonical_json(request),
         "request_digest": request_digest,

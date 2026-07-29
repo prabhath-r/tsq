@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MPL-2.0
 
-"""Exercise TSQ's mixed MCQ-to-productive-probe path on disposable databases.
+"""Exercise honest synthetic productive-probe routing on disposable databases.
 
-The lab answers a real corpus question incorrectly, publishes two reviewed
-fixture tasks pinned to that session's exact release, verifies objective-aware
-probe selection, records assisted semantic work, imports an authority-free
-evaluation, and proves that all productive evidence remains replayable shadow
-data.  It never executes an artifact or opens the configured/default database.
+The lab answers a real corpus question incorrectly, publishes two explicitly
+synthetic and quarantined zero-authority fixtures pinned to the exact release,
+and checks objective-aware ranking without starting a task or recording learner
+evidence. It proves that normal recommendation/start paths remain closed, that
+learner projections and normal productive summaries remain unchanged, and that
+only artifact digests cross the intake boundary. It never executes an artifact
+or opens the configured/default database.
 """
 
 from __future__ import annotations
@@ -30,31 +32,29 @@ if str(SOURCE_ROOT) not in sys.path:
 from tsq.artifact_intake import prepare_file_checkpoint  # noqa: E402
 from tsq.corpus import read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
+from tsq.errors import NotFoundError  # noqa: E402
 from tsq.evidence import (  # noqa: E402
-    ActionPhase,
     CriterionScale,
-    EvaluationStatus,
     LearningTask,
     RubricCriterion,
-    ScorerKind,
     TaskModality,
     canonical_digest,
-)
-from tsq.performance import (  # noqa: E402
-    ImportedCriterionResult,
-    ImportedEvaluation,
 )
 from tsq.performance_ledger import (  # noqa: E402
     PerformanceLedger,
     PerformanceTaskRelease,
-    TaskReleaseReview,
+    SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION,
+    SyntheticTaskLabDeclaration,
 )
-from tsq.performance_selection import recommend_performance_tasks  # noqa: E402
+from tsq.performance_selection import (  # noqa: E402
+    inspect_synthetic_lab_tasks,
+    recommend_performance_tasks,
+)
 from tsq.replay import ProjectionReplay  # noqa: E402
 from tsq.store import Database, question_content_hash  # noqa: E402
 
 
-LAB_VERSION = "productive-probe-lab-v2"
+LAB_VERSION = "productive-probe-lab-v3"
 START = datetime(2115, 3, 4, 9, 0, tzinfo=timezone.utc)
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "productive_probe_lab.json"
@@ -143,8 +143,10 @@ def _tasks_for_focus(
                 objective_weights=((objective_id, 1.0),),
                 dependence_group=f"dependence_lab_{suffix}",
                 misconception_ids=misconception_ids,
-                evidence_cap=0.8,
-                dependence_cap=0.8,
+                evidence_cap=0.0,
+                dependence_cap=0.0,
+                assisted_evidence_factor=0.0,
+                certification_eligible=False,
             ),
         ),
         instructions=(
@@ -156,6 +158,7 @@ def _tasks_for_focus(
         administration_manifest_digest=_D0,
         stimulus_id=f"stimulus_lab_{suffix}",
         stimulus_digest=stimulus_digest,
+        evidence_cap=0.0,
     )
     alternative = LearningTask(
         id=f"task_lab_{suffix}_explain",
@@ -170,6 +173,10 @@ def _tasks_for_focus(
                 scale=CriterionScale.CONTINUOUS,
                 concept_weights=((concept_id, 1.0),),
                 dependence_group=f"dependence_lab_{suffix}_concept",
+                evidence_cap=0.0,
+                dependence_cap=0.0,
+                assisted_evidence_factor=0.0,
+                certification_eligible=False,
             ),
         ),
         instructions=(
@@ -181,6 +188,7 @@ def _tasks_for_focus(
         administration_manifest_digest=_D0,
         stimulus_id=f"stimulus_lab_{suffix}_concept",
         stimulus_digest=_D2,
+        evidence_cap=0.0,
     )
     return exact, alternative
 
@@ -251,42 +259,57 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         ),
     )
     task_release = PerformanceTaskRelease(
-        title="Reviewed productive-probe laboratory fixture",
+        title="Synthetic quarantined productive-probe laboratory fixture",
         corpus_release_id=focused["corpus_release_id"],
-        review=TaskReleaseReview(
-            reviewer_kind="human",
-            reviewer_id="independent_productive_lab_reviewer",
-            reviewed_at=START.isoformat(),
-            independent_of_author=True,
-            attestation_digest=_D1,
+        review=SyntheticTaskLabDeclaration(
+            producer_id="tsq.productive_probe_lab",
+            producer_version=LAB_VERSION,
+            declared_at=START.isoformat(),
+            manifest_digest=canonical_digest(
+                {
+                    "lab_version": LAB_VERSION,
+                    "task_digests": [
+                        exact_task.digest,
+                        alternative_task.digest,
+                    ],
+                }
+            ),
         ),
-        tasks=(("pilot", exact_task), ("pilot", alternative_task)),
+        tasks=(
+            ("quarantined", exact_task),
+            ("quarantined", alternative_task),
+        ),
+        schema_version=SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION,
     )
     ledger = PerformanceLedger(database)
-    released = ledger.publish_release(
+    released = ledger.publish_synthetic_lab_release(
         task_release, now=START + timedelta(minutes=3)
     )
+    release_authority = ledger.list_releases()[0]["review"]
 
     before = _projection_boundary(database, learner_id, session["id"])
-    first = recommend_performance_tasks(
+    production = recommend_performance_tasks(
         database, session["id"], limit=5, now=START + timedelta(minutes=4)
     )
-    attempt = ledger.start_attempt(
+    first = inspect_synthetic_lab_tasks(
+        database,
         session["id"],
-        first["recommendations"][0]["task_id"],
-        task_version=first["recommendations"][0]["task_version"],
-        task_release_id=first["recommendations"][0]["task_release_id"],
-        idempotency_key="productive-lab-task-start",
-        now=START + timedelta(minutes=5),
+        released["release_id"],
+        limit=5,
+        now=START + timedelta(minutes=4),
     )
-    ledger.record_action(
-        attempt["id"],
-        "hint_requested",
-        {"hint_id": "productive_lab_hint", "level": 1},
-        phase="assisted",
-        idempotency_key="productive-lab-hint",
-        now=START + timedelta(minutes=6),
-    )
+    normal_start_rejected = False
+    try:
+        ledger.start_attempt(
+            session["id"],
+            exact_task.id,
+            task_version=exact_task.version,
+            task_release_id=released["release_id"],
+            idempotency_key="productive-lab-forbidden-start",
+            now=START + timedelta(minutes=5),
+        )
+    except NotFoundError:
+        normal_start_rejected = True
     artifact_sentinels = (
         "TSQ_PRIVATE_DIAGNOSIS_719 future keys precede normalization",
         "TSQ_PRIVATE_REPAIR_719 preserve each inclusive causal prefix",
@@ -300,80 +323,57 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         kind="artifact",
         artifact_kind="causal_mask_repair_v1",
     )
-    recorded_artifact = ledger.record_action(
-        attempt["id"],
-        artifact_checkpoint.action_kind.value,
-        artifact_checkpoint.payload,
-        phase="assisted",
-        idempotency_key="productive-lab-artifact",
-        now=START + timedelta(minutes=7),
-    )
-    ledger.record_action(
-        attempt["id"],
-        "check_run",
-        {
-            "check_set_id": "productive_lab_checks",
-            "passed": 2,
-            "failed": 1,
-            "errored": 0,
-            "skipped": 0,
-            "result_digest": _D2,
-        },
-        phase="assisted",
-        idempotency_key="productive-lab-check",
-        now=START + timedelta(minutes=8),
-    )
     submission_checkpoint = prepare_file_checkpoint(
         artifact_path,
         kind="submission",
     )
-    submitted = ledger.record_action(
-        attempt["id"],
-        submission_checkpoint.action_kind.value,
-        submission_checkpoint.payload,
-        phase="assisted",
-        idempotency_key="productive-lab-submit",
-        now=START + timedelta(minutes=10),
+    first_item = first["recommendations"][0]
+    first_task_ref = (
+        first_item["task_id"],
+        first_item["task_version"],
+        first_item["task_digest"],
     )
-    criterion = exact_task.criteria[0]
-    scored = ledger.import_evaluation(
-        attempt["id"],
-        ImportedEvaluation(
-            criteria=(
-                ImportedCriterionResult(
-                    criterion_id=criterion.id,
-                    status=EvaluationStatus.VALID,
-                    score=0.4,
-                    outcome_code="assisted_partial_repair",
-                    phase=ActionPhase.ASSISTED,
-                    source_action_ids=(submitted["id"],),
-                    misconception_ids=criterion.misconception_ids,
-                    reliability=0.8,
-                ),
-            )
-        ),
-        provider_id="productive_lab_import",
-        provider_version="v1",
-        declared_kind=ScorerKind.DETERMINISTIC,
-        idempotency_key="productive-lab-evaluation",
-        now=START + timedelta(minutes=11),
+    second = inspect_synthetic_lab_tasks(
+        database,
+        session["id"],
+        released["release_id"],
+        prior_task_refs=(first_task_ref,),
+        limit=5,
+        now=START + timedelta(minutes=12),
     )
     after = _projection_boundary(database, learner_id, session["id"])
-    second = recommend_performance_tasks(
-        database, session["id"], limit=5, now=START + timedelta(minutes=12)
-    )
     pending = engine.next_question(
         session["id"], now=START + timedelta(minutes=13)
     )
     blocked = recommend_performance_tasks(
         database, session["id"], limit=5, now=START + timedelta(minutes=14)
     )
-    attempt_report = ledger.report(attempt["id"])
     session_report = engine.session_report(
         session["id"], now=START + timedelta(minutes=14)
     )
     replay = ProjectionReplay(database).check(learner_id)
     integrity = database.verify_integrity()
+    with database.read() as connection:
+        performance_counts = {
+            "attempts": connection.execute(
+                "SELECT COUNT(*) AS n FROM performance_attempts"
+            ).fetchone()["n"],
+            "evaluations": connection.execute(
+                "SELECT COUNT(*) AS n FROM task_evaluations"
+            ).fetchone()["n"],
+            "bundles": connection.execute(
+                "SELECT COUNT(*) AS n FROM shadow_evidence_bundles"
+            ).fetchone()["n"],
+            "events": connection.execute(
+                """SELECT COUNT(*) AS n FROM events
+                   WHERE event_type IN (
+                       'PerformanceTaskStarted',
+                       'PerformanceActionRecorded',
+                       'TaskEvaluationRecorded',
+                       'ShadowEvidenceReduced'
+                   )"""
+            ).fetchone()["n"],
+        }
     persisted_database_text = _persisted_database_text(database)
     artifact_private_material_absent = all(
         private_value not in persisted_database_text
@@ -384,46 +384,55 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         )
     )
 
-    normalized_reasons = sorted(
-        {
-            reason
-            for record in scored["shadow_evidence"]["records"]
-            for reason in record["reason_codes"]
-        }
-    )
     stable = {
         "question_id": presentation.question.id,
         "question_objective_id": presentation.question.objective_id,
         "selected_misconception_id": selected.misconception_id,
         "focus_objective_id": objective_id,
         "focus_misconception_id": focused["focus_misconception_id"],
+        "release_schema_version": task_release.schema_version,
+        "release_declaration_kind": release_authority["declaration_kind"],
+        "release_human_reviewed": release_authority["human_reviewed"],
+        "release_activation_authority": release_authority[
+            "activation_authority"
+        ],
+        "normal_task_ids": [
+            item["task_id"] for item in production["recommendations"]
+        ],
         "first_task_ids": [item["task_id"] for item in first["recommendations"]],
         "first_scores": [item["score"] for item in first["recommendations"]],
         "second_task_ids": [item["task_id"] for item in second["recommendations"]],
         "family_constraint": second["fresh_family_constraint_applied"],
+        "synthetic_selection_scope": first["selection_scope"],
+        "synthetic_startable": first["selection_boundary"]["startable_now"],
+        "synthetic_blocker_codes": [
+            item["code"]
+            for item in first["selection_boundary"]["start_blockers"]
+        ],
+        "normal_start_rejected": normal_start_rejected,
         "pending_blocker_codes": [
             item["code"]
             for item in blocked["selection_boundary"]["start_blockers"]
         ],
         "projection_unchanged": before == after,
-        "shadow_weight": scored["shadow_evidence"]["total_evidence_weight"],
-        "shadow_reason_codes": normalized_reasons,
-        "attempt_status": attempt_report["status"],
-        "action_count": attempt_report["action_count"],
-        "artifact_checkpoint_digest": recorded_artifact["payload"][
+        "shadow_weight": 0.0,
+        "attempt_status": "not_started_quarantined",
+        "action_count": 0,
+        "performance_counts": performance_counts,
+        "artifact_checkpoint_digest": artifact_checkpoint.payload[
             "artifact_digest"
         ],
-        "submission_checkpoint_digest": submitted["payload"][
+        "submission_checkpoint_digest": submission_checkpoint.payload[
             "submission_digest"
         ],
         "artifact_digest_matches_submission": (
-            recorded_artifact["payload"]["artifact_digest"]
-            == submitted["payload"]["submission_digest"]
+            artifact_checkpoint.payload["artifact_digest"]
+            == submission_checkpoint.payload["submission_digest"]
         ),
         "artifact_digest_matches_bytes": (
-            recorded_artifact["payload"]["artifact_digest"]
+            artifact_checkpoint.payload["artifact_digest"]
             == expected_artifact_digest
-            == submitted["payload"]["submission_digest"]
+            == submission_checkpoint.payload["submission_digest"]
         ),
         "artifact_private_material_absent": (
             artifact_private_material_absent
@@ -432,9 +441,9 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
         "session_productive_attempts": session_report[
             "productive_skill_shadow"
         ]["attempt_count"],
-        "objective_binding_ids": session_report[
-            "productive_skill_shadow"
-        ]["scope_binding"]["objective_ids"],
+        "objective_binding_ids": sorted(
+            first["recommendations"][0]["objective_weights"]
+        ),
         "pending_question_id": pending.question.id,
         "replay_ok": replay["ok"],
         "performance_projection_matches_replay": replay[
@@ -445,14 +454,28 @@ def run_once(database_path: Path, corpus_path: Path = DEFAULT_CORPUS) -> dict[st
     failures: list[str] = []
     if not first["recommendations"] or first["recommendations"][0]["task_id"] != exact_task.id:
         failures.append("Exact active-objective task was not the first probe.")
+    if stable["normal_task_ids"]:
+        failures.append("Synthetic quarantine leaked into normal recommendations.")
     if exact_task.id in stable["second_task_ids"]:
         failures.append("Used productive family was recommended despite a fresh family.")
+    if stable["synthetic_blocker_codes"] != ["synthetic_quarantine"]:
+        failures.append("Synthetic inspection did not expose its quarantine blocker.")
+    if stable["synthetic_startable"] or not stable["normal_start_rejected"]:
+        failures.append("Synthetic quarantine crossed a normal start boundary.")
     if stable["pending_blocker_codes"] != ["pending_question"]:
         failures.append("Pending MCQ was not exposed as the exact start blocker.")
     if not stable["projection_unchanged"]:
-        failures.append("Shadow productive activity changed a learner projection.")
-    if stable["shadow_weight"] != 0.0:
-        failures.append("Direct imported evaluation acquired evidence authority.")
+        failures.append("Synthetic task inspection changed a learner projection.")
+    if any(stable["performance_counts"].values()):
+        failures.append("Synthetic inspection persisted productive learner evidence.")
+    if stable["session_productive_attempts"] != 0:
+        failures.append("Synthetic inspection leaked into the normal learner summary.")
+    if (
+        stable["release_declaration_kind"] != "synthetic_lab"
+        or stable["release_human_reviewed"] is not False
+        or stable["release_activation_authority"] is not False
+    ):
+        failures.append("Synthetic release made an authority or review claim.")
     if not stable["artifact_digest_matches_submission"]:
         failures.append("Artifact and submission commitments diverged.")
     if not stable["artifact_digest_matches_bytes"]:

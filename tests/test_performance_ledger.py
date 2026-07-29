@@ -8,6 +8,7 @@ import json
 import tempfile
 import threading
 import unittest
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
@@ -47,6 +48,7 @@ from tsq.performance_ledger import (
     derive_performance_projections,
     performance_integrity_errors,
     read_task_release,
+    require_performance_projection_consistency,
 )
 from tsq.performance_selection import recommend_performance_tasks
 from tsq.reconciliation import (
@@ -180,6 +182,26 @@ class PerformanceLedgerTestCase(unittest.TestCase):
                 "performance-learner", connection
             )
         return learner_revision, session_revision, projection_hash
+
+    def performance_event_and_projection_counts(self) -> dict[str, int]:
+        tables = (
+            "events",
+            "performance_attempts",
+            "performance_actions",
+            "performance_artifact_run_claims",
+            "performance_artifact_run_receipts",
+            "performance_scoring_claims",
+            "performance_scoring_reconciliations",
+            "task_evaluations",
+            "shadow_evidence_bundles",
+        )
+        with self.database.read() as connection:
+            return {
+                table: connection.execute(
+                    f"SELECT COUNT(*) AS n FROM {table}"
+                ).fetchone()["n"]
+                for table in tables
+            }
 
     def start(self, *, key: str = "start-performance") -> dict:
         return self.ledger.start_attempt(
@@ -2820,6 +2842,152 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         self.assertEqual(result["shadow_evidence"]["total_evidence_weight"], 0.0)
         self.assertFalse(result["projection_applied"])
 
+    def test_direct_import_rejects_outer_schema_subclass_before_commit(
+        self,
+    ) -> None:
+        class DigestOverride(ImportedEvaluation):
+            @property
+            def digest(self) -> str:
+                return "f" * 64
+
+        attempt = self.start()
+        submitted = self.submit(attempt["id"])
+        imported = DigestOverride(
+            criteria=(
+                ImportedCriterionResult(
+                    criterion_id="criterion_mask_invariant",
+                    status=EvaluationStatus.VALID,
+                    score=0.9,
+                    outcome_code="outer_schema_subclass",
+                    phase=ActionPhase.UNASSISTED,
+                    source_action_ids=(submitted["id"],),
+                ),
+            )
+        )
+        before = self.performance_event_and_projection_counts()
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            "exact ImportedEvaluation",
+        ):
+            self.ledger.import_evaluation(
+                attempt["id"],
+                imported,
+                provider_id="outer_schema_subclass",
+                provider_version="v1",
+                now=START + timedelta(minutes=6),
+            )
+
+        self.assertEqual(
+            self.performance_event_and_projection_counts(),
+            before,
+        )
+        integrity = self.database.verify_integrity()
+        self.assertTrue(integrity["ok"], integrity["errors"])
+
+    def test_direct_import_rejects_nested_schema_subclass_before_commit(
+        self,
+    ) -> None:
+        class NestedCriterion(ImportedCriterionResult):
+            pass
+
+        attempt = self.start()
+        submitted = self.submit(attempt["id"])
+        exact_criterion = ImportedCriterionResult(
+            criterion_id="criterion_mask_invariant",
+            status=EvaluationStatus.VALID,
+            score=0.9,
+            outcome_code="nested_schema_subclass",
+            phase=ActionPhase.UNASSISTED,
+            source_action_ids=(submitted["id"],),
+        )
+        imported = ImportedEvaluation(
+            criteria=(exact_criterion,)
+        )
+        nested_criterion = NestedCriterion(
+            criterion_id=exact_criterion.criterion_id,
+            status=exact_criterion.status,
+            score=exact_criterion.score,
+            outcome_code=exact_criterion.outcome_code,
+            phase=exact_criterion.phase,
+            source_action_ids=exact_criterion.source_action_ids,
+            attestation_digest=exact_criterion.attestation_digest,
+            misconception_ids=exact_criterion.misconception_ids,
+            reliability=exact_criterion.reliability,
+        )
+        object.__setattr__(imported, "criteria", (nested_criterion,))
+        before = self.performance_event_and_projection_counts()
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            "exact ImportedCriterionResult",
+        ):
+            self.ledger.import_evaluation(
+                attempt["id"],
+                imported,
+                provider_id="nested_schema_subclass",
+                provider_version="v1",
+                now=START + timedelta(minutes=6),
+            )
+
+        self.assertEqual(
+            self.performance_event_and_projection_counts(),
+            before,
+        )
+        integrity = self.database.verify_integrity()
+        self.assertTrue(integrity["ok"], integrity["errors"])
+
+    def test_record_action_freezes_stateful_mapping_once_before_commit(
+        self,
+    ) -> None:
+        class StatefulPayload(Mapping[str, object]):
+            def __init__(self) -> None:
+                self.read_count = 0
+
+            def __getitem__(self, key: str) -> object:
+                if key != "reason_code":
+                    raise KeyError(key)
+                self.read_count += 1
+                return (
+                    "first_reason"
+                    if self.read_count == 1
+                    else "changed_reason"
+                )
+
+            def __iter__(self):
+                return iter(("reason_code",))
+
+            def __len__(self) -> int:
+                return 1
+
+        attempt = self.start()
+        payload = StatefulPayload()
+        before = self.performance_event_and_projection_counts()
+
+        action = self.ledger.record_action(
+            attempt["id"],
+            ActionKind.ABANDONED.value,
+            payload,
+            idempotency_key="stateful-action-payload",
+            now=START + timedelta(minutes=2),
+        )
+
+        self.assertEqual(payload.read_count, 1)
+        self.assertEqual(
+            action["payload"],
+            {"reason_code": "first_reason"},
+        )
+        after = self.performance_event_and_projection_counts()
+        self.assertEqual(after["events"], before["events"] + 1)
+        self.assertEqual(
+            after["performance_actions"],
+            before["performance_actions"] + 1,
+        )
+        for table in set(before) - {"events", "performance_actions"}:
+            self.assertEqual(after[table], before[table], table)
+        integrity = self.database.verify_integrity()
+        self.assertTrue(integrity["ok"], integrity["errors"])
+
     def test_integrity_accepts_canonical_request_for_author_ordered_criteria(
         self,
     ) -> None:
@@ -3132,6 +3300,225 @@ class PerformanceLedgerTestCase(unittest.TestCase):
             )
         self.assertTrue(self.database.verify_integrity()["ok"])
 
+    def test_trace_corruption_is_isolated_to_its_learner(self) -> None:
+        primary = self.start(key="start-isolation-primary")
+        self.engine.create_learner(
+            "performance-isolation-peer",
+            "Performance Isolation Peer",
+        )
+        peer_session = self.engine.start_session(
+            "performance-isolation-peer",
+            "t_transformers",
+            seed=9412,
+            now=START,
+        )
+        peer = self.ledger.start_attempt(
+            peer_session["id"],
+            self.task.id,
+            task_version=self.task.version,
+            task_release_id=self.release_report["release_id"],
+            idempotency_key="start-isolation-peer",
+            now=START + timedelta(minutes=1),
+        )
+        with self.database.transaction() as connection:
+            connection.execute("DROP TRIGGER performance_actions_no_update")
+            connection.execute(
+                """UPDATE performance_actions
+                   SET elapsed_ms=elapsed_ms + 1
+                   WHERE attempt_id=? AND sequence=0""",
+                (peer["id"],),
+            )
+
+        self.assertEqual(len(self.ledger.list_actions(primary["id"])), 1)
+        self.assertEqual(
+            self.ledger.report(primary["id"])["id"],
+            primary["id"],
+        )
+        recommendation = recommend_performance_tasks(
+            self.database,
+            self.session["id"],
+            now=START + timedelta(minutes=2),
+        )
+        self.assertEqual(
+            recommendation["learner_id"],
+            "performance-learner",
+        )
+        with self.assertRaisesRegex(
+            ValidationError,
+            "immutable event derivation",
+        ):
+            self.ledger.list_actions(peer["id"])
+
+    def test_learner_stream_cannot_hide_mismatched_event_owner(self) -> None:
+        attempt = self.start(key="start-stream-owner")
+        self.engine.create_learner(
+            "performance-stream-intruder",
+            "Performance Stream Intruder",
+        )
+        peer_session = self.engine.start_session(
+            "performance-stream-intruder",
+            "t_transformers",
+            seed=9413,
+            now=START,
+        )
+        peer = self.ledger.start_attempt(
+            peer_session["id"],
+            self.task.id,
+            task_version=self.task.version,
+            task_release_id=self.release_report["release_id"],
+            idempotency_key="start-stream-intruder-peer",
+            now=START + timedelta(minutes=1),
+        )
+        with self.database.transaction() as connection:
+            self.database.append_event(
+                connection,
+                stream_id="learner:performance-learner",
+                event_type="PerformanceActionRecorded",
+                schema_version=1,
+                payload={},
+                metadata={},
+                learner_id="performance-stream-intruder",
+                session_id=self.session["id"],
+                correlation_id="rogue-correlation",
+                causation_id="rogue-causation",
+                occurred_at=START + timedelta(minutes=1, seconds=30),
+            )
+
+        for operation in (
+            lambda: self.ledger.report(attempt["id"]),
+            lambda: self.ledger.record_action(
+                attempt["id"],
+                "answer_revised",
+                {"answer_digest": _D3},
+                idempotency_key="after-stream-intruder",
+                now=START + timedelta(minutes=2),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                ValidationError,
+                "immutable events",
+            ):
+                operation()
+        self.assertEqual(
+            self.ledger.report(peer["id"])["learner_id"],
+            "performance-stream-intruder",
+        )
+        self.assertEqual(len(self.ledger.list_actions(peer["id"])), 1)
+        self.assertFalse(self.database.verify_integrity()["ok"])
+
+    def test_registered_evaluation_requires_claim_or_legacy_exemption(
+        self,
+    ) -> None:
+        attempt = self.start(key="start-claimless-provider")
+        submitted = self.submit(attempt["id"])
+        imported = ImportedEvaluation(
+            criteria=(
+                ImportedCriterionResult(
+                    criterion_id="criterion_mask_invariant",
+                    status=EvaluationStatus.VALID,
+                    score=0.7,
+                    outcome_code="claimless_provider_probe",
+                    phase=ActionPhase.UNASSISTED,
+                    source_action_ids=(submitted["id"],),
+                ),
+            )
+        )
+        provider = SyntheticDeterministicProvider(
+            imported,
+            provider_id="synthetic.claimless-provider",
+        )
+        registry = ScoringProviderRegistry(allow_synthetic=True)
+        registry.register(provider, provider.authority_binding)
+        self.ledger.score_attempt(
+            attempt["id"],
+            registry,
+            provider.provider_id,
+            provider.provider_version,
+            idempotency_key="claimless-provider-score",
+            now=START + timedelta(minutes=6),
+        )
+        with self.database.transaction() as connection:
+            claim = connection.execute(
+                """SELECT id, event_id FROM performance_scoring_claims
+                   WHERE attempt_id=?""",
+                (attempt["id"],),
+            ).fetchone()
+            connection.execute(
+                "DROP TRIGGER performance_scoring_claims_no_delete"
+            )
+            connection.execute("DROP TRIGGER events_no_delete")
+            connection.execute(
+                "DELETE FROM performance_scoring_claims WHERE id=?",
+                (claim["id"],),
+            )
+            connection.execute(
+                "DELETE FROM events WHERE event_id=?",
+                (claim["event_id"],),
+            )
+
+        with self.database.read() as connection:
+            with self.assertRaisesRegex(
+                ValidationError,
+                "exactly one matching scoring claim",
+            ):
+                require_performance_projection_consistency(
+                    connection,
+                    learner_id="performance-learner",
+                )
+
+    def test_recovered_import_requires_completed_reconciliation(self) -> None:
+        attempt, _submitted, claim, _provider, imported = (
+            self.failed_scoring_claim(
+                provider_id="synthetic.missing-reconciliation",
+                key="score-for-missing-reconciliation",
+            )
+        )
+        registry, adapter = self.reconciliation_registry(
+            claim,
+            outcome=ReconciliationOutcome.COMPLETED,
+            imported=imported,
+            observed_at=START + timedelta(minutes=8),
+            completed_at=START + timedelta(minutes=7, seconds=30),
+        )
+        result = self.ledger.reconcile_scoring_claim(
+            claim["id"],
+            registry,
+            adapter.reconciler_id,
+            adapter.reconciler_version,
+            idempotency_key="complete-before-removal",
+            now=START + timedelta(minutes=9),
+        )
+        with self.database.transaction() as connection:
+            observation = connection.execute(
+                """SELECT id, event_id
+                   FROM performance_scoring_reconciliations
+                   WHERE id=?""",
+                (result["reconciliation_id"],),
+            ).fetchone()
+            connection.execute(
+                "DROP TRIGGER performance_scoring_reconciliations_no_delete"
+            )
+            connection.execute("DROP TRIGGER events_no_delete")
+            connection.execute(
+                """DELETE FROM performance_scoring_reconciliations
+                   WHERE id=?""",
+                (observation["id"],),
+            )
+            connection.execute(
+                "DELETE FROM events WHERE event_id=?",
+                (observation["event_id"],),
+            )
+
+        with self.database.read() as connection:
+            with self.assertRaisesRegex(
+                ValidationError,
+                "exactly one completed reconciliation",
+            ):
+                require_performance_projection_consistency(
+                    connection,
+                    learner_id=attempt["learner_id"],
+                )
+
     def test_integrity_recomputes_shadow_bundle_and_detects_projection_tampering(
         self,
     ) -> None:
@@ -3316,7 +3703,19 @@ class PerformanceLedgerTestCase(unittest.TestCase):
                    WHERE attempt_id=?""",
                 (attempt["id"],),
             )
-        damaged_source = self.ledger.report(attempt["id"])
+        with self.database.read() as connection:
+            damaged_bundle = json.loads(
+                connection.execute(
+                    """SELECT bundle_json FROM shadow_evidence_bundles
+                       WHERE attempt_id=?""",
+                    (attempt["id"],),
+                ).fetchone()["bundle_json"]
+            )
+        with self.assertRaisesRegex(
+            ValidationError,
+            "immutable event derivation",
+        ):
+            self.ledger.report(attempt["id"])
         check = ProjectionReplay(self.database).check("performance-learner")
         self.assertFalse(check["ok"])
         self.assertFalse(check["performance_projection_matches_replay"])
@@ -3327,13 +3726,17 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         )
         self.assertTrue(rebuilt["ok"], rebuilt["errors"])
         self.assertTrue(rebuilt["source_performance_projection_was_repaired"])
-        self.assertEqual(self.ledger.report(attempt["id"]), damaged_source)
+        with self.assertRaisesRegex(
+            ValidationError,
+            "immutable event derivation",
+        ):
+            self.ledger.report(attempt["id"])
         rebuilt_database = Database(rebuilt_path, read_only=True)
         self.assertTrue(rebuilt_database.verify_integrity()["ok"])
         rebuilt_report = PerformanceLedger(rebuilt_database).report(attempt["id"])
         self.assertNotEqual(
             rebuilt_report["evaluations"][0]["shadow_evidence"],
-            damaged_source["evaluations"][0]["shadow_evidence"],
+            damaged_bundle,
         )
 
     def test_release_replay_has_stable_shape_and_listing_hides_storage_json(
@@ -3352,6 +3755,7 @@ class PerformanceLedgerTestCase(unittest.TestCase):
                 "bundle_hash",
                 "bundle_size_bytes",
                 "corpus_release_id",
+                "release_authority_kind",
                 "task_count",
                 "status_counts",
                 "idempotent_replay",
@@ -3361,12 +3765,63 @@ class PerformanceLedgerTestCase(unittest.TestCase):
             replay["status_counts"],
             self.release_report["status_counts"],
         )
+        self.assertEqual(
+            replay["release_authority_kind"], "human_review"
+        )
         listed = self.ledger.list_releases()
         self.assertNotIn("review_json", listed[0])
         self.assertEqual(
             listed[0]["review"]["reviewer_id"],
             self.release.review.reviewer_id,
         )
+
+    def test_programmatic_release_honors_serialized_size_bound_before_commit(
+        self,
+    ) -> None:
+        release = replace(
+            self.release,
+            title="Programmatic release size-bound fixture",
+        )
+        serialized_size = len(
+            canonical_json(release.terms()).encode("utf-8")
+        )
+        with self.database.read() as connection:
+            before = {
+                table: connection.execute(
+                    f"SELECT COUNT(*) AS n FROM {table}"
+                ).fetchone()["n"]
+                for table in (
+                    "performance_tasks",
+                    "performance_task_releases",
+                    "release_performance_tasks",
+                )
+            }
+
+        with (
+            patch(
+                "tsq.performance_ledger.MAX_TASK_RELEASE_BYTES",
+                serialized_size - 1,
+            ),
+            self.assertRaisesRegex(
+                ValidationError,
+                "Task release exceeds",
+            ),
+        ):
+            self.ledger.publish_release(
+                release,
+                now=self.release_time + timedelta(seconds=1),
+            )
+
+        with self.database.read() as connection:
+            after = {
+                table: connection.execute(
+                    f"SELECT COUNT(*) AS n FROM {table}"
+                ).fetchone()["n"]
+                for table in before
+            }
+        self.assertEqual(after, before)
+        integrity = self.database.verify_integrity()
+        self.assertTrue(integrity["ok"], integrity["errors"])
 
     def test_cli_imports_inspects_and_recommends_pinned_task_fixture(self) -> None:
         declared_fixture = declared_task_release_fixture(self.corpus_release_id)

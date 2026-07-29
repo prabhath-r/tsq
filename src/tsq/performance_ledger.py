@@ -96,6 +96,7 @@ from .store import (
 
 
 TASK_RELEASE_SCHEMA_VERSION = 1
+SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION = 2
 PERFORMANCE_EVENT_SCHEMA_VERSION = 1
 TASK_STATUSES = frozenset({"quarantined", "pilot", "approved"})
 SERVICEABLE_TASK_STATUSES = frozenset({"pilot", "approved"})
@@ -117,6 +118,17 @@ _REVIEW_FIELDS = frozenset(
         "reviewed_at",
         "independent_of_author",
         "attestation_digest",
+    }
+)
+_SYNTHETIC_LAB_DECLARATION_FIELDS = frozenset(
+    {
+        "declaration_kind",
+        "producer_id",
+        "producer_version",
+        "declared_at",
+        "manifest_digest",
+        "human_reviewed",
+        "activation_authority",
     }
 )
 _BUNDLE_FIELDS = frozenset(
@@ -387,7 +399,7 @@ class OperationalArtifactRunReceipt:
 
 @dataclass(frozen=True, slots=True)
 class TaskReleaseReview:
-    """Review commitment required before a task release can be sealed."""
+    """Independent human commitment required for a serviceable v1 release."""
 
     reviewer_kind: str
     reviewer_id: str
@@ -435,20 +447,111 @@ class TaskReleaseReview:
 
 
 @dataclass(frozen=True, slots=True)
+class SyntheticTaskLabDeclaration:
+    """Non-authoritative provenance for quarantined laboratory fixtures.
+
+    This is deliberately not a review.  It cannot attest independence,
+    authorize activation, or make a task serviceable.  The distinct v2 release
+    schema prevents a synthetic declaration from being interpreted as the
+    historical v1 human-review commitment.
+    """
+
+    producer_id: str
+    producer_version: str
+    declared_at: str
+    manifest_digest: str
+
+    def __post_init__(self) -> None:
+        _require_id(self.producer_id, "declaration.producer_id")
+        _require_id(self.producer_version, "declaration.producer_version")
+        _aware_timestamp(self.declared_at, "declaration.declared_at")
+        _require_digest(
+            self.manifest_digest, "declaration.manifest_digest"
+        )
+
+    def terms(self) -> dict[str, Any]:
+        return {
+            "declaration_kind": "synthetic_lab",
+            "producer_id": self.producer_id,
+            "producer_version": self.producer_version,
+            "declared_at": self.declared_at,
+            "manifest_digest": self.manifest_digest,
+            "human_reviewed": False,
+            "activation_authority": False,
+        }
+
+    @classmethod
+    def from_terms(cls, value: object) -> "SyntheticTaskLabDeclaration":
+        if type(value) is not dict:
+            raise ValidationError(
+                "Synthetic laboratory declaration must be an object."
+            )
+        _require_exact_fields(
+            value,
+            _SYNTHETIC_LAB_DECLARATION_FIELDS,
+            "Synthetic laboratory declaration",
+        )
+        if value["declaration_kind"] != "synthetic_lab":
+            raise ValidationError(
+                "Synthetic laboratory declaration kind must be synthetic_lab."
+            )
+        if value["human_reviewed"] is not False:
+            raise ValidationError(
+                "Synthetic laboratory content cannot claim human review."
+            )
+        if value["activation_authority"] is not False:
+            raise ValidationError(
+                "Synthetic laboratory content cannot claim activation authority."
+            )
+        declaration = cls(
+            producer_id=value["producer_id"],
+            producer_version=value["producer_version"],
+            declared_at=value["declared_at"],
+            manifest_digest=value["manifest_digest"],
+        )
+        if canonical_json(declaration.terms()) != canonical_json(value):
+            raise ValidationError(
+                "Synthetic laboratory declaration is not canonical."
+            )
+        return declaration
+
+
+def _release_authority_from_terms(
+    value: object,
+) -> TaskReleaseReview | SyntheticTaskLabDeclaration:
+    if type(value) is not dict:
+        raise ValidationError("Release authority must be an object.")
+    if "reviewer_kind" in value:
+        return TaskReleaseReview.from_terms(value)
+    if "declaration_kind" in value:
+        return SyntheticTaskLabDeclaration.from_terms(value)
+    raise ValidationError(
+        "Release authority is neither a human review nor a synthetic "
+        "laboratory declaration."
+    )
+
+
+@dataclass(frozen=True, slots=True)
 class PerformanceTaskRelease:
     """Canonical bundle of immutable productive-skill task definitions."""
 
     title: str
     corpus_release_id: str
-    review: TaskReleaseReview
+    review: TaskReleaseReview | SyntheticTaskLabDeclaration
     tasks: tuple[tuple[str, LearningTask], ...]
     schema_version: int = TASK_RELEASE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require_text(self.title, "title", 256)
         _require_id(self.corpus_release_id, "corpus_release_id")
-        if not isinstance(self.review, TaskReleaseReview):
-            raise ValidationError("review must be a TaskReleaseReview.")
+        if type(self.review) not in {
+            TaskReleaseReview,
+            SyntheticTaskLabDeclaration,
+        }:
+            raise ValidationError(
+                "review must be a TaskReleaseReview or "
+                "SyntheticTaskLabDeclaration."
+            )
         if type(self.tasks) is not tuple or not self.tasks:
             raise ValidationError("tasks must be a non-empty tuple.")
         normalized: list[tuple[str, LearningTask]] = []
@@ -458,8 +561,10 @@ class PerformanceTaskRelease:
                 raise ValidationError(
                     "Task status must be quarantined, pilot, or approved."
                 )
-            if not isinstance(task, LearningTask):
-                raise ValidationError("tasks must contain LearningTask values.")
+            if type(task) is not LearningTask:
+                raise ValidationError(
+                    "tasks must contain exact LearningTask values."
+                )
             key = (task.id, task.version)
             if key in keys:
                 raise ValidationError(
@@ -472,10 +577,54 @@ class PerformanceTaskRelease:
             "tasks",
             tuple(sorted(normalized, key=lambda item: (item[1].id, item[1].version))),
         )
-        if self.schema_version != TASK_RELEASE_SCHEMA_VERSION:
+        expected_schema_version = (
+            TASK_RELEASE_SCHEMA_VERSION
+            if type(self.review) is TaskReleaseReview
+            else SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION
+        )
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != expected_schema_version
+        ):
             raise ValidationError(
-                f"schema_version must be {TASK_RELEASE_SCHEMA_VERSION}."
+                f"schema_version must be {expected_schema_version} for this "
+                "release authority."
             )
+        if type(self.review) is SyntheticTaskLabDeclaration:
+            non_quarantined = [
+                task.id
+                for status, task in self.tasks
+                if status != "quarantined"
+            ]
+            if non_quarantined:
+                raise ValidationError(
+                    "Synthetic laboratory releases may contain only "
+                    "quarantined tasks: "
+                    + ", ".join(sorted(non_quarantined))
+                    + "."
+                )
+            unsafe_tasks: list[str] = []
+            for _status, task in self.tasks:
+                if (
+                    task.evidence_cap != 0.0
+                    or task.scorer_contracts
+                    or any(
+                        criterion.evidence_cap != 0.0
+                        or criterion.dependence_cap != 0.0
+                        or criterion.assisted_evidence_factor != 0.0
+                        or criterion.certification_eligible is not False
+                        for criterion in task.criteria
+                    )
+                ):
+                    unsafe_tasks.append(task.id)
+            if unsafe_tasks:
+                raise ValidationError(
+                    "Synthetic laboratory tasks must have zero evidence and "
+                    "dependence caps, no scorer contracts, zero assisted "
+                    "evidence, and no certification eligibility: "
+                    + ", ".join(sorted(unsafe_tasks))
+                    + "."
+                )
 
     def terms(self) -> dict[str, Any]:
         return {
@@ -517,13 +666,40 @@ class PerformanceTaskRelease:
                     f"tasks[{index}].task is invalid: {exc}"
                 ) from exc
             tasks.append((entry["status"], task))
-        return cls(
+        schema_version = value["schema_version"]
+        if (
+            type(schema_version) is int
+            and schema_version == TASK_RELEASE_SCHEMA_VERSION
+        ):
+            authority: TaskReleaseReview | SyntheticTaskLabDeclaration = (
+                TaskReleaseReview.from_terms(value["review"])
+            )
+        elif (
+            type(schema_version) is int
+            and schema_version
+            == SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION
+        ):
+            authority = SyntheticTaskLabDeclaration.from_terms(
+                value["review"]
+            )
+        else:
+            raise ValidationError(
+                "Performance-task release schema_version must be "
+                f"{TASK_RELEASE_SCHEMA_VERSION} or "
+                f"{SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION}."
+            )
+        release = cls(
             title=value["title"],
             corpus_release_id=value["corpus_release_id"],
-            review=TaskReleaseReview.from_terms(value["review"]),
+            review=authority,
             tasks=tuple(tasks),
-            schema_version=value["schema_version"],
+            schema_version=schema_version,
         )
+        if canonical_json(release.terms()) != canonical_json(value):
+            raise ValidationError(
+                "Performance-task release is not canonical."
+            )
+        return release
 
 
 def read_task_release(path: str | Path) -> PerformanceTaskRelease:
@@ -545,6 +721,317 @@ def read_task_release(path: str | Path) -> PerformanceTaskRelease:
     return PerformanceTaskRelease.from_terms(
         _json_object(raw, "Performance-task release")
     )
+
+
+def _validate_release_corpus_bindings(
+    connection: sqlite3.Connection,
+    bundle: PerformanceTaskRelease,
+    *,
+    require_current_live_bindings: bool,
+) -> None:
+    """Validate every task binding against one immutable corpus release."""
+
+    corpus_release = connection.execute(
+        "SELECT sealed_at FROM corpus_releases WHERE id=?",
+        (bundle.corpus_release_id,),
+    ).fetchone()
+    if corpus_release is None:
+        raise NotFoundError(
+            f"Corpus release {bundle.corpus_release_id} does not exist."
+        )
+    if corpus_release["sealed_at"] is None:
+        raise ConflictError(
+            "Performance tasks can reference only a sealed corpus release."
+        )
+    release_sources = {
+        row["source_id"]: row["content_hash"]
+        for row in connection.execute(
+            """SELECT membership.source_id, source.content_hash
+               FROM release_sources membership
+               JOIN sources source ON source.id=membership.source_id
+               WHERE membership.release_id=?""",
+            (bundle.corpus_release_id,),
+        )
+    }
+    release_concepts = {
+        row["concept_id"]
+        for row in connection.execute(
+            "SELECT concept_id FROM release_concepts WHERE release_id=?",
+            (bundle.corpus_release_id,),
+        )
+    }
+    release_objectives = {
+        row["objective_id"]: row["primary_concept_id"]
+        for row in connection.execute(
+            """SELECT membership.objective_id,
+                      objective.primary_concept_id
+               FROM release_learning_objectives membership
+               JOIN learning_objectives objective
+                 ON objective.id=membership.objective_id
+               WHERE membership.release_id=?""",
+            (bundle.corpus_release_id,),
+        )
+    }
+    release_misconceptions = {
+        row["misconception_id"]
+        for row in connection.execute(
+            """SELECT misconception_id FROM release_misconceptions
+               WHERE release_id=?""",
+            (bundle.corpus_release_id,),
+        )
+    }
+    release_misconception_concepts = {
+        row["misconception_id"]: row["concept_id"]
+        for row in connection.execute(
+            """SELECT membership.misconception_id,
+                      misconception.concept_id
+               FROM release_misconceptions membership
+               JOIN misconceptions misconception
+                 ON misconception.id=membership.misconception_id
+               WHERE membership.release_id=?""",
+            (bundle.corpus_release_id,),
+        )
+    }
+    all_misconception_objectives = release_misconception_objectives(
+        connection,
+        bundle.corpus_release_id,
+        accepted_only=False,
+        exclude_revoked=False,
+    )
+    live_misconception_objectives = release_misconception_objectives(
+        connection,
+        bundle.corpus_release_id,
+        accepted_only=True,
+        exclude_revoked=True,
+    )
+    accepted_misconception_objectives = release_misconception_objectives(
+        connection,
+        bundle.corpus_release_id,
+        accepted_only=True,
+        exclude_revoked=False,
+    )
+    for task_status, task in bundle.tasks:
+        for source_id, provenance_digest in task.source_manifests:
+            if source_id not in release_sources:
+                raise ValidationError(
+                    f"Task {task.id} cites source {source_id} outside its "
+                    "pinned corpus release."
+                )
+            if release_sources[source_id] != provenance_digest:
+                raise ValidationError(
+                    f"Task {task.id} source manifest for {source_id} does "
+                    "not match the immutable source definition."
+                )
+        unknown_concepts = set(task.concept_ids) - release_concepts
+        if unknown_concepts:
+            raise ValidationError(
+                f"Task {task.id} references concepts outside its release: "
+                + ", ".join(sorted(unknown_concepts))
+            )
+        for criterion in task.criteria:
+            for objective_id in criterion.objective_ids:
+                primary_concept_id = release_objectives.get(objective_id)
+                if primary_concept_id is None:
+                    raise ValidationError(
+                        f"Task {task.id} criterion {criterion.id} references "
+                        f"objective {objective_id} outside its release."
+                    )
+                if primary_concept_id not in criterion.concept_ids:
+                    raise ValidationError(
+                        f"Task {task.id} criterion {criterion.id} objective "
+                        f"{objective_id} has primary concept "
+                        f"{primary_concept_id} outside that criterion's "
+                        "concept mapping."
+                    )
+        unknown_misconceptions = (
+            set(task.misconception_ids) - release_misconceptions
+        )
+        if unknown_misconceptions:
+            raise ValidationError(
+                f"Task {task.id} references misconceptions outside its "
+                "release: "
+                + ", ".join(sorted(unknown_misconceptions))
+            )
+        task_misconception_objectives = (
+            (
+                live_misconception_objectives
+                if require_current_live_bindings
+                else accepted_misconception_objectives
+            )
+            if task_status in SERVICEABLE_TASK_STATUSES
+            else all_misconception_objectives
+        )
+        for criterion in task.criteria:
+            criterion_concepts = set(criterion.concept_ids)
+            for misconception_id in criterion.misconception_ids:
+                if (
+                    not criterion.objective_ids
+                    and release_misconception_concepts.get(
+                        misconception_id
+                    )
+                    not in criterion_concepts
+                ):
+                    raise ValidationError(
+                        f"Task {task.id} criterion {criterion.id} "
+                        f"misconception {misconception_id} is outside that "
+                        "criterion's concept mapping."
+                    )
+        missing_bindings = missing_objective_misconception_bindings(
+            task,
+            task_misconception_objectives,
+        )
+        if missing_bindings:
+            criterion_id, misconception_id = missing_bindings[0]
+            raise ValidationError(
+                f"Task {task.id} criterion {criterion_id} misconception "
+                f"{misconception_id} is not mapped to any of that "
+                "criterion's objectives in the pinned release."
+            )
+
+
+def load_stored_task_release(
+    connection: sqlite3.Connection,
+    release_id: str,
+) -> tuple[PerformanceTaskRelease, datetime]:
+    """Strictly reconstruct one stored release and its publication time."""
+
+    _require_id(release_id, "release_id")
+    row = connection.execute(
+        "SELECT * FROM performance_task_releases WHERE id=?",
+        (release_id,),
+    ).fetchone()
+    if row is None:
+        raise NotFoundError(
+            f"Performance task release {release_id} does not exist."
+        )
+    review = _release_authority_from_terms(
+        _json_object(row["review_json"], f"Release {release_id} authority")
+    )
+    member_rows = connection.execute(
+        """SELECT member.*, task.task_digest AS stored_task_digest,
+                  task.definition_json, task.imported_at
+           FROM release_performance_tasks member
+           LEFT JOIN performance_tasks task
+             ON task.task_id=member.task_id
+            AND task.task_version=member.task_version
+           WHERE member.release_id=?
+           ORDER BY member.task_id, member.task_version""",
+        (release_id,),
+    ).fetchall()
+    created_at = _aware_timestamp(
+        row["created_at"], f"Release {release_id} created_at"
+    )
+    sealed_at = _aware_timestamp(
+        row["sealed_at"], f"Release {release_id} sealed_at"
+    )
+    if row["sealed_at"] != row["created_at"] or sealed_at != created_at:
+        raise ValidationError(
+            f"Release {release_id} seal boundary differs from publication."
+        )
+    authority_at = _aware_timestamp(
+        (
+            review.reviewed_at
+            if type(review) is TaskReleaseReview
+            else review.declared_at
+        ),
+        f"Release {release_id} authority timestamp",
+    )
+    if authority_at > created_at:
+        raise ValidationError(
+            f"Release {release_id} publication precedes its authority."
+        )
+    corpus_release = connection.execute(
+        "SELECT sealed_at FROM corpus_releases WHERE id=?",
+        (row["corpus_release_id"],),
+    ).fetchone()
+    if corpus_release is None:
+        raise NotFoundError(
+            f"Corpus release {row['corpus_release_id']} does not exist."
+        )
+    corpus_sealed_at = _aware_timestamp(
+        corpus_release["sealed_at"],
+        f"Corpus release {row['corpus_release_id']} sealed_at",
+    )
+    if created_at < corpus_sealed_at:
+        raise ValidationError(
+            f"Release {release_id} publication precedes its corpus release."
+        )
+    definitions: list[tuple[str, LearningTask]] = []
+    for member in member_rows:
+        if member["definition_json"] is None:
+            raise ValidationError(
+                f"Release {release_id} member {member['task_id']}@"
+                f"{member['task_version']} has no task definition."
+            )
+        try:
+            task = LearningTask.from_terms(
+                _json_object(
+                    member["definition_json"],
+                    (
+                        f"Release {release_id} task "
+                        f"{member['task_id']}@{member['task_version']}"
+                    ),
+                )
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValidationError(
+                f"Release {release_id} contains an invalid task: {exc}"
+            ) from exc
+        if (
+            task.id != member["task_id"]
+            or task.version != member["task_version"]
+            or task.digest != member["task_digest"]
+            or task.digest != member["stored_task_digest"]
+            or canonical_json(task.terms()) != member["definition_json"]
+        ):
+            raise ValidationError(
+                f"Release {release_id} task {member['task_id']}@"
+                f"{member['task_version']} has an identity, definition, or "
+                "membership digest mismatch."
+            )
+        imported_at = _aware_timestamp(
+            member["imported_at"],
+            (
+                f"Release {release_id} task "
+                f"{member['task_id']}@{member['task_version']} imported_at"
+            ),
+        )
+        if imported_at > created_at:
+            raise ValidationError(
+                f"Release {release_id} contains a task imported after "
+                "publication."
+            )
+        definitions.append((member["status"], task))
+    schema_version = (
+        TASK_RELEASE_SCHEMA_VERSION
+        if type(review) is TaskReleaseReview
+        else SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION
+    )
+    try:
+        bundle = PerformanceTaskRelease(
+            title=row["title"],
+            corpus_release_id=row["corpus_release_id"],
+            review=review,
+            tasks=tuple(definitions),
+            schema_version=schema_version,
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ValidationError(
+            f"Release {release_id} cannot be reconstructed: {exc}"
+        ) from exc
+    if (
+        bundle.release_id != row["id"]
+        or bundle.bundle_hash != row["bundle_hash"]
+    ):
+        raise ValidationError(
+            f"Release {release_id} bundle commitment mismatch."
+        )
+    _validate_release_corpus_bindings(
+        connection,
+        bundle,
+        require_current_live_bindings=False,
+    )
+    return bundle, created_at
 
 
 def _row_dict(row: sqlite3.Row) -> dict[str, Any]:
@@ -624,20 +1111,85 @@ class PerformanceLedger:
         *,
         now: datetime | None = None,
     ) -> dict[str, Any]:
-        if not isinstance(bundle, PerformanceTaskRelease):
-            raise ValidationError("bundle must be a PerformanceTaskRelease.")
-        published_at = _now(now)
-        reviewed_at = _aware_timestamp(
-            bundle.review.reviewed_at, "review.reviewed_at"
-        )
-        if reviewed_at > published_at:
+        """Publish a human-reviewed v1 release.
+
+        Synthetic laboratory fixtures have a separate explicit entry point and
+        can never pass through this activation-capable authoring command.
+        """
+
+        if type(bundle) is not PerformanceTaskRelease:
             raise ValidationError(
-                "Task release cannot be published before its review."
+                "bundle must be an exact PerformanceTaskRelease."
+            )
+        if type(bundle.review) is not TaskReleaseReview:
+            raise ValidationError(
+                "Synthetic laboratory releases require "
+                "publish_synthetic_lab_release and remain quarantined."
+            )
+        return self._publish_release(bundle, now=now)
+
+    def publish_synthetic_lab_release(
+        self,
+        bundle: PerformanceTaskRelease,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Seal one non-authoritative, quarantine-only laboratory release."""
+
+        if type(bundle) is not PerformanceTaskRelease:
+            raise ValidationError(
+                "bundle must be an exact PerformanceTaskRelease."
+            )
+        if type(bundle.review) is not SyntheticTaskLabDeclaration:
+            raise ValidationError(
+                "Synthetic laboratory publication requires a "
+                "SyntheticTaskLabDeclaration."
+            )
+        return self._publish_release(bundle, now=now)
+
+    def _publish_release(
+        self,
+        bundle: PerformanceTaskRelease,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        if type(bundle) is not PerformanceTaskRelease:
+            raise ValidationError(
+                "bundle must be an exact PerformanceTaskRelease."
+            )
+        try:
+            bundle = PerformanceTaskRelease.from_terms(bundle.terms())
+        except (TypeError, ValueError, ValidationError) as exc:
+            raise ValidationError(
+                f"Task release is not canonical: {exc}"
+            ) from exc
+        published_at = _now(now)
+        authority_at_value = (
+            bundle.review.reviewed_at
+            if type(bundle.review) is TaskReleaseReview
+            else bundle.review.declared_at
+        )
+        authority_at_label = (
+            "review.reviewed_at"
+            if type(bundle.review) is TaskReleaseReview
+            else "declaration.declared_at"
+        )
+        authority_at = _aware_timestamp(
+            authority_at_value, authority_at_label
+        )
+        if authority_at > published_at:
+            raise ValidationError(
+                "Task release cannot be published before its review or "
+                "synthetic declaration."
             )
         timestamp = to_timestamp(published_at)
         bundle_json = canonical_json(bundle.terms())
         review_json = canonical_json(bundle.review.terms())
         bundle_size_bytes = len(bundle_json.encode("utf-8"))
+        if bundle_size_bytes > MAX_TASK_RELEASE_BYTES:
+            raise ValidationError(
+                f"Task release exceeds the {MAX_TASK_RELEASE_BYTES}-byte limit."
+            )
         status_counts = {
             status: sum(item_status == status for item_status, _ in bundle.tasks)
             for status in sorted(TASK_STATUSES)
@@ -669,159 +1221,48 @@ class PerformanceLedger:
             if prior is not None:
                 if prior["id"] != bundle.release_id:
                     raise ConflictError("Task release hash resolved to a conflicting ID.")
+                stored_bundle, stored_created_at = load_stored_task_release(
+                    connection,
+                    prior["id"],
+                )
+                if stored_created_at > published_at:
+                    raise ValidationError(
+                        "Task release cannot be replayed before its stored "
+                        "publication time."
+                    )
+                if (
+                    canonical_json(stored_bundle.terms())
+                    != canonical_json(bundle.terms())
+                ):
+                    raise ConflictError(
+                        "Stored task release does not match the requested "
+                        "immutable bundle."
+                    )
                 return {
                     "release_id": prior["id"],
                     "bundle_hash": prior["bundle_hash"],
                     "bundle_size_bytes": bundle_size_bytes,
                     "corpus_release_id": prior["corpus_release_id"],
+                    "release_authority_kind": (
+                        "human_review"
+                        if type(bundle.review) is TaskReleaseReview
+                        else "synthetic_lab"
+                    ),
                     "task_count": len(bundle.tasks),
                     "status_counts": status_counts,
                     "idempotent_replay": True,
                 }
 
-            release_sources = {
-                row["source_id"]: row["content_hash"]
-                for row in connection.execute(
-                    """SELECT membership.source_id, source.content_hash
-                       FROM release_sources membership
-                       JOIN sources source ON source.id=membership.source_id
-                       WHERE membership.release_id=?""",
-                    (bundle.corpus_release_id,),
-                )
-            }
-            release_concepts = {
-                row["concept_id"]
-                for row in connection.execute(
-                    "SELECT concept_id FROM release_concepts WHERE release_id=?",
-                    (bundle.corpus_release_id,),
-                )
-            }
-            release_objectives = {
-                row["objective_id"]: row["primary_concept_id"]
-                for row in connection.execute(
-                    """SELECT membership.objective_id,
-                              objective.primary_concept_id
-                       FROM release_learning_objectives membership
-                       JOIN learning_objectives objective
-                         ON objective.id=membership.objective_id
-                       WHERE membership.release_id=?""",
-                    (bundle.corpus_release_id,),
-                )
-            }
-            release_misconceptions = {
-                row["misconception_id"]
-                for row in connection.execute(
-                    """SELECT misconception_id FROM release_misconceptions
-                       WHERE release_id=?""",
-                    (bundle.corpus_release_id,),
-                )
-            }
-            release_misconception_concepts = {
-                row["misconception_id"]: row["concept_id"]
-                for row in connection.execute(
-                    """SELECT membership.misconception_id,
-                              misconception.concept_id
-                       FROM release_misconceptions membership
-                       JOIN misconceptions misconception
-                         ON misconception.id=membership.misconception_id
-                       WHERE membership.release_id=?""",
-                    (bundle.corpus_release_id,),
-                )
-            }
-            all_release_misconception_objectives = (
-                release_misconception_objectives(
-                    connection,
-                    bundle.corpus_release_id,
-                    accepted_only=False,
-                    exclude_revoked=False,
-                )
+            _validate_release_corpus_bindings(
+                connection,
+                bundle,
+                require_current_live_bindings=True,
             )
-            live_release_misconception_objectives = (
-                release_misconception_objectives(
-                    connection,
-                    bundle.corpus_release_id,
-                    accepted_only=True,
-                    exclude_revoked=True,
-                )
-            )
-            for task_status, task in bundle.tasks:
-                for source_id, provenance_digest in task.source_manifests:
-                    if source_id not in release_sources:
-                        raise ValidationError(
-                            f"Task {task.id} cites source {source_id} outside its "
-                            "pinned corpus release."
-                        )
-                    if release_sources[source_id] != provenance_digest:
-                        raise ValidationError(
-                            f"Task {task.id} source manifest for {source_id} does "
-                            "not match the immutable source definition."
-                        )
-                unknown_concepts = set(task.concept_ids) - release_concepts
-                if unknown_concepts:
-                    raise ValidationError(
-                        f"Task {task.id} references concepts outside its release: "
-                        + ", ".join(sorted(unknown_concepts))
-                    )
-                for criterion in task.criteria:
-                    for objective_id in criterion.objective_ids:
-                        primary_concept_id = release_objectives.get(
-                            objective_id
-                        )
-                        if primary_concept_id is None:
-                            raise ValidationError(
-                                f"Task {task.id} criterion {criterion.id} "
-                                f"references objective {objective_id} outside "
-                                "its release."
-                            )
-                        if primary_concept_id not in criterion.concept_ids:
-                            raise ValidationError(
-                                f"Task {task.id} criterion {criterion.id} "
-                                f"objective {objective_id} has primary concept "
-                                f"{primary_concept_id} outside that criterion's "
-                                "concept mapping."
-                            )
-                unknown_misconceptions = (
-                    set(task.misconception_ids) - release_misconceptions
-                )
-                if unknown_misconceptions:
-                    raise ValidationError(
-                        f"Task {task.id} references misconceptions outside its release: "
-                        + ", ".join(sorted(unknown_misconceptions))
-                    )
-                task_misconception_objectives = (
-                    live_release_misconception_objectives
-                    if task_status in SERVICEABLE_TASK_STATUSES
-                    else all_release_misconception_objectives
-                )
-                for criterion in task.criteria:
-                    criterion_concepts = set(criterion.concept_ids)
-                    for misconception_id in criterion.misconception_ids:
-                        if not criterion.objective_ids and (
-                            release_misconception_concepts.get(
-                                misconception_id
-                            )
-                            not in criterion_concepts
-                        ):
-                            raise ValidationError(
-                                f"Task {task.id} criterion {criterion.id} "
-                                f"misconception {misconception_id} is outside "
-                                "that criterion's concept mapping."
-                            )
-                missing_bindings = missing_objective_misconception_bindings(
-                    task,
-                    task_misconception_objectives,
-                )
-                if missing_bindings:
-                    criterion_id, misconception_id = missing_bindings[0]
-                    raise ValidationError(
-                        f"Task {task.id} criterion {criterion_id} "
-                        f"misconception {misconception_id} is not mapped to "
-                        "any of that criterion's objectives in the pinned "
-                        "release."
-                    )
+
+            for _task_status, task in bundle.tasks:
                 definition_json = canonical_json(task.terms())
                 existing = connection.execute(
-                    """SELECT task_digest, definition_json
+                    """SELECT task_digest, definition_json, imported_at
                        FROM performance_tasks
                        WHERE task_id=? AND task_version=?""",
                     (task.id, task.version),
@@ -833,6 +1274,17 @@ class PerformanceLedger:
                     raise ConflictError(
                         f"Performance task {task.id} version {task.version} is immutable; "
                         "publish a new version."
+                    )
+                if existing is not None and (
+                    _aware_timestamp(
+                        existing["imported_at"],
+                        f"Performance task {task.id}@{task.version} imported_at",
+                    )
+                    > published_at
+                ):
+                    raise ValidationError(
+                        f"Performance task {task.id}@{task.version} cannot be "
+                        "reused by a release that predates its immutable import."
                     )
                 connection.execute(
                     """INSERT OR IGNORE INTO performance_tasks(
@@ -877,6 +1329,11 @@ class PerformanceLedger:
             "bundle_hash": bundle.bundle_hash,
             "bundle_size_bytes": bundle_size_bytes,
             "corpus_release_id": bundle.corpus_release_id,
+            "release_authority_kind": (
+                "human_review"
+                if type(bundle.review) is TaskReleaseReview
+                else "synthetic_lab"
+            ),
             "task_count": len(bundle.tasks),
             "status_counts": status_counts,
             "idempotent_replay": False,
@@ -901,12 +1358,21 @@ class PerformanceLedger:
                    GROUP BY task_release.id
                    ORDER BY task_release.created_at DESC, task_release.id"""
             ).fetchall()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            item = _row_dict(row)
-            review_json = item.pop("review_json")
-            item["review"] = _json_object(review_json, "Stored review")
-            result.append(item)
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                bundle, _created_at = load_stored_task_release(
+                    connection,
+                    row["id"],
+                )
+                item = _row_dict(row)
+                item.pop("review_json")
+                item["review"] = bundle.review.terms()
+                item["release_authority_kind"] = (
+                    "human_review"
+                    if type(bundle.review) is TaskReleaseReview
+                    else "synthetic_lab"
+                )
+                result.append(item)
         return result
 
     def list_tasks(
@@ -935,6 +1401,15 @@ class PerformanceLedger:
                           json_extract(task.definition_json, '$.title') AS title,
                           json_extract(task.definition_json, '$.modality') AS modality,
                           task_release.corpus_release_id,
+                          COALESCE(
+                              json_extract(
+                                  task_release.review_json, '$.reviewer_kind'
+                              ),
+                              json_extract(
+                                  task_release.review_json,
+                                  '$.declaration_kind'
+                              )
+                          ) AS release_authority_kind,
                           task_release.created_at
                    FROM release_performance_tasks member
                    JOIN performance_tasks task
@@ -946,7 +1421,27 @@ class PerformanceLedger:
                 + " ORDER BY task.task_id, task.task_version, member.release_id",
                 tuple(parameters),
             ).fetchall()
-        return [_row_dict(row) for row in rows]
+            authorities: dict[str, str] = {}
+            for task_release_id in {
+                row["release_id"] for row in rows
+            }:
+                bundle, _created_at = load_stored_task_release(
+                    connection,
+                    task_release_id,
+                )
+                authorities[task_release_id] = (
+                    "human_review"
+                    if type(bundle.review) is TaskReleaseReview
+                    else "synthetic_lab"
+                )
+            result = []
+            for row in rows:
+                item = _row_dict(row)
+                item["release_authority_kind"] = authorities[
+                    row["release_id"]
+                ]
+                result.append(item)
+        return result
 
     def show_task(
         self,
@@ -972,7 +1467,16 @@ class PerformanceLedger:
         with self.database.read() as connection:
             rows = connection.execute(
                 """SELECT task.*, member.release_id, member.status,
-                          task_release.corpus_release_id
+                          task_release.corpus_release_id,
+                          COALESCE(
+                              json_extract(
+                                  task_release.review_json, '$.reviewer_kind'
+                              ),
+                              json_extract(
+                                  task_release.review_json,
+                                  '$.declaration_kind'
+                              )
+                          ) AS release_authority_kind
                    FROM performance_tasks task
                    JOIN release_performance_tasks member
                      ON member.task_id=task.task_id
@@ -991,6 +1495,16 @@ class PerformanceLedger:
                 "Task reference is ambiguous; specify both --version and --release."
             )
         row = rows[0]
+        with self.database.read() as connection:
+            bundle, _created_at = load_stored_task_release(
+                connection,
+                row["release_id"],
+            )
+        release_authority_kind = (
+            "human_review"
+            if type(bundle.review) is TaskReleaseReview
+            else "synthetic_lab"
+        )
         definition = _json_object(row["definition_json"], "Stored task definition")
         try:
             task = LearningTask.from_terms(definition)
@@ -1004,6 +1518,7 @@ class PerformanceLedger:
             "status": row["status"],
             "release_id": row["release_id"],
             "corpus_release_id": row["corpus_release_id"],
+            "release_authority_kind": release_authority_kind,
             "imported_at": row["imported_at"],
         }
 
@@ -1243,6 +1758,10 @@ class PerformanceLedger:
                 "member.task_id=?",
                 "task_release.corpus_release_id=?",
                 "member.status IN ('pilot', 'approved')",
+                (
+                    "json_extract(task_release.review_json, "
+                    "'$.reviewer_kind')='human'"
+                ),
             ]
             parameters: list[Any] = [task_id, session["corpus_release_id"]]
             if task_version is not None:
@@ -1275,10 +1794,33 @@ class PerformanceLedger:
                     "Task reference is ambiguous; specify task version and release."
                 )
             member = candidates[0]
-            task_release_created_at = _aware_timestamp(
-                member["task_release_created_at"],
-                "Performance-task release publication",
+            stored_release, task_release_created_at = (
+                load_stored_task_release(
+                    connection,
+                    member["release_id"],
+                )
             )
+            if type(stored_release.review) is not TaskReleaseReview:
+                raise NotFoundError(
+                    f"No serviceable release contains task {task_id} for "
+                    "this session."
+                )
+            stored_members = {
+                (task.id, task.version): (status, task.digest)
+                for status, task in stored_release.tasks
+            }
+            stored_member = stored_members.get(
+                (member["task_id"], member["task_version"])
+            )
+            if (
+                stored_member is None
+                or stored_member[0] not in SERVICEABLE_TASK_STATUSES
+                or stored_member[1] != member["task_digest"]
+            ):
+                raise NotFoundError(
+                    f"No serviceable release contains task {task_id} for "
+                    "this session."
+                )
             if occurred < task_release_created_at:
                 raise ValidationError(
                     "Performance task cannot start before its release."
@@ -1401,7 +1943,10 @@ class PerformanceLedger:
         occurred: datetime,
         idempotency_key: str | None,
         command_hash: str,
+        projection_validated: bool = False,
     ) -> LearningAction:
+        if not projection_validated:
+            self._task_for_attempt(connection, attempt)
         previous = connection.execute(
             """SELECT MAX(sequence) AS sequence FROM performance_actions
                WHERE attempt_id=?""",
@@ -1505,13 +2050,17 @@ class PerformanceLedger:
         if not isinstance(payload, Mapping):
             raise ValidationError("payload must be an object.")
         try:
+            frozen_payload = _json_object(
+                canonical_json(dict(payload)),
+                "Performance action payload",
+            )
             command_hash = _command_hash(
                 {
                     "operation": "record_action",
                     "attempt_id": attempt_id,
                     "action_type": kind.value,
                     "phase": typed_phase.value,
-                    "payload": dict(payload),
+                    "payload": frozen_payload,
                 }
             )
         except (TypeError, ValueError) as exc:
@@ -1531,6 +2080,7 @@ class PerformanceLedger:
                 attempt["learner_id"],
                 connection,
             )
+            self._task_for_attempt(connection, attempt)
             prior = self._prior_command(
                 connection,
                 idempotency_key,
@@ -1578,10 +2128,11 @@ class PerformanceLedger:
                 attempt,
                 kind,
                 typed_phase,
-                payload,
+                frozen_payload,
                 occurred=occurred,
                 idempotency_key=idempotency_key,
                 command_hash=command_hash,
+                projection_validated=True,
             )
             row = connection.execute(
                 "SELECT * FROM performance_actions WHERE id=?", (action.id,)
@@ -1606,10 +2157,12 @@ class PerformanceLedger:
     def list_actions(self, attempt_id: str) -> list[dict[str, Any]]:
         _require_id(attempt_id, "attempt_id")
         with self.database.read() as connection:
-            if connection.execute(
-                "SELECT 1 FROM performance_attempts WHERE id=?", (attempt_id,)
-            ).fetchone() is None:
+            attempt = connection.execute(
+                "SELECT * FROM performance_attempts WHERE id=?", (attempt_id,)
+            ).fetchone()
+            if attempt is None:
                 raise NotFoundError(f"Performance attempt {attempt_id} does not exist.")
+            self._task_for_attempt(connection, attempt)
             rows = connection.execute(
                 """SELECT * FROM performance_actions
                    WHERE attempt_id=? ORDER BY sequence""",
@@ -2263,16 +2816,22 @@ class PerformanceLedger:
                 "invalid_artifact, runner_failed, or timed_out."
             )
         with self.database.read() as connection:
-            if attempt_id is not None and connection.execute(
-                "SELECT 1 FROM performance_attempts WHERE id=?",
-                (attempt_id,),
-            ).fetchone() is None:
-                raise NotFoundError(
-                    f"Performance attempt {attempt_id} does not exist."
-                )
+            validated_learners: set[str] = set()
+            if attempt_id is not None:
+                attempt = connection.execute(
+                    "SELECT * FROM performance_attempts WHERE id=?",
+                    (attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise NotFoundError(
+                        f"Performance attempt {attempt_id} does not exist."
+                    )
             self._artifact_run_projection_guard(
                 connection, attempt_id=attempt_id
             )
+            if attempt_id is not None:
+                self._task_for_attempt(connection, attempt)
+                validated_learners.add(attempt["learner_id"])
             rows = connection.execute(
                 """SELECT * FROM performance_artifact_run_claims"""
                 + (
@@ -2283,6 +2842,31 @@ class PerformanceLedger:
                 + " ORDER BY claimed_at, id",
                 (() if attempt_id is None else (attempt_id,)),
             ).fetchall()
+            for row_attempt_id in sorted(
+                {row["attempt_id"] for row in rows}
+            ):
+                attempt = connection.execute(
+                    "SELECT * FROM performance_attempts WHERE id=?",
+                    (row_attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise ValidationError(
+                        f"Artifact run has no performance attempt "
+                        f"{row_attempt_id}."
+                    )
+                learner_id = attempt["learner_id"]
+                if learner_id not in validated_learners:
+                    require_performance_projection_consistency(
+                        connection,
+                        learner_id=learner_id,
+                        trace_only=True,
+                    )
+                    validated_learners.add(learner_id)
+                self._task_for_attempt(
+                    connection,
+                    attempt,
+                    trace_validated=True,
+                )
             result = [
                 self._artifact_run_view(connection, row) for row in rows
             ]
@@ -2316,6 +2900,15 @@ class PerformanceLedger:
             self._artifact_run_projection_guard(
                 connection, claim_id=rows[0]["id"]
             )
+            attempt = connection.execute(
+                "SELECT * FROM performance_attempts WHERE id=?",
+                (rows[0]["attempt_id"],),
+            ).fetchone()
+            if attempt is None:
+                raise ValidationError(
+                    "Artifact run has no performance attempt."
+                )
+            self._task_for_attempt(connection, attempt)
             return self._artifact_run_view(connection, rows[0])
 
     def run_artifact_check(
@@ -2618,6 +3211,16 @@ class PerformanceLedger:
                 raise ConflictError(
                     "Artifact-run claim disappeared before finalization."
                 )
+            current_attempt = connection.execute(
+                "SELECT * FROM performance_attempts WHERE id=?",
+                (attempt_id,),
+            ).fetchone()
+            if current_attempt is None:
+                raise ConflictError(
+                    "Performance attempt disappeared before artifact-run "
+                    "finalization."
+                )
+            self._task_for_attempt(connection, current_attempt)
             prior_receipt = connection.execute(
                 """SELECT 1 FROM performance_artifact_run_receipts
                    WHERE claim_id=?""",
@@ -2627,10 +3230,6 @@ class PerformanceLedger:
                 return self._artifact_run_view(
                     connection, claim, idempotent_replay=True
                 )
-            current_attempt = connection.execute(
-                "SELECT * FROM performance_attempts WHERE id=?",
-                (attempt_id,),
-            ).fetchone()
             session = connection.execute(
                 "SELECT * FROM sessions WHERE id=?",
                 (claim["session_id"],),
@@ -2690,6 +3289,7 @@ class PerformanceLedger:
                             "result_digest": result_digest,
                         }
                     ),
+                    projection_validated=True,
                 )
             operational = OperationalArtifactRunReceipt(
                 claim_id=claim_id,
@@ -2816,13 +3416,18 @@ class PerformanceLedger:
             parameters.append(attempt_id)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""
         with self.database.read() as connection:
-            if attempt_id is not None and connection.execute(
-                "SELECT 1 FROM performance_attempts WHERE id=?",
-                (attempt_id,),
-            ).fetchone() is None:
-                raise NotFoundError(
-                    f"Performance attempt {attempt_id} does not exist."
-                )
+            validated_learners: set[str] = set()
+            if attempt_id is not None:
+                attempt = connection.execute(
+                    "SELECT * FROM performance_attempts WHERE id=?",
+                    (attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise NotFoundError(
+                        f"Performance attempt {attempt_id} does not exist."
+                    )
+                self._task_for_attempt(connection, attempt)
+                validated_learners.add(attempt["learner_id"])
             orphan_parameters: tuple[Any, ...] = (
                 (attempt_id,)
                 if attempt_id is not None
@@ -2885,6 +3490,31 @@ class PerformanceLedger:
                 + " ORDER BY claim.claimed_at, claim.id",
                 tuple(parameters),
             ).fetchall()
+            for row_attempt_id in sorted(
+                {row["attempt_id"] for row in rows}
+            ):
+                attempt = connection.execute(
+                    "SELECT * FROM performance_attempts WHERE id=?",
+                    (row_attempt_id,),
+                ).fetchone()
+                if attempt is None:
+                    raise ValidationError(
+                        f"Scoring claim has no performance attempt "
+                        f"{row_attempt_id}."
+                    )
+                learner_id = attempt["learner_id"]
+                if learner_id not in validated_learners:
+                    require_performance_projection_consistency(
+                        connection,
+                        learner_id=learner_id,
+                        trace_only=True,
+                    )
+                    validated_learners.add(learner_id)
+                self._task_for_attempt(
+                    connection,
+                    attempt,
+                    trace_validated=True,
+                )
             result = [
                 self._scoring_claim_view(connection, row) for row in rows
             ]
@@ -3202,6 +3832,15 @@ class PerformanceLedger:
                 raise NotFoundError(
                     f"Performance scoring claim {claim_id} does not exist."
                 )
+            attempt = connection.execute(
+                "SELECT * FROM performance_attempts WHERE id=?",
+                (row["attempt_id"],),
+            ).fetchone()
+            if attempt is None:
+                raise ValidationError(
+                    "Scoring claim has no performance attempt."
+                )
+            self._task_for_attempt(connection, attempt)
             return self._scoring_claim_view(connection, row)
 
     @staticmethod
@@ -3248,24 +3887,69 @@ class PerformanceLedger:
 
     @staticmethod
     def _task_for_attempt(
-        connection: sqlite3.Connection, attempt: sqlite3.Row
+        connection: sqlite3.Connection,
+        attempt: sqlite3.Row,
+        *,
+        trace_validated: bool = False,
     ) -> LearningTask:
-        row = connection.execute(
-            """SELECT * FROM performance_tasks
-               WHERE task_id=? AND task_version=?""",
-            (attempt["task_id"], attempt["task_version"]),
-        ).fetchone()
-        if row is None:
-            raise ValidationError("Performance attempt has no task definition.")
-        try:
-            task = LearningTask.from_terms(
-                _json_object(row["definition_json"], "Stored task definition")
+        if not trace_validated:
+            require_performance_projection_consistency(
+                connection,
+                learner_id=attempt["learner_id"],
+                trace_only=True,
             )
-        except ValueError as exc:
-            raise ValidationError(f"Stored task definition is invalid: {exc}") from exc
-        if task.digest != attempt["task_digest"]:
-            raise ValidationError("Performance attempt task digest mismatch.")
-        return task
+        release, release_created_at = load_stored_task_release(
+            connection,
+            attempt["task_release_id"],
+        )
+        if (
+            type(release.review) is not TaskReleaseReview
+            or release.corpus_release_id != attempt["corpus_release_id"]
+        ):
+            raise ValidationError(
+                "Performance attempt is not pinned to an exact "
+                "human-reviewed release."
+            )
+        member = next(
+            (
+                (status, task)
+                for status, task in release.tasks
+                if task.id == attempt["task_id"]
+                and task.version == attempt["task_version"]
+            ),
+            None,
+        )
+        if (
+            member is None
+            or member[0] not in SERVICEABLE_TASK_STATUSES
+            or member[1].digest != attempt["task_digest"]
+        ):
+            raise ValidationError(
+                "Performance attempt does not match an exact serviceable "
+                "task-release member."
+            )
+        session = connection.execute(
+            """SELECT learner_id, corpus_release_id FROM sessions WHERE id=?""",
+            (attempt["session_id"],),
+        ).fetchone()
+        if (
+            session is None
+            or session["learner_id"] != attempt["learner_id"]
+            or session["corpus_release_id"] != attempt["corpus_release_id"]
+        ):
+            raise ValidationError(
+                "Performance attempt crosses its session ownership or corpus "
+                "boundary."
+            )
+        started_at = _aware_timestamp(
+            attempt["started_at"],
+            f"Performance attempt {attempt['id']} started_at",
+        )
+        if started_at < release_created_at:
+            raise ValidationError(
+                "Performance attempt precedes its task release."
+            )
+        return member[1]
 
     @staticmethod
     def _submission_boundary(
@@ -3806,8 +4490,8 @@ class PerformanceLedger:
                 attempt["learner_id"],
                 connection,
             )
-            through_sequence = self._submission_boundary(connection, attempt_id)
             task = self._task_for_attempt(connection, attempt)
+            through_sequence = self._submission_boundary(connection, attempt_id)
             actions = self._typed_actions(
                 connection, attempt_id, through_sequence=through_sequence
             )
@@ -3899,6 +4583,7 @@ class PerformanceLedger:
                 current_attempt["learner_id"],
                 connection,
             )
+            self._task_for_attempt(connection, current_attempt)
             prior = self._prior_command(
                 connection,
                 idempotency_key,
@@ -4039,10 +4724,10 @@ class PerformanceLedger:
                 current_attempt["learner_id"],
                 connection,
             )
+            current_task = self._task_for_attempt(connection, current_attempt)
             current_through_sequence = self._submission_boundary(
                 connection, attempt_id
             )
-            current_task = self._task_for_attempt(connection, current_attempt)
             current_actions = self._typed_actions(
                 connection,
                 attempt_id,
@@ -4365,7 +5050,7 @@ class PerformanceLedger:
 
         with self.database.read() as connection:
             learner = connection.execute(
-                """SELECT attempt.learner_id
+                """SELECT attempt.*
                    FROM performance_scoring_claims claim
                    JOIN performance_attempts attempt
                      ON attempt.id=claim.attempt_id
@@ -4385,6 +5070,7 @@ class PerformanceLedger:
                 learner["learner_id"],
                 connection,
             )
+            self._task_for_attempt(connection, learner)
             if idempotency_key is not None:
                 prior_observation = connection.execute(
                     """SELECT * FROM performance_scoring_reconciliations
@@ -4561,7 +5247,7 @@ class PerformanceLedger:
 
         with self.database.transaction() as connection:
             current_learner = connection.execute(
-                """SELECT attempt.learner_id
+                """SELECT attempt.*
                    FROM performance_scoring_claims claim
                    JOIN performance_attempts attempt
                      ON attempt.id=claim.attempt_id
@@ -4580,6 +5266,7 @@ class PerformanceLedger:
                 current_learner["learner_id"],
                 connection,
             )
+            self._task_for_attempt(connection, current_learner)
             if idempotency_key is not None:
                 prior_observation = connection.execute(
                     """SELECT * FROM performance_scoring_reconciliations
@@ -4827,10 +5514,16 @@ class PerformanceLedger:
         now: datetime | None = None,
     ) -> dict[str, Any]:
         _require_id(attempt_id, "attempt_id")
-        if not isinstance(imported, ImportedEvaluation):
-            raise ValidationError("imported must be an ImportedEvaluation.")
-        if not isinstance(declared_kind, ScorerKind):
-            raise ValidationError("declared_kind must be a ScorerKind.")
+        if type(imported) is not ImportedEvaluation or any(
+            type(item) is not ImportedCriterionResult
+            for item in imported.criteria
+        ):
+            raise ValidationError(
+                "imported must be an exact ImportedEvaluation containing exact "
+                "ImportedCriterionResult values."
+            )
+        if type(declared_kind) is not ScorerKind:
+            raise ValidationError("declared_kind must be an exact ScorerKind.")
         occurred = _now(now)
         with self.database.transaction() as connection:
             attempt = connection.execute(
@@ -4842,8 +5535,8 @@ class PerformanceLedger:
                 attempt["learner_id"],
                 connection,
             )
-            through_sequence = self._submission_boundary(connection, attempt_id)
             task = self._task_for_attempt(connection, attempt)
+            through_sequence = self._submission_boundary(connection, attempt_id)
             actions = self._typed_actions(
                 connection, attempt_id, through_sequence=through_sequence
             )
@@ -4900,19 +5593,32 @@ class PerformanceLedger:
 
     @staticmethod
     def _evaluation_report(
-        connection: sqlite3.Connection, evaluation_id: str, replay: bool
+        connection: sqlite3.Connection,
+        evaluation_id: str,
+        replay: bool,
+        *,
+        evidence_validated: bool = False,
     ) -> dict[str, Any]:
         row = connection.execute(
             """SELECT evaluation.*, bundle.bundle_digest, bundle.bundle_json,
-                      bundle.projection_applied, bundle.certification_applied
+                      bundle.projection_applied, bundle.certification_applied,
+                      attempt.learner_id
                FROM task_evaluations evaluation
                JOIN shadow_evidence_bundles bundle
                  ON bundle.evaluation_id=evaluation.id
+               JOIN performance_attempts attempt
+                 ON attempt.id=evaluation.attempt_id
                WHERE evaluation.id=?""",
             (evaluation_id,),
         ).fetchone()
         if row is None:
             raise ValidationError("Evaluation event lacks its shadow projection.")
+        if not evidence_validated:
+            require_performance_projection_consistency(
+                connection,
+                learner_id=row["learner_id"],
+                comparison_names=("evaluations", "bundles"),
+            )
         return {
             "attempt_id": row["attempt_id"],
             "evaluation": _json_object(row["evaluation_json"], "Stored evaluation"),
@@ -4927,18 +5633,23 @@ class PerformanceLedger:
 
     @classmethod
     def _attempt_report(
-        cls, connection: sqlite3.Connection, attempt_id: str, replay: bool
+        cls,
+        connection: sqlite3.Connection,
+        attempt_id: str,
+        replay: bool,
+        *,
+        trace_validated: bool = False,
     ) -> dict[str, Any]:
         attempt = connection.execute(
             "SELECT * FROM performance_attempts WHERE id=?", (attempt_id,)
         ).fetchone()
         if attempt is None:
             raise NotFoundError(f"Performance attempt {attempt_id} does not exist.")
-        definition = connection.execute(
-            """SELECT definition_json FROM performance_tasks
-               WHERE task_id=? AND task_version=?""",
-            (attempt["task_id"], attempt["task_version"]),
-        ).fetchone()
+        task = cls._task_for_attempt(
+            connection,
+            attempt,
+            trace_validated=trace_validated,
+        )
         counts = connection.execute(
             """SELECT COUNT(*) AS action_count,
                       SUM(action_type='hint_requested') AS hint_count,
@@ -4954,7 +5665,7 @@ class PerformanceLedger:
         return {
             **_row_dict(attempt),
             "status": cls._attempt_status(connection, attempt_id),
-            "task": _json_object(definition["definition_json"], "Stored task definition"),
+            "task": task.terms(),
             "action_count": counts["action_count"],
             "hint_count": counts["hint_count"] or 0,
             "check_count": counts["check_count"] or 0,
@@ -4979,7 +5690,22 @@ class PerformanceLedger:
                 owner["learner_id"],
                 connection,
             )
-            report = self._attempt_report(connection, attempt_id, False)
+            require_performance_projection_consistency(
+                connection,
+                learner_id=owner["learner_id"],
+                comparison_names=(
+                    "attempts",
+                    "actions",
+                    "evaluations",
+                    "bundles",
+                ),
+            )
+            report = self._attempt_report(
+                connection,
+                attempt_id,
+                False,
+                trace_validated=True,
+            )
             evaluations = connection.execute(
                 """SELECT evaluation.id FROM task_evaluations evaluation
                    WHERE evaluation.attempt_id=?
@@ -4987,7 +5713,12 @@ class PerformanceLedger:
                 (attempt_id,),
             ).fetchall()
             report["evaluations"] = [
-                self._evaluation_report(connection, row["id"], False)
+                self._evaluation_report(
+                    connection,
+                    row["id"],
+                    False,
+                    evidence_validated=True,
+                )
                 for row in evaluations
             ]
             report["actions"] = [
@@ -5418,6 +6149,7 @@ def performance_integrity_errors(
         "SELECT * FROM performance_tasks ORDER BY task_id, task_version"
     ).fetchall()
     tasks: dict[tuple[str, int], LearningTask] = {}
+    task_imported_at: dict[tuple[str, int], datetime] = {}
     for row in task_rows:
         label = f"performance task {row['task_id']}@{row['task_version']}"
         terms = decode(row["definition_json"], f"{label} definition")
@@ -5436,9 +6168,15 @@ def performance_integrity_errors(
         ):
             errors.append(f"{label}: identity or digest mismatch")
         try:
-            _aware_timestamp(row["imported_at"], f"{label} imported_at")
+            imported_at = _aware_timestamp(
+                row["imported_at"], f"{label} imported_at"
+            )
         except ValidationError as exc:
             errors.append(str(exc))
+        else:
+            task_imported_at[(row["task_id"], row["task_version"])] = (
+                imported_at
+            )
         tasks[(row["task_id"], row["task_version"])] = task
 
     release_rows = connection.execute(
@@ -5447,11 +6185,18 @@ def performance_integrity_errors(
     release_ids = {row["id"] for row in release_rows}
     for row in release_rows:
         label = f"performance task release {row['id']}"
+        release_created_at: datetime | None = None
+        try:
+            release_created_at = _aware_timestamp(
+                row["created_at"], f"{label} created_at"
+            )
+        except ValidationError as exc:
+            errors.append(str(exc))
         review_terms = decode(row["review_json"], f"{label} review")
         if review_terms is None:
             continue
         try:
-            review = TaskReleaseReview.from_terms(review_terms)
+            review = _release_authority_from_terms(review_terms)
         except (TypeError, ValueError, ValidationError) as exc:
             errors.append(f"{label}: invalid review ({exc})")
             continue
@@ -5532,6 +6277,16 @@ def performance_integrity_errors(
                 errors.append(
                     f"{label}: member {task.id}@{task.version} digest mismatch"
                 )
+            imported_at = task_imported_at.get((task.id, task.version))
+            if (
+                release_created_at is not None
+                and imported_at is not None
+                and imported_at > release_created_at
+            ):
+                errors.append(
+                    f"{label}: member {task.id}@{task.version} was imported "
+                    "after publication"
+                )
             definitions.append((member["status"], task))
             for source_id, digest in task.source_manifests:
                 if source_rows.get(source_id) != digest:
@@ -5598,6 +6353,11 @@ def performance_integrity_errors(
                 corpus_release_id=row["corpus_release_id"],
                 review=review,
                 tasks=tuple(definitions),
+                schema_version=(
+                    TASK_RELEASE_SCHEMA_VERSION
+                    if type(review) is TaskReleaseReview
+                    else SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION
+                ),
             )
             if (
                 reconstructed.release_id != row["id"]
@@ -5630,14 +6390,25 @@ def performance_integrity_errors(
             except ValidationError as exc:
                 errors.append(str(exc))
         try:
-            reviewed_at = _aware_timestamp(
-                review.reviewed_at, f"{label} reviewed_at"
+            authority_at = _aware_timestamp(
+                (
+                    review.reviewed_at
+                    if type(review) is TaskReleaseReview
+                    else review.declared_at
+                ),
+                (
+                    f"{label} reviewed_at"
+                    if type(review) is TaskReleaseReview
+                    else f"{label} declared_at"
+                ),
             )
             created_at = _aware_timestamp(
                 row["created_at"], f"{label} created_at"
             )
-            if reviewed_at > created_at:
-                errors.append(f"{label}: publication precedes review")
+            if authority_at > created_at:
+                errors.append(
+                    f"{label}: publication precedes review or declaration"
+                )
         except ValidationError as exc:
             errors.append(str(exc))
         if row["sealed_at"] != row["created_at"]:
@@ -5817,30 +6588,45 @@ def performance_integrity_errors(
             attempt_tasks[row["id"]] = task
             if metadata is not None and metadata.get("task_schema_version") != task.schema_version:
                 errors.append(f"{label}: task schema metadata mismatch")
-        membership = connection.execute(
-            """SELECT member.task_digest, member.status,
-                      release.corpus_release_id, release.created_at
-               FROM release_performance_tasks member
-               JOIN performance_task_releases release ON release.id=member.release_id
-               WHERE member.release_id=? AND member.task_id=?
-                 AND member.task_version=?""",
-            (row["task_release_id"], row["task_id"], row["task_version"]),
-        ).fetchone()
+        stored_release: PerformanceTaskRelease | None = None
+        stored_release_created_at: datetime | None = None
+        try:
+            stored_release, stored_release_created_at = (
+                load_stored_task_release(
+                    connection,
+                    row["task_release_id"],
+                )
+            )
+        except (NotFoundError, ConflictError, ValidationError) as exc:
+            errors.append(f"{label}: invalid task release ({exc})")
+        stored_member = (
+            next(
+                (
+                    (status, member_task)
+                    for status, member_task in stored_release.tasks
+                    if member_task.id == row["task_id"]
+                    and member_task.version == row["task_version"]
+                ),
+                None,
+            )
+            if stored_release is not None
+            else None
+        )
         if (
-            membership is None
-            or membership["task_digest"] != row["task_digest"]
-            or membership["status"] not in SERVICEABLE_TASK_STATUSES
-            or membership["corpus_release_id"] != row["corpus_release_id"]
+            stored_release is None
+            or type(stored_release.review) is not TaskReleaseReview
+            or stored_release.corpus_release_id != row["corpus_release_id"]
+            or stored_member is None
+            or stored_member[0] not in SERVICEABLE_TASK_STATUSES
+            or stored_member[1].digest != row["task_digest"]
             or row["task_release_id"] not in release_ids
         ):
             errors.append(f"{label}: invalid task-release boundary")
-        elif event is not None:
+        elif event is not None and stored_release_created_at is not None:
             try:
                 if _aware_timestamp(
                     event["occurred_at"], f"{label} event occurrence"
-                ) < _aware_timestamp(
-                    membership["created_at"], f"{label} release publication"
-                ):
+                ) < stored_release_created_at:
                     errors.append(
                         f"{label}: occurrence precedes task release"
                     )
@@ -7291,27 +8077,83 @@ _PERFORMANCE_PROJECTION_TABLES = (
 
 def performance_projection_snapshot(
     connection: sqlite3.Connection,
+    *,
+    learner_id: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return the exact mutable shadow projections in stable row order."""
 
+    if learner_id is not None:
+        _require_id(learner_id, "learner_id")
+    attempt_scope = (
+        ""
+        if learner_id is None
+        else " WHERE learner_id=?"
+    )
+    dependent_scope = (
+        ""
+        if learner_id is None
+        else (
+            " WHERE attempt_id IN ("
+            "SELECT id FROM performance_attempts WHERE learner_id=?"
+            ")"
+        )
+    )
+    artifact_receipt_scope = (
+        ""
+        if learner_id is None
+        else (
+            " WHERE claim_id IN ("
+            "SELECT claim.id FROM performance_artifact_run_claims claim "
+            "JOIN performance_attempts attempt "
+            "ON attempt.id=claim.attempt_id "
+            "WHERE attempt.learner_id=?"
+            ")"
+        )
+    )
+    scoring_reconciliation_scope = (
+        ""
+        if learner_id is None
+        else (
+            " WHERE observation.claim_id IN ("
+            "SELECT claim.id FROM performance_scoring_claims claim "
+            "JOIN performance_attempts attempt "
+            "ON attempt.id=claim.attempt_id "
+            "WHERE attempt.learner_id=?"
+            ")"
+        )
+    )
     queries = {
-        "attempts": "SELECT * FROM performance_attempts ORDER BY id",
+        "attempts": (
+            "SELECT * FROM performance_attempts"
+            + attempt_scope
+            + " ORDER BY id"
+        ),
         "actions": (
-            "SELECT * FROM performance_actions "
+            "SELECT * FROM performance_actions"
+            + dependent_scope
+            + " "
             "ORDER BY attempt_id, sequence, id"
         ),
         "artifact_run_claims": (
-            "SELECT * FROM performance_artifact_run_claims ORDER BY id"
+            "SELECT * FROM performance_artifact_run_claims"
+            + dependent_scope
+            + " ORDER BY id"
         ),
         "artifact_run_receipts": (
-            "SELECT * FROM performance_artifact_run_receipts ORDER BY id"
+            "SELECT * FROM performance_artifact_run_receipts"
+            + artifact_receipt_scope
+            + " ORDER BY id"
         ),
         "scoring_claims": (
-            "SELECT * FROM performance_scoring_claims ORDER BY id"
+            "SELECT * FROM performance_scoring_claims"
+            + dependent_scope
+            + " ORDER BY id"
         ),
         "scoring_reconciliations": (
             "SELECT observation.* "
-            "FROM performance_scoring_reconciliations observation "
+            "FROM performance_scoring_reconciliations observation"
+            + scoring_reconciliation_scope
+            + " "
             "ORDER BY ("
             "SELECT event.stream_id FROM events event "
             "WHERE event.event_id=observation.event_id"
@@ -7321,11 +8163,15 @@ def performance_projection_snapshot(
             "), observation.id"
         ),
         "evaluations": (
-            "SELECT * FROM task_evaluations "
+            "SELECT * FROM task_evaluations"
+            + dependent_scope
+            + " "
             "ORDER BY attempt_id, recorded_at, id"
         ),
         "bundles": (
-            "SELECT * FROM shadow_evidence_bundles "
+            "SELECT * FROM shadow_evidence_bundles"
+            + dependent_scope
+            + " "
             "ORDER BY attempt_id, evaluation_id, id"
         ),
     }
@@ -7361,15 +8207,27 @@ def performance_projection_snapshot(
             snapshot[name] = []
             continue
         snapshot[name] = [
-            _row_dict(row) for row in connection.execute(query).fetchall()
+            _row_dict(row)
+            for row in connection.execute(
+                query,
+                (() if learner_id is None else (learner_id,)),
+            ).fetchall()
         ]
     return snapshot
 
 
 def derive_performance_projections(
     connection: sqlite3.Connection,
+    *,
+    learner_id: str | None = None,
+    trace_only: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     """Derive shadow projection rows exclusively from immutable events."""
+
+    if learner_id is not None:
+        _require_id(learner_id, "learner_id")
+    if type(trace_only) is not bool:
+        raise ValidationError("trace_only must be a boolean.")
 
     def reject_artifact_technical_key_collision(
         event_key: object,
@@ -7416,8 +8274,13 @@ def derive_performance_projections(
     recovered_evaluations: dict[
         str, tuple[TaskEvaluation, Mapping[str, Any], sqlite3.Row]
     ] = {}
+    evaluation_modes: dict[str, NormalizationMode] = {}
+    legacy_scoring_exemptions: dict[
+        str, tuple[dict[str, Any], sqlite3.Row]
+    ] = {}
     attempts_by_id: dict[str, dict[str, Any]] = {}
     attempt_events_by_id: dict[str, sqlite3.Row] = {}
+    attempt_tasks_by_id: dict[str, LearningTask] = {}
     action_contexts_by_id: dict[
         str, tuple[dict[str, Any], LearningAction, sqlite3.Row]
     ] = {}
@@ -7433,20 +8296,64 @@ def derive_performance_projections(
         ],
     ] = {}
     artifact_receipt_claim_ids: set[str] = set()
+    system_artifact_check_action_ids: set[str] = set()
     artifact_caller_keys: set[str] = set()
     artifact_command_hashes: set[str] = set()
     artifact_receipt_digests: set[str] = set()
+    release_cache: dict[str, tuple[PerformanceTaskRelease, datetime]] = {}
+    active_attempt_by_session: dict[str, str] = {}
+    terminal_attempts: set[str] = set()
+    next_action_sequence: dict[str, int] = {}
+    prior_action_occurrence: dict[str, datetime] = {}
+
+    def strict_release(
+        release_id: str,
+    ) -> tuple[PerformanceTaskRelease, datetime]:
+        cached = release_cache.get(release_id)
+        if cached is None:
+            cached = load_stored_task_release(connection, release_id)
+            release_cache[release_id] = cached
+        return cached
+
+    event_types = (
+        (
+            "PerformanceTaskStarted",
+            "PerformanceActionRecorded",
+            "PerformanceArtifactRunClaimed",
+            "PerformanceArtifactRunObserved",
+        )
+        if trace_only
+        else (
+            "PerformanceTaskStarted",
+            "PerformanceActionRecorded",
+            "PerformanceArtifactRunClaimed",
+            "PerformanceArtifactRunObserved",
+            "PerformanceScoringClaimed",
+            "PerformanceScoringClaimMigrated",
+            "PerformanceScoringReconciled",
+            "PerformanceScoringLegacyExempted",
+            "TaskEvaluationRecorded",
+            "ShadowEvidenceReduced",
+        )
+    )
+    placeholders = ", ".join("?" for _item in event_types)
+    event_scope = (
+        " AND stream_id=?"
+        if learner_id is not None
+        else ""
+    )
+    event_parameters: tuple[object, ...] = event_types + (
+        (f"learner:{learner_id}",)
+        if learner_id is not None
+        else ()
+    )
     events = connection.execute(
-        """SELECT * FROM events WHERE event_type IN (
-               'PerformanceTaskStarted', 'PerformanceActionRecorded',
-               'PerformanceArtifactRunClaimed',
-               'PerformanceArtifactRunObserved',
-               'PerformanceScoringClaimed',
-               'PerformanceScoringClaimMigrated',
-               'PerformanceScoringReconciled',
-               'PerformanceScoringLegacyExempted',
-               'TaskEvaluationRecorded', 'ShadowEvidenceReduced'
-           ) ORDER BY stream_id, stream_version"""
+        "SELECT * FROM events WHERE event_type IN ("
+        + placeholders
+        + ")"
+        + event_scope
+        + " ORDER BY stream_id, stream_version",
+        event_parameters,
     ).fetchall()
     for event in events:
         event_type = event["event_type"]
@@ -7507,6 +8414,287 @@ def derive_performance_projections(
                 raise ValidationError(
                     f"Performance event {event['event_id']} is not shadow-only."
                 )
+            _require_id(
+                payload["attempt_id"],
+                f"Performance event {event['event_id']} attempt_id",
+            )
+            _require_id(
+                payload["session_id"],
+                f"Performance event {event['event_id']} session_id",
+            )
+            _require_id(
+                payload["learner_id"],
+                f"Performance event {event['event_id']} learner_id",
+            )
+            _require_id(
+                payload["task_release_id"],
+                f"Performance event {event['event_id']} task_release_id",
+            )
+            _require_id(
+                payload["corpus_release_id"],
+                f"Performance event {event['event_id']} corpus_release_id",
+            )
+            _require_id(
+                payload["task_id"],
+                f"Performance event {event['event_id']} task_id",
+            )
+            _require_digest(
+                payload["task_digest"],
+                f"Performance event {event['event_id']} task_digest",
+            )
+            if (
+                type(payload["task_version"]) is not int
+                or payload["task_version"] < 1
+                or type(payload["session_revision"]) is not int
+                or payload["session_revision"] < 0
+                or type(payload["learner_revision"]) is not int
+                or payload["learner_revision"] < 0
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} has an invalid "
+                    "task version or revision."
+                )
+            release, release_created_at = strict_release(
+                payload["task_release_id"]
+            )
+            if (
+                type(release.review) is not TaskReleaseReview
+                or release.corpus_release_id != payload["corpus_release_id"]
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} is not pinned to "
+                    "an exact human-reviewed task release."
+                )
+            release_member = next(
+                (
+                    (status, task)
+                    for status, task in release.tasks
+                    if task.id == payload["task_id"]
+                    and task.version == payload["task_version"]
+                ),
+                None,
+            )
+            if (
+                release_member is None
+                or release_member[0] not in SERVICEABLE_TASK_STATUSES
+                or release_member[1].digest != payload["task_digest"]
+                or metadata["task_schema_version"]
+                != release_member[1].schema_version
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} does not reference "
+                    "an exact serviceable task-release member."
+                )
+            if (
+                _aware_timestamp(
+                    event["occurred_at"],
+                    f"Performance event {event['event_id']} occurred_at",
+                )
+                < release_created_at
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} precedes its task "
+                    "release."
+                )
+            session_row = connection.execute(
+                """SELECT learner_id, corpus_release_id
+                   FROM sessions WHERE id=?""",
+                (payload["session_id"],),
+            ).fetchone()
+            if (
+                session_row is None
+                or session_row["learner_id"] != payload["learner_id"]
+                or session_row["corpus_release_id"]
+                != payload["corpus_release_id"]
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} crosses its "
+                    "session ownership or corpus boundary."
+                )
+            if connection.execute(
+                "SELECT 1 FROM learners WHERE id=?",
+                (payload["learner_id"],),
+            ).fetchone() is None:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} references an "
+                    "unknown learner."
+                )
+            expected_stream_id = f"learner:{payload['learner_id']}"
+            if (
+                event["stream_id"] != expected_stream_id
+                or event["learner_id"] != payload["learner_id"]
+                or event["session_id"] != payload["session_id"]
+                or event["correlation_id"] != payload["attempt_id"]
+                or event["causation_id"] != payload["session_id"]
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} has an invalid "
+                    "stream or causal envelope."
+                )
+            session_boundaries = connection.execute(
+                """SELECT event_type, stream_id, stream_version, learner_id,
+                          session_id, occurred_at
+                   FROM events
+                   WHERE session_id=?
+                     AND event_type IN ('SessionStarted', 'SessionEnded')
+                   ORDER BY stream_version""",
+                (payload["session_id"],),
+            ).fetchall()
+            session_starts = [
+                boundary
+                for boundary in session_boundaries
+                if boundary["event_type"] == "SessionStarted"
+            ]
+            session_ends = [
+                boundary
+                for boundary in session_boundaries
+                if boundary["event_type"] == "SessionEnded"
+            ]
+            occurred_at = _aware_timestamp(
+                event["occurred_at"],
+                f"Performance event {event['event_id']} occurred_at",
+            )
+            if (
+                len(session_starts) != 1
+                or session_starts[0]["stream_id"] != expected_stream_id
+                or session_starts[0]["learner_id"] != payload["learner_id"]
+                or session_starts[0]["session_id"] != payload["session_id"]
+                or session_starts[0]["stream_version"]
+                >= event["stream_version"]
+                or _aware_timestamp(
+                    session_starts[0]["occurred_at"],
+                    f"Session {payload['session_id']} start occurrence",
+                )
+                > occurred_at
+                or any(
+                    boundary["stream_version"] < event["stream_version"]
+                    or _aware_timestamp(
+                        boundary["occurred_at"],
+                        f"Session {payload['session_id']} end occurrence",
+                    )
+                    < occurred_at
+                    for boundary in session_ends
+                )
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} falls outside its "
+                    "session-active interval."
+                )
+            expected_session_revision = connection.execute(
+                """SELECT COUNT(*) AS n FROM events
+                   WHERE stream_id=? AND session_id=?
+                     AND stream_version < ?
+                     AND event_type IN (
+                         'QuestionSelected', 'ResponseSubmitted'
+                     )""",
+                (
+                    expected_stream_id,
+                    payload["session_id"],
+                    event["stream_version"],
+                ),
+            ).fetchone()["n"]
+            expected_learner_revision = connection.execute(
+                """SELECT COUNT(*) AS n FROM events
+                   WHERE stream_id=? AND learner_id=?
+                     AND stream_version < ?
+                     AND event_type='ResponseSubmitted'""",
+                (
+                    expected_stream_id,
+                    payload["learner_id"],
+                    event["stream_version"],
+                ),
+            ).fetchone()["n"]
+            if (
+                payload["session_revision"] != expected_session_revision
+                or payload["learner_revision"] != expected_learner_revision
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} has a stale or "
+                    "future revision snapshot."
+                )
+            open_decision_ids: set[str] = set()
+            decision_events = connection.execute(
+                """SELECT event_type, event_id, payload_json, causation_id
+                   FROM events
+                   WHERE stream_id=? AND session_id=?
+                     AND stream_version < ?
+                     AND event_type IN (
+                         'QuestionSelected', 'ResponseSubmitted',
+                         'DecisionInvalidated'
+                     )
+                   ORDER BY stream_version""",
+                (
+                    expected_stream_id,
+                    payload["session_id"],
+                    event["stream_version"],
+                ),
+            ).fetchall()
+            for decision_event in decision_events:
+                if decision_event["event_type"] == "QuestionSelected":
+                    decision_payload = _json_object(
+                        decision_event["payload_json"],
+                        (
+                            f"QuestionSelected event "
+                            f"{decision_event['event_id']} payload"
+                        ),
+                    )
+                    decision_id = decision_payload.get("decision_id")
+                    _require_id(
+                        decision_id,
+                        (
+                            f"QuestionSelected event "
+                            f"{decision_event['event_id']} decision_id"
+                        ),
+                    )
+                    if decision_id in open_decision_ids:
+                        raise ValidationError(
+                            f"QuestionSelected event "
+                            f"{decision_event['event_id']} repeats decision "
+                            f"{decision_id}."
+                        )
+                    open_decision_ids.add(decision_id)
+                elif decision_event["event_type"] == "ResponseSubmitted":
+                    open_decision_ids.discard(
+                        decision_event["causation_id"]
+                    )
+                else:
+                    invalidation_payload = _json_object(
+                        decision_event["payload_json"],
+                        (
+                            f"DecisionInvalidated event "
+                            f"{decision_event['event_id']} payload"
+                        ),
+                    )
+                    open_decision_ids.discard(
+                        invalidation_payload.get("decision_id")
+                    )
+            if open_decision_ids:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} starts while "
+                    "selected-response decision(s) remain pending."
+                )
+            _require_digest(
+                metadata["command_hash"],
+                f"Performance event {event['event_id']} command_hash",
+            )
+            possible_command_hashes = {
+                _command_hash(
+                    {
+                        "operation": "start_attempt",
+                        "session_id": payload["session_id"],
+                        "task_id": payload["task_id"],
+                        "task_version": version,
+                        "task_release_id": release_id,
+                    }
+                )
+                for version in (None, payload["task_version"])
+                for release_id in (None, payload["task_release_id"])
+            }
+            if metadata["command_hash"] not in possible_command_hashes:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} command commitment "
+                    "does not match any valid start request."
+                )
             attempt_row = {
                 "id": payload["attempt_id"],
                 "event_id": event["event_id"],
@@ -7528,9 +8716,23 @@ def derive_performance_projections(
                     f"Performance event {event['event_id']} repeats attempt "
                     f"{attempt_row['id']}."
                 )
+            prior_active_attempt = active_attempt_by_session.get(
+                payload["session_id"]
+            )
+            if prior_active_attempt is not None:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} overlaps active "
+                    f"attempt {prior_active_attempt} in session "
+                    f"{payload['session_id']}."
+                )
             attempts.append(attempt_row)
             attempts_by_id[attempt_row["id"]] = attempt_row
             attempt_events_by_id[attempt_row["id"]] = event
+            attempt_tasks_by_id[attempt_row["id"]] = release_member[1]
+            active_attempt_by_session[payload["session_id"]] = (
+                attempt_row["id"]
+            )
+            next_action_sequence[attempt_row["id"]] = 0
             checkpoints.append(
                 {
                     "event_id": event["event_id"],
@@ -7574,6 +8776,176 @@ def derive_performance_projections(
                 raise ValidationError(
                     f"Performance event {event['event_id']} action boundary mismatch."
                 )
+            attempt = attempts_by_id.get(action.trace_id)
+            if attempt is None:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action precedes "
+                    f"attempt {action.trace_id}."
+                )
+            task = attempt_tasks_by_id[action.trace_id]
+            if action.kind not in task.allowed_action_kinds:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action "
+                    f"{action.kind.value} is not allowed by the exact task "
+                    "release."
+                )
+            attempt_event = attempt_events_by_id[action.trace_id]
+            if (
+                event["stream_id"] != attempt_event["stream_id"]
+                or event["stream_version"] <= attempt_event["stream_version"]
+                or event["learner_id"] != attempt["learner_id"]
+                or event["session_id"] != attempt["session_id"]
+                or event["correlation_id"] != action.trace_id
+                or event["causation_id"] != action.trace_id
+                or metadata["task_digest"] != attempt["task_digest"]
+                or metadata["task_release_id"]
+                != attempt["task_release_id"]
+                or metadata["corpus_release_id"]
+                != attempt["corpus_release_id"]
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action crosses "
+                    "its attempt envelope."
+                )
+            expected_sequence = next_action_sequence.get(action.trace_id)
+            if expected_sequence is None or action.sequence != expected_sequence:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action sequence is "
+                    "not contiguous."
+                )
+            if (
+                action.sequence == 0
+                and action.kind is not ActionKind.STARTED
+            ) or (
+                action.sequence > 0
+                and action.kind is ActionKind.STARTED
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} has an invalid "
+                    "started-action boundary."
+                )
+            action_occurred_at = _aware_timestamp(
+                event["occurred_at"],
+                f"Performance event {event['event_id']} occurred_at",
+            )
+            prior_occurrence = prior_action_occurrence.get(action.trace_id)
+            if (
+                action_occurred_at
+                < _aware_timestamp(
+                    attempt["started_at"],
+                    f"Attempt {action.trace_id} started_at",
+                )
+                or (
+                    prior_occurrence is not None
+                    and action_occurred_at < prior_occurrence
+                )
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action occurrence "
+                    "is outside its monotonic attempt timeline."
+                )
+            expected_elapsed_ms = int(
+                (
+                    action_occurred_at
+                    - _aware_timestamp(
+                        attempt["started_at"],
+                        f"Attempt {action.trace_id} started_at",
+                    )
+                ).total_seconds()
+                * 1000
+            )
+            if action.elapsed_ms != expected_elapsed_ms:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action elapsed_ms "
+                    "does not match its occurrence."
+                )
+            _require_digest(
+                metadata["command_hash"],
+                f"Performance event {event['event_id']} command_hash",
+            )
+            if action.kind is ActionKind.STARTED:
+                allowed_action_command_hashes = {
+                    _command_hash(
+                        {
+                            "operation": "automatic_start",
+                            "attempt_id": action.trace_id,
+                        }
+                    )
+                }
+            elif action.kind is ActionKind.CHECK_RUN:
+                system_action_command_hashes = {
+                    _command_hash(
+                        {
+                            "operation": "record_artifact_run_check",
+                            "claim_id": claim_id,
+                            "result_digest": action.payload[
+                                "result_digest"
+                            ],
+                        }
+                    )
+                    for claim_id, context in artifact_claim_contexts.items()
+                    if (
+                        context[0]["attempt_id"] == action.trace_id
+                        and context[0]["through_sequence"]
+                        == action.sequence - 1
+                        and context[0]["check_set_id"]
+                        == action.payload["check_set_id"]
+                        and context[3]["stream_id"] == event["stream_id"]
+                        and context[3]["stream_version"]
+                        < event["stream_version"]
+                    )
+                }
+                generic_action_command_hash = _command_hash(
+                    {
+                        "operation": "record_action",
+                        "attempt_id": action.trace_id,
+                        "action_type": action.kind.value,
+                        "phase": action.phase.value,
+                        "payload": action.terms()["payload"],
+                    }
+                )
+                allowed_action_command_hashes = (
+                    system_action_command_hashes
+                    | {generic_action_command_hash}
+                )
+                if metadata["command_hash"] in system_action_command_hashes:
+                    system_artifact_check_action_ids.add(action.id)
+            else:
+                allowed_action_command_hashes = {
+                    _command_hash(
+                        {
+                            "operation": "record_action",
+                            "attempt_id": action.trace_id,
+                            "action_type": action.kind.value,
+                            "phase": action.phase.value,
+                            "payload": action.terms()["payload"],
+                        }
+                    )
+                }
+            if metadata["command_hash"] not in allowed_action_command_hashes:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action command "
+                    "commitment mismatch."
+                )
+            if action.trace_id in terminal_attempts:
+                if action.phase is not ActionPhase.POST_FEEDBACK:
+                    raise ValidationError(
+                        f"Performance event {event['event_id']} records a "
+                        "non-feedback action after attempt termination."
+                    )
+            elif (
+                active_attempt_by_session.get(attempt["session_id"])
+                != action.trace_id
+            ):
+                raise ValidationError(
+                    f"Performance event {event['event_id']} action is outside "
+                    "the active attempt for its session."
+                )
+            if action.kind in {ActionKind.SUBMITTED, ActionKind.ABANDONED}:
+                terminal_attempts.add(action.trace_id)
+                active_attempt_by_session.pop(attempt["session_id"], None)
+            next_action_sequence[action.trace_id] = action.sequence + 1
+            prior_action_occurrence[action.trace_id] = action_occurred_at
             action_row = {
                 "id": action.id,
                 "event_id": event["event_id"],
@@ -7829,7 +9201,10 @@ def derive_performance_projections(
                           task.task_digest AS definition_digest,
                           member.task_digest AS member_digest,
                           member.status,
-                          release.corpus_release_id
+                          release.corpus_release_id,
+                          json_extract(
+                              release.review_json, '$.reviewer_kind'
+                          ) AS reviewer_kind
                    FROM performance_task_releases release
                    JOIN release_performance_tasks member
                      ON member.release_id=release.id
@@ -7871,6 +9246,7 @@ def derive_performance_projections(
                 or attempt["corpus_release_id"]
                 != task_row["corpus_release_id"]
                 or task_row["status"] not in SERVICEABLE_TASK_STATUSES
+                or task_row["reviewer_kind"] != "human"
                 or task_row["definition_digest"] != payload["task_digest"]
                 or task_row["member_digest"] != payload["task_digest"]
                 or task.digest != payload["task_digest"]
@@ -8732,6 +10108,27 @@ def derive_performance_projections(
                     f"Performance event {event['event_id']} legacy scoring "
                     "exception mismatch."
                 )
+            _require_id(
+                payload["evaluation_id"],
+                f"Performance event {event['event_id']} evaluation_id",
+            )
+            _require_id(
+                payload["attempt_id"],
+                f"Performance event {event['event_id']} attempt_id",
+            )
+            _require_digest(
+                payload["command_hash"],
+                f"Performance event {event['event_id']} command_hash",
+            )
+            if payload["evaluation_id"] in legacy_scoring_exemptions:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} duplicates a "
+                    "legacy scoring exception."
+                )
+            legacy_scoring_exemptions[payload["evaluation_id"]] = (
+                payload,
+                event,
+            )
             checkpoints.append(
                 {
                     "event_id": event["event_id"],
@@ -8768,18 +10165,37 @@ def derive_performance_projections(
                 ),
                 f"Performance event {event['event_id']} metadata",
             )
+            authority = payload["authority"]
+            if type(authority) is not dict:
+                raise ValidationError(
+                    f"Performance event {event['event_id']} authority must be "
+                    "an object."
+                )
+            _require_exact_fields(
+                authority,
+                frozenset(
+                    {"normalized_result", "normalized_result_digest"}
+                ),
+                f"Performance event {event['event_id']} authority",
+            )
             try:
                 evaluation = TaskEvaluation.from_terms(payload["evaluation"])
+                normalized_result = NormalizedScoringResult.from_terms(
+                    authority["normalized_result"]
+                )
             except (TypeError, ValueError) as exc:
                 raise ValidationError(
-                    f"Performance event {event['event_id']} evaluation is invalid: {exc}"
+                    f"Performance event {event['event_id']} evaluation or "
+                    f"authority is invalid: {exc}"
                 ) from exc
             if (
                 evaluation.trace_id != payload["attempt_id"]
                 or evaluation.digest != payload["evaluation_digest"]
+                or normalized_result.evaluation.digest != evaluation.digest
+                or authority["normalized_result_digest"]
+                != normalized_result.digest
                 or type(payload["through_sequence"]) is not int
                 or payload["through_sequence"] < 0
-                or type(payload["authority"]) is not dict
                 or metadata["shadow_only"] is not True
                 or metadata["projection_applied"] is not False
                 or metadata["certification_applied"] is not False
@@ -8787,6 +10203,58 @@ def derive_performance_projections(
                 raise ValidationError(
                     f"Performance event {event['event_id']} evaluation boundary mismatch."
                 )
+            _require_digest(
+                metadata["command_hash"],
+                f"Performance event {event['event_id']} command_hash",
+            )
+            matching_claims = [
+                claim
+                for claim in scoring_claims
+                if claim["evaluation_id"] == evaluation.id
+                and claim["attempt_id"] == evaluation.trace_id
+                and claim["through_sequence"]
+                == payload["through_sequence"]
+            ]
+            if matching_claims:
+                if (
+                    len(matching_claims) != 1
+                    or metadata["command_hash"]
+                    != matching_claims[0]["command_hash"]
+                ):
+                    raise ValidationError(
+                        f"Performance event {event['event_id']} evaluation "
+                        "does not match its exact scoring claim."
+                    )
+            elif (
+                normalized_result.normalization_mode
+                is NormalizationMode.DIRECT_IMPORT
+            ):
+                imported = _authority_free_imported_evaluation(evaluation)
+                expected_import_command_hash = _command_hash(
+                    {
+                        "operation": "import_evaluation",
+                        "attempt_id": evaluation.trace_id,
+                        "through_sequence": payload["through_sequence"],
+                        "provider_id": (
+                            normalized_result.provider.provider_id
+                        ),
+                        "provider_version": (
+                            normalized_result.provider.provider_version
+                        ),
+                        "declared_kind": (
+                            normalized_result.provider.declared_kind.value
+                        ),
+                        "imported_digest": imported.digest,
+                    }
+                )
+                if (
+                    metadata["command_hash"]
+                    != expected_import_command_hash
+                ):
+                    raise ValidationError(
+                        f"Performance event {event['event_id']} direct-import "
+                        "command commitment mismatch."
+                    )
             evaluations.append(
                 {
                     "id": evaluation.id,
@@ -8795,15 +10263,18 @@ def derive_performance_projections(
                     "through_sequence": payload["through_sequence"],
                     "evaluation_digest": evaluation.digest,
                     "evaluation_json": canonical_json(evaluation.terms()),
-                    "authority_json": canonical_json(payload["authority"]),
+                    "authority_json": canonical_json(authority),
                     "recorded_at": event["recorded_at"],
                     "command_hash": metadata["command_hash"],
                 }
             )
             recovered_evaluations[evaluation.id] = (
                 evaluation,
-                payload["authority"],
+                authority,
                 event,
+            )
+            evaluation_modes[evaluation.id] = (
+                normalized_result.normalization_mode
             )
             checkpoints.append(
                 {
@@ -8868,6 +10339,116 @@ def derive_performance_projections(
                     "bundle_id": payload["bundle_id"],
                 }
             )
+    for evaluation_id, (
+        exemption_payload,
+        exemption_event,
+    ) in legacy_scoring_exemptions.items():
+        recovered = recovered_evaluations.get(evaluation_id)
+        if recovered is None:
+            raise ValidationError(
+                "Legacy scoring exception has no exact task evaluation."
+            )
+        evaluation, _authority, evaluation_event = recovered
+        attempt = attempts_by_id.get(evaluation.trace_id)
+        evaluation_metadata = _event_metadata(evaluation_event)
+        claims = [
+            claim
+            for claim in scoring_claims
+            if claim["evaluation_id"] == evaluation_id
+        ]
+        if (
+            attempt is None
+            or exemption_payload["attempt_id"] != evaluation.trace_id
+            or exemption_payload["command_hash"]
+            != evaluation_metadata["command_hash"]
+            or evaluation_modes[evaluation_id]
+            is not NormalizationMode.REGISTERED_PROVIDER
+            or claims
+            or exemption_event["schema_version"]
+            != PERFORMANCE_EVENT_SCHEMA_VERSION
+            or exemption_event["stream_id"]
+            != f"learner:{attempt['learner_id']}"
+            or exemption_event["learner_id"] != attempt["learner_id"]
+            or exemption_event["session_id"]
+            not in {None, attempt["session_id"]}
+            or exemption_event["correlation_id"] != attempt["id"]
+            or exemption_event["causation_id"] != evaluation_id
+            or exemption_event["stream_version"]
+            <= evaluation_event["stream_version"]
+        ):
+            raise ValidationError(
+                "Legacy scoring exception does not match its exact "
+                "registered-provider evaluation boundary."
+            )
+
+    for evaluation_id, mode in evaluation_modes.items():
+        claims = [
+            claim
+            for claim in scoring_claims
+            if claim["evaluation_id"] == evaluation_id
+        ]
+        exemption = legacy_scoring_exemptions.get(evaluation_id)
+        if mode is NormalizationMode.REGISTERED_PROVIDER:
+            matching_claims = [
+                claim
+                for claim in claims
+                if claim["attempt_id"]
+                == recovered_evaluations[evaluation_id][0].trace_id
+                and claim["through_sequence"]
+                == next(
+                    item["through_sequence"]
+                    for item in evaluations
+                    if item["id"] == evaluation_id
+                )
+            ]
+            if (
+                len(matching_claims)
+                + (1 if exemption is not None else 0)
+                != 1
+                or len(claims) != len(matching_claims)
+            ):
+                raise ValidationError(
+                    "Registered-provider evaluation must have exactly one "
+                    "matching scoring claim or schema-v14 exemption."
+                )
+        elif claims:
+            recovered_claims = [
+                claim
+                for claim in claims
+                if any(
+                    observation["claim_id"] == claim["id"]
+                    and observation["evaluation_id"] == evaluation_id
+                    and observation["outcome"]
+                    == ReconciliationOutcome.COMPLETED.value
+                    for observation in scoring_reconciliations
+                )
+            ]
+            if (
+                len(claims) != 1
+                or len(recovered_claims) != 1
+                or exemption is not None
+            ):
+                raise ValidationError(
+                    "Direct-import evaluation with a provider callback claim "
+                    "requires exactly one completed reconciliation."
+                )
+        elif exemption is not None:
+            raise ValidationError(
+                "Direct-import evaluation cannot use a legacy provider "
+                "exception."
+            )
+
+    receipt_bound_check_action_ids = {
+        receipt["check_action_id"]
+        for receipt in artifact_run_receipts
+        if receipt["check_action_id"] is not None
+    }
+    if system_artifact_check_action_ids != receipt_bound_check_action_ids:
+        raise ValidationError(
+            "System artifact check actions must be bound one-for-one to "
+            "successful terminal artifact-run observations."
+        )
+
     for observation in scoring_reconciliations:
         if observation["outcome"] != ReconciliationOutcome.COMPLETED.value:
             continue
@@ -8973,6 +10554,87 @@ def derive_performance_projections(
         ),
     }
     return snapshot, checkpoints
+
+
+def require_performance_projection_consistency(
+    connection: sqlite3.Connection,
+    *,
+    learner_id: str,
+    trace_only: bool = False,
+    comparison_names: tuple[str, ...] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """Require stored productive projections to match immutable events.
+
+    Productive evidence is shadow-only, but it is still learner-facing and
+    operational.  Read and append paths therefore cannot defer this boundary to
+    an optional integrity command: malformed or manually inserted attempt,
+    action, scoring, evaluation, or bundle rows must fail closed before they are
+    reported or extended.  ``trace_only`` validates the complete attempt/action
+    lifecycle (including system artifact-check authority) while leaving
+    scoring-specific recovery paths to their dedicated projection guards.
+    """
+
+    _require_id(learner_id, "learner_id")
+    if type(trace_only) is not bool:
+        raise ValidationError("trace_only must be a boolean.")
+    allowed_projection_names = frozenset(
+        {
+            "attempts",
+            "actions",
+            "artifact_run_claims",
+            "artifact_run_receipts",
+            "scoring_claims",
+            "scoring_reconciliations",
+            "evaluations",
+            "bundles",
+        }
+    )
+    if comparison_names is not None and (
+        type(comparison_names) is not tuple
+        or not comparison_names
+        or len(set(comparison_names)) != len(comparison_names)
+        or any(
+            type(name) is not str or name not in allowed_projection_names
+            for name in comparison_names
+        )
+    ):
+        raise ValidationError(
+            "comparison_names must be a non-empty tuple of unique performance "
+            "projection names."
+        )
+    if trace_only and comparison_names is not None and any(
+        name not in {"attempts", "actions"} for name in comparison_names
+    ):
+        raise ValidationError(
+            "trace-only derivation can compare only attempts and actions."
+        )
+    try:
+        derived, _checkpoints = derive_performance_projections(
+            connection,
+            learner_id=learner_id,
+            trace_only=trace_only,
+        )
+        stored = performance_projection_snapshot(
+            connection,
+            learner_id=learner_id,
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ValidationError(
+            "Performance projections cannot be trusted against immutable "
+            f"events: {exc}"
+        ) from exc
+    projection_names = comparison_names or (
+        ("attempts", "actions")
+        if trace_only
+        else tuple(sorted(allowed_projection_names))
+    )
+    for name in projection_names:
+        if canonical_json(stored[name]) != canonical_json(derived[name]):
+            raise ValidationError(
+                f"Stored performance {name.replace('_', ' ')} differ from "
+                "immutable event derivation."
+            )
+    return derived
 
 
 def rebuild_performance_projections(
@@ -9143,15 +10805,18 @@ __all__ = [
     "PERFORMANCE_ARTIFACT_RUN_SCHEMA_VERSION",
     "PERFORMANCE_EVENT_SCHEMA_VERSION",
     "SERVICEABLE_TASK_STATUSES",
+    "SYNTHETIC_TASK_LAB_RELEASE_SCHEMA_VERSION",
     "TASK_RELEASE_SCHEMA_VERSION",
     "TASK_STATUSES",
     "PerformanceLedger",
     "PerformanceTaskRelease",
     "OperationalArtifactRunReceipt",
+    "SyntheticTaskLabDeclaration",
     "TaskReleaseReview",
     "derive_performance_projections",
     "performance_integrity_errors",
     "performance_projection_snapshot",
     "read_task_release",
     "rebuild_performance_projections",
+    "require_performance_projection_consistency",
 ]

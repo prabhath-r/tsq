@@ -12,7 +12,6 @@ mastery or certification through this policy.
 
 from __future__ import annotations
 
-import json
 from collections import Counter
 from datetime import datetime, timezone
 from math import exp, isfinite, sqrt
@@ -24,6 +23,13 @@ from .learner import LearnerModel
 from .performance_boundaries import (
     missing_objective_misconception_bindings,
     release_misconception_objectives,
+)
+from .performance_ledger import (
+    SERVICEABLE_TASK_STATUSES,
+    SyntheticTaskLabDeclaration,
+    TaskReleaseReview,
+    load_stored_task_release,
+    require_performance_projection_consistency,
 )
 from .store import Database
 
@@ -41,6 +47,18 @@ def _now(value: datetime | None) -> datetime:
     return resolved.astimezone(timezone.utc)
 
 
+def _stored_timestamp(value: object, label: str) -> datetime:
+    if type(value) is not str:
+        raise ValidationError(f"{label} must be an ISO-8601 timestamp string.")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (ValueError, OverflowError) as exc:
+        raise ValidationError(f"{label} is not a valid timestamp.") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValidationError(f"{label} must include a timezone offset.")
+    return parsed.astimezone(timezone.utc)
+
+
 def _probability(log_odds: float) -> float:
     if type(log_odds) not in {int, float} or not isfinite(log_odds):
         raise ValidationError(
@@ -50,54 +68,6 @@ def _probability(log_odds: float) -> float:
         return 1.0 / (1.0 + exp(-log_odds))
     exponential = exp(log_odds)
     return exponential / (1.0 + exponential)
-
-
-def _strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    value: dict[str, Any] = {}
-    for key, item in pairs:
-        if key in value:
-            raise ValidationError(
-                f"Stored performance task contains duplicate field {key!r}."
-            )
-        value[key] = item
-    return value
-
-
-def _reject_constant(value: str) -> None:
-    raise ValidationError(
-        f"Stored performance task contains invalid number {value!r}."
-    )
-
-
-def _finite_json_float(value: str) -> float:
-    parsed = float(value)
-    if not isfinite(parsed):
-        raise ValidationError(
-            "Stored performance task contains a non-finite number."
-        )
-    return parsed
-
-
-def _decode_task_definition(raw: object, label: str) -> LearningTask:
-    if type(raw) is not str:
-        raise ValidationError(f"{label} definition must be strict JSON text.")
-    try:
-        terms = json.loads(
-            raw,
-            object_pairs_hook=_strict_object,
-            parse_constant=_reject_constant,
-            parse_float=_finite_json_float,
-        )
-    except ValidationError:
-        raise
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise ValidationError(f"{label} definition is invalid JSON: {exc}") from exc
-    if type(terms) is not dict:
-        raise ValidationError(f"{label} definition must be a JSON object.")
-    try:
-        return LearningTask.from_terms(terms)
-    except (TypeError, ValueError) as exc:
-        raise ValidationError(f"{label} definition is invalid: {exc}") from exc
 
 
 def _criterion_weight_total(task: LearningTask) -> float:
@@ -170,6 +140,14 @@ def _task_misconception_weights(task: LearningTask) -> dict[str, float]:
     }
 
 
+def _task_ref_terms(task_ref: tuple[str, int, str]) -> dict[str, Any]:
+    return {
+        "task_id": task_ref[0],
+        "task_version": task_ref[1],
+        "task_digest": task_ref[2],
+    }
+
+
 def _weighted_sum(
     weights: dict[str, float],
     values: dict[str, float],
@@ -229,14 +207,16 @@ def _selected_response_components(
     return mastery, uncertainty, scarcity, due
 
 
-def recommend_performance_tasks(
+def _recommend_performance_tasks(
     database: Database,
     session_id: str,
     *,
     limit: int = 5,
     now: datetime | None = None,
+    synthetic_lab_release_id: str | None = None,
+    prior_task_refs: tuple[tuple[str, int, str], ...] = (),
 ) -> dict[str, Any]:
-    """Rank exact released tasks as optional diagnostic probes.
+    """Rank exact tasks inside one explicit release-authority boundary.
 
     Family novelty is a hard constraint whenever at least one fresh candidate
     exists.  Every score component is returned, and ties are resolved by
@@ -248,6 +228,37 @@ def recommend_performance_tasks(
     if type(limit) is not int or not 1 <= limit <= MAX_RECOMMENDATION_LIMIT:
         raise ValidationError(
             f"limit must be an integer from 1 through {MAX_RECOMMENDATION_LIMIT}."
+        )
+    synthetic_lab = synthetic_lab_release_id is not None
+    if synthetic_lab and (
+        type(synthetic_lab_release_id) is not str
+        or not synthetic_lab_release_id.strip()
+        or len(synthetic_lab_release_id) > 128
+    ):
+        raise ValidationError(
+            "synthetic_lab_release_id must be a non-blank release ID."
+        )
+    if type(prior_task_refs) is not tuple or any(
+        type(task_ref) is not tuple
+        or len(task_ref) != 3
+        or type(task_ref[0]) is not str
+        or not task_ref[0].strip()
+        or len(task_ref[0]) > 128
+        or type(task_ref[1]) is not int
+        or task_ref[1] < 1
+        or type(task_ref[2]) is not str
+        or len(task_ref[2]) != 64
+        or any(character not in "0123456789abcdef" for character in task_ref[2])
+        for task_ref in prior_task_refs
+    ):
+        raise ValidationError(
+            "prior_task_refs must be a tuple of exact "
+            "(task_id, task_version, task_digest) tuples."
+        )
+    if prior_task_refs and not synthetic_lab:
+        raise ValidationError(
+            "prior_task_refs are accepted only by the synthetic laboratory "
+            "inspection boundary."
         )
     current_time = _now(now)
     projection_model = LearnerModel()
@@ -384,10 +395,20 @@ def recommend_performance_tasks(
             + 0.05 * due
         )
 
+    candidate_entries: list[tuple[dict[str, Any], LearningTask]] = []
+    historical_tasks: list[LearningTask] = []
+    synthetic_history_tasks: dict[
+        tuple[str, int, str], LearningTask
+    ] = {}
     with database.read() as connection:
         database.require_learner_evidence_safe(
             session["learner_id"],
             connection,
+        )
+        require_performance_projection_consistency(
+            connection,
+            learner_id=session["learner_id"],
+            trace_only=True,
         )
         pending_question = connection.execute(
             """SELECT decision.id FROM decisions decision
@@ -408,35 +429,138 @@ def recommend_performance_tasks(
                ORDER BY attempt.started_at, attempt.id LIMIT 1""",
             (session_id,),
         ).fetchone()
-        candidate_rows = connection.execute(
-            """SELECT member.release_id, member.status,
-                      task.task_id, task.task_version, task.task_digest,
-                      member.task_digest AS membership_task_digest,
-                      task.definition_json, task_release.created_at
-               FROM release_performance_tasks member
-               JOIN performance_task_releases task_release
-                 ON task_release.id=member.release_id
-               JOIN performance_tasks task
-                 ON task.task_id=member.task_id
-                AND task.task_version=member.task_version
-               WHERE task_release.corpus_release_id=?
-                 AND member.status IN ('pilot', 'approved')
-               ORDER BY task.task_id, task.task_version, member.release_id""",
-            (session["corpus_release_id"],),
-        ).fetchall()
-        history_rows = connection.execute(
-            """SELECT attempt.id, attempt.task_id, attempt.task_version,
-                      attempt.task_digest AS attempt_task_digest,
-                      attempt.started_at, task.task_digest AS stored_task_digest,
-                      task.definition_json
-               FROM performance_attempts attempt
-               JOIN performance_tasks task
-                 ON task.task_id=attempt.task_id
-                AND task.task_version=attempt.task_version
-               WHERE attempt.learner_id=?
-               ORDER BY attempt.started_at, attempt.id""",
-            (session["learner_id"],),
-        ).fetchall()
+        release_cache: dict[str, tuple[Any, datetime]] = {}
+
+        def strict_release(release_id: str) -> tuple[Any, datetime]:
+            cached = release_cache.get(release_id)
+            if cached is None:
+                cached = load_stored_task_release(connection, release_id)
+                release_cache[release_id] = cached
+            return cached
+
+        if synthetic_lab:
+            synthetic_bundle, synthetic_created_at = strict_release(
+                str(synthetic_lab_release_id)
+            )
+            if type(synthetic_bundle.review) is not SyntheticTaskLabDeclaration:
+                raise ValidationError(
+                    "Requested release is not an exact synthetic laboratory "
+                    "declaration."
+                )
+            if (
+                synthetic_bundle.corpus_release_id
+                != session["corpus_release_id"]
+            ):
+                raise ValidationError(
+                    "Synthetic task release does not match the session's "
+                    "immutable corpus release."
+                )
+            if synthetic_created_at > current_time:
+                raise ValidationError(
+                    "Synthetic laboratory release cannot be inspected before "
+                    "its immutable publication time."
+                )
+            candidate_entries.extend(
+                (
+                    {
+                        "release_id": str(synthetic_lab_release_id),
+                        "status": status,
+                    },
+                    task,
+                )
+                for status, task in synthetic_bundle.tasks
+            )
+            synthetic_history_tasks = {
+                (task.id, task.version, task.digest): task
+                for _status, task in synthetic_bundle.tasks
+            }
+        else:
+            release_rows = connection.execute(
+                """SELECT DISTINCT member.release_id
+                   FROM release_performance_tasks member
+                   JOIN performance_task_releases task_release
+                     ON task_release.id=member.release_id
+                   WHERE task_release.corpus_release_id=?
+                     AND member.status IN ('pilot', 'approved')
+                   ORDER BY member.release_id""",
+                (session["corpus_release_id"],),
+            ).fetchall()
+            for release_row in release_rows:
+                release_id = release_row["release_id"]
+                bundle, created_at = strict_release(release_id)
+                if bundle.corpus_release_id != session["corpus_release_id"]:
+                    raise ValidationError(
+                        f"Stored performance release {release_id} crosses the "
+                        "session corpus boundary."
+                    )
+                if type(bundle.review) is not TaskReleaseReview:
+                    raise ValidationError(
+                        f"Stored performance release {release_id} has "
+                        "serviceable members without exact human authority."
+                    )
+                if created_at > current_time:
+                    continue
+                candidate_entries.extend(
+                    (
+                        {"release_id": release_id, "status": status},
+                        task,
+                    )
+                    for status, task in bundle.tasks
+                    if status in SERVICEABLE_TASK_STATUSES
+                )
+
+            history_rows = connection.execute(
+                """SELECT attempt.id, attempt.task_release_id,
+                          attempt.corpus_release_id, attempt.task_id,
+                          attempt.task_version, attempt.task_digest,
+                          attempt.started_at
+                   FROM performance_attempts attempt
+                   WHERE attempt.learner_id=?
+                   ORDER BY attempt.started_at, attempt.id""",
+                (session["learner_id"],),
+            ).fetchall()
+            for history_row in history_rows:
+                bundle, release_created_at = strict_release(
+                    history_row["task_release_id"]
+                )
+                if (
+                    type(bundle.review) is not TaskReleaseReview
+                    or bundle.corpus_release_id
+                    != history_row["corpus_release_id"]
+                ):
+                    raise ValidationError(
+                        f"Stored performance history {history_row['id']} "
+                        "does not reference an exact human-reviewed release."
+                    )
+                exact_member = next(
+                    (
+                        (status, task)
+                        for status, task in bundle.tasks
+                        if task.id == history_row["task_id"]
+                        and task.version == history_row["task_version"]
+                    ),
+                    None,
+                )
+                if (
+                    exact_member is None
+                    or exact_member[0] not in SERVICEABLE_TASK_STATUSES
+                    or exact_member[1].digest != history_row["task_digest"]
+                ):
+                    raise ValidationError(
+                        f"Stored performance history {history_row['id']} has "
+                        "an invalid release membership."
+                    )
+                started_at = _stored_timestamp(
+                    history_row["started_at"],
+                    f"Performance attempt {history_row['id']} started_at",
+                )
+                if started_at < release_created_at:
+                    raise ValidationError(
+                        f"Stored performance history {history_row['id']} "
+                        "precedes its task release."
+                    )
+                if started_at <= current_time:
+                    historical_tasks.append(exact_member[1])
         belief_rows = connection.execute(
             """SELECT belief.misconception_id, belief.log_odds,
                       belief.evidence_count
@@ -450,26 +574,13 @@ def recommend_performance_tasks(
         live_misconception_objectives = release_misconception_objectives(
             connection,
             session["corpus_release_id"],
-            accepted_only=True,
-            exclude_revoked=True,
+            accepted_only=not synthetic_lab,
+            exclude_revoked=not synthetic_lab,
         )
 
     family_attempts: Counter[str] = Counter()
     modality_attempts: Counter[str] = Counter()
-    for row in history_rows:
-        historical_task = _decode_task_definition(
-            row["definition_json"],
-            f"Stored performance task {row['task_id']}@{row['task_version']}",
-        )
-        if (
-            historical_task.id != row["task_id"]
-            or historical_task.version != row["task_version"]
-            or historical_task.digest != row["stored_task_digest"]
-            or historical_task.digest != row["attempt_task_digest"]
-        ):
-            raise ValidationError(
-                f"Stored performance history {row['id']} has a task identity mismatch."
-            )
+    for historical_task in historical_tasks:
         family_attempts[historical_task.family_id] += 1
         modality_attempts[historical_task.modality.value] += 1
 
@@ -489,21 +600,7 @@ def recommend_performance_tasks(
     # one exact membership, preferring approved over pilot and then the stable
     # release ID, so a caller can start it without an ambiguous lookup.
     memberships: dict[tuple[str, int, str], tuple[Any, LearningTask]] = {}
-    for row in candidate_rows:
-        task = _decode_task_definition(
-            row["definition_json"],
-            f"Stored performance task {row['task_id']}@{row['task_version']}",
-        )
-        if (
-            task.id != row["task_id"]
-            or task.version != row["task_version"]
-            or task.digest != row["task_digest"]
-            or task.digest != row["membership_task_digest"]
-        ):
-            raise ValidationError(
-                f"Stored performance task {row['task_id']}@{row['task_version']} "
-                "has an identity or membership digest mismatch."
-            )
+    for row, task in candidate_entries:
         task_concept_ids = set(task.concept_ids)
         task_objective_ids = set(task.objective_ids)
         unknown_objectives = task_objective_ids - set(objectives)
@@ -531,6 +628,20 @@ def recommend_performance_tasks(
             prior[0]["release_id"],
         ):
             memberships[key] = (row, task)
+
+    if synthetic_lab:
+        missing_prior_task_refs = (
+            set(prior_task_refs) - set(synthetic_history_tasks)
+        )
+        if missing_prior_task_refs:
+            raise ValidationError(
+                "Synthetic laboratory prior_task_refs are outside the exact "
+                "quarantined release."
+            )
+        for task_ref in prior_task_refs:
+            historical_task = synthetic_history_tasks[task_ref]
+            family_attempts[historical_task.family_id] += 1
+            modality_attempts[historical_task.modality.value] += 1
 
     scored: list[dict[str, Any]] = []
     focus_objective_id = session["focus_objective_id"]
@@ -595,7 +706,11 @@ def recommend_performance_tasks(
         family_count = family_attempts[task.family_id]
         family_novelty = 1.0 / (1.0 + family_count)
         modality_novelty = 1.0 / (1.0 + modality_attempts[task.modality.value])
-        release_quality = 1.0 if row["status"] == "approved" else 0.6
+        release_quality = (
+            0.0
+            if synthetic_lab
+            else (1.0 if row["status"] == "approved" else 0.6)
+        )
         score = (
             0.34 * need
             + 0.24 * focus_alignment
@@ -622,6 +737,8 @@ def recommend_performance_tasks(
             reasons.append("release_pinned_objective_binding")
         else:
             reasons.append("concept_only_binding")
+        if synthetic_lab:
+            reasons.append("synthetic_quarantine_only")
         reasons.append("fresh_family" if family_count == 0 else "repeated_family")
         scored.append(
             {
@@ -668,6 +785,15 @@ def recommend_performance_tasks(
             "policy_version": PRODUCTIVE_PROBE_POLICY_VERSION,
             "learner_model_version": projection_model.model_version,
             "projection_time": current_time.isoformat(),
+            "selection_scope": (
+                "synthetic_quarantined_lab"
+                if synthetic_lab
+                else "human_reviewed_shadow"
+            ),
+            "synthetic_lab_release_id": synthetic_lab_release_id,
+            "synthetic_prior_task_refs": [
+                _task_ref_terms(task_ref) for task_ref in prior_task_refs
+            ],
             "corpus_release_id": session["corpus_release_id"],
             "focus": {
                 "objective_id": focus_objective_id,
@@ -690,6 +816,17 @@ def recommend_performance_tasks(
         family_representatives.append(item)
     recommendations = family_representatives[:limit]
     blockers: list[dict[str, str]] = []
+    if synthetic_lab:
+        blockers.append(
+            {
+                "code": "synthetic_quarantine",
+                "id": str(synthetic_lab_release_id),
+                "resolution": (
+                    "human review and a new immutable serviceable release are "
+                    "required; this laboratory inspection cannot activate tasks"
+                ),
+            }
+        )
     if pending_question is not None:
         blockers.append(
             {
@@ -710,6 +847,15 @@ def recommend_performance_tasks(
         "policy_version": PRODUCTIVE_PROBE_POLICY_VERSION,
         "learner_model_version": projection_model.model_version,
         "projection_time": current_time.isoformat(),
+        "selection_scope": (
+            "synthetic_quarantined_lab"
+            if synthetic_lab
+            else "human_reviewed_shadow"
+        ),
+        "synthetic_lab_release_id": synthetic_lab_release_id,
+        "synthetic_prior_task_refs": [
+            _task_ref_terms(task_ref) for task_ref in prior_task_refs
+        ],
         "session_id": session_id,
         "learner_id": session["learner_id"],
         "corpus_release_id": session["corpus_release_id"],
@@ -732,10 +878,21 @@ def recommend_performance_tasks(
             "productive_evidence_applied": False,
             "mastery_affected": False,
             "certification_affected": False,
+            "human_reviewed": not synthetic_lab,
+            "activation_authority": not synthetic_lab,
             "interpretation": (
-                "Selected-response uncertainty routes an optional productive "
-                "probe. Productive observations remain shadow-only and cannot "
-                "change mastery, certification, or the MCQ policy."
+                (
+                    "Selected-response state ranks quarantined synthetic "
+                    "fixtures for laboratory inspection only. No task is "
+                    "serviceable, startable, reviewed, or authorized."
+                )
+                if synthetic_lab
+                else (
+                    "Selected-response uncertainty routes an optional "
+                    "productive probe. Productive observations remain "
+                    "shadow-only and cannot change mastery, certification, "
+                    "or the MCQ policy."
+                )
             ),
         },
     }
@@ -747,8 +904,63 @@ def recommend_performance_tasks(
     return report
 
 
+def recommend_performance_tasks(
+    database: Database,
+    session_id: str,
+    *,
+    limit: int = 5,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Rank human-reviewed serviceable tasks as optional shadow probes."""
+
+    return _recommend_performance_tasks(
+        database,
+        session_id,
+        limit=limit,
+        now=now,
+        synthetic_lab_release_id=None,
+        prior_task_refs=(),
+    )
+
+
+def inspect_synthetic_lab_tasks(
+    database: Database,
+    session_id: str,
+    task_release_id: str,
+    *,
+    prior_task_refs: tuple[tuple[str, int, str], ...] = (),
+    limit: int = 5,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Rank one exact synthetic quarantine without making it serviceable.
+
+    ``prior_task_refs`` is an explicit, repeatable in-memory laboratory history
+    of exact immutable task identities committed into the report digest. It
+    never writes an attempt or alters the learner's production family/modality
+    history.
+    """
+
+    if (
+        type(task_release_id) is not str
+        or not task_release_id.strip()
+        or len(task_release_id) > 128
+    ):
+        raise ValidationError(
+            "task_release_id must be a non-blank synthetic release ID."
+        )
+    return _recommend_performance_tasks(
+        database,
+        session_id,
+        limit=limit,
+        now=now,
+        synthetic_lab_release_id=task_release_id,
+        prior_task_refs=prior_task_refs,
+    )
+
+
 __all__ = [
     "MAX_RECOMMENDATION_LIMIT",
     "PRODUCTIVE_PROBE_POLICY_VERSION",
+    "inspect_synthetic_lab_tasks",
     "recommend_performance_tasks",
 ]

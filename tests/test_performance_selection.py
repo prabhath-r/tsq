@@ -9,6 +9,7 @@ import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from tsq.corpus import read_and_parse
 from tsq.cli import main
@@ -297,7 +298,14 @@ class ProductiveProbeSelectionTestCase(unittest.TestCase):
         output = io.StringIO()
         error = io.StringIO()
 
-        with redirect_stdout(output), redirect_stderr(error):
+        with (
+            patch(
+                "tsq.performance_selection._now",
+                return_value=START + timedelta(minutes=1),
+            ),
+            redirect_stdout(output),
+            redirect_stderr(error),
+        ):
             exit_code = main(
                 [
                     "--db",
@@ -833,6 +841,64 @@ class ProductiveProbeSelectionTestCase(unittest.TestCase):
                 self.database,
                 self.session["id"],
                 now=START + timedelta(minutes=1),
+            )
+
+    def test_incomplete_human_authority_never_becomes_serviceable(self) -> None:
+        forged_release_id = "ptrel_incomplete_human"
+        with self.database.transaction() as connection:
+            connection.execute(
+                """INSERT INTO performance_task_releases(
+                       id, corpus_release_id, bundle_hash, title,
+                       review_json, created_at, sealed_at
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    forged_release_id,
+                    self.corpus_release_id,
+                    _D0,
+                    "Incomplete human authority",
+                    '{"reviewer_kind":"human"}',
+                    START.isoformat(),
+                    START.isoformat(),
+                ),
+            )
+            connection.execute(
+                """INSERT INTO release_performance_tasks(
+                       release_id, task_id, task_version, task_digest, status
+                   ) VALUES (?, ?, ?, ?, 'pilot')""",
+                (
+                    forged_release_id,
+                    self.objective_task.id,
+                    self.objective_task.version,
+                    self.objective_task.digest,
+                ),
+            )
+            before_events = connection.execute(
+                "SELECT COUNT(*) AS n FROM events"
+            ).fetchone()["n"]
+
+        with self.assertRaisesRegex(
+            ValidationError,
+            "missing|human review|authority",
+        ):
+            recommend_performance_tasks(
+                self.database,
+                self.session["id"],
+                now=START + timedelta(minutes=1),
+            )
+        with self.assertRaises(ValidationError):
+            self.ledger.start_attempt(
+                self.session["id"],
+                self.objective_task.id,
+                task_version=self.objective_task.version,
+                task_release_id=forged_release_id,
+                now=START + timedelta(minutes=1),
+            )
+        with self.database.read() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT COUNT(*) AS n FROM events"
+                ).fetchone()["n"],
+                before_events,
             )
 
     def test_invalid_now_type_fails_with_validation_error(self) -> None:
