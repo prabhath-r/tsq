@@ -68,6 +68,16 @@ _RESPONSE_CREDIBILITY_SQL = credible_response_sql(
 _CREDIBLE_ROUTING_ATTEMPT_SQL = (
     f"AND ({_RESPONSE_CREDIBILITY_SQL})"
 )
+_PARENT_FRAME_ORIGIN_BY_OPEN_REASON = {
+    "cross_objective_diagnostic_focus": "cross_objective_diagnostic",
+    "descend_to_evidence_boundary": "prerequisite_boundary",
+}
+_PARENT_FRAME_RESUME_REASONS = frozenset(
+    {
+        "persistent_prerequisite_verification_resume_parent",
+        "prerequisite_verified_resume_parent",
+    }
+)
 
 
 def _certificate_observability_sql() -> str:
@@ -4684,6 +4694,7 @@ class AdaptiveEngine:
         }
 
         adaptive_path: list[dict[str, Any]] = []
+        parent_frame_origins: list[str] = []
         boundary_concepts: set[str] = set()
         for index, row in enumerate(answered, start=1):
             outcome = json.loads(row["outcome_json"]) if row["outcome_json"] else {}
@@ -4697,6 +4708,36 @@ class AdaptiveEngine:
             transition_reason = outcome.get(
                 "transition_reason", "legacy_transition"
             )
+            parent_resume_origin: str | None = None
+            opened_origin = _PARENT_FRAME_ORIGIN_BY_OPEN_REASON.get(
+                transition_reason
+            )
+            if opened_origin is not None:
+                parent_frame_origins.append(opened_origin)
+            elif transition_reason in _PARENT_FRAME_RESUME_REASONS:
+                parent_resume_origin = (
+                    parent_frame_origins.pop()
+                    if parent_frame_origins
+                    else "unclassified_legacy"
+                )
+
+            # Current outcomes commit the exact post-transition parent stack.
+            # Keep a parallel origin stack for derived reporting while leaving
+            # immutable legacy transition reasons untouched. Older outcomes can
+            # lack remediation_path, so an unmatched historical frame remains
+            # explicitly unclassified instead of being called a prerequisite.
+            outcome_path = outcome.get("remediation_path")
+            if isinstance(outcome_path, list):
+                expected_depth = len(outcome_path)
+                if len(parent_frame_origins) > expected_depth:
+                    del parent_frame_origins[expected_depth:]
+                elif len(parent_frame_origins) < expected_depth:
+                    parent_frame_origins.extend(
+                        ["unclassified_legacy"]
+                        * (expected_depth - len(parent_frame_origins))
+                    )
+            elif after_focus is None:
+                parent_frame_origins.clear()
             selected_misconception_id = row["selected_misconception_id"]
             adaptive_path.append(
                 {
@@ -4762,11 +4803,17 @@ class AdaptiveEngine:
                         else None
                     ),
                     "transition_reason": transition_reason,
+                    "parent_resume_origin": parent_resume_origin,
                     "boundary_decision": boundary_decision,
                 }
             )
         transition_counts = Counter(
             step["transition_reason"] for step in adaptive_path
+        )
+        parent_resumption_origins = Counter(
+            step["parent_resume_origin"]
+            for step in adaptive_path
+            if step["parent_resume_origin"] is not None
         )
         current_focused_run = 0
         maximum_focused_run = 0
@@ -4787,8 +4834,17 @@ class AdaptiveEngine:
             "prerequisite_descents": transition_counts[
                 "descend_to_evidence_boundary"
             ],
-            "prerequisite_resumptions": transition_counts[
-                "prerequisite_verified_resume_parent"
+            "parent_resumptions": sum(
+                parent_resumption_origins.values()
+            ),
+            "prerequisite_resumptions": parent_resumption_origins[
+                "prerequisite_boundary"
+            ],
+            "cross_objective_parent_resumptions": (
+                parent_resumption_origins["cross_objective_diagnostic"]
+            ),
+            "unclassified_parent_resumptions": parent_resumption_origins[
+                "unclassified_legacy"
             ],
             "prevented_reopenings": transition_counts[
                 "verified_prerequisite_not_reopened"

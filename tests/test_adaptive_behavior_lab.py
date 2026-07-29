@@ -330,6 +330,18 @@ class AdaptiveBehaviorLabTests(unittest.TestCase):
             self.assertIn("objective_changes", compact)
             self.assertIn("objective_performance", compact)
             self.assertIn("family_evidence_definitions", compact)
+            self.assertEqual(
+                compact["selected_answers"],
+                persisted["selected_answers"],
+            )
+            self.assertEqual(
+                compact["selected_incorrect"],
+                persisted["selected_incorrect"],
+            )
+            self.assertEqual(
+                compact["selected_accuracy"],
+                persisted["selected_accuracy"],
+            )
             self.assertTrue(compact["objective_changes"])
             self.assertTrue(compact["objective_performance"])
             self.assertFalse(violations)
