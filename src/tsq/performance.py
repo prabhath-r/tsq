@@ -504,7 +504,7 @@ class ImportedEvaluation:
 
     def __post_init__(self) -> None:
         if type(self.criteria) is not tuple or any(
-            not isinstance(item, ImportedCriterionResult) for item in self.criteria
+            type(item) is not ImportedCriterionResult for item in self.criteria
         ):
             raise ScoringProtocolError(
                 "ImportedEvaluation.criteria must be a tuple of "
@@ -1252,8 +1252,14 @@ def _normalize(
 ) -> NormalizedScoringResult:
     if not isinstance(request, ScoringRequest):
         raise ScoringProtocolError("request must be a ScoringRequest.")
-    if not isinstance(imported, ImportedEvaluation):
-        raise ScoringProtocolError("imported must be an ImportedEvaluation.")
+    if type(imported) is not ImportedEvaluation or any(
+        type(item) is not ImportedCriterionResult
+        for item in imported.criteria
+    ):
+        raise ScoringProtocolError(
+            "imported must be an exact ImportedEvaluation containing exact "
+            "ImportedCriterionResult values."
+        )
     actual_ids = tuple(item.criterion_id for item in imported.criteria)
     if actual_ids != request.criterion_ids:
         missing = sorted(set(request.criterion_ids) - set(actual_ids))

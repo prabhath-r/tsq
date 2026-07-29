@@ -28,6 +28,7 @@ from .evidence import (
     reduce_evidence,
 )
 from .performance import NormalizedScoringResult, ScoringProtocolError
+from .performance_ledger import require_performance_projection_consistency
 from .store import Database
 
 
@@ -507,6 +508,10 @@ def productive_shadow_summary(
             database.require_learner_evidence_safe(
                 learner_id,
                 connection,
+            )
+            require_performance_projection_consistency(
+                connection,
+                learner_id=learner_id,
             )
         return summary
 
@@ -1031,5 +1036,9 @@ def productive_shadow_summary(
         database.require_learner_evidence_safe(
             learner_id,
             connection,
+        )
+        require_performance_projection_consistency(
+            connection,
+            learner_id=learner_id,
         )
     return summary

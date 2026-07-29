@@ -378,8 +378,8 @@ class ArtifactRunAdversarialIntegrityTests(unittest.TestCase):
             lambda: fixture.ledger.inspect_artifact_run(run["claim_id"]),
         ):
             with self.assertRaisesRegex(
-                ConflictError,
-                "mismatched generated check action",
+                ValidationError,
+                "performance actions differ",
             ):
                 operation()
 
@@ -404,12 +404,16 @@ class ArtifactRunAdversarialIntegrityTests(unittest.TestCase):
                     run["check_action"]["id"],
                 ),
             )
-        fixture.ledger.record_action(
-            attempt["id"],
-            ActionKind.SUBMITTED.value,
-            {"submission_digest": captured.sha256},
-            now=ledger_fixture.BASE + timedelta(minutes=4),
-        )
+        with self.assertRaisesRegex(
+            ValidationError,
+            "performance actions differ",
+        ):
+            fixture.ledger.record_action(
+                attempt["id"],
+                ActionKind.SUBMITTED.value,
+                {"submission_digest": captured.sha256},
+                now=ledger_fixture.BASE + timedelta(minutes=4),
+            )
         observation = ImportedEvaluation(
             criteria=(
                 ImportedCriterionResult(
@@ -424,7 +428,7 @@ class ArtifactRunAdversarialIntegrityTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             ValidationError,
-            "terminal runner receipt",
+            "performance actions differ",
         ):
             fixture.ledger.score_attempt(
                 attempt["id"],
@@ -484,6 +488,7 @@ class ArtifactRunAdversarialIntegrityTests(unittest.TestCase):
                         command_hash=_command_hash(
                             {"operation": "adversarial_late_boundary"}
                         ),
+                        projection_validated=True,
                     )
                 return event
 
