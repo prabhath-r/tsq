@@ -20,7 +20,9 @@ from tsq.store import Database
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
-GOLDEN = ROOT / "tests" / "fixtures" / "action_replay_expected.json"
+EXPECTED_REPLAY = (
+    ROOT / "tests" / "fixtures" / "action_replay_expected.json"
+)
 START = datetime(2101, 6, 7, 8, 0, tzinfo=timezone.utc)
 DIGEST_A = "1" * 64
 DIGEST_B = "2" * 64
@@ -200,7 +202,7 @@ class ActionProjectionReplayTestCase(unittest.TestCase):
             report["reconstructed_action_projection_hash"],
         )
         self.assertEqual(self.action_snapshot(self.database), before)
-        expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+        expected = json.loads(EXPECTED_REPLAY.read_text(encoding="utf-8"))
         self.assertEqual(golden_action_projection(report), expected)
 
     def test_check_detects_projection_corruption_and_copy_rebuild_repairs_it(self) -> None:

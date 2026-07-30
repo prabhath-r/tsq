@@ -345,8 +345,8 @@ class ArtifactRunAdversarialIntegrityTests(unittest.TestCase):
                     ),
                 ):
                     with self.assertRaisesRegex(
-                        ConflictError,
-                        "mismatched terminal receipt",
+                        ValidationError,
+                        "artifact run receipts differ",
                     ):
                         operation()
 

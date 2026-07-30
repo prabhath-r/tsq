@@ -47,7 +47,9 @@ LEGACY_UNATTESTED_COHORT_SHA256 = (
 LEGACY_UNATTESTED_MANIFEST_SCHEMA = (
     "tsq-legacy-unattested-question-manifest-v1"
 )
-LEGACY_UNATTESTED_MANIFEST_RESOURCE = "legacy_unattested_question_manifest.json"
+LEGACY_UNATTESTED_MANIFEST_RESOURCE = (
+    "legacy_unattested_question_manifest.json"
+)
 
 
 @dataclass(frozen=True, slots=True)

@@ -30,8 +30,10 @@ from tsq.store import (
     _expected_v17_schema_contract,
 )
 
-from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
-from tests.test_migration_event_lifecycle import durable_database_fingerprint
+from tests.schema_upgrade_helpers import (
+    durable_database_fingerprint,
+    restore_pre_shadow_schema,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -252,7 +254,7 @@ class PolicyShadowSchemaTests(unittest.TestCase):
             before_data = historical_data_snapshot(database)
             before_events = event_snapshot(database)
 
-            self.assertEqual(SCHEMA_VERSION, 20)
+            self.assertEqual(SCHEMA_VERSION, 21)
             self.assertIsNotNone(decision_id)
             self.assertEqual(
                 schema_contract(database),
@@ -286,18 +288,18 @@ class PolicyShadowSchemaTests(unittest.TestCase):
                              AND tbl_name='policy_shadow_evaluations'"""
                     ).fetchall()
                 }
-            self.assertEqual(version, "20")
+            self.assertEqual(version, "21")
             self.assertEqual(shadow_count, 0)
             self.assertEqual(trigger_names, POLICY_SHADOW_TRIGGERS)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
 
-    def test_reopening_current_v20_is_semantically_idempotent(
+    def test_reopening_current_v21_is_semantically_idempotent(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "reopen-v20.db"
+            path = Path(directory) / "reopen-v21.db"
             database, _decision_id = build_exact_v17(path)
             database.initialize()
             before_data = historical_data_snapshot(database)

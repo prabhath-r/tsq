@@ -108,7 +108,7 @@ from .versions import (
 )
 
 
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX = (
     "performance-score-claim:v1:"
 )
@@ -1013,6 +1013,186 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE INDEX IF NOT EXISTS idx_events_stream ON events(stream_id, stream_version);
 CREATE INDEX IF NOT EXISTS idx_events_learner ON events(learner_id, recorded_at);
+CREATE INDEX IF NOT EXISTS idx_events_correlation_stream
+ON events(correlation_id, stream_id, stream_version)
+WHERE event_type IN (
+    'PerformanceTaskStarted',
+    'PerformanceActionRecorded',
+    'PerformanceArtifactRunClaimed',
+    'PerformanceArtifactRunObserved'
+);
+CREATE INDEX IF NOT EXISTS idx_events_causation_stream
+ON events(causation_id, stream_id, stream_version)
+WHERE event_type IN (
+    'PerformanceTaskStarted',
+    'PerformanceActionRecorded',
+    'PerformanceArtifactRunClaimed',
+    'PerformanceArtifactRunObserved'
+);
+CREATE INDEX IF NOT EXISTS idx_events_session_stream
+ON events(session_id, stream_version);
+CREATE INDEX IF NOT EXISTS idx_events_stream_type_version
+ON events(stream_id, event_type, stream_version);
+CREATE INDEX IF NOT EXISTS idx_events_performance_attempt_payload
+ON events(
+    json_extract(payload_json, '$.attempt_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type IN (
+    'PerformanceTaskStarted',
+    'PerformanceActionRecorded',
+    'PerformanceArtifactRunClaimed',
+    'PerformanceArtifactRunObserved'
+);
+CREATE INDEX IF NOT EXISTS idx_events_action_trace_stream
+ON events(
+    json_extract(payload_json, '$.action.trace_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceActionRecorded';
+CREATE INDEX IF NOT EXISTS idx_events_action_id_stream
+ON events(
+    json_extract(payload_json, '$.action.id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceActionRecorded';
+CREATE INDEX IF NOT EXISTS idx_events_artifact_action_stream
+ON events(
+    json_extract(payload_json, '$.artifact_action_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunClaimed';
+CREATE INDEX IF NOT EXISTS idx_events_claim_caller_key_stream
+ON events(
+    json_extract(payload_json, '$.caller_idempotency_key'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunClaimed';
+CREATE INDEX IF NOT EXISTS idx_events_claim_command_hash_stream
+ON events(
+    json_extract(payload_json, '$.command_hash'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunClaimed';
+CREATE INDEX IF NOT EXISTS idx_events_claim_request_run_stream
+ON events(
+    json_extract(payload_json, '$.request.run_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunClaimed';
+CREATE INDEX IF NOT EXISTS idx_events_claim_request_digest_stream
+ON events(
+    json_extract(payload_json, '$.request_digest'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunClaimed';
+CREATE INDEX IF NOT EXISTS idx_events_check_action_stream
+ON events(
+    json_extract(payload_json, '$.check_action_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_claim_payload_stream
+ON events(
+    json_extract(payload_json, '$.claim_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type IN (
+    'PerformanceArtifactRunClaimed',
+    'PerformanceArtifactRunObserved'
+);
+CREATE INDEX IF NOT EXISTS idx_events_observed_request_run_stream
+ON events(
+    json_extract(payload_json, '$.result.request.run_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_observed_request_digest_stream
+ON events(
+    json_extract(payload_json, '$.result.request_digest'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_observed_result_digest_stream
+ON events(
+    json_extract(payload_json, '$.result_digest'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_receipt_attempt_stream
+ON events(
+    json_extract(payload_json, '$.receipt.attempt_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_receipt_claim_stream
+ON events(
+    json_extract(payload_json, '$.receipt.claim_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_receipt_artifact_action_stream
+ON events(
+    json_extract(payload_json, '$.receipt.artifact_action_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_receipt_id_stream
+ON events(
+    json_extract(payload_json, '$.receipt_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_receipt_digest_stream
+ON events(
+    json_extract(payload_json, '$.receipt_digest'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_receipt_request_digest_stream
+ON events(
+    json_extract(payload_json, '$.receipt.request_digest'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_receipt_result_digest_stream
+ON events(
+    json_extract(payload_json, '$.receipt.result_digest'),
+    stream_id,
+    stream_version
+)
+WHERE event_type = 'PerformanceArtifactRunObserved';
+CREATE INDEX IF NOT EXISTS idx_events_payload_session_stream
+ON events(
+    json_extract(payload_json, '$.session_id'),
+    stream_id,
+    stream_version
+)
+WHERE event_type IN (
+    'PerformanceTaskStarted',
+    'PerformanceActionRecorded',
+    'PerformanceArtifactRunClaimed',
+    'PerformanceArtifactRunObserved'
+);
 
 CREATE TABLE IF NOT EXISTS stream_heads (
     stream_id TEXT PRIMARY KEY,
@@ -3759,6 +3939,37 @@ def _capture_current_schema_contract(
     )
 
 
+_V21_EVENT_INDEX_NAMES = frozenset(
+    {
+        "idx_events_causation_stream",
+        "idx_events_correlation_stream",
+        "idx_events_session_stream",
+        "idx_events_stream_type_version",
+        "idx_events_action_id_stream",
+        "idx_events_action_trace_stream",
+        "idx_events_artifact_action_stream",
+        "idx_events_claim_caller_key_stream",
+        "idx_events_claim_command_hash_stream",
+        "idx_events_claim_request_digest_stream",
+        "idx_events_claim_request_run_stream",
+        "idx_events_check_action_stream",
+        "idx_events_claim_payload_stream",
+        "idx_events_observed_request_digest_stream",
+        "idx_events_observed_request_run_stream",
+        "idx_events_observed_result_digest_stream",
+        "idx_events_performance_attempt_payload",
+        "idx_events_payload_session_stream",
+        "idx_events_receipt_artifact_action_stream",
+        "idx_events_receipt_attempt_stream",
+        "idx_events_receipt_claim_stream",
+        "idx_events_receipt_digest_stream",
+        "idx_events_receipt_id_stream",
+        "idx_events_receipt_request_digest_stream",
+        "idx_events_receipt_result_digest_stream",
+    }
+)
+
+
 @lru_cache(maxsize=1)
 def _expected_current_schema_contract() -> _CurrentSchemaContract:
     """Build the authoritative contract once from a fresh in-memory schema."""
@@ -3780,6 +3991,34 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         reference._install_v8_learning_action_triggers(connection)
         reference._install_release_snapshot_triggers(connection)
         reference._install_corpus_registry_triggers(connection)
+        connection.commit()
+        return _capture_current_schema_contract(connection)
+    finally:
+        connection.close()
+
+
+@lru_cache(maxsize=1)
+def _expected_v20_schema_contract() -> _CurrentSchemaContract:
+    """Return the one exact v20 structure accepted as a migration source."""
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    reference = Database(":memory:")
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(DDL)
+        reference._migrate_v11_to_v12(connection)
+        reference._migrate_v12_to_v13(connection)
+        reference._migrate_v13_to_v14(connection)
+        reference._migrate_v14_to_v15(connection)
+        reference._install_current_performance_scoring_triggers(connection)
+        reference._install_v5_indexes(connection)
+        reference._install_v6_authoring_triggers(connection)
+        reference._install_v4_attempt_triggers(connection)
+        reference._install_v8_learning_action_triggers(connection)
+        reference._install_release_snapshot_triggers(connection)
+        reference._install_corpus_registry_triggers(connection)
+        reference._downgrade_v21_contract_to_v20(connection)
         connection.commit()
         return _capture_current_schema_contract(connection)
     finally:
@@ -4160,8 +4399,16 @@ class Database:
     def read(self) -> Iterator[sqlite3.Connection]:
         connection = self.connect()
         try:
+            # A read operation commonly validates immutable events and then
+            # consumes several dependent projections. Pin one deferred
+            # snapshot across that complete context so a concurrent commit
+            # cannot create a validate/use split or evade a fixed-point
+            # identity lookup after its key has already been queried.
+            connection.execute("BEGIN")
             yield connection
         finally:
+            if connection.in_transaction:
+                connection.rollback()
             connection.close()
 
     def validate_current_schema(
@@ -4440,7 +4687,16 @@ class Database:
                             )
                             self._enforce_historical_generated_safety()
                             return
-                        if existing_version == 19:
+                        if existing_version == 20:
+                            actual_v20 = _capture_current_schema_contract(
+                                existing_connection
+                            )
+                            if actual_v20 != _expected_v20_schema_contract():
+                                raise ConflictError(
+                                    "Schema v20 structure is not the exact "
+                                    "supported v21 migration source."
+                                )
+                        elif existing_version == 19:
                             actual_v19 = _capture_current_schema_contract(
                                 existing_connection
                             )
@@ -4583,7 +4839,16 @@ class Database:
                 raise ConflictError(
                     f"Database schema is {current_version}; engine expects at most {SCHEMA_VERSION}."
                 )
-            if current_version == 19:
+            if current_version == 20:
+                if (
+                    _capture_current_schema_contract(connection)
+                    != _expected_v20_schema_contract()
+                ):
+                    raise ConflictError(
+                        "Schema v20 structure is not the exact supported "
+                        "v21 migration source."
+                    )
+            elif current_version == 19:
                 if (
                     _capture_current_schema_contract(connection)
                     != _expected_v19_schema_contract()
@@ -4723,6 +4988,12 @@ class Database:
             if current_version < 20:
                 self._migrate_v19_to_v20(connection)
                 current_version = 20
+            # v21 adds only deterministic indexes for attempt-attributed and
+            # session-scoped event replay. Existing history and projections
+            # are indexed in place; no semantic row or event is synthesized.
+            if current_version < 21:
+                self._migrate_v20_to_v21(connection)
+                current_version = 21
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -6579,6 +6850,23 @@ class Database:
         )
 
     @staticmethod
+    def _downgrade_v21_contract_to_v20(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Derive the exact v20 event-index contract for migration preflight.
+
+        This helper is used only by reference and migration fixtures. Schema
+        v21 adds no rows or event semantics; its entire durable difference is
+        the event lookup indexes.
+        """
+
+        for index_name in sorted(_V21_EVENT_INDEX_NAMES):
+            connection.execute(
+                "DROP INDEX IF EXISTS "
+                + _quote_sqlite_identifier(index_name)
+            )
+
+    @staticmethod
     def _drop_empty_v20_artifact_run_tables(
         connection: sqlite3.Connection,
     ) -> None:
@@ -6642,6 +6930,7 @@ class Database:
         triggers before removing the empty artifact-run tables.
         """
 
+        cls._downgrade_v21_contract_to_v20(connection)
         claim_namespace_fragment = """
                 SELECT CASE WHEN NEW.idempotency_key IS NOT NULL AND (
                     NEW.idempotency_key GLOB
@@ -7294,6 +7583,57 @@ class Database:
             raise ConflictError(
                 "Schema v20 artifact-run guards were not installed: "
                 + ", ".join(sorted(missing))
+            )
+
+    @staticmethod
+    def _migrate_v20_to_v21(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Validate the exact event indexes installed by v21.
+
+        DDL creates and populates these indexes inside the migration
+        transaction. No event or mutable projection row is rewritten.
+        """
+
+        actual_events = next(
+            (
+                table
+                for table in _capture_current_schema_contract(
+                    connection
+                ).tables
+                if table.name == "events"
+            ),
+            None,
+        )
+        expected_events = next(
+            (
+                table
+                for table in _expected_current_schema_contract().tables
+                if table.name == "events"
+            ),
+            None,
+        )
+        if actual_events is None or expected_events is None:
+            raise ConflictError(
+                "Schema v21 event table is missing from its schema contract."
+            )
+        actual_indexes = {
+            index
+            for index in actual_events.indexes
+            if index.name in _V21_EVENT_INDEX_NAMES
+        }
+        expected_indexes = {
+            index
+            for index in expected_events.indexes
+            if index.name in _V21_EVENT_INDEX_NAMES
+        }
+        if (
+            {index.name for index in actual_indexes}
+            != _V21_EVENT_INDEX_NAMES
+            or actual_indexes != expected_indexes
+        ):
+            raise ConflictError(
+                "Schema v21 event replay indexes were not installed exactly."
             )
 
     @staticmethod

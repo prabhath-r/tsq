@@ -31,7 +31,7 @@ from tsq.objective_posterior import (
 from tsq.replay import ProjectionReplay
 from tsq.store import Database, SCHEMA_VERSION
 
-from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,7 +152,7 @@ class ObjectiveGridStoreTestCase(unittest.TestCase):
             ).fetchone()
 
         self.assertEqual(schema_version, str(SCHEMA_VERSION))
-        self.assertEqual(SCHEMA_VERSION, 20)
+        self.assertEqual(SCHEMA_VERSION, 21)
         self.assertEqual(row["posterior_schema_version"], OBJECTIVE_POSTERIOR_SCHEMA_VERSION)
         self.assertEqual(row["algorithm"], OBJECTIVE_POSTERIOR_ALGORITHM)
         self.assertEqual(row["grid_id"], OBJECTIVE_POSTERIOR_GRID_ID)

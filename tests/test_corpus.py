@@ -178,7 +178,7 @@ class CorpusTestCase(unittest.TestCase):
                 f"{pair[0]}/{pair[1]}",
             )
 
-    def test_seed_corpus_has_no_blocking_deterministic_quality_issues(self) -> None:
+    def test_curriculum_has_no_blocking_deterministic_quality_issues(self) -> None:
         errors = [issue for issue in audit_corpus(self.questions) if issue.severity == "error"]
         self.assertEqual(errors, [])
         self.assertGreaterEqual(len(self.questions), 20)

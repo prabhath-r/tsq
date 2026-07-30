@@ -11,7 +11,7 @@ from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.store import SCHEMA_VERSION, Database
 
-from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -101,7 +101,7 @@ class ProductiveLedgerUpgradeTests(unittest.TestCase):
             before_learner = learner_fingerprint(database)
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 20)
+            self.assertEqual(SCHEMA_VERSION, 21)
             self.assertEqual(event_fingerprint(database), before_events)
             self.assertEqual(learner_fingerprint(database), before_learner)
             with database.read() as connection:

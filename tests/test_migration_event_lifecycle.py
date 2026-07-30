@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 import tempfile
 import unittest
@@ -21,12 +20,15 @@ from tsq.store import (
     _expected_v16_schema_contract,
 )
 
+from tests.schema_upgrade_helpers import (
+    durable_database_fingerprint,
+    rehash_event_streams,
+    restore_pre_shadow_schema,
+)
 from tests.test_scoring_claim_history_upgrade import (
     START as SCORING_START,
     _build_two_claim_database,
     _downgrade_exact_v15,
-    restore_pre_shadow_schema,
-    rehash_event_streams,
 )
 
 
@@ -50,26 +52,6 @@ V17_SESSION_CLAUSE = """AND (
 V16_SESSION_CLAUSE = (
     "AND claim_event.session_id = attempt.session_id"
 )
-
-
-def durable_database_fingerprint(path: Path) -> tuple[tuple[str, int, str], ...]:
-    """Fingerprint every non-empty durable SQLite file for one database."""
-
-    result: list[tuple[str, int, str]] = []
-    # SQLite may create a transient shared-memory coordination file while
-    # opening a WAL database read-only. It is not durable database content.
-    for suffix in ("", "-wal", "-journal"):
-        candidate = Path(f"{path}{suffix}")
-        if candidate.exists() and candidate.stat().st_size:
-            material = candidate.read_bytes()
-            result.append(
-                (
-                    suffix or "main",
-                    len(material),
-                    hashlib.sha256(material).hexdigest(),
-                )
-            )
-    return tuple(result)
 
 
 def data_snapshot(
@@ -382,7 +364,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
             before_events = event_snapshot(database)
             before_schema = schema_contract(database)
 
-            self.assertEqual(SCHEMA_VERSION, 20)
+            self.assertEqual(SCHEMA_VERSION, 21)
             self.assertEqual(
                 before_schema,
                 _expected_v16_schema_contract(),
@@ -418,7 +400,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "20")
+            self.assertEqual(version, "21")
             upgraded_trigger = claim_trigger_sql(database)
             self.assertIn(
                 "NEW.claim_schema_version = 1",
@@ -719,7 +701,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "20")
+            self.assertEqual(version, "21")
 
     def test_scoring_claim_fk_deferrability_is_part_of_schema_contract(
         self,
@@ -758,13 +740,13 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 "DEFERRABLE INITIALLY DEFERRED",
                 row["sql"].upper(),
             )
-            self.assertEqual(version, "20")
+            self.assertEqual(version, "21")
 
-    def test_current_v20_fk_corruption_fails_before_safety_writes(
+    def test_current_v21_fk_corruption_fails_before_safety_writes(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "current-v20-fk-corrupt.db"
+            path = Path(directory) / "current-v21-fk-corrupt.db"
             database = Database(path)
             database.initialize()
             with closing(sqlite3.connect(path)) as connection:
@@ -819,7 +801,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
             self.assertEqual(after_violations, before_violations)
-            self.assertEqual(version, "20")
+            self.assertEqual(version, "21")
 
 
 if __name__ == "__main__":

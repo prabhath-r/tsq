@@ -45,11 +45,13 @@ from tests.test_performance_ledger import (
     CORPUS,
     declared_task_release_fixture,
 )
-from tests.test_scoring_claim_history_upgrade import (
-    _build_two_claim_database,
+from tests.schema_upgrade_helpers import (
+    durable_database_fingerprint,
     rehash_event_streams,
 )
-from tests.test_migration_event_lifecycle import durable_database_fingerprint
+from tests.test_scoring_claim_history_upgrade import (
+    _build_two_claim_database,
+)
 
 
 START = datetime(2110, 7, 1, 9, 0, tzinfo=timezone.utc)
@@ -719,7 +721,7 @@ class ArtifactRunUpgradeTests(unittest.TestCase):
                     connection.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()["value"],
-                    "20",
+                    "21",
                 )
                 self.assertEqual(
                     tuple(

@@ -50,7 +50,9 @@ from tsq.store import SCHEMA_VERSION, Database
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
-GOLDEN = ROOT / "tests" / "fixtures" / "performance_replay_expected.json"
+EXPECTED_REPLAY = (
+    ROOT / "tests" / "fixtures" / "performance_replay_expected.json"
+)
 START = datetime(2112, 8, 9, 10, 0, tzinfo=timezone.utc)
 DIGEST_A = "4" * 64
 DIGEST_B = "5" * 64
@@ -646,7 +648,7 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         report = ProjectionReplay(self.database).check("performance-replay")
 
         self.assertTrue(report["ok"], report["errors"])
-        self.assertEqual(SCHEMA_VERSION, 20)
+        self.assertEqual(SCHEMA_VERSION, 21)
         self.assertEqual(TASK_SCHEMA_VERSION, 3)
         self.assertEqual(EVIDENCE_BUNDLE_SCHEMA_VERSION, 2)
         self.assertEqual(NORMALIZED_SCORING_RESULT_SCHEMA_VERSION, 1)
@@ -684,7 +686,7 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
             {pinning["active_release_id"]},
         )
         self.assertEqual(performance_source_snapshot(self.database), before)
-        expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+        expected = json.loads(EXPECTED_REPLAY.read_text(encoding="utf-8"))
         actual = golden_performance_projection(report, self.database)
         reconciliation_rows = actual["projection_rows"][
             "scoring_reconciliations"
@@ -764,7 +766,7 @@ class PerformanceProjectionReplayGoldenTestCase(unittest.TestCase):
         self.assertTrue(rebuilt.verify_integrity()["ok"])
         replayed = ProjectionReplay(rebuilt).check("performance-replay")
         self.assertTrue(replayed["ok"], replayed["errors"])
-        expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+        expected = json.loads(EXPECTED_REPLAY.read_text(encoding="utf-8"))
         self.assertEqual(
             golden_performance_projection(replayed, rebuilt), expected
         )
