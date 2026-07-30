@@ -1140,9 +1140,9 @@ def build_policy_shadow_report(
         reader = Database(database.path, read_only=True)
     try:
         with reader.read() as connection:
-            # Pin one read snapshot so a concurrent answer or selection cannot
-            # make the event, decision, and projection queries disagree.
-            connection.execute("BEGIN")
+            # Database.read() pins one snapshot so a concurrent answer or
+            # selection cannot make event, decision, and projection queries
+            # disagree.
             _validate_scope(
                 connection,
                 session_id=session_id,

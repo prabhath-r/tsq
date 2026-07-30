@@ -19,7 +19,7 @@ from tsq.errors import ConflictError, ExhaustedError, ValidationError
 from tsq.models import SessionPhase
 from tsq.store import SCHEMA_VERSION, Database
 
-from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -279,7 +279,7 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 20)
+        self.assertEqual(SCHEMA_VERSION, 21)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:

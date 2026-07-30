@@ -1,4 +1,4 @@
-.PHONY: audit behavior-audit init corpus-check start study test
+.PHONY: audit behavior-audit corpus-check init start study test
 
 PYTHON := python3
 DB ?= tsq.db

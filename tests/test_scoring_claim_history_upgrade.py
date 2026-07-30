@@ -14,7 +14,7 @@ from pathlib import Path
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError, ValidationError
-from tsq.evidence import ActionPhase, EvaluationStatus, canonical_json
+from tsq.evidence import ActionPhase, EvaluationStatus
 from tsq.performance import (
     ImportedCriterionResult,
     ImportedEvaluation,
@@ -29,9 +29,12 @@ from tsq.performance_ledger import (
 from tsq.store import (
     SCHEMA_VERSION,
     Database,
-    _content_hash,
     performance_scoring_claim_event_key,
-    performance_scoring_claim_payload,
+)
+
+from tests.schema_upgrade_helpers import (
+    rehash_event_streams,
+    restore_pre_shadow_schema,
 )
 
 
@@ -41,252 +44,6 @@ TASK_RELEASE = ROOT / "tests" / "fixtures" / "reviewed_productive_task_release.j
 TASK_RELEASE_CORPUS_PLACEHOLDER = "rel_fixture_requires_explicit_pinning"
 START = datetime(2116, 4, 5, 10, 0, tzinfo=timezone.utc)
 SUBMISSION_DIGEST = "9" * 64
-
-
-def restore_pre_reconciliation_schema(
-    connection: sqlite3.Connection,
-) -> None:
-    """Restore the exact historical v18 scoring boundary for fixtures.
-
-    Legacy migration tests start with a current database for convenience.
-    Schema v19 widened scoring claims and added reconciliation state, so the
-    fixture must remove that entire prospective boundary before reconstructing
-    v17 or earlier.  A fixture with reconciliation history cannot represent a
-    historical database and is rejected rather than silently erasing events.
-    """
-
-    artifact_run_table = connection.execute(
-        """SELECT 1 FROM sqlite_master
-           WHERE type='table'
-             AND name='performance_artifact_run_claims'"""
-    ).fetchone()
-    if artifact_run_table is not None:
-        Database._downgrade_v20_contract_to_v19(connection)
-
-    reconciliation_table = connection.execute(
-        """SELECT 1 FROM sqlite_master
-           WHERE type='table'
-             AND name='performance_scoring_reconciliations'"""
-    ).fetchone()
-    if reconciliation_table is None:
-        return
-    if connection.execute(
-        "SELECT 1 FROM performance_scoring_reconciliations LIMIT 1"
-    ).fetchone() is not None:
-        raise AssertionError(
-            "Historical fixture cannot discard scoring reconciliation rows."
-        )
-    if connection.execute(
-        """SELECT 1 FROM events
-           WHERE event_type='PerformanceScoringReconciled'
-           LIMIT 1"""
-    ).fetchone() is not None:
-        raise AssertionError(
-            "Historical fixture cannot discard scoring reconciliation events."
-        )
-
-    claims = [
-        dict(row)
-        for row in connection.execute(
-            "SELECT * FROM performance_scoring_claims ORDER BY id"
-        ).fetchall()
-    ]
-    event_guard = connection.execute(
-        """SELECT sql FROM sqlite_master
-           WHERE type='trigger' AND name='events_no_update'"""
-    ).fetchone()
-    if event_guard is None or not event_guard["sql"]:
-        raise AssertionError(
-            "Historical fixture lacks the immutable event update guard."
-        )
-    connection.execute('DROP TRIGGER "events_no_update"')
-    for trigger_name in (
-        "performance_scoring_claims_validate_insert",
-        "performance_scoring_claims_no_update",
-        "performance_scoring_claims_no_delete",
-        "events_respect_performance_scoring_claim",
-        "performance_scoring_reconciliations_validate_insert",
-        "performance_scoring_reconciliations_no_update",
-        "performance_scoring_reconciliations_no_delete",
-        "events_respect_performance_scoring_reconciliation",
-        "task_evaluations_validate_scoring_claim",
-        "task_evaluations_validate_insert",
-        "shadow_evidence_bundles_validate_insert",
-    ):
-        connection.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
-
-    for claim in claims:
-        claim_event = connection.execute(
-            "SELECT event_type FROM events WHERE event_id=?",
-            (claim["event_id"],),
-        ).fetchone()
-        if claim_event is None or claim_event["event_type"] not in {
-            "PerformanceScoringClaimed",
-            "PerformanceScoringClaimMigrated",
-        }:
-            raise AssertionError(
-                f"Historical claim {claim['id']} lacks its admission event."
-            )
-        migrated = (
-            claim_event["event_type"] == "PerformanceScoringClaimMigrated"
-        )
-        payload = performance_scoring_claim_payload(
-            claim_id=claim["id"],
-            caller_idempotency_key=claim["idempotency_key"],
-            attempt_id=claim["attempt_id"],
-            evaluation_id=claim["evaluation_id"],
-            through_sequence=claim["through_sequence"],
-            provider_id=claim["provider_id"],
-            provider_version=claim["provider_version"],
-            action_trace_digest_value=claim["action_trace_digest"],
-            command_hash=claim["command_hash"],
-            claimed_at=claim["claimed_at"],
-        )
-        connection.execute(
-            """UPDATE events
-               SET schema_version=1, payload_json=?, metadata_json=?
-               WHERE event_id=?""",
-            (
-                canonical_json(payload),
-                canonical_json(
-                    {
-                        "claim_schema_version": 1,
-                        "admission_mode": (
-                            "legacy_projection_migration"
-                            if migrated
-                            else "pre_callback"
-                        ),
-                        "source_schema_version": 15 if migrated else None,
-                        "shadow_only": True,
-                    }
-                ),
-                claim["event_id"],
-            ),
-        )
-    rehash_event_streams(connection)
-
-    connection.execute("DROP TABLE performance_scoring_reconciliations")
-    connection.execute(
-        """ALTER TABLE performance_scoring_claims
-           RENAME TO _schema_v19_scoring_claims"""
-    )
-    Database._create_v16_scoring_claim_table(connection)
-    connection.executemany(
-        """INSERT INTO performance_scoring_claims(
-               id, event_id, idempotency_key, attempt_id, evaluation_id,
-               through_sequence, provider_id, provider_version,
-               action_trace_digest, command_hash, claimed_at
-           ) VALUES (
-               :id, :event_id, :idempotency_key, :attempt_id,
-               :evaluation_id, :through_sequence, :provider_id,
-               :provider_version, :action_trace_digest, :command_hash,
-               :claimed_at
-           )""",
-        claims,
-    )
-    connection.execute("DROP TABLE _schema_v19_scoring_claims")
-    Database._install_v18_performance_scoring_triggers(connection)
-    Database._install_v18_shadow_evidence_bundle_trigger(connection)
-    connection.execute(event_guard["sql"])
-
-
-def restore_pre_shadow_schema(connection: sqlite3.Connection) -> None:
-    """Strip the prospective v18 shadow boundary from a legacy fixture."""
-
-    restore_pre_reconciliation_schema(connection)
-    table = connection.execute(
-        """SELECT 1 FROM sqlite_master
-           WHERE type='table' AND name='policy_shadow_evaluations'"""
-    ).fetchone()
-    if table is None:
-        return
-
-    shadow_events = connection.execute(
-        """SELECT event_id, stream_id FROM events
-           WHERE event_type='PolicyShadowEvaluated'
-           ORDER BY stream_id, stream_version"""
-    ).fetchall()
-    v18_policy_events = connection.execute(
-        """SELECT event_id, stream_id, metadata_json FROM events
-           WHERE json_extract(
-                 metadata_json, '$.policy_version'
-             )='recursive-evidence-graph-v18'
-           ORDER BY stream_id, stream_version"""
-    ).fetchall()
-    event_guards = []
-    if shadow_events or v18_policy_events:
-        event_guards = connection.execute(
-            """SELECT name, sql FROM sqlite_master
-               WHERE type='trigger'
-                 AND name IN ('events_no_update', 'events_no_delete')
-               ORDER BY name"""
-        ).fetchall()
-        for guard in event_guards:
-            connection.execute(f'DROP TRIGGER "{guard["name"]}"')
-
-    for trigger_name in (
-        "policy_shadow_evaluations_validate_insert",
-        "policy_shadow_evaluations_no_update",
-        "policy_shadow_evaluations_no_delete",
-    ):
-        connection.execute(f'DROP TRIGGER IF EXISTS "{trigger_name}"')
-    connection.execute("DELETE FROM policy_shadow_evaluations")
-    connection.execute("DROP TABLE policy_shadow_evaluations")
-
-    connection.execute(
-        """UPDATE decisions
-           SET policy_version='recursive-evidence-graph-v17'
-           WHERE policy_version='recursive-evidence-graph-v18'"""
-    )
-    for policy_event in v18_policy_events:
-        metadata = json.loads(policy_event["metadata_json"])
-        metadata["policy_version"] = "recursive-evidence-graph-v17"
-        connection.execute(
-            """UPDATE events SET metadata_json=? WHERE event_id=?""",
-            (
-                json.dumps(
-                    metadata,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                ),
-                policy_event["event_id"],
-            ),
-        )
-
-    if shadow_events:
-        connection.execute(
-            "DELETE FROM events WHERE event_type='PolicyShadowEvaluated'"
-        )
-        for stream_id in sorted(
-            {row["stream_id"] for row in shadow_events}
-        ):
-            rows = connection.execute(
-                """SELECT event_id FROM events
-                   WHERE stream_id=? ORDER BY stream_version""",
-                (stream_id,),
-            ).fetchall()
-            for row in rows:
-                connection.execute(
-                    """UPDATE events
-                       SET stream_version=stream_version+1000000
-                       WHERE event_id=?""",
-                    (row["event_id"],),
-                )
-            for stream_version, row in enumerate(rows, start=1):
-                connection.execute(
-                    """UPDATE events SET stream_version=?
-                       WHERE event_id=?""",
-                    (stream_version, row["event_id"]),
-                )
-    if shadow_events or v18_policy_events:
-        rehash_event_streams(connection)
-        for guard in event_guards:
-            if not guard["sql"]:
-                raise AssertionError(
-                    f"Event guard {guard['name']} has no SQL."
-                )
-            connection.execute(guard["sql"])
 
 
 def _fingerprint_material(lines: list[str]) -> tuple[int, str]:
@@ -358,59 +115,6 @@ def declared_task_release_fixture(
             "Productive-task fixture must use its explicit corpus placeholder."
         )
     return replace(template, corpus_release_id=corpus_release_id)
-
-
-def rehash_event_streams(connection: sqlite3.Connection) -> None:
-    for stream in connection.execute(
-        "SELECT DISTINCT stream_id FROM events ORDER BY stream_id"
-    ).fetchall():
-        stream_id = stream["stream_id"]
-        previous_hash = None
-        tail_version = 0
-        tail_recorded_at = None
-        for event in connection.execute(
-            """SELECT * FROM events
-               WHERE stream_id=? ORDER BY stream_version""",
-            (stream_id,),
-        ).fetchall():
-            envelope = {
-                "event_id": event["event_id"],
-                "stream_id": event["stream_id"],
-                "stream_version": event["stream_version"],
-                "event_type": event["event_type"],
-                "schema_version": event["schema_version"],
-                "occurred_at": event["occurred_at"],
-                "recorded_at": event["recorded_at"],
-                "learner_id": event["learner_id"],
-                "session_id": event["session_id"],
-                "correlation_id": event["correlation_id"],
-                "causation_id": event["causation_id"],
-                "idempotency_key": event["idempotency_key"],
-                "payload": json.loads(event["payload_json"]),
-                "metadata": json.loads(event["metadata_json"]),
-                "previous_hash": previous_hash,
-            }
-            payload_hash = _content_hash(envelope)
-            connection.execute(
-                """UPDATE events
-                   SET previous_hash=?, payload_hash=?
-                   WHERE event_id=?""",
-                (previous_hash, payload_hash, event["event_id"]),
-            )
-            previous_hash = payload_hash
-            tail_version = event["stream_version"]
-            tail_recorded_at = event["recorded_at"]
-        connection.execute(
-            """UPDATE stream_heads
-               SET stream_version=?, payload_hash=?, updated_at=?
-               WHERE stream_id=?""",
-            (
-                tail_version,
-                previous_hash,
-                tail_recorded_at,
-                stream_id,
-            ),
-        )
 
 
 def _registered_evaluation(
@@ -697,7 +401,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 20)
+            self.assertEqual(SCHEMA_VERSION, 21)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
@@ -706,7 +410,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
                     connection.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()["value"],
-                    "20",
+                    "21",
                 )
                 migrated = connection.execute(
                     """SELECT claim.*, event.event_type, event.stream_id,

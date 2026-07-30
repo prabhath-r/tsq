@@ -30,7 +30,7 @@ from tsq.corpus import parse_bundle, read_and_parse
 from tsq.errors import ConflictError, NotFoundError, ValidationError
 from tsq.store import Database
 
-from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]

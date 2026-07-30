@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import io
 import sqlite3
 import tempfile
@@ -16,27 +15,14 @@ from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError
 from tsq.store import SCHEMA_VERSION, Database
 
-from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+from tests.schema_upgrade_helpers import (
+    durable_database_fingerprint,
+    restore_pre_shadow_schema,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
-
-
-def durable_database_fingerprint(path: Path) -> tuple[tuple[str, int, str], ...]:
-    result: list[tuple[str, int, str]] = []
-    for suffix in ("", "-wal", "-journal"):
-        candidate = Path(f"{path}{suffix}")
-        if candidate.exists() and candidate.stat().st_size:
-            material = candidate.read_bytes()
-            result.append(
-                (
-                    suffix or "main",
-                    len(material),
-                    hashlib.sha256(material).hexdigest(),
-                )
-            )
-    return tuple(result)
 
 
 class LegacyTableUpgradeTests(unittest.TestCase):

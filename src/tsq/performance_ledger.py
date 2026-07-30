@@ -108,6 +108,15 @@ _PERFORMANCE_TECHNICAL_EVENT_KEY_PREFIXES = (
     PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
     PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
 )
+_PERFORMANCE_TRACE_EVENT_TYPES = (
+    "PerformanceTaskStarted",
+    "PerformanceActionRecorded",
+    "PerformanceArtifactRunClaimed",
+    "PerformanceArtifactRunObserved",
+)
+_PERFORMANCE_TRACE_EVENT_TYPES_SQL = ", ".join(
+    f"'{event_type}'" for event_type in _PERFORMANCE_TRACE_EVENT_TYPES
+)
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -3893,10 +3902,9 @@ class PerformanceLedger:
         trace_validated: bool = False,
     ) -> LearningTask:
         if not trace_validated:
-            require_performance_projection_consistency(
+            require_performance_attempt_trace_consistency(
                 connection,
-                learner_id=attempt["learner_id"],
-                trace_only=True,
+                attempt_id=attempt["id"],
             )
         release, release_created_at = load_stored_task_release(
             connection,
@@ -8079,46 +8087,58 @@ def performance_projection_snapshot(
     connection: sqlite3.Connection,
     *,
     learner_id: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Return the exact mutable shadow projections in stable row order."""
 
     if learner_id is not None:
         _require_id(learner_id, "learner_id")
+    if session_id is not None:
+        _require_id(session_id, "session_id")
+    if learner_id is not None and session_id is not None:
+        raise ValidationError(
+            "Performance projection snapshot accepts only one scope."
+        )
+    scope_column = (
+        "learner_id"
+        if learner_id is not None
+        else ("session_id" if session_id is not None else None)
+    )
+    scope_value = learner_id if learner_id is not None else session_id
     attempt_scope = (
-        ""
-        if learner_id is None
-        else " WHERE learner_id=?"
+        "" if scope_column is None else f" WHERE {scope_column}=?"
     )
     dependent_scope = (
         ""
-        if learner_id is None
+        if scope_column is None
         else (
             " WHERE attempt_id IN ("
-            "SELECT id FROM performance_attempts WHERE learner_id=?"
+            "SELECT id FROM performance_attempts "
+            f"WHERE {scope_column}=?"
             ")"
         )
     )
     artifact_receipt_scope = (
         ""
-        if learner_id is None
+        if scope_column is None
         else (
             " WHERE claim_id IN ("
             "SELECT claim.id FROM performance_artifact_run_claims claim "
             "JOIN performance_attempts attempt "
             "ON attempt.id=claim.attempt_id "
-            "WHERE attempt.learner_id=?"
+            f"WHERE attempt.{scope_column}=?"
             ")"
         )
     )
     scoring_reconciliation_scope = (
         ""
-        if learner_id is None
+        if scope_column is None
         else (
             " WHERE observation.claim_id IN ("
             "SELECT claim.id FROM performance_scoring_claims claim "
             "JOIN performance_attempts attempt "
             "ON attempt.id=claim.attempt_id "
-            "WHERE attempt.learner_id=?"
+            f"WHERE attempt.{scope_column}=?"
             ")"
         )
     )
@@ -8210,24 +8230,533 @@ def performance_projection_snapshot(
             _row_dict(row)
             for row in connection.execute(
                 query,
-                (() if learner_id is None else (learner_id,)),
+                (() if scope_column is None else (scope_value,)),
             ).fetchall()
         ]
     return snapshot
+
+
+def _attempt_scoped_performance_events(
+    connection: sqlite3.Connection,
+    *,
+    attempt_id: str,
+    session_id: str,
+    start_event_id: str,
+) -> list[sqlite3.Row]:
+    """Return the fixed-point event graph for one attempt session.
+
+    Membership follows only lifecycle identities that are unique to an
+    attempt, action, artifact-run request, claim, process result, or receipt.
+    Shared task, checker, artifact, check-set, runner, and binding identities
+    deliberately do not join otherwise independent learner history.
+    """
+
+    events_by_id: dict[str, sqlite3.Row] = {}
+    action_rows: dict[str, sqlite3.Row] = {}
+    claim_rows: dict[str, sqlite3.Row] = {}
+    receipt_rows: dict[str, sqlite3.Row] = {}
+    attempt_ids = {attempt_id}
+    loaded_projection_attempt_ids: set[str] = set()
+    loaded_projection_event_ids: set[str] = set()
+    queried_values: dict[str, set[str]] = {}
+
+    def add_events(rows: Iterable[sqlite3.Row]) -> bool:
+        changed = False
+        for row in rows:
+            event_id = row["event_id"]
+            if event_id in events_by_id:
+                continue
+            events_by_id[event_id] = row
+            changed = True
+        return changed
+
+    def json_object(raw: object) -> dict[str, Any]:
+        if type(raw) is not str:
+            return {}
+        try:
+            value = json.loads(raw)
+        except (json.JSONDecodeError, RecursionError, ValueError):
+            return {}
+        return value if type(value) is dict else {}
+
+    def nested_text(value: object, *path: str) -> str | None:
+        current = value
+        for field_name in path:
+            if type(current) is not dict:
+                return None
+            current = current.get(field_name)
+        return current if type(current) is str else None
+
+    def scoped_values(values: set[str]) -> str:
+        return canonical_json(sorted(values))
+
+    def lookup_event_ids(event_ids: set[str]) -> list[sqlite3.Row]:
+        pending = event_ids - loaded_projection_event_ids
+        if not pending:
+            return []
+        loaded_projection_event_ids.update(pending)
+        return connection.execute(
+            "WITH scoped_values(value) AS MATERIALIZED ("
+            "SELECT value FROM json_each(?) WHERE type='text'"
+            ") SELECT event.* FROM scoped_values AS scope "
+            "JOIN events AS event ON event.event_id=scope.value "
+            "WHERE event.event_type IN ("
+            + _PERFORMANCE_TRACE_EVENT_TYPES_SQL
+            + ") ORDER BY event.stream_id, event.stream_version",
+            (scoped_values(pending),),
+        ).fetchall()
+
+    def lookup_payload(
+        *,
+        key: str,
+        index_name: str,
+        event_predicate: str,
+        path: str,
+        values: set[str],
+    ) -> list[sqlite3.Row]:
+        prior = queried_values.setdefault(key, set())
+        pending = values - prior
+        if not pending:
+            return []
+        prior.update(pending)
+        return connection.execute(
+            "WITH scoped_values(value) AS MATERIALIZED ("
+            "SELECT value FROM json_each(?) WHERE type='text'"
+            ") SELECT event.* FROM scoped_values AS scope "
+            "CROSS JOIN events AS event INDEXED BY "
+            + index_name
+            + " WHERE "
+            + event_predicate
+            + " AND json_extract(event.payload_json, '"
+            + path
+            + "')=scope.value "
+            "ORDER BY event.stream_id, event.stream_version",
+            (scoped_values(pending),),
+        ).fetchall()
+
+    def lookup_envelope(
+        *,
+        key: str,
+        index_name: str,
+        column: str,
+        values: set[str],
+    ) -> list[sqlite3.Row]:
+        prior = queried_values.setdefault(key, set())
+        pending = values - prior
+        if not pending:
+            return []
+        prior.update(pending)
+        return connection.execute(
+            "WITH scoped_values(value) AS MATERIALIZED ("
+            "SELECT value FROM json_each(?) WHERE type='text'"
+            ") SELECT event.* FROM scoped_values AS scope "
+            "CROSS JOIN events AS event INDEXED BY "
+            + index_name
+            + " WHERE event.event_type IN ("
+            + _PERFORMANCE_TRACE_EVENT_TYPES_SQL
+            + ") AND event."
+            + column
+            + "=scope.value "
+            "ORDER BY event.stream_id, event.stream_version",
+            (scoped_values(pending),),
+        ).fetchall()
+
+    add_events(
+        connection.execute(
+            "WITH scoped_session_ids(session_id) AS MATERIALIZED (SELECT ?) "
+            "SELECT event.* FROM scoped_session_ids AS scope "
+            "CROSS JOIN events AS event "
+            "INDEXED BY idx_events_session_stream "
+            "WHERE event.event_type IN ("
+            + _PERFORMANCE_TRACE_EVENT_TYPES_SQL
+            + ") AND event.session_id=scope.session_id "
+            "UNION "
+            "SELECT event.* FROM scoped_session_ids AS scope "
+            "CROSS JOIN events AS event "
+            "INDEXED BY idx_events_payload_session_stream "
+            "WHERE event.event_type IN ("
+            + _PERFORMANCE_TRACE_EVENT_TYPES_SQL
+            + ") AND json_extract("
+            "event.payload_json, '$.session_id')=scope.session_id "
+            "UNION "
+            "SELECT event.* FROM events AS event "
+            "WHERE event.event_id=? "
+            "AND event.event_type IN ("
+            + _PERFORMANCE_TRACE_EVENT_TYPES_SQL
+            + ") ORDER BY stream_id, stream_version",
+            (session_id, start_event_id),
+        ).fetchall()
+    )
+
+    while True:
+        before = (
+            len(events_by_id),
+            len(attempt_ids),
+            len(action_rows),
+            len(claim_rows),
+            len(receipt_rows),
+        )
+
+        for event in events_by_id.values():
+            if event["event_type"] != "PerformanceTaskStarted":
+                continue
+            defined_attempt_id = nested_text(
+                json_object(event["payload_json"]),
+                "attempt_id",
+            )
+            if defined_attempt_id is not None:
+                attempt_ids.add(defined_attempt_id)
+
+        new_projection_attempt_ids = (
+            attempt_ids - loaded_projection_attempt_ids
+        )
+        if new_projection_attempt_ids:
+            loaded_projection_attempt_ids.update(new_projection_attempt_ids)
+            values_json = scoped_values(new_projection_attempt_ids)
+            for row in connection.execute(
+                "WITH scoped_values(value) AS MATERIALIZED ("
+                "SELECT value FROM json_each(?) WHERE type='text'"
+                ") SELECT action.* FROM scoped_values AS scope "
+                "CROSS JOIN performance_actions AS action "
+                "INDEXED BY idx_performance_actions_attempt "
+                "WHERE action.attempt_id=scope.value",
+                (values_json,),
+            ).fetchall():
+                action_rows[row["id"]] = row
+            for row in connection.execute(
+                "WITH scoped_values(value) AS MATERIALIZED ("
+                "SELECT value FROM json_each(?) WHERE type='text'"
+                ") SELECT claim.* FROM scoped_values AS scope "
+                "CROSS JOIN performance_artifact_run_claims AS claim "
+                "INDEXED BY idx_performance_artifact_run_claims_attempt "
+                "WHERE claim.attempt_id=scope.value",
+                (values_json,),
+            ).fetchall():
+                claim_rows[row["id"]] = row
+            for row in connection.execute(
+                "WITH scoped_values(value) AS MATERIALIZED ("
+                "SELECT value FROM json_each(?) WHERE type='text'"
+                ") SELECT receipt.* FROM scoped_values AS scope "
+                "CROSS JOIN performance_artifact_run_claims AS claim "
+                "INDEXED BY idx_performance_artifact_run_claims_attempt "
+                "JOIN performance_artifact_run_receipts AS receipt "
+                "ON receipt.claim_id=claim.id "
+                "WHERE claim.attempt_id=scope.value",
+                (values_json,),
+            ).fetchall():
+                receipt_rows[row["id"]] = row
+
+        projection_event_ids = {
+            row["event_id"]
+            for rows in (action_rows, claim_rows, receipt_rows)
+            for row in rows.values()
+        }
+        add_events(lookup_event_ids(projection_event_ids))
+
+        action_ids = set(action_rows)
+        claim_ids = set(claim_rows)
+        claim_caller_keys = {
+            row["idempotency_key"]
+            for row in claim_rows.values()
+            if row["idempotency_key"] is not None
+        }
+        claim_command_hashes = {
+            row["command_hash"] for row in claim_rows.values()
+        }
+        request_run_ids = {
+            run_id
+            for row in claim_rows.values()
+            if (
+                run_id := nested_text(
+                    json_object(row["request_json"]),
+                    "run_id",
+                )
+            )
+            is not None
+        }
+        request_digests = {
+            row["request_digest"] for row in claim_rows.values()
+        }
+        # A generic learner-authored check_run may legitimately repeat a
+        # content result digest in another attempt. Only artifact-run process
+        # receipts bind this digest to one exact request/observation identity.
+        result_digests = {
+            row["result_digest"]
+            for row in receipt_rows.values()
+            if row["result_digest"] is not None
+        }
+        receipt_ids = set(receipt_rows)
+        receipt_digests = {
+            row["receipt_digest"] for row in receipt_rows.values()
+        }
+
+        for event in events_by_id.values():
+            payload = json_object(event["payload_json"])
+            if event["event_type"] == "PerformanceActionRecorded":
+                action_id_value = nested_text(payload, "action", "id")
+                if action_id_value is not None:
+                    action_ids.add(action_id_value)
+            elif event["event_type"] == "PerformanceArtifactRunClaimed":
+                claim_id_value = nested_text(payload, "claim_id")
+                if claim_id_value is not None:
+                    claim_ids.add(claim_id_value)
+                caller_key = nested_text(
+                    payload,
+                    "caller_idempotency_key",
+                )
+                if caller_key is not None:
+                    claim_caller_keys.add(caller_key)
+                command_hash = nested_text(payload, "command_hash")
+                if command_hash is not None:
+                    claim_command_hashes.add(command_hash)
+                run_id = nested_text(payload, "request", "run_id")
+                if run_id is not None:
+                    request_run_ids.add(run_id)
+                request_digest = nested_text(payload, "request_digest")
+                if request_digest is not None:
+                    request_digests.add(request_digest)
+            elif event["event_type"] == "PerformanceArtifactRunObserved":
+                receipt_id_value = nested_text(payload, "receipt_id")
+                if receipt_id_value is not None:
+                    receipt_ids.add(receipt_id_value)
+                receipt_digest = nested_text(payload, "receipt_digest")
+                if receipt_digest is not None:
+                    receipt_digests.add(receipt_digest)
+                for digest_path in (
+                    ("result_digest",),
+                    ("receipt", "result_digest"),
+                ):
+                    result_digest = nested_text(payload, *digest_path)
+                    if result_digest is not None:
+                        result_digests.add(result_digest)
+
+        event_ids = set(events_by_id)
+        lookup_specs = (
+            (
+                "attempt_payload",
+                "idx_events_performance_attempt_payload",
+                "event.event_type IN ("
+                + _PERFORMANCE_TRACE_EVENT_TYPES_SQL
+                + ")",
+                "$.attempt_id",
+                attempt_ids,
+            ),
+            (
+                "action_trace",
+                "idx_events_action_trace_stream",
+                "event.event_type='PerformanceActionRecorded'",
+                "$.action.trace_id",
+                attempt_ids,
+            ),
+            (
+                "receipt_attempt",
+                "idx_events_receipt_attempt_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.receipt.attempt_id",
+                attempt_ids,
+            ),
+            (
+                "action_id",
+                "idx_events_action_id_stream",
+                "event.event_type='PerformanceActionRecorded'",
+                "$.action.id",
+                action_ids,
+            ),
+            (
+                "artifact_action",
+                "idx_events_artifact_action_stream",
+                "event.event_type='PerformanceArtifactRunClaimed'",
+                "$.artifact_action_id",
+                action_ids,
+            ),
+            (
+                "check_action",
+                "idx_events_check_action_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.check_action_id",
+                action_ids,
+            ),
+            (
+                "receipt_artifact_action",
+                "idx_events_receipt_artifact_action_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.receipt.artifact_action_id",
+                action_ids,
+            ),
+            (
+                "claim_id",
+                "idx_events_claim_payload_stream",
+                "event.event_type IN ("
+                "'PerformanceArtifactRunClaimed',"
+                "'PerformanceArtifactRunObserved')",
+                "$.claim_id",
+                claim_ids,
+            ),
+            (
+                "receipt_claim",
+                "idx_events_receipt_claim_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.receipt.claim_id",
+                claim_ids,
+            ),
+            (
+                "claim_caller_key",
+                "idx_events_claim_caller_key_stream",
+                "event.event_type='PerformanceArtifactRunClaimed'",
+                "$.caller_idempotency_key",
+                claim_caller_keys,
+            ),
+            (
+                "claim_command_hash",
+                "idx_events_claim_command_hash_stream",
+                "event.event_type='PerformanceArtifactRunClaimed'",
+                "$.command_hash",
+                claim_command_hashes,
+            ),
+            (
+                "claim_request_run",
+                "idx_events_claim_request_run_stream",
+                "event.event_type='PerformanceArtifactRunClaimed'",
+                "$.request.run_id",
+                request_run_ids,
+            ),
+            (
+                "observed_request_run",
+                "idx_events_observed_request_run_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.result.request.run_id",
+                request_run_ids,
+            ),
+            (
+                "claim_request_digest",
+                "idx_events_claim_request_digest_stream",
+                "event.event_type='PerformanceArtifactRunClaimed'",
+                "$.request_digest",
+                request_digests,
+            ),
+            (
+                "observed_request_digest",
+                "idx_events_observed_request_digest_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.result.request_digest",
+                request_digests,
+            ),
+            (
+                "receipt_request_digest",
+                "idx_events_receipt_request_digest_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.receipt.request_digest",
+                request_digests,
+            ),
+            (
+                "observed_result_digest",
+                "idx_events_observed_result_digest_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.result_digest",
+                result_digests,
+            ),
+            (
+                "receipt_result_digest",
+                "idx_events_receipt_result_digest_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.receipt.result_digest",
+                result_digests,
+            ),
+            (
+                "receipt_id",
+                "idx_events_receipt_id_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.receipt_id",
+                receipt_ids,
+            ),
+            (
+                "receipt_digest",
+                "idx_events_receipt_digest_stream",
+                "event.event_type='PerformanceArtifactRunObserved'",
+                "$.receipt_digest",
+                receipt_digests,
+            ),
+        )
+        for (
+            key,
+            index_name,
+            event_predicate,
+            path,
+            values,
+        ) in lookup_specs:
+            add_events(
+                lookup_payload(
+                    key=key,
+                    index_name=index_name,
+                    event_predicate=event_predicate,
+                    path=path,
+                    values=values,
+                )
+            )
+        add_events(
+            lookup_envelope(
+                key="attempt_correlation",
+                index_name="idx_events_correlation_stream",
+                column="correlation_id",
+                values=attempt_ids,
+            )
+        )
+        add_events(
+            lookup_envelope(
+                key="attempt_causation",
+                index_name="idx_events_causation_stream",
+                column="causation_id",
+                values=attempt_ids,
+            )
+        )
+        add_events(
+            lookup_envelope(
+                key="event_causation",
+                index_name="idx_events_causation_stream",
+                column="causation_id",
+                values=event_ids,
+            )
+        )
+
+        after = (
+            len(events_by_id),
+            len(attempt_ids),
+            len(action_rows),
+            len(claim_rows),
+            len(receipt_rows),
+        )
+        if after == before:
+            break
+
+    return sorted(
+        events_by_id.values(),
+        key=lambda event: (event["stream_id"], event["stream_version"]),
+    )
 
 
 def derive_performance_projections(
     connection: sqlite3.Connection,
     *,
     learner_id: str | None = None,
+    attempt_id: str | None = None,
     trace_only: bool = False,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     """Derive shadow projection rows exclusively from immutable events."""
 
     if learner_id is not None:
         _require_id(learner_id, "learner_id")
+    if attempt_id is not None:
+        _require_id(attempt_id, "attempt_id")
+    if learner_id is not None and attempt_id is not None:
+        raise ValidationError(
+            "Performance projection derivation accepts only one scope."
+        )
     if type(trace_only) is not bool:
         raise ValidationError("trace_only must be a boolean.")
+    if attempt_id is not None and not trace_only:
+        raise ValidationError(
+            "Attempt-scoped performance derivation is trace-only."
+        )
 
     def reject_artifact_technical_key_collision(
         event_key: object,
@@ -8316,18 +8845,10 @@ def derive_performance_projections(
         return cached
 
     event_types = (
-        (
-            "PerformanceTaskStarted",
-            "PerformanceActionRecorded",
-            "PerformanceArtifactRunClaimed",
-            "PerformanceArtifactRunObserved",
-        )
+        _PERFORMANCE_TRACE_EVENT_TYPES
         if trace_only
         else (
-            "PerformanceTaskStarted",
-            "PerformanceActionRecorded",
-            "PerformanceArtifactRunClaimed",
-            "PerformanceArtifactRunObserved",
+            *_PERFORMANCE_TRACE_EVENT_TYPES,
             "PerformanceScoringClaimed",
             "PerformanceScoringClaimMigrated",
             "PerformanceScoringReconciled",
@@ -8337,24 +8858,41 @@ def derive_performance_projections(
         )
     )
     placeholders = ", ".join("?" for _item in event_types)
-    event_scope = (
-        " AND stream_id=?"
-        if learner_id is not None
-        else ""
-    )
-    event_parameters: tuple[object, ...] = event_types + (
-        (f"learner:{learner_id}",)
-        if learner_id is not None
-        else ()
-    )
-    events = connection.execute(
-        "SELECT * FROM events WHERE event_type IN ("
-        + placeholders
-        + ")"
-        + event_scope
-        + " ORDER BY stream_id, stream_version",
-        event_parameters,
-    ).fetchall()
+    if attempt_id is None:
+        event_scope = (
+            " AND stream_id=?"
+            if learner_id is not None
+            else ""
+        )
+        event_parameters: tuple[object, ...] = event_types + (
+            (f"learner:{learner_id}",)
+            if learner_id is not None
+            else ()
+        )
+        events = connection.execute(
+            "SELECT * FROM events WHERE event_type IN ("
+            + placeholders
+            + ")"
+            + event_scope
+            + " ORDER BY stream_id, stream_version",
+            event_parameters,
+        ).fetchall()
+    else:
+        stored_attempt = connection.execute(
+            """SELECT event_id, session_id
+               FROM performance_attempts WHERE id=?""",
+            (attempt_id,),
+        ).fetchone()
+        if stored_attempt is None:
+            raise ValidationError(
+                f"Performance attempt {attempt_id} has no projection."
+            )
+        events = _attempt_scoped_performance_events(
+            connection,
+            attempt_id=attempt_id,
+            session_id=stored_attempt["session_id"],
+            start_event_id=stored_attempt["event_id"],
+        )
     for event in events:
         event_type = event["event_type"]
         supported_schema = (
@@ -10556,6 +11094,63 @@ def derive_performance_projections(
     return snapshot, checkpoints
 
 
+def require_performance_attempt_trace_consistency(
+    connection: sqlite3.Connection,
+    *,
+    attempt_id: str,
+) -> dict[str, list[dict[str, Any]]]:
+    """Require one session's productive trace to match immutable events.
+
+    A target attempt cannot be validated in isolation from earlier attempts in
+    the same session because their terminal actions establish whether its start
+    was legal.  Unrelated sessions do not participate in that boundary and are
+    intentionally excluded from this operational guard.  Aggregate reports,
+    replay, and integrity continue to use the learner-wide derivation below.
+    """
+
+    _require_id(attempt_id, "attempt_id")
+    attempt = connection.execute(
+        """SELECT session_id FROM performance_attempts WHERE id=?""",
+        (attempt_id,),
+    ).fetchone()
+    if attempt is None:
+        raise ValidationError(
+            f"Performance attempt {attempt_id} has no projection."
+        )
+    try:
+        derived, _checkpoints = derive_performance_projections(
+            connection,
+            attempt_id=attempt_id,
+            trace_only=True,
+        )
+        stored = performance_projection_snapshot(
+            connection,
+            session_id=attempt["session_id"],
+        )
+    except (TypeError, ValueError, ValidationError) as exc:
+        raise ValidationError(
+            "Performance attempt trace cannot be trusted against immutable "
+            f"events: {exc}"
+        ) from exc
+    for name in (
+        "attempts",
+        "actions",
+        "artifact_run_claims",
+        "artifact_run_receipts",
+    ):
+        if canonical_json(stored[name]) != canonical_json(derived[name]):
+            raise ValidationError(
+                "Stored performance "
+                f"{name.replace('_', ' ')} differ from immutable "
+                "event derivation for the attempt session."
+            )
+    if not any(row["id"] == attempt_id for row in derived["attempts"]):
+        raise ValidationError(
+            f"Performance attempt {attempt_id} has no immutable start event."
+        )
+    return derived
+
+
 def require_performance_projection_consistency(
     connection: sqlite3.Connection,
     *,
@@ -10569,9 +11164,10 @@ def require_performance_projection_consistency(
     operational.  Read and append paths therefore cannot defer this boundary to
     an optional integrity command: malformed or manually inserted attempt,
     action, scoring, evaluation, or bundle rows must fail closed before they are
-    reported or extended.  ``trace_only`` validates the complete attempt/action
-    lifecycle (including system artifact-check authority) while leaving
-    scoring-specific recovery paths to their dedicated projection guards.
+    reported or extended.  ``trace_only`` validates attempts, actions, and the
+    complete artifact-run claim/receipt lifecycle (including system
+    artifact-check authority) while leaving scoring-specific recovery paths to
+    their dedicated projection guards.
     """
 
     _require_id(learner_id, "learner_id")
@@ -10602,11 +11198,18 @@ def require_performance_projection_consistency(
             "comparison_names must be a non-empty tuple of unique performance "
             "projection names."
         )
+    trace_projection_names = (
+        "attempts",
+        "actions",
+        "artifact_run_claims",
+        "artifact_run_receipts",
+    )
     if trace_only and comparison_names is not None and any(
-        name not in {"attempts", "actions"} for name in comparison_names
+        name not in trace_projection_names for name in comparison_names
     ):
         raise ValidationError(
-            "trace-only derivation can compare only attempts and actions."
+            "trace-only derivation can compare only attempts, actions, "
+            "artifact-run claims, and artifact-run receipts."
         )
     try:
         derived, _checkpoints = derive_performance_projections(
@@ -10624,7 +11227,7 @@ def require_performance_projection_consistency(
             f"events: {exc}"
         ) from exc
     projection_names = comparison_names or (
-        ("attempts", "actions")
+        trace_projection_names
         if trace_only
         else tuple(sorted(allowed_projection_names))
     )

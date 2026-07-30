@@ -32,12 +32,14 @@ from tsq.store import (
     to_timestamp,
 )
 
+from tests.schema_upgrade_helpers import (
+    durable_database_fingerprint,
+    rehash_event_streams,
+)
 from tests.test_scoring_claim_history_upgrade import (
     _build_two_claim_database,
     _registered_evaluation,
-    rehash_event_streams,
 )
-from tests.test_migration_event_lifecycle import durable_database_fingerprint
 
 
 _RECONCILER_ID = "synthetic.schema-v19-reconciler"
@@ -389,7 +391,7 @@ class ScoringReconciliationUpgradeTests(unittest.TestCase):
                     """SELECT COUNT(*) AS n
                        FROM performance_scoring_reconciliations"""
                 ).fetchone()["n"]
-            self.assertEqual(version, "20")
+            self.assertEqual(version, "21")
             self.assertEqual(
                 tuple(tuple(row)[:11] for row in rows),
                 before_claims,

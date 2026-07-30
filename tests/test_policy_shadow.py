@@ -31,7 +31,7 @@ from tsq.policy_shadow import (
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
-from tests.test_scoring_claim_history_upgrade import rehash_event_streams
+from tests.schema_upgrade_helpers import rehash_event_streams
 
 
 ROOT = Path(__file__).resolve().parents[1]

@@ -26,12 +26,14 @@ from tsq.learner import (
 from tsq.replay import ProjectionReplay
 from tsq.store import Database
 
-from tests.test_scoring_claim_history_upgrade import restore_pre_shadow_schema
+from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus" / "ai_curriculum.json"
-GOLDEN = ROOT / "tests" / "fixtures" / "learner_replay_expected.json"
+EXPECTED_REPLAY = (
+    ROOT / "tests" / "fixtures" / "learner_replay_expected.json"
+)
 START = datetime(2100, 4, 5, 9, 0, tzinfo=timezone.utc)
 
 
@@ -180,7 +182,7 @@ class ProjectionReplayTestCase(unittest.TestCase):
         self.assertTrue(
             all(item["state_changes_match"] for item in report["checkpoints"])
         )
-        expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+        expected = json.loads(EXPECTED_REPLAY.read_text(encoding="utf-8"))
         self.assertEqual(golden_projection(report), expected)
 
     def test_check_detects_projection_tampering_but_replays_committed_history(self) -> None:
@@ -373,7 +375,7 @@ class ProjectionReplayTestCase(unittest.TestCase):
         self.assertTrue(all(item["hash_matches"] for item in report["checkpoints"]))
 
     def test_golden_fixture_declares_historical_v5_model(self) -> None:
-        expected = json.loads(GOLDEN.read_text(encoding="utf-8"))
+        expected = json.loads(EXPECTED_REPLAY.read_text(encoding="utf-8"))
         self.assertEqual(
             expected["learner_model_version"],
             OBJECTIVE_GAUSSIAN_MODEL_VERSION,
