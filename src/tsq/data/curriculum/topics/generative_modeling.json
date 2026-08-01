@@ -1,0 +1,492 @@
+{
+  "topic": {
+    "id": "t_generative_modeling",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Generative Modeling",
+    "description": "Models of data-generating processes and joint distributions.",
+    "concept_ids": [
+      "c_generative_models"
+    ],
+    "related_topic_ids": [
+      "t_unsupervised_learning",
+      "t_language_modeling"
+    ],
+    "sort_order": 80
+  },
+  "concepts": [
+    {
+      "id": "c_generative_models",
+      "name": "Generative modeling",
+      "description": "Modeling a joint distribution or a data-generating process rather than only a decision rule.",
+      "level": "foundation"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_generative_requires_neural_synthesis",
+      "name": "Generative means neural sample synthesis",
+      "description": "Defines generative models by modern media generation rather than by the modeled distribution.",
+      "concept_id": "c_generative_models",
+      "remediation": "Classify models by whether they represent a joint/data distribution or only a conditional decision."
+    },
+    {
+      "id": "m_joint_modeling_is_assumption_free",
+      "name": "Joint modeling is assumption free",
+      "description": "Assumes modeling more of the data distribution guarantees dominance without additional modeling commitments.",
+      "concept_id": "c_generative_models",
+      "remediation": "Compare what each approach must estimate and how misspecification affects its sample tradeoff."
+    },
+    {
+      "id": "m_higher_likelihood_guarantees_better_decisions",
+      "name": "Higher generative likelihood guarantees better decisions",
+      "description": "Assumes a model with higher overall data likelihood must perform better on every conditional prediction or utility-weighted action.",
+      "concept_id": "c_generative_models",
+      "remediation": "Evaluate the conditional quantity and decision utility directly in addition to the joint-model likelihood."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_generative_discriminative_001",
+      "version": 1,
+      "family_id": "f_modeling_factorizations",
+      "status": "approved",
+      "stem": "Naive Bayes can outperform logistic regression with little data when its assumptions are useful, while logistic regression may win with more data when those assumptions are violated. Which explanation uses the generative-discriminative distinction correctly?",
+      "kind": "conceptual",
+      "difficulty": 0.75,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_generative_models",
+          "weight": 0.45,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 0.45,
+          "role": "contrast"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.1,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Naive Bayes models p(x | y)p(y), while logistic regression models p(y | x) directly; their different assumptions create different sample-efficiency tradeoffs.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Generative assumptions can reduce estimation burden when useful but introduce misspecification costs; discriminative fitting focuses directly on the conditional task."
+        },
+        {
+          "id": "b",
+          "text": "A model is generative when a neural decoder can synthesize realistic raw examples, so Naive Bayes is not generative under the standard probabilistic definition of generation.",
+          "correct": false,
+          "misconception_id": "m_generative_requires_neural_synthesis",
+          "rationale": "Generative refers to modeling a joint or data distribution; it does not require a neural architecture or photorealistic sampling."
+        },
+        {
+          "id": "c",
+          "text": "A discriminative classifier does not output probabilities because it models a boundary rather than p(y | x).",
+          "correct": false,
+          "misconception_id": "m_discriminative_models_cannot_be_probabilistic",
+          "rationale": "Logistic regression is a discriminative model precisely because it directly parameterizes a conditional probability."
+        },
+        {
+          "id": "d",
+          "text": "Estimating p(x, y) requires fewer assumptions than estimating p(y | x), so the generative model eventually dominates.",
+          "correct": false,
+          "misconception_id": "m_joint_modeling_is_assumption_free",
+          "rationale": "A joint model estimates more structure and generally makes additional commitments that may be useful or misspecified."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "naive_bayes",
+        "logistic_regression",
+        "joint_distribution",
+        "conditional_distribution"
+      ]
+    },
+    {
+      "id": "q_generative_density_utility_001",
+      "version": 1,
+      "family_id": "f_generative_density_vs_task_utility",
+      "status": "approved",
+      "stem": "A joint density model has better held-out log likelihood than a competitor but worse expected utility on a rare-event intervention task. What conclusion best respects both results?",
+      "kind": "comparison",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_generative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Joint modeling is assumption free, so its higher likelihood should override the observed task-utility comparison.",
+          "correct": false,
+          "misconception_id": "m_joint_modeling_is_assumption_free",
+          "rationale": "A joint model makes additional distributional commitments, and its aggregate fit objective differs from task utility."
+        },
+        {
+          "id": "b",
+          "text": "Better overall density fit need not optimize a rare, cost-weighted action; conditional errors and utility should be audited directly.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Log likelihood averages distributional fit, whereas the deployment decision weights a particular region and consequence structure."
+        },
+        {
+          "id": "c",
+          "text": "The model is not generative unless it uses a neural network to synthesize media-like samples from random noise.",
+          "correct": false,
+          "misconception_id": "m_generative_requires_neural_synthesis",
+          "rationale": "Generative modeling concerns a joint or data-generating distribution and is not restricted to neural media synthesis."
+        },
+        {
+          "id": "d",
+          "text": "Higher held-out likelihood ensures better decisions, so the measured utility deficit is irrelevant evaluation noise.",
+          "correct": false,
+          "misconception_id": "m_higher_likelihood_guarantees_better_decisions",
+          "rationale": "A global likelihood improvement does not guarantee better conditional ranking, calibration, or cost-sensitive actions."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "generative_models",
+        "likelihood",
+        "expected_utility",
+        "rare_events"
+      ]
+    },
+    {
+      "id": "q_generative_likelihood_decision_001",
+      "version": 1,
+      "family_id": "f_generative_likelihood_utility",
+      "status": "approved",
+      "stem": "Model G assigns higher held-out joint log likelihood to images and labels than model H, but H has lower cost-weighted classification loss on the deployment population. Which comparison is sound?",
+      "kind": "application",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_generative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "G fits the evaluated joint distribution better; H performs better under the stated deployment decision loss.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Joint density fit and utility-weighted conditional decisions are distinct objectives that can rank models differently."
+        },
+        {
+          "id": "b",
+          "text": "G is preferable for the decision because higher generative likelihood implies lower loss for each downstream action.",
+          "correct": false,
+          "misconception_id": "m_higher_likelihood_guarantees_better_decisions",
+          "rationale": "Overall likelihood can improve through aspects of x that do not improve the cost-weighted label decision."
+        },
+        {
+          "id": "c",
+          "text": "G is assumption free because modeling the joint distribution removes commitments required by conditional model H.",
+          "correct": false,
+          "misconception_id": "m_joint_modeling_is_assumption_free",
+          "rationale": "A joint model commits to additional structure for the feature distribution and can be misspecified there."
+        },
+        {
+          "id": "d",
+          "text": "G counts as generative when it uses a neural decoder that synthesizes realistic image samples.",
+          "correct": false,
+          "misconception_id": "m_generative_requires_neural_synthesis",
+          "rationale": "Generative modeling concerns a joint or data-generating distribution, not a required neural media interface."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "generative_models",
+        "joint_likelihood",
+        "decision_utility",
+        "evaluation"
+      ]
+    },
+    {
+      "id": "q_generative_tabular_sampling_001",
+      "version": 1,
+      "family_id": "f_generative_tabular_factorization",
+      "status": "approved",
+      "stem": "A Bayesian network over weather, demand, and outages specifies a normalized joint distribution and can sample complete synthetic records by ancestral sampling. It contains no neural network. How should it be classified?",
+      "kind": "transfer",
+      "difficulty": -0.15,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_generative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Discriminative, because a model without a neural synthesis decoder does not meet the definition of generative modeling.",
+          "correct": false,
+          "misconception_id": "m_generative_requires_neural_synthesis",
+          "rationale": "A normalized joint distribution with a sampling process is generative regardless of neural architecture."
+        },
+        {
+          "id": "b",
+          "text": "Generative, because it models a data-generating joint distribution and supports sampling of complete variable configurations.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The joint factorization defines how records are distributed, which is the relevant generative property."
+        },
+        {
+          "id": "c",
+          "text": "Assumption free, because specifying the full joint distribution avoids structural commitments about dependencies among variables.",
+          "correct": false,
+          "misconception_id": "m_joint_modeling_is_assumption_free",
+          "rationale": "The graph and local conditional distributions encode substantive independence and parametric assumptions."
+        },
+        {
+          "id": "d",
+          "text": "Superior for outage decisions, because joint sampling and likelihood imply better utility than a conditional predictor.",
+          "correct": false,
+          "misconception_id": "m_higher_likelihood_guarantees_better_decisions",
+          "rationale": "Decision performance depends on the relevant conditional estimates, losses, calibration, and model fit."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "generative_models",
+        "bayesian_network",
+        "joint_distribution",
+        "sampling"
+      ]
+    },
+    {
+      "id": "q_generative_missing_feature_001",
+      "version": 1,
+      "family_id": "f_generative_missing_feature",
+      "status": "quarantined",
+      "stem": "Classifier G models p(y)p(x1, x2 | y), while classifier D models p(y | x1, x2) directly. At deployment, x2 is sometimes missing. Which statement correctly describes the generative model's relevant capability and limitation?",
+      "kind": "comparison",
+      "difficulty": 0.6,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_generative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "G can marginalize x2 under its joint assumptions to predict from x1, but that capability does not establish better deployment decisions.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A joint model supports missing-variable marginalization, while misspecification and the task loss still determine whether this helps in deployment."
+        },
+        {
+          "id": "b",
+          "text": "G lacks a generative model unless it uses a neural decoder to synthesize realistic x1 and x2 samples.",
+          "correct": false,
+          "misconception_id": "m_generative_requires_neural_synthesis",
+          "rationale": "The probabilistic factorization is generative because it models a joint data distribution; neural media synthesis is not the definition."
+        },
+        {
+          "id": "c",
+          "text": "G's marginalization is assumption free because estimating the joint distribution removes commitments about relationships among x1, x2, and y.",
+          "correct": false,
+          "misconception_id": "m_joint_modeling_is_assumption_free",
+          "rationale": "The chosen class-conditional factorization adds structural and distributional assumptions that govern the quality of its marginal predictions."
+        },
+        {
+          "id": "d",
+          "text": "G's higher held-out joint likelihood establishes lower classification loss with missing x2, independent of the deployment loss and population.",
+          "correct": false,
+          "misconception_id": "m_higher_likelihood_guarantees_better_decisions",
+          "rationale": "Overall density fit and the cost-weighted conditional decision are distinct evaluation targets, especially under missingness shift."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_scenario",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "prior_independent_verdict": "accept",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "generative_models",
+        "missing_features",
+        "marginalization",
+        "decision_utility"
+      ]
+    },
+    {
+      "id": "q_generative_prior_shift_001",
+      "version": 1,
+      "family_id": "f_label_shift_prior_odds",
+      "status": "quarantined",
+      "stem": "The source class prior is P_s(y = 1) = 0.10 and the target prior is P_t(y = 1) = 0.40. Audits support label shift: P_t(x | y) = P_s(x | y). At a particular x, a generative classifier and a calibrated discriminative classifier both give source posterior P_s(y = 1 | x) = 0.20. Using target odds = source posterior odds times the target-to-source prior-odds ratio, which response is correct?",
+      "kind": "calculation",
+      "difficulty": 1.05,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_generative_models",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_distribution_shift",
+          "weight": 0.25,
+          "role": "transfer"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.1,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Keep 0.20 because prior-ratio correction applies only to neural models that can synthesize target-domain examples.",
+          "correct": false,
+          "misconception_id": "m_generative_requires_neural_synthesis",
+          "rationale": "Label-shift correction follows from probabilistic factorization and Bayes' rule, not from neural media-synthesis capability."
+        },
+        {
+          "id": "b",
+          "text": "Set the target posterior to 0.50 by adding the 0.30 prior increase, because joint modeling makes prior replacement assumption free.",
+          "correct": false,
+          "misconception_id": "m_joint_modeling_is_assumption_free",
+          "rationale": "Posterior probabilities are not corrected by addition, and the correction is justified only under the stated class-conditional stability and calibration assumptions."
+        },
+        {
+          "id": "c",
+          "text": "Set the target posterior to 0.60; G can replace its prior, and D can reweight calibrated source posterior odds by the same prior-odds ratio.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Source posterior odds are 0.20/0.80 = 0.25. The target-to-source prior-odds ratio is (0.40/0.60)/(0.10/0.90) = 6, giving target odds 1.5 and probability 1.5/2.5 = 0.60."
+        },
+        {
+          "id": "d",
+          "text": "Keep the source posterior from whichever model had the better source conditional log score, because that ranking guarantees lower target decision loss without correction.",
+          "correct": false,
+          "misconception_id": "m_higher_likelihood_guarantees_better_decisions",
+          "rationale": "Both models define a source conditional score, but its ranking does not remove the prior shift or establish target utility under deployment costs."
+        }
+      ],
+      "source_ids": [
+        "src_lipton_label_shift_2018",
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_label_shift_calculation",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "Source posterior odds 0.25 times prior-odds ratio 6 equals target odds 1.5, hence target posterior 0.6.",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ],
+        "family_coordination": "Independent review found the two numerical label-shift items isomorphic, so they share one evidence family."
+      },
+      "tags": [
+        "generative_models",
+        "label_shift",
+        "posterior_odds",
+        "bayes_rule",
+        "deployment_evaluation"
+      ]
+    }
+  ]
+}

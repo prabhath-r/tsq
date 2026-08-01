@@ -6,7 +6,7 @@ LEARNER ?= local
 TOPIC ?= Large Language Models
 
 audit:
-	PYTHONPATH=src $(PYTHON) -m tsq audit corpus/ai_curriculum.json --strict
+	PYTHONPATH=src $(PYTHON) -m tsq audit corpus --strict
 	$(MAKE) behavior-audit
 
 behavior-audit:

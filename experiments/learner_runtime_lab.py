@@ -40,7 +40,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from tsq.corpus import read_and_parse  # noqa: E402
+from tsq.corpus import corpus_source_digest, read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.errors import ExhaustedError  # noqa: E402
 from tsq.learner import MODEL_VERSION, LearnerModel  # noqa: E402
@@ -53,7 +53,7 @@ from tsq.store import SCHEMA_VERSION, Database  # noqa: E402
 
 
 LAB_VERSION = "learner-runtime-lab-v1"
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_PROTECTED_DATABASE = PROJECT_ROOT / "tsq.db"
 DEFAULT_TOPIC = "t_transformers"
 DEFAULT_HISTORY_RESPONSES = 24
@@ -114,11 +114,7 @@ def database_family_fingerprint(path: Path) -> dict[str, dict[str, Any]]:
 
 
 def corpus_digest(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(1024 * 1024):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return corpus_source_digest(path)
 
 
 def latency_summary(samples_ns: list[int]) -> dict[str, Any]:
@@ -493,7 +489,7 @@ def run_lab(
     warmups: int = DEFAULT_WARMUPS,
     profile_top: int = DEFAULT_PROFILE_TOP,
 ) -> dict[str, Any]:
-    require(corpus.exists() and corpus.is_file(), f"Corpus does not exist: {corpus}")
+    require(corpus.exists(), f"Corpus does not exist: {corpus}")
     require(
         0 <= history_responses <= MAX_HISTORY_RESPONSES,
         f"history_responses must be in [0, {MAX_HISTORY_RESPONSES}].",

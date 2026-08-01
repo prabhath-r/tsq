@@ -13,7 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from tests.test_store_integrity import tiny_corpus
-from tsq.corpus import read_and_parse, validate_bundle
+from tsq.corpus import load_bundle, read_and_parse, validate_bundle
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError, ValidationError
 from tsq.evidence import (
@@ -45,7 +45,7 @@ from tsq.store import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 ATTESTATION = "a" * 64
 
 
@@ -69,7 +69,7 @@ def active_generated_provenance() -> dict[str, object]:
 
 class RawGeneratedActivationTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        self.bundle = load_bundle(CORPUS)
         self.question = next(
             question
             for question in self.bundle["questions"]

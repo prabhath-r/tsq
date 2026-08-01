@@ -22,7 +22,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-"tsq.data" = ["*.json"]
+"tsq.data" = ["*.json", "curriculum/*.json", "curriculum/topics/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

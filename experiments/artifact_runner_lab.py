@@ -68,7 +68,7 @@ from tsq.store import Database  # noqa: E402
 
 LAB_VERSION = "artifact-runner-lab-v1"
 START = datetime(2121, 9, 10, 9, 0, tzinfo=timezone.utc)
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 OUTPUT = ROOT / "experiments" / "results" / "artifact_runner_lab.json"
 SCENARIOS: tuple[tuple[str, bytes], ...] = (
     (

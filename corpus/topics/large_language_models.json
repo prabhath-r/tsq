@@ -1,0 +1,17 @@
+{
+  "topic": {
+    "id": "t_large_language_models",
+    "domain_id": "d_artificial_intelligence",
+    "name": "Large Language Models",
+    "description": "Language models and systems that generate, retrieve context, call tools, and act through structured loops.",
+    "concept_ids": [],
+    "related_topic_ids": [
+      "t_machine_learning"
+    ],
+    "sort_order": 20
+  },
+  "concepts": [],
+  "learning_objectives": [],
+  "misconceptions": [],
+  "questions": []
+}

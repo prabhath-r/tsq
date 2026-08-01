@@ -15,14 +15,14 @@ from unittest.mock import patch
 
 from tsq.authoring import CoveragePlanner
 from tsq.cli import _print_compact_study_completion, build_parser, main
-from tsq.corpus import read_and_parse
+from tsq.corpus import load_bundle, read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError
 from tsq.store import SCHEMA_VERSION, Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 
 
 def durable_database_fingerprint(path: Path) -> dict[str, tuple[int, str] | None]:
@@ -124,6 +124,64 @@ class CliJourneyTestCase(unittest.TestCase):
             )
         self.assertEqual(exit_code, 0)
         return json.loads(output.getvalue())
+
+    def test_strict_audit_keeps_quarantined_only_mapping_gaps_visible(
+        self,
+    ) -> None:
+        bundle = load_bundle(CORPUS)
+        question = next(
+            item
+            for item in bundle["questions"]
+            if item["status"] == "quarantined"
+            and item.get("provenance", {}).get("generated") is True
+        )
+        primary_concept_id = next(
+            mapping["concept_id"]
+            for mapping in question["concepts"]
+            if mapping["role"] == "primary"
+        )
+        new_concept_id = "c_quarantined_support_only"
+        bundle["concepts"].append(
+            {
+                "id": new_concept_id,
+                "name": "Quarantined support only",
+                "description": (
+                    "A test-only concept mapped by quarantined evidence but "
+                    "never by an active primary item."
+                ),
+                "prior_mastery": 0.2,
+            }
+        )
+        owner = next(
+            topic
+            for topic in bundle["topics"]
+            if primary_concept_id in topic["concept_ids"]
+        )
+        owner["concept_ids"].append(new_concept_id)
+        for mapping in question["concepts"]:
+            mapping["weight"] *= 0.9
+        question["concepts"].append(
+            {
+                "concept_id": new_concept_id,
+                "weight": 0.1,
+                "role": "supporting",
+            }
+        )
+        corpus_path = Path(self.tempdir.name) / "warning-corpus.json"
+        corpus_path.write_text(json.dumps(bundle), encoding="utf-8")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                ["audit", str(corpus_path), "--strict", "--json"]
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertIn(
+            "missing_primary_mapping_coverage",
+            {issue["code"] for issue in payload["warnings"]},
+        )
 
     def test_interactive_commands_collect_confidence_by_default(self) -> None:
         parser = build_parser()

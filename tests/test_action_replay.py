@@ -19,7 +19,7 @@ from tsq.store import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 EXPECTED_REPLAY = (
     ROOT / "tests" / "fixtures" / "action_replay_expected.json"
 )

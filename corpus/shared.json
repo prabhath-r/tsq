@@ -1,0 +1,1163 @@
+{
+  "domains": [
+    {
+      "id": "d_artificial_intelligence",
+      "name": "Artificial Intelligence",
+      "description": "Methods for building systems that learn, reason, generate, retrieve, and act under uncertainty.",
+      "sort_order": 10
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_supervised_contrast_unsupervised",
+      "source": "c_supervised_learning",
+      "target": "c_unsupervised_learning",
+      "relation": "contrasts_with",
+      "weight": 0.9,
+      "rationale": "The paradigms differ primarily in whether task labels define the learning signal."
+    },
+    {
+      "id": "e_supervised_contrast_rl",
+      "source": "c_supervised_learning",
+      "target": "c_reinforcement_learning",
+      "relation": "contrasts_with",
+      "weight": 0.9,
+      "rationale": "Supervised examples are usually exogenous, while an RL policy changes its future observations."
+    },
+    {
+      "id": "e_probability_prereq_supervised",
+      "source": "c_probability_reasoning",
+      "target": "c_supervised_learning",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Expected loss and probabilistic prediction require conditional probability reasoning."
+    },
+    {
+      "id": "e_erm_part_supervised",
+      "source": "c_empirical_risk_minimization",
+      "target": "c_supervised_learning",
+      "relation": "part_of",
+      "weight": 0.9,
+      "rationale": "Empirical risk minimization is a core supervised-learning formulation."
+    },
+    {
+      "id": "e_erm_prereq_generalization",
+      "source": "c_empirical_risk_minimization",
+      "target": "c_generalization",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Generalization analysis starts by distinguishing empirical from population risk."
+    },
+    {
+      "id": "e_partition_prereq_generalization",
+      "source": "c_data_partitioning",
+      "target": "c_generalization",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "A valid holdout design is needed to estimate deployment performance."
+    },
+    {
+      "id": "e_partition_prereq_leakage",
+      "source": "c_data_partitioning",
+      "target": "c_data_leakage",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Leakage is diagnosed relative to split boundaries, prediction time, and unit of independence."
+    },
+    {
+      "id": "e_leakage_prereq_generalization",
+      "source": "c_data_leakage",
+      "target": "c_generalization",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Leaked evaluation is not evidence of generalization."
+    },
+    {
+      "id": "e_bias_variance_prereq_regularization",
+      "source": "c_bias_variance",
+      "target": "c_regularization",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Regularization is best understood as trading approximation bias for reduced estimation variance."
+    },
+    {
+      "id": "e_bias_variance_prereq_generalization",
+      "source": "c_bias_variance",
+      "target": "c_generalization",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Bias and variance explain why low training error need not transfer."
+    },
+    {
+      "id": "e_linear_part_supervised",
+      "source": "c_linear_models",
+      "target": "c_supervised_learning",
+      "relation": "part_of",
+      "weight": 0.8,
+      "rationale": "Linear predictors are a foundational supervised model class."
+    },
+    {
+      "id": "e_scaling_prereq_regularization",
+      "source": "c_feature_scaling",
+      "target": "c_regularization",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Coordinate-wise penalties have meaning only relative to feature units."
+    },
+    {
+      "id": "e_scaling_prereq_gradient",
+      "source": "c_feature_scaling",
+      "target": "c_gradient_optimization",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Feature scales strongly affect curvature and optimization conditioning."
+    },
+    {
+      "id": "e_gradient_prereq_neural",
+      "source": "c_gradient_optimization",
+      "target": "c_neural_networks",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Most neural networks are fitted with gradient-based optimization."
+    },
+    {
+      "id": "e_neural_prereq_backprop",
+      "source": "c_neural_networks",
+      "target": "c_backpropagation",
+      "relation": "prerequisite",
+      "weight": 0.7,
+      "rationale": "Backpropagation questions assume an understanding of composed neural transformations."
+    },
+    {
+      "id": "e_backprop_prereq_representation",
+      "source": "c_backpropagation",
+      "target": "c_representation_learning",
+      "relation": "prerequisite",
+      "weight": 0.7,
+      "rationale": "Gradient flow determines which learned representations receive task signal."
+    },
+    {
+      "id": "e_representation_prereq_attention",
+      "source": "c_representation_learning",
+      "target": "c_attention",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Attention operates on and constructs learned representations."
+    },
+    {
+      "id": "e_attention_part_transformers",
+      "source": "c_attention",
+      "target": "c_transformers",
+      "relation": "part_of",
+      "weight": 1.0,
+      "rationale": "Attention is the central token-mixing component of a transformer."
+    },
+    {
+      "id": "e_probability_prereq_calibration",
+      "source": "c_probability_reasoning",
+      "target": "c_calibration",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Calibration is a conditional-frequency property of probabilistic forecasts."
+    },
+    {
+      "id": "e_ranking_contrast_calibration",
+      "source": "c_ranking_metrics",
+      "target": "c_calibration",
+      "relation": "contrasts_with",
+      "weight": 1.0,
+      "rationale": "A score can order cases well while its numeric probabilities remain unreliable."
+    },
+    {
+      "id": "e_calibration_prereq_thresholds",
+      "source": "c_calibration",
+      "target": "c_decision_thresholds",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Cost-derived probability thresholds require trustworthy probability semantics."
+    },
+    {
+      "id": "e_probability_prereq_thresholds",
+      "source": "c_probability_reasoning",
+      "target": "c_decision_thresholds",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Optimal action thresholds follow from comparing conditional expected costs."
+    },
+    {
+      "id": "e_imbalance_prereq_ranking",
+      "source": "c_class_imbalance",
+      "target": "c_ranking_metrics",
+      "relation": "prerequisite",
+      "weight": 0.7,
+      "rationale": "Prevalence changes how ranking metrics, especially precision-recall summaries, should be interpreted."
+    },
+    {
+      "id": "e_generalization_prereq_shift",
+      "source": "c_generalization",
+      "target": "c_distribution_shift",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Shift analysis refines what future distribution a generalization claim covers."
+    },
+    {
+      "id": "e_probability_prereq_shift",
+      "source": "c_probability_reasoning",
+      "target": "c_distribution_shift",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Shift types are distinguished through different factorizations of joint distributions."
+    },
+    {
+      "id": "e_supervised_contrast_causal",
+      "source": "c_supervised_learning",
+      "target": "c_causal_inference",
+      "relation": "contrasts_with",
+      "weight": 1.0,
+      "rationale": "Predictive association alone does not identify an intervention effect."
+    },
+    {
+      "id": "e_probability_prereq_generative",
+      "source": "c_probability_reasoning",
+      "target": "c_generative_models",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Joint and latent-variable models require probability factorization."
+    },
+    {
+      "id": "e_generative_contrast_discriminative",
+      "source": "c_generative_models",
+      "target": "c_discriminative_models",
+      "relation": "contrasts_with",
+      "weight": 1.0,
+      "rationale": "The primary contrast is joint or data-process modeling versus direct conditional prediction."
+    },
+    {
+      "id": "e_discriminative_part_supervised",
+      "source": "c_discriminative_models",
+      "target": "c_supervised_learning",
+      "relation": "part_of",
+      "weight": 0.8,
+      "rationale": "Discriminative prediction is a major supervised-learning approach."
+    },
+    {
+      "id": "e_dimensionality_part_unsupervised",
+      "source": "c_dimensionality_reduction",
+      "target": "c_unsupervised_learning",
+      "relation": "part_of",
+      "weight": 0.8,
+      "rationale": "Methods such as PCA learn structure without labels."
+    },
+    {
+      "id": "e_clustering_part_unsupervised",
+      "source": "c_clustering",
+      "target": "c_unsupervised_learning",
+      "relation": "part_of",
+      "weight": 0.9,
+      "rationale": "Clustering is a canonical unsupervised task."
+    },
+    {
+      "id": "e_scaling_prereq_dimensionality",
+      "source": "c_feature_scaling",
+      "target": "c_dimensionality_reduction",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Variance-based projections depend on the units of their coordinates."
+    },
+    {
+      "id": "e_scaling_prereq_clustering",
+      "source": "c_feature_scaling",
+      "target": "c_clustering",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Distance-based clusters depend on feature scale and geometry."
+    },
+    {
+      "id": "e_rl_prereq_bellman",
+      "source": "c_reinforcement_learning",
+      "target": "c_bellman_reasoning",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Bellman reasoning formalizes the sequential objective in reinforcement learning."
+    },
+    {
+      "id": "e_rl_prereq_off_policy",
+      "source": "c_reinforcement_learning",
+      "target": "c_off_policy_evaluation",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Off-policy evaluation assumes policies, trajectories, returns, and behavior data."
+    },
+    {
+      "id": "e_probability_prereq_off_policy",
+      "source": "c_probability_reasoning",
+      "target": "c_off_policy_evaluation",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Importance ratios and support conditions are probabilistic concepts."
+    },
+    {
+      "id": "e_probability_prereq_knowledge",
+      "source": "c_probability_reasoning",
+      "target": "c_knowledge_tracing",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Knowledge tracing updates uncertain latent skill state from noisy observations."
+    },
+    {
+      "id": "e_calibration_prereq_knowledge",
+      "source": "c_calibration",
+      "target": "c_knowledge_tracing",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "A learner model should not interpret response likelihoods more literally than their calibration supports."
+    },
+    {
+      "id": "e_information_prereq_adaptive",
+      "source": "c_information_gain",
+      "target": "c_adaptive_testing",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Expected information gain is one principled question-selection objective."
+    },
+    {
+      "id": "e_knowledge_part_adaptive",
+      "source": "c_knowledge_tracing",
+      "target": "c_adaptive_testing",
+      "relation": "part_of",
+      "weight": 1.0,
+      "rationale": "Adaptive selection consumes and updates the learner state maintained by knowledge tracing."
+    },
+    {
+      "id": "e_generalization_prereq_adaptive",
+      "source": "c_generalization",
+      "target": "c_adaptive_testing",
+      "relation": "prerequisite",
+      "weight": 0.6,
+      "rationale": "An adaptive policy must remain valid for new learners and avoid overfitting item history."
+    },
+    {
+      "id": "e_probability_prereq_autoregressive",
+      "source": "c_probability_reasoning",
+      "target": "c_autoregressive_language_modeling",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Autoregressive likelihood is a product of conditional token probabilities."
+    },
+    {
+      "id": "e_generative_related_autoregressive",
+      "source": "c_generative_models",
+      "target": "c_autoregressive_language_modeling",
+      "relation": "generalizes",
+      "weight": 0.8,
+      "rationale": "Autoregressive language modeling is a sequence-specific generative factorization."
+    },
+    {
+      "id": "e_attention_prereq_scaling",
+      "source": "c_attention",
+      "target": "c_attention_scaling",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Scaling is understood relative to query-key dot products and softmax attention."
+    },
+    {
+      "id": "e_autoregressive_prereq_masking",
+      "source": "c_autoregressive_language_modeling",
+      "target": "c_causal_masking",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "The autoregressive factorization determines which sequence positions are future information."
+    },
+    {
+      "id": "e_transformers_prereq_masking",
+      "source": "c_transformers",
+      "target": "c_causal_masking",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Causal masking is implemented inside transformer attention blocks."
+    },
+    {
+      "id": "e_transformers_prereq_rag_grounding",
+      "source": "c_transformers",
+      "target": "c_rag_grounding",
+      "relation": "prerequisite",
+      "weight": 0.6,
+      "rationale": "Retrieved passages condition a generator whose sequence behavior must still be evaluated."
+    },
+    {
+      "id": "e_retrieval_prereq_rag_grounding",
+      "source": "c_rag_retrieval_quality",
+      "target": "c_rag_grounding",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Grounding cannot exceed the relevance and authority of the available retrieved evidence."
+    },
+    {
+      "id": "e_autoregressive_prereq_agent_tools",
+      "source": "c_autoregressive_language_modeling",
+      "target": "c_agent_tool_use",
+      "relation": "prerequisite",
+      "weight": 0.6,
+      "rationale": "Tool calls begin as model outputs but require a separate execution boundary."
+    },
+    {
+      "id": "e_tool_use_prereq_agent_loop",
+      "source": "c_agent_tool_use",
+      "target": "c_agent_observation_loop",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "An observation loop distinguishes proposed calls from executed actions and returned state."
+    },
+    {
+      "id": "e_rag_related_agent_tools",
+      "source": "c_rag_grounding",
+      "target": "c_agent_tool_use",
+      "relation": "related_to",
+      "weight": 0.7,
+      "rationale": "Retrieval is one tool-mediated way an agent can acquire external evidence."
+    }
+  ],
+  "objective_edges": [
+    {
+      "id": "oe_value_prereq_order",
+      "source": "lo_attention_value_routing",
+      "target": "lo_attention_permutation_order",
+      "relation": "prerequisite",
+      "weight": 0.75,
+      "rationale": "Order-behavior predictions require tracing what content-only attention routes before deciding what changes without a positional signal."
+    },
+    {
+      "id": "oe_value_prereq_resources",
+      "source": "lo_attention_value_routing",
+      "target": "lo_attention_resource_scaling",
+      "relation": "prerequisite",
+      "weight": 0.7,
+      "rationale": "Resource scaling follows from identifying the pairwise score and weighted-value intermediates created by attention."
+    },
+    {
+      "id": "oe_value_prereq_paths",
+      "source": "lo_attention_value_routing",
+      "target": "lo_transformer_information_paths",
+      "relation": "prerequisite",
+      "weight": 0.85,
+      "rationale": "Distinguishing Transformer information paths requires knowing how an attention sublayer moves source values between positions."
+    },
+    {
+      "id": "oe_paths_prereq_composition",
+      "source": "lo_transformer_information_paths",
+      "target": "lo_transformer_sublayer_composition",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Reasoning about non-commuting sublayer composition first requires distinguishing the information path implemented by each sublayer."
+    },
+    {
+      "id": "oe_value_prereq_visibility",
+      "source": "lo_attention_value_routing",
+      "target": "lo_causal_visibility",
+      "relation": "prerequisite",
+      "weight": 0.85,
+      "rationale": "Causal visibility constrains the same query-key comparisons and value routes that unmasked attention would otherwise permit."
+    },
+    {
+      "id": "oe_value_prereq_logits",
+      "source": "lo_attention_value_routing",
+      "target": "lo_attention_logit_scaling",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Predicting logit scaling effects requires locating query-key scores before softmax and separating them from routed values."
+    },
+    {
+      "id": "oe_visibility_prereq_cache",
+      "source": "lo_causal_visibility",
+      "target": "lo_incremental_kv_cache",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Tracing an incremental cache requires knowing which prior positions a newly generated token may attend to under causal visibility."
+    },
+    {
+      "id": "oe_paths_prereq_cache",
+      "source": "lo_transformer_information_paths",
+      "target": "lo_incremental_kv_cache",
+      "relation": "prerequisite",
+      "weight": 0.8,
+      "rationale": "Distinguishing cached from recomputed tensors requires tracing information through attention and the surrounding Transformer sublayers."
+    },
+    {
+      "id": "oe_agent_authorization_prereq_state",
+      "source": "lo_agent_tool_authorization",
+      "target": "lo_agent_state_reconciliation",
+      "relation": "prerequisite",
+      "weight": 0.9,
+      "rationale": "Reconciling an agent's external state requires first distinguishing a model proposal from an authorized, executed tool action whose observation can change that state."
+    }
+  ],
+  "sources": [
+    {
+      "id": "src_bundle_schema_v1",
+      "type": "schema_definition",
+      "title": "AI foundations bundle schema conventions",
+      "authors": [
+        "Project corpus team"
+      ],
+      "year": 2026,
+      "locator": "Local schema version 1.0.0",
+      "notes": "Edges point from a prerequisite, component, or contrasted concept to the downstream or paired concept. Question difficulty is an expert-prior IRT b value; discrimination is an expert-prior IRT a value; guess_rate and slip_rate are probabilities. Concept weights sum to 1. Correct options have a null misconception_id; every distractor names exactly one misconception. These priors require empirical recalibration."
+    },
+    {
+      "id": "src_bishop_prml_2006",
+      "type": "book",
+      "title": "Pattern Recognition and Machine Learning",
+      "authors": [
+        "Christopher M. Bishop"
+      ],
+      "year": 2006,
+      "locator": "Springer"
+    },
+    {
+      "id": "src_hastie_esl_2009",
+      "type": "book",
+      "title": "The Elements of Statistical Learning, Second Edition",
+      "authors": [
+        "Trevor Hastie",
+        "Robert Tibshirani",
+        "Jerome Friedman"
+      ],
+      "year": 2009,
+      "locator": "Springer"
+    },
+    {
+      "id": "src_goodfellow_dl_2016",
+      "type": "book",
+      "title": "Deep Learning",
+      "authors": [
+        "Ian Goodfellow",
+        "Yoshua Bengio",
+        "Aaron Courville"
+      ],
+      "year": 2016,
+      "locator": "MIT Press"
+    },
+    {
+      "id": "src_sutton_barto_rl_2018",
+      "type": "book",
+      "title": "Reinforcement Learning: An Introduction, Second Edition",
+      "authors": [
+        "Richard S. Sutton",
+        "Andrew G. Barto"
+      ],
+      "year": 2018,
+      "locator": "MIT Press"
+    },
+    {
+      "id": "src_murphy_pml_2022",
+      "type": "book",
+      "title": "Probabilistic Machine Learning: An Introduction",
+      "authors": [
+        "Kevin P. Murphy"
+      ],
+      "year": 2022,
+      "locator": "MIT Press"
+    },
+    {
+      "id": "src_pearl_causality_2009",
+      "type": "book",
+      "title": "Causality: Models, Reasoning, and Inference, Second Edition",
+      "authors": [
+        "Judea Pearl"
+      ],
+      "year": 2009,
+      "locator": "Cambridge University Press"
+    },
+    {
+      "id": "src_vaswani_attention_2017",
+      "type": "paper",
+      "title": "Attention Is All You Need",
+      "authors": [
+        "Ashish Vaswani",
+        "Noam Shazeer",
+        "Niki Parmar",
+        "Jakob Uszkoreit",
+        "Llion Jones",
+        "Aidan N. Gomez",
+        "Lukasz Kaiser",
+        "Illia Polosukhin"
+      ],
+      "year": 2017,
+      "locator": "Advances in Neural Information Processing Systems 30"
+    },
+    {
+      "id": "src_brunner_identifiability_2020",
+      "type": "paper",
+      "title": "On Identifiability in Transformers",
+      "authors": [
+        "Gino Brunner",
+        "Yang Liu",
+        "Damián Pascual",
+        "Oliver Richter",
+        "Massimiliano Ciaramita",
+        "Roger Wattenhofer"
+      ],
+      "year": 2020,
+      "locator": "International Conference on Learning Representations 2020",
+      "uri": "https://arxiv.org/abs/1908.04211"
+    },
+    {
+      "id": "src_brown_gpt3_2020",
+      "type": "paper",
+      "title": "Language Models are Few-Shot Learners",
+      "authors": [
+        "Tom B. Brown",
+        "Benjamin Mann",
+        "Nick Ryder",
+        "Melanie Subbiah",
+        "Jared Kaplan",
+        "Prafulla Dhariwal",
+        "Arvind Neelakantan",
+        "Pranav Shyam",
+        "Girish Sastry",
+        "Amanda Askell",
+        "Sandhini Agarwal",
+        "Ariel Herbert-Voss",
+        "Gretchen Krueger",
+        "Tom Henighan",
+        "Rewon Child",
+        "Aditya Ramesh",
+        "Daniel M. Ziegler",
+        "Jeffrey Wu",
+        "Clemens Winter",
+        "Christopher Hesse",
+        "Mark Chen",
+        "Eric Sigler",
+        "Mateusz Litwin",
+        "Scott Gray",
+        "Benjamin Chess",
+        "Jack Clark",
+        "Christopher Berner",
+        "Sam McCandlish",
+        "Alec Radford",
+        "Ilya Sutskever",
+        "Dario Amodei"
+      ],
+      "year": 2020,
+      "locator": "Advances in Neural Information Processing Systems 33",
+      "uri": "https://arxiv.org/abs/2005.14165"
+    },
+    {
+      "id": "src_lewis_rag_2020",
+      "type": "paper",
+      "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+      "authors": [
+        "Patrick Lewis",
+        "Ethan Perez",
+        "Aleksandra Piktus",
+        "Fabio Petroni",
+        "Vladimir Karpukhin",
+        "Naman Goyal",
+        "Heinrich Küttler",
+        "Mike Lewis",
+        "Wen-tau Yih",
+        "Tim Rocktäschel",
+        "Sebastian Riedel",
+        "Douwe Kiela"
+      ],
+      "year": 2020,
+      "locator": "Advances in Neural Information Processing Systems 33",
+      "uri": "https://arxiv.org/abs/2005.11401"
+    },
+    {
+      "id": "src_react_2022",
+      "type": "paper",
+      "title": "ReAct: Synergizing Reasoning and Acting in Language Models",
+      "authors": [
+        "Shunyu Yao",
+        "Jeffrey Zhao",
+        "Dian Yu",
+        "Nan Du",
+        "Izhak Shafran",
+        "Karthik Narasimhan",
+        "Yuan Cao"
+      ],
+      "year": 2022,
+      "locator": "International Conference on Learning Representations 2023",
+      "uri": "https://arxiv.org/abs/2210.03629"
+    },
+    {
+      "id": "src_toolformer_2023",
+      "type": "paper",
+      "title": "Toolformer: Language Models Can Teach Themselves to Use Tools",
+      "authors": [
+        "Timo Schick",
+        "Jane Dwivedi-Yu",
+        "Roberto Dessì",
+        "Roberta Raileanu",
+        "Maria Lomeli",
+        "Luke Zettlemoyer",
+        "Nicola Cancedda",
+        "Thomas Scialom"
+      ],
+      "year": 2023,
+      "locator": "Advances in Neural Information Processing Systems 36",
+      "uri": "https://arxiv.org/abs/2302.04761"
+    },
+    {
+      "id": "src_corbett_anderson_1995",
+      "type": "paper",
+      "title": "Knowledge Tracing: Modeling the Acquisition of Procedural Knowledge",
+      "authors": [
+        "Albert T. Corbett",
+        "John R. Anderson"
+      ],
+      "year": 1995,
+      "locator": "User Modeling and User-Adapted Interaction 4"
+    },
+    {
+      "id": "src_van_der_linden_adaptive_2010",
+      "type": "book",
+      "title": "Elements of Adaptive Testing",
+      "authors": [
+        "Wim J. van der Linden",
+        "Cees A. W. Glas"
+      ],
+      "year": 2010,
+      "locator": "Springer"
+    },
+    {
+      "id": "src_shazeer_fast_decoding_2019",
+      "type": "paper",
+      "title": "Fast Transformer Decoding: One Write-Head is All You Need",
+      "authors": [
+        "Noam Shazeer"
+      ],
+      "year": 2019,
+      "locator": "arXiv:1911.02150",
+      "uri": "https://arxiv.org/abs/1911.02150"
+    },
+    {
+      "id": "src_krell_sequence_packing_2021",
+      "type": "paper",
+      "title": "Efficient Sequence Packing without Cross-contamination: Accelerating Large Language Models without Impacting Performance",
+      "authors": [
+        "Mario Michael Krell",
+        "Matej Kosec",
+        "Sergio P. Perez",
+        "Andrew Fitzgibbon"
+      ],
+      "year": 2021,
+      "locator": "arXiv:2107.02027",
+      "uri": "https://arxiv.org/abs/2107.02027"
+    },
+    {
+      "id": "src_dao_flashattention_2022",
+      "type": "paper",
+      "title": "FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness",
+      "authors": [
+        "Tri Dao",
+        "Daniel Y. Fu",
+        "Stefano Ermon",
+        "Atri Rudra",
+        "Christopher Ré"
+      ],
+      "year": 2022,
+      "locator": "Advances in Neural Information Processing Systems 35",
+      "uri": "https://arxiv.org/abs/2205.14135"
+    },
+    {
+      "id": "src_ba_layer_normalization_2016",
+      "type": "paper",
+      "title": "Layer Normalization",
+      "authors": [
+        "Jimmy Lei Ba",
+        "Jamie Ryan Kiros",
+        "Geoffrey E. Hinton"
+      ],
+      "year": 2016,
+      "locator": "arXiv:1607.06450",
+      "uri": "https://arxiv.org/abs/1607.06450"
+    },
+    {
+      "id": "src_bahdanau_alignment_2015",
+      "type": "paper",
+      "title": "Neural Machine Translation by Jointly Learning to Align and Translate",
+      "authors": [
+        "Dzmitry Bahdanau",
+        "Kyunghyun Cho",
+        "Yoshua Bengio"
+      ],
+      "year": 2015,
+      "locator": "International Conference on Learning Representations",
+      "uri": "https://arxiv.org/abs/1409.0473"
+    },
+    {
+      "id": "src_xiong_layernorm_transformer_2020",
+      "type": "paper",
+      "title": "On Layer Normalization in the Transformer Architecture",
+      "authors": [
+        "Ruibin Xiong",
+        "Yunchang Yang",
+        "Di He",
+        "Kai Zheng",
+        "Shuxin Zheng",
+        "Chen Xing",
+        "Huishuai Zhang",
+        "Yanyan Lan",
+        "Liwei Wang",
+        "Tie-Yan Liu"
+      ],
+      "year": 2020,
+      "locator": "Proceedings of the 37th International Conference on Machine Learning",
+      "uri": "https://proceedings.mlr.press/v119/xiong20b.html"
+    },
+    {
+      "id": "src_expert_synthesis_2026",
+      "type": "original_authorship",
+      "title": "Original diagnostic scenarios and distractor analysis for the AI foundations seed corpus",
+      "authors": [
+        "Project corpus team"
+      ],
+      "year": 2026,
+      "locator": "This bundle",
+      "notes": "All stems, options, rationales, and misconception formulations are original synthesis. Canonical references support concepts rather than verbatim wording."
+    },
+    {
+      "id": "src_choi_grady_dodd_stopping_2011",
+      "type": "paper",
+      "title": "A New Stopping Rule for Computerized Adaptive Testing",
+      "authors": [
+        "Seung W. Choi",
+        "Matthew W. Grady",
+        "Barbara G. Dodd"
+      ],
+      "year": 2011,
+      "locator": "Educational and Psychological Measurement 71(1), 37-53; predicted standard error reduction stopping rule",
+      "uri": "https://doi.org/10.1177/0013164410387338",
+      "notes": "Primary study of a stopping rule based on predicted reduction in posterior standard error. The paper does not supply the item's synthetic common-utility terms; those terms are disclosed original synthesis."
+    },
+    {
+      "id": "src_xu_mostow_multiskill_2011",
+      "type": "paper",
+      "title": "Using Logistic Regression to Trace Multiple Subskills in a Dynamic Bayes Net",
+      "authors": [
+        "Yanbo Xu",
+        "Jack Mostow"
+      ],
+      "year": 2011,
+      "locator": "Proceedings of the 4th International Conference on Educational Data Mining, pp. 241-245; Sections 1-2",
+      "uri": "https://educationaldatamining.org/EDM2011/wp-content/uploads/proc/edm2011_paper17_short_Xu.pdf",
+      "notes": "Primary multi-subskill knowledge-tracing source. The proposal's small likelihood tables are self-contained original derivations, not fitted parameters reported by the paper."
+    },
+    {
+      "id": "src_lipton_label_shift_2018",
+      "type": "paper",
+      "title": "Detecting and Correcting for Label Shift with Black Box Predictors",
+      "authors": [
+        "Zachary C. Lipton",
+        "Yu-Xiang Wang",
+        "Alexander J. Smola"
+      ],
+      "year": 2018,
+      "locator": "Proceedings of the 35th International Conference on Machine Learning, PMLR 80, 3122-3130; label-shift definition and classifier correction",
+      "uri": "https://proceedings.mlr.press/v80/lipton18a.html",
+      "notes": "Primary source for changed p(y) with stable p(x|y) and correction of a classifier under that assumption."
+    },
+    {
+      "id": "src_rumelhart_backprop_1986",
+      "type": "paper",
+      "title": "Learning representations by back-propagating errors",
+      "authors": [
+        "David E. Rumelhart",
+        "Geoffrey E. Hinton",
+        "Ronald J. Williams"
+      ],
+      "year": 1986,
+      "locator": "Nature 323, 533-536",
+      "uri": "https://doi.org/10.1038/323533a0"
+    },
+    {
+      "id": "src_jax_stop_gradient_v0_11_0",
+      "type": "official_documentation",
+      "title": "jax.lax.stop_gradient (JAX v0.11.0)",
+      "authors": [
+        "The JAX Authors"
+      ],
+      "version": "0.11.0",
+      "release_commit": "a1521744c6dc074443fe549f19f48d7197abf759",
+      "accessed_on": "2026-07-22",
+      "locator": "JAX v0.11.0 source snapshot at commit a1521744c6dc074443fe549f19f48d7197abf759, jax/_src/lax/lax.py stop_gradient API documentation; higher-order autodiff guide, stopping-gradients and straight-through-estimator sections",
+      "uri": "https://github.com/jax-ml/jax/blob/a1521744c6dc074443fe549f19f48d7197abf759/jax/_src/lax/lax.py",
+      "readable_documentation_uri": "https://docs.jax.dev/en/latest/higher-order.html",
+      "notes": "The release commit pins the identity-valued, differentiation-blocking API semantics used by the questions. The rendered guide is retained only as a readable locator and is not the immutable authority."
+    },
+    {
+      "id": "src_polyak_momentum_1964",
+      "type": "paper",
+      "title": "Some methods of speeding up the convergence of iteration methods",
+      "authors": [
+        "Boris T. Polyak"
+      ],
+      "year": 1964,
+      "locator": "USSR Computational Mathematics and Mathematical Physics 4(5), 1-17",
+      "uri": "https://doi.org/10.1016/0041-5553(64)90137-5"
+    },
+    {
+      "id": "src_glorot_rectifiers_2011",
+      "type": "paper",
+      "title": "Deep Sparse Rectifier Neural Networks",
+      "authors": [
+        "Xavier Glorot",
+        "Antoine Bordes",
+        "Yoshua Bengio"
+      ],
+      "year": 2011,
+      "locator": "Proceedings of the Fourteenth International Conference on Artificial Intelligence and Statistics, PMLR 15, 315-323",
+      "uri": "https://proceedings.mlr.press/v15/glorot11a.html",
+      "notes": "Primary rectifier reference. The item's fixed-mask directional derivative is an explicit local calculation, with general network calculus also grounded in the cited textbook and expert synthesis."
+    },
+    {
+      "id": "src_neyshabur_path_sgd_2015",
+      "type": "paper",
+      "title": "Path-SGD: Path-Normalized Optimization in Deep Neural Networks",
+      "authors": [
+        "Behnam Neyshabur",
+        "Ruslan Salakhutdinov",
+        "Nati Srebro"
+      ],
+      "year": 2015,
+      "locator": "Advances in Neural Information Processing Systems 28, 2422-2430",
+      "uri": "https://proceedings.neurips.cc/paper/2015/hash/eaa32c96f620053cf442ad32258076b9-Abstract.html"
+    },
+    {
+      "id": "src_chen_simclr_2020",
+      "type": "paper",
+      "title": "A Simple Framework for Contrastive Learning of Visual Representations",
+      "authors": [
+        "Ting Chen",
+        "Simon Kornblith",
+        "Mohammad Norouzi",
+        "Geoffrey Hinton"
+      ],
+      "year": 2020,
+      "locator": "Proceedings of the 37th International Conference on Machine Learning, PMLR 119, 1597-1607",
+      "uri": "https://proceedings.mlr.press/v119/chen20j.html"
+    },
+    {
+      "id": "src_ng_reward_shaping_1999",
+      "type": "paper",
+      "title": "Policy Invariance Under Reward Transformations: Theory and Application to Reward Shaping",
+      "authors": [
+        "Andrew Y. Ng",
+        "Daishi Harada",
+        "Stuart J. Russell"
+      ],
+      "year": 1999,
+      "locator": "Proceedings of the Sixteenth International Conference on Machine Learning, 278-287",
+      "uri": "https://people.eecs.berkeley.edu/~pabbeel/cs287-fa09/readings/NgHaradaRussell-shaping-ICML1999.pdf",
+      "canonical_uri": "http://robotics.stanford.edu/~ang/papers/shaping-icml99.ps",
+      "notes": "Stable readable HTTPS teaching-library copy plus the canonical author-hosted Stanford PostScript provenance."
+    },
+    {
+      "id": "src_precup_off_policy_2000",
+      "type": "paper",
+      "title": "Eligibility Traces for Off-Policy Policy Evaluation",
+      "authors": [
+        "Doina Precup",
+        "Richard S. Sutton",
+        "Satinder Singh"
+      ],
+      "year": 2000,
+      "locator": "Proceedings of the Seventeenth International Conference on Machine Learning, 759-766",
+      "uri": "https://web.eecs.umich.edu/~baveja/Papers/OffPolicy.pdf"
+    },
+    {
+      "id": "src_jiang_li_dr_2016",
+      "type": "paper",
+      "title": "Doubly Robust Off-policy Value Evaluation for Reinforcement Learning",
+      "authors": [
+        "Nan Jiang",
+        "Lihong Li"
+      ],
+      "year": 2016,
+      "locator": "Proceedings of the 33rd International Conference on Machine Learning, PMLR 48, 652-661",
+      "uri": "https://proceedings.mlr.press/v48/jiang16.html"
+    },
+    {
+      "id": "src_hyndman_athanasopoulos_fpp3_2021",
+      "type": "book",
+      "title": "Forecasting: Principles and Practice, Third Edition",
+      "authors": [
+        "Rob J. Hyndman",
+        "George Athanasopoulos"
+      ],
+      "year": 2021,
+      "locator": "OTexts, Sections 1.4 and 5.10",
+      "uri": "https://otexts.com/fpp3/",
+      "notes": "Section 5.10 directly describes time-series cross-validation with training observations preceding each test observation and rolling forecasting origins. It does not supply the generated dates, centered-window scenario, wording, or distractors."
+    },
+    {
+      "id": "src_lee_seung_nmf_2000",
+      "type": "paper",
+      "title": "Algorithms for Non-negative Matrix Factorization",
+      "authors": [
+        "Daniel D. Lee",
+        "H. Sebastian Seung"
+      ],
+      "year": 2000,
+      "locator": "Advances in Neural Information Processing Systems 13, pages 556-562",
+      "uri": "https://proceedings.neurips.cc/paper_files/paper/2000/hash/f9d1152547c0bde01830b7e8bd60024c-Abstract.html"
+    },
+    {
+      "id": "src_ester_dbscan_1996",
+      "type": "paper",
+      "title": "A Density-Based Algorithm for Discovering Clusters in Large Spatial Databases with Noise",
+      "authors": [
+        "Martin Ester",
+        "Hans-Peter Kriegel",
+        "Jörg Sander",
+        "Xiaowei Xu"
+      ],
+      "year": 1996,
+      "locator": "Proceedings of the Second International Conference on Knowledge Discovery and Data Mining, pages 226-231",
+      "uri": "https://f.aaai.org/Library/KDD/1996/kdd96-037.php"
+    },
+    {
+      "id": "src_ragas_2024",
+      "type": "paper",
+      "title": "RAGAs: Automated Evaluation of Retrieval Augmented Generation",
+      "authors": [
+        "Shahul Es",
+        "Jithin James",
+        "Luis Espinosa Anke",
+        "Steven Schockaert"
+      ],
+      "year": 2024,
+      "locator": "Proceedings of EACL 2024: System Demonstrations, pages 150-158",
+      "uri": "https://aclanthology.org/2024.eacl-demo.16/"
+    },
+    {
+      "id": "src_alce_2023",
+      "type": "paper",
+      "title": "Enabling Large Language Models to Generate Text with Citations",
+      "authors": [
+        "Tianyu Gao",
+        "Howard Yen",
+        "Jiatong Yu",
+        "Danqi Chen"
+      ],
+      "year": 2023,
+      "locator": "Proceedings of EMNLP 2023, pages 6465-6488",
+      "uri": "https://aclanthology.org/2023.emnlp-main.398/"
+    },
+    {
+      "id": "src_ircot_2023",
+      "type": "paper",
+      "title": "Interleaving Retrieval with Chain-of-Thought Reasoning for Knowledge-Intensive Multi-Step Questions",
+      "authors": [
+        "Harsh Trivedi",
+        "Niranjan Balasubramanian",
+        "Tushar Khot",
+        "Ashish Sabharwal"
+      ],
+      "year": 2023,
+      "locator": "Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics, Volume 1, pages 10014-10037",
+      "uri": "https://aclanthology.org/2023.acl-long.557/"
+    },
+    {
+      "id": "src_hoerl_kennard_ridge_1970",
+      "type": "paper",
+      "title": "Ridge Regression: Biased Estimation for Nonorthogonal Problems",
+      "authors": [
+        "Arthur E. Hoerl",
+        "Robert W. Kennard"
+      ],
+      "year": 1970,
+      "locator": "Technometrics 12(1), 55-67; ridge estimator obtained by adding a positive diagonal term to the least-squares normal equations",
+      "uri": "https://doi.org/10.1080/00401706.1970.10488634",
+      "notes": "Primary ridge-regression source. It grounds penalized least-squares shrinkage, not the item's synthetic one-row arithmetic or any claim that a penalty is observed data."
+    },
+    {
+      "id": "src_lamport_event_ordering_1978",
+      "type": "paper",
+      "title": "Time, Clocks, and the Ordering of Events in a Distributed System",
+      "authors": [
+        "Leslie Lamport"
+      ],
+      "year": 1978,
+      "locator": "Communications of the ACM 21(7), 558-565; sections The Partial Ordering and Logical Clocks",
+      "uri": "https://doi.org/10.1145/359545.359563",
+      "notes": "Primary source for reasoning about event order and logical timestamps rather than physical arrival order. The monotone revision contract in the item is explicitly stipulated and is not attributed to the paper."
+    },
+    {
+      "id": "src_mrag_2025",
+      "type": "paper",
+      "title": "MRAG: A Modular Retrieval Framework for Time-Sensitive Question Answering",
+      "authors": [
+        "Siyue Zhang",
+        "Yuxiang Xue",
+        "Yiming Zhang",
+        "Xiaobao Wu",
+        "Anh Tuan Luu",
+        "Chen Zhao"
+      ],
+      "year": 2025,
+      "locator": "Findings of the Association for Computational Linguistics: EMNLP 2025, pages 3080–3118; DOI 10.18653/v1/2025.findings-emnlp.167",
+      "uri": "https://aclanthology.org/2025.findings-emnlp.167/",
+      "notes": "Independently AI-reviewed and registered as supporting evidence for decomposing time-sensitive questions into content and temporal constraints and ranking semantic and temporal relevance separately. It does not validate the stipulated regulator notices, dates, or deadline. Human review and explicit activation of any generated question remain separate requirements."
+    },
+    {
+      "id": "src_macaroons_2014",
+      "type": "paper",
+      "title": "Macaroons: Cookies with Contextual Caveats for Decentralized Authorization in the Cloud",
+      "authors": [
+        "Arnar Birgisson",
+        "Joe Gibbs Politz",
+        "Ulfar Erlingsson",
+        "Ankur Taly",
+        "Michael Vrable",
+        "Mark Lentczner"
+      ],
+      "year": 2014,
+      "locator": "21st Annual Network and Distributed System Security Symposium (NDSS 2014), San Diego, California; DOI 10.14722/ndss.2014.23212",
+      "uri": "https://www.ndss-symposium.org/ndss2014/ndss-2014-programme/macaroons-cookies-contextual-caveats-decentralized-authorization-cloud/",
+      "notes": "Independently AI-reviewed and registered as supporting evidence for decentralized delegation and credential attenuation through object, action, and contextual caveats. It does not establish the stipulated TSQ coordinator, ticket, or human-approval contract. Human review and explicit activation of any generated question remain separate requirements."
+    },
+    {
+      "id": "src_rfc9396_2023",
+      "type": "standard",
+      "title": "OAuth 2.0 Rich Authorization Requests",
+      "authors": [
+        "Torsten Lodderstedt",
+        "Justin Richer",
+        "Brian Campbell"
+      ],
+      "year": 2023,
+      "locator": "RFC 9396, Internet Standards Track, May 2023; DOI 10.17487/RFC9396",
+      "uri": "https://www.rfc-editor.org/rfc/rfc9396.html",
+      "notes": "Independently AI-reviewed and registered as supporting standards evidence only for protecting OAuth authorization_details carried in authorization requests against tampering or swapping. It does not define the stipulated ticket workflow, dry-run, canonical firewall arguments, or tool-approval lifecycle. Human review and explicit activation of any generated question remain separate requirements."
+    },
+    {
+      "id": "src_sagas_1987",
+      "type": "paper",
+      "title": "Sagas",
+      "authors": [
+        "Hector Garcia-Molina",
+        "Kenneth Salem"
+      ],
+      "year": 1987,
+      "locator": "ACM SIGMOD Record 16(3), December 1987, pages 249–259; also published in SIGMOD 1987 proceedings; DOI 10.1145/38714.38742",
+      "uri": "https://sigmodrecord.org/1987/12/09/sagas/",
+      "notes": "Independently AI-reviewed and registered as supporting evidence for compensating completed subtransactions when a later saga subtransaction fails, including reservation and cancellation examples. It does not specify the stipulated all-or-neither trip predicate or cancellation API's operation-identity contract. Human review and explicit activation of any generated question remain separate requirements."
+    },
+    {
+      "id": "src_chandy_lamport_snapshots_1985",
+      "type": "paper",
+      "title": "Distributed Snapshots: Determining Global States of Distributed Systems",
+      "authors": [
+        "K. Mani Chandy",
+        "Leslie Lamport"
+      ],
+      "year": 1985,
+      "locator": "ACM Transactions on Computer Systems 3(1), February 1985, pages 63–75; DOI 10.1145/214451.214456",
+      "uri": "https://doi.org/10.1145/214451.214456",
+      "notes": "Independently AI-reviewed and registered as supporting evidence for recording a consistent global state before evaluating a global-state predicate, with detection guarantees for stable properties. It does not define the stipulated paginated monitoring API, cursor, or same-snapshot contract. Human review and explicit activation of any generated question remain separate requirements."
+    }
+  ]
+}

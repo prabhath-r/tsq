@@ -35,7 +35,7 @@ from tests.schema_upgrade_helpers import rehash_event_streams
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 
 
 def score(question_id: str, total: float) -> CandidateScore:

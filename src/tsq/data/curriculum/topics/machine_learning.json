@@ -1,0 +1,17 @@
+{
+  "topic": {
+    "id": "t_machine_learning",
+    "domain_id": "d_artificial_intelligence",
+    "name": "Machine Learning",
+    "description": "Learning predictive, generative, representational, and decision-making behavior from data or interaction.",
+    "concept_ids": [],
+    "related_topic_ids": [
+      "t_large_language_models"
+    ],
+    "sort_order": 10
+  },
+  "concepts": [],
+  "learning_objectives": [],
+  "misconceptions": [],
+  "questions": []
+}

@@ -34,7 +34,13 @@ from .capacity import (
     concept_target,
     topic_target,
 )
-from .corpus import load_bundle, parse_bundle, read_and_parse, validate_bundle
+from .corpus import (
+    corpus_source_digest,
+    load_bundle,
+    parse_bundle,
+    read_and_parse,
+    validate_bundle,
+)
 from .authoring import (
     AuthoringJobs,
     CoveragePlanner,
@@ -101,7 +107,7 @@ from .store import Database, new_id
 
 
 BUNDLED_CORPUS_PACKAGE = "tsq.data"
-BUNDLED_CORPUS_NAME = "ai_curriculum.json"
+BUNDLED_CORPUS_NAME = "curriculum"
 BUNDLED_RELEASE_MARKER = "bundled_corpus_release"
 BUNDLED_RESOURCE_DIGEST_MARKER = "bundled_corpus_resource_sha256"
 # Releases shipped before the marker existed.  This narrow, immutable lineage
@@ -272,9 +278,7 @@ def _ensure_starter_corpus(database: Database) -> StarterCorpusStatus:
         return StarterCorpusStatus(False)
     try:
         with _corpus_path(None) as (corpus_path, _):
-            bundled_resource_digest = hashlib.sha256(
-                corpus_path.read_bytes()
-            ).hexdigest()
+            bundled_resource_digest = corpus_source_digest(corpus_path)
             if (
                 active_release_id is not None
                 and marker
@@ -438,6 +442,11 @@ def command_audit(args: argparse.Namespace) -> int:
         else:
             issues = audit_corpus(
                 questions,
+                expected_primary_concept_ids={
+                    mapping.concept_id
+                    for question in questions
+                    for mapping in question.concepts
+                },
                 knowledge_graph=KnowledgeGraph(concepts, edges),
                 misconceptions=misconceptions,
             )
@@ -472,7 +481,7 @@ def command_capacity(args: argparse.Namespace) -> int:
             topics,
         ) = read_and_parse(corpus_path, include_catalog=True)
         corpus_sha256 = (
-            hashlib.sha256(corpus_path.read_bytes()).hexdigest()
+            corpus_source_digest(corpus_path)
             if args.quarantine_impact
             else None
         )
@@ -3450,7 +3459,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--corpus",
         type=Path,
         default=None,
-        help=f"Corpus JSON path (default: bundled {BUNDLED_CORPUS_NAME})",
+        help=(
+            "Corpus JSON file, manifest, or sharded directory "
+            f"(default: bundled {BUNDLED_CORPUS_NAME})"
+        ),
     )
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=command_init)
@@ -3476,7 +3488,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         nargs="?",
         default=None,
-        help=f"Corpus JSON path (default: bundled {BUNDLED_CORPUS_NAME})",
+        help=(
+            "Corpus JSON file, manifest, or sharded directory "
+            f"(default: bundled {BUNDLED_CORPUS_NAME})"
+        ),
     )
     audit.add_argument("--json", action="store_true")
     audit.add_argument("--strict", action="store_true", help="Treat warnings as a failing audit")
@@ -3491,7 +3506,10 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         nargs="?",
         default=None,
-        help=f"Corpus JSON path (default: bundled {BUNDLED_CORPUS_NAME})",
+        help=(
+            "Corpus JSON file, manifest, or sharded directory "
+            f"(default: bundled {BUNDLED_CORPUS_NAME})"
+        ),
     )
     capacity_scope = capacity.add_mutually_exclusive_group()
     capacity_scope.add_argument("--concept", help="Analyze one stable concept ID")

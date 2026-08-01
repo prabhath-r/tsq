@@ -1,0 +1,3161 @@
+{
+  "topic": {
+    "id": "t_reliability_generalization",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Reliability and Generalization",
+    "description": "Evidence that model behavior transfers beyond fitted data and remains valid at deployment.",
+    "concept_ids": [
+      "c_generalization",
+      "c_data_partitioning",
+      "c_data_leakage",
+      "c_bias_variance",
+      "c_regularization",
+      "c_feature_scaling",
+      "c_distribution_shift"
+    ],
+    "related_topic_ids": [
+      "t_retrieval_augmented_generation"
+    ],
+    "sort_order": 60
+  },
+  "concepts": [
+    {
+      "id": "c_generalization",
+      "name": "Generalization",
+      "description": "Performance on future data drawn from the intended deployment process.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_data_partitioning",
+      "name": "Data partitioning and validation",
+      "description": "Designing train, validation, and test partitions that match the unit and chronology of deployment.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_data_leakage",
+      "name": "Data leakage",
+      "description": "Information reaches model fitting or selection that would not be available at the prediction time being evaluated.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_bias_variance",
+      "name": "Bias and variance",
+      "description": "Decomposing predictive error into systematic approximation and sensitivity to the sampled training set.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_regularization",
+      "name": "Regularization",
+      "description": "Constraining effective model complexity to improve expected out-of-sample performance.",
+      "level": "intermediate"
+    },
+    {
+      "id": "c_feature_scaling",
+      "name": "Feature scaling and geometry",
+      "description": "How units and transformations change distance, penalties, and optimization geometry.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_distribution_shift",
+      "name": "Distribution shift",
+      "description": "Changes between training and deployment distributions, including covariate, label, and concept shift.",
+      "level": "intermediate"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_leakage_is_only_target_column",
+      "name": "Leakage means only copying the target",
+      "description": "Treats leakage as an explicit target column and misses proxies or features unavailable at prediction time.",
+      "concept_id": "c_data_leakage",
+      "remediation": "Reconstruct the exact prediction timestamp and audit whether each value exists then."
+    },
+    {
+      "id": "m_cross_validation_repairs_bad_split_units",
+      "name": "More folds repair invalid split units",
+      "description": "Assumes leave-one-out or many-fold validation fixes patient, group, or temporal dependence without changing the split unit.",
+      "concept_id": "c_data_partitioning",
+      "remediation": "Choose split units and chronology from deployment first; choose the number of folds second."
+    },
+    {
+      "id": "m_preprocessing_on_all_data_is_harmless",
+      "name": "Unsupervised preprocessing cannot leak",
+      "description": "Assumes scaling or representation fitting on all rows is harmless because labels are not used.",
+      "concept_id": "c_data_leakage",
+      "remediation": "Fit every learned transformation inside each training partition and apply it unchanged to held-out data."
+    },
+    {
+      "id": "m_test_set_is_a_validation_set",
+      "name": "The test set may guide model selection",
+      "description": "Uses test results to choose hyperparameters and still interprets the selected result as unbiased final evidence.",
+      "concept_id": "c_data_partitioning",
+      "remediation": "Use validation data for choices and reserve the test set for one locked evaluation."
+    },
+    {
+      "id": "m_more_trials_reduce_selection_bias",
+      "name": "More test-set trials reduce selection bias",
+      "description": "Believes searching more configurations against the same test set makes the best score more reliable.",
+      "concept_id": "c_data_partitioning",
+      "remediation": "Study the winner's curse: maximizing noisy estimates increases optimism as the search grows."
+    },
+    {
+      "id": "m_averaging_reused_test_scores_restores_holdout",
+      "name": "Averaging restores a reused holdout",
+      "description": "Assumes averaging scores removes the adaptivity created when test feedback influenced the workflow.",
+      "concept_id": "c_data_partitioning",
+      "remediation": "Track information flow, not just the final aggregation; adaptive reuse spends holdout validity."
+    },
+    {
+      "id": "m_l2_is_scale_invariant",
+      "name": "L2 regularization is scale invariant",
+      "description": "Extends the reparameterization invariance of an unpenalized linear score to a coordinate-wise L2 penalty.",
+      "concept_id": "c_regularization",
+      "remediation": "Rewrite the penalty after a unit change and compare the feasible coefficient geometry."
+    },
+    {
+      "id": "m_scaling_changes_optimization_only",
+      "name": "Scaling affects speed but never the fitted model",
+      "description": "Recognizes conditioning effects but ignores that regularization makes the optimization objective itself unit dependent.",
+      "concept_id": "c_feature_scaling",
+      "remediation": "Separate invariance of model predictions from invariance of the penalized objective."
+    },
+    {
+      "id": "m_one_global_lambda_repairs_one_feature_rescale",
+      "name": "One global lambda repairs any coordinate rescale",
+      "description": "Assumes a scalar penalty multiplier can undo a rescaling applied to only one feature without affecting the others.",
+      "concept_id": "c_regularization",
+      "remediation": "Compare per-coordinate penalty weights before and after rescaling."
+    },
+    {
+      "id": "m_training_error_diagnoses_variance",
+      "name": "Training error alone diagnoses variance",
+      "description": "Uses a low training error to dismiss instability across plausible training samples.",
+      "concept_id": "c_bias_variance",
+      "remediation": "Measure sensitivity across resamples; variance concerns fitted-model changes, not just in-sample fit."
+    },
+    {
+      "id": "m_more_capacity_reduces_variance",
+      "name": "More capacity reduces variance",
+      "description": "Assumes a deeper or more flexible model smooths away fold-to-fold instability.",
+      "concept_id": "c_bias_variance",
+      "remediation": "Contrast how capacity changes bias and sensitivity to sample-specific details."
+    },
+    {
+      "id": "m_single_split_is_stable_evidence",
+      "name": "The best single split is representative",
+      "description": "Selects a favorable partition and treats cross-split variability as irrelevant noise.",
+      "concept_id": "c_data_partitioning",
+      "remediation": "Summarize performance across prespecified resamples and retain uncertainty in the estimate."
+    },
+    {
+      "id": "m_stable_class_conditionals_mean_no_shift",
+      "name": "Stable class-conditionals mean no shift",
+      "description": "Overlooks that changing class priors changes the joint and marginal deployment distributions.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "Factor p(x,y) as p(x|y)p(y) and vary one factor at a time."
+    },
+    {
+      "id": "m_prior_change_is_covariate_shift",
+      "name": "A prior change is covariate shift",
+      "description": "Labels a change in p(y) with stable p(x|y) as covariate shift.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "Contrast label shift with the covariate-shift assumption that p(y|x) remains stable."
+    },
+    {
+      "id": "m_prior_change_is_concept_shift",
+      "name": "A prior change is concept shift",
+      "description": "Confuses changing outcome prevalence with a change in the conditional relationship from features to outcomes.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "Identify exactly which conditional or marginal factor changed before naming the shift."
+    },
+    {
+      "id": "m_validation_removes_need_for_complexity_control",
+      "name": "A validation set removes complexity concerns",
+      "description": "Assumes finite validation data permit unlimited adaptive search without selection variance or overfitting.",
+      "concept_id": "c_data_partitioning",
+      "remediation": "Treat model selection itself as an adaptive statistical procedure with finite evidence."
+    },
+    {
+      "id": "m_standardization_is_purely_numerical",
+      "name": "Standardization is purely numerical",
+      "description": "Ignores that scaling coordinates changes the metric and relative feature influence used by distance-based algorithms.",
+      "concept_id": "c_feature_scaling",
+      "remediation": "Write the Euclidean distance before and after scaling one coordinate."
+    },
+    {
+      "id": "m_unit_conversion_changes_information_content",
+      "name": "Changing measurement units changes information content",
+      "description": "Interprets an invertible unit conversion as adding or removing predictive information from the observations.",
+      "concept_id": "c_feature_scaling",
+      "remediation": "Distinguish an invertible representation change from its effect on a particular algorithm or prior."
+    },
+    {
+      "id": "m_coefficients_are_invariant_to_feature_units",
+      "name": "Coefficients are invariant to feature units",
+      "description": "Expects a regression coefficient to keep the same numerical value when its corresponding feature is rescaled.",
+      "concept_id": "c_feature_scaling",
+      "remediation": "Preserve the linear predictor algebraically after multiplying a feature by a constant."
+    },
+    {
+      "id": "m_same_predictions_imply_same_penalty",
+      "name": "Equivalent predictions imply equivalent coefficient penalties",
+      "description": "Assumes a reparameterization that preserves fitted values also preserves an L1 or L2 norm on the coefficients.",
+      "concept_id": "c_feature_scaling",
+      "remediation": "Substitute the rescaled coefficient into the chosen penalty and compare magnitudes."
+    },
+    {
+      "id": "m_tree_partitions_change_under_unit_conversion",
+      "name": "A unit conversion changes tree partitions",
+      "description": "Assumes positive monotone rescaling changes the ordering of candidate split points and therefore the fitted partition of a standard decision tree.",
+      "concept_id": "c_feature_scaling",
+      "remediation": "Track observation order and translated thresholds under a positive affine feature transformation."
+    },
+    {
+      "id": "m_all_models_require_standardization",
+      "name": "All model families require standardization",
+      "description": "Treats scale sensitivity as a universal property rather than one determined by an algorithm's geometry, parameterization, and optimization.",
+      "concept_id": "c_feature_scaling",
+      "remediation": "Compare order-based tree splits with Euclidean distance and coefficient-penalty calculations."
+    },
+    {
+      "id": "m_training_fit_is_generalization",
+      "name": "Training fit is generalization",
+      "description": "Uses performance on fitted examples as direct evidence of performance on new draws from the deployment process.",
+      "concept_id": "c_generalization",
+      "remediation": "Estimate performance on untouched examples sampled with the same units and chronology as deployment."
+    },
+    {
+      "id": "m_sample_size_repairs_distribution_mismatch",
+      "name": "More source data repair distribution mismatch",
+      "description": "Assumes an arbitrarily large sample from the wrong population identifies performance in a different deployment distribution.",
+      "concept_id": "c_generalization",
+      "remediation": "Distinguish sampling uncertainty within a distribution from bias caused by a mismatch between source and target distributions."
+    },
+    {
+      "id": "m_average_performance_guarantees_subgroups",
+      "name": "Average performance guarantees subgroup performance",
+      "description": "Infers reliable behavior for every deployment subgroup from a satisfactory aggregate test metric.",
+      "concept_id": "c_generalization",
+      "remediation": "Report uncertainty and performance for decision-relevant subgroups in addition to the deployment-weighted aggregate."
+    },
+    {
+      "id": "m_duplicates_across_splits_are_independent",
+      "name": "Duplicates across splits are independent evidence",
+      "description": "Treats near-duplicate records in training and evaluation partitions as separate evidence despite shared content or entity identity.",
+      "concept_id": "c_data_leakage",
+      "remediation": "Deduplicate or group related records before splitting and evaluate on genuinely unseen units."
+    },
+    {
+      "id": "m_resampling_variation_is_only_metric_noise",
+      "name": "Resampling variation is only metric noise",
+      "description": "Dismisses large changes in fitted predictions across plausible training samples as irrelevant evaluation noise rather than estimator variance.",
+      "concept_id": "c_bias_variance",
+      "remediation": "Compare fitted functions or predictions across resampled training sets, not only uncertainty in a reported average."
+    },
+    {
+      "id": "m_stronger_regularization_always_improves_generalization",
+      "name": "Stronger regularization always improves generalization",
+      "description": "Assumes increasing a penalty monotonically improves held-out performance and cannot introduce harmful bias or underfitting.",
+      "concept_id": "c_regularization",
+      "remediation": "Tune regularization on untouched validation data and inspect both training and validation error across strengths."
+    },
+    {
+      "id": "m_stable_feature_marginal_means_no_shift",
+      "name": "A stable feature marginal rules out shift",
+      "description": "Concludes that deployment is unchanged from a stable p(x) even when the conditional outcome mechanism p(y|x) has changed.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "Audit the joint factorization and test conditional outcome behavior rather than checking feature marginals alone."
+    },
+    {
+      "id": "m_conditional_change_is_label_shift",
+      "name": "Any conditional change is label shift",
+      "description": "Calls a change in p(y|x) label shift even though label shift assumes stable class-conditional features and a changed class prior.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "State which factor in p(x,y) is assumed stable before naming the shift."
+    },
+    {
+      "id": "m_covariate_shift_changes_label_mechanism",
+      "name": "Covariate shift changes the label mechanism",
+      "description": "Defines covariate shift as a change in p(y|x) rather than a change in p(x) with a stable conditional outcome relationship.",
+      "concept_id": "c_distribution_shift",
+      "remediation": "Contrast p_source(x) with p_target(x) while holding p(y|x) fixed in the covariate-shift factorization."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_data_leakage_prediction_time_001",
+      "version": 1,
+      "family_id": "f_deployment_aligned_validation",
+      "status": "approved",
+      "stem": "A hospital trains a model to predict 30-day readmission at the moment a patient is admitted. Its table has one row per admission and includes length_of_stay, which is known only at discharge. Some patients have multiple admissions. Which evaluation redesign most directly makes the reported performance credible for future patients?",
+      "kind": "conceptual",
+      "difficulty": 0.75,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_data_leakage",
+          "weight": 0.5,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 0.35,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Remove post-admission features, split by patient and chronology, and fit preprocessing within each training partition.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This aligns feature availability, independence units, time direction, and learned preprocessing with the intended admission-time deployment."
+        },
+        {
+          "id": "b",
+          "text": "Keep length_of_stay because it is not the target, but stratify a random row split by the readmission label.",
+          "correct": false,
+          "misconception_id": "m_leakage_is_only_target_column",
+          "rationale": "A non-target feature still leaks if it is unavailable when the prediction must be made; stratification does not repair that."
+        },
+        {
+          "id": "c",
+          "text": "Keep the feature set and use leave-one-admission-out cross-validation so that each row is tested exactly once.",
+          "correct": false,
+          "misconception_id": "m_cross_validation_repairs_bad_split_units",
+          "rationale": "More folds do not prevent the same patient or later-time information from crossing boundaries, and the post-admission feature remains invalid."
+        },
+        {
+          "id": "d",
+          "text": "Remove the explicit readmission column, standardize all remaining rows together, and then create the train-test split.",
+          "correct": false,
+          "misconception_id": "m_preprocessing_on_all_data_is_harmless",
+          "rationale": "Fitting scaling before the split leaks held-out distribution information and still fails to audit prediction-time availability."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "leakage",
+        "temporal_split",
+        "group_split",
+        "deployment"
+      ]
+    },
+    {
+      "id": "q_holdout_adaptive_reuse_001",
+      "version": 1,
+      "family_id": "f_deployment_aligned_validation",
+      "status": "approved",
+      "stem": "A team tries 40 hyperparameter configurations. After each run it inspects performance on the same nominal test set and chooses the configuration with the highest test accuracy. What is the strongest correction if the goal is an honest final performance estimate?",
+      "kind": "application",
+      "difficulty": 0.45,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 0.55,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.3,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Report the best test accuracy because searching more configurations makes the maximum estimate conservative.",
+          "correct": false,
+          "misconception_id": "m_more_trials_reduce_selection_bias",
+          "rationale": "Choosing the maximum of many noisy test estimates creates optimism; a larger search usually worsens the winner's curse."
+        },
+        {
+          "id": "b",
+          "text": "Select configurations on validation data, lock the workflow, then evaluate once on an untouched test set; use nested cross-validation when data are scarce.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Model-selection feedback is separated from the final estimate; nested cross-validation reproduces that separation across outer folds."
+        },
+        {
+          "id": "c",
+          "text": "Average the 40 test accuracies so that positive and negative selection errors cancel before reporting the chosen model, despite choosing it from those same repeated measurements.",
+          "correct": false,
+          "misconception_id": "m_averaging_reused_test_scores_restores_holdout",
+          "rationale": "Averaging candidate scores does not undo that test feedback determined which model and workflow were selected."
+        },
+        {
+          "id": "d",
+          "text": "Continue using the test set for selection, but rename it validation after the final configuration has been chosen.",
+          "correct": false,
+          "misconception_id": "m_test_set_is_a_validation_set",
+          "rationale": "Renaming correctly acknowledges its role but does not create a new untouched set for final evaluation."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "holdout",
+        "hyperparameter_search",
+        "selection_bias"
+      ]
+    },
+    {
+      "id": "q_regularization_feature_units_001",
+      "version": 1,
+      "family_id": "f_objective_geometry",
+      "status": "approved",
+      "stem": "An L2-regularized logistic regression is refit with the same numerical penalty strength after one feature is converted from meters to millimeters. The physical information is unchanged. Which statement is correct?",
+      "kind": "conceptual",
+      "difficulty": 1.05,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.45,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.35,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Predictions should be identical because an invertible rescaling can be absorbed into the corresponding coefficient.",
+          "correct": false,
+          "misconception_id": "m_l2_is_scale_invariant",
+          "rationale": "The score can be reparameterized, but the L2 norm of that reparameterized coefficient is different, so the penalized optimum need not match."
+        },
+        {
+          "id": "b",
+          "text": "The effect is limited to convergence speed; feature units do not change the optimum of a convex logistic-regression objective under penalization.",
+          "correct": false,
+          "misconception_id": "m_scaling_changes_optimization_only",
+          "rationale": "Convexity guarantees the nature of the optimum, not invariance of an objective whose penalty changes under coordinate rescaling."
+        },
+        {
+          "id": "c",
+          "text": "Predictions can change because the rescaling changes the penalty geometry; standardize within training data or transform the penalty and retune it.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "L2 applies to coordinate values, so changing units changes relative shrinkage unless scaling or per-coordinate penalties compensate."
+        },
+        {
+          "id": "d",
+          "text": "Multiplying the one global penalty strength by 1000 exactly restores the original solution for all coefficients.",
+          "correct": false,
+          "misconception_id": "m_one_global_lambda_repairs_one_feature_rescale",
+          "rationale": "A global change also alters shrinkage on untouched features and cannot exactly undo a change isolated to one coordinate."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "logistic_regression",
+        "l2",
+        "scaling",
+        "invariance"
+      ]
+    },
+    {
+      "id": "q_bias_variance_resampling_001",
+      "version": 1,
+      "family_id": "f_generalization_diagnosis",
+      "status": "approved",
+      "stem": "A deep decision tree has almost zero training error. Across repeated, deployment-aligned cross-validation splits, its validation error ranges from 12% to 31%, and the selected root features change substantially. What is the best diagnosis and response?",
+      "kind": "debugging",
+      "difficulty": 0.55,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_bias_variance",
+          "weight": 0.55,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.2,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.15,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 0.1,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The model has high bias; increasing tree depth should reduce both the split variability and validation error across future samples as well.",
+          "correct": false,
+          "misconception_id": "m_more_capacity_reduces_variance",
+          "rationale": "Near-zero training error argues against an underfitting diagnosis, while greater depth usually increases sensitivity to sample details."
+        },
+        {
+          "id": "b",
+          "text": "The model has low variance because its training error is stable; merely the average validation error matters.",
+          "correct": false,
+          "misconception_id": "m_training_error_diagnoses_variance",
+          "rationale": "Variance concerns changes in the fitted function across samples, which the unstable validation results and roots directly reveal."
+        },
+        {
+          "id": "c",
+          "text": "Choose the split with 12% error as representative and discard the other splits as unlucky partition noise.",
+          "correct": false,
+          "misconception_id": "m_single_split_is_stable_evidence",
+          "rationale": "Selecting the most favorable split produces another selection bias and hides the uncertainty the repeats were intended to expose."
+        },
+        {
+          "id": "d",
+          "text": "The pattern indicates high variance; constrain or prune the tree, or use variance-reducing aggregation, and retain uncertainty across valid resamples.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Unstable fitted structure plus a wide validation range is characteristic of estimation variance; regularization or bagging targets that sensitivity."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "variance",
+        "decision_tree",
+        "cross_validation",
+        "regularization"
+      ]
+    },
+    {
+      "id": "q_distribution_label_shift_001",
+      "version": 1,
+      "family_id": "f_distribution_factorization",
+      "status": "approved",
+      "stem": "A diagnostic classifier moves from a specialty clinic to population screening. Careful audits indicate that p(x | y) is stable for both disease states, but disease prevalence p(y) changes substantially. Which shift is described?",
+      "kind": "conceptual",
+      "difficulty": 0.7,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_distribution_shift",
+          "weight": 0.7,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.3,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "No shift, because stable class-conditional feature distributions imply the complete joint distribution is unchanged.",
+          "correct": false,
+          "misconception_id": "m_stable_class_conditionals_mean_no_shift",
+          "rationale": "The joint p(x,y)=p(x|y)p(y) changes when p(y) changes even if p(x|y) remains fixed."
+        },
+        {
+          "id": "b",
+          "text": "Covariate shift, because any resulting change in the marginal distribution p(x) receives that name.",
+          "correct": false,
+          "misconception_id": "m_prior_change_is_covariate_shift",
+          "rationale": "Although p(x) may consequently change, the stated invariant factorization is the defining label-shift setup."
+        },
+        {
+          "id": "c",
+          "text": "Label shift, because p(y) changes while the class-conditional feature mechanism p(x | y) remains stable.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This is precisely the prior-probability or label-shift assumption."
+        },
+        {
+          "id": "d",
+          "text": "Concept shift, because a prevalence change means the predictive relationship p(y | x) changed for structural reasons.",
+          "correct": false,
+          "misconception_id": "m_prior_change_is_concept_shift",
+          "rationale": "The posterior may numerically change through Bayes' rule, but the stipulated change is in priors, not a changed class-conditional mechanism."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "label_shift",
+        "bayes_rule",
+        "deployment"
+      ]
+    },
+    {
+      "id": "q_scaling_distance_metric_001",
+      "version": 1,
+      "family_id": "f_distance_units_geometry",
+      "status": "approved",
+      "stem": "A nearest-neighbor model uses age measured in years and annual income measured in dollars. Without scaling, income differences dominate Euclidean distance. What does standardizing these coordinates actually do?",
+      "kind": "application",
+      "difficulty": -0.7,
+      "discrimination": 1.3,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 0.2,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It leaves the distance geometry unchanged and improves floating-point precision, because standardization is a numerical implementation detail.",
+          "correct": false,
+          "misconception_id": "m_standardization_is_purely_numerical",
+          "rationale": "Coordinate scaling changes relative distance contributions and can therefore change neighbor identities, not merely arithmetic conditioning."
+        },
+        {
+          "id": "b",
+          "text": "It defines a different metric in which one standard-deviation change in each feature has comparable coordinate weight before model fitting.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Standardization rescales axes and thereby encodes a substantive notion of proximity for a Euclidean algorithm."
+        },
+        {
+          "id": "c",
+          "text": "It adds predictive information by converting dollars into standardized units, creating distinctions that were absent in the original observations for downstream learning.",
+          "correct": false,
+          "misconception_id": "m_unit_conversion_changes_information_content",
+          "rationale": "An invertible rescaling preserves information in the data even though a scale-sensitive algorithm may use that information differently."
+        },
+        {
+          "id": "d",
+          "text": "It changes convergence speed while preserving the selected neighbors, because scaling affects optimization but not distance-based model geometry.",
+          "correct": false,
+          "misconception_id": "m_scaling_changes_optimization_only",
+          "rationale": "Nearest-neighbor selection is itself defined by distances, so rescaling can directly change predictions without an iterative optimizer."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "nearest_neighbors",
+        "distance",
+        "units"
+      ]
+    },
+    {
+      "id": "q_scaling_penalty_reparameterization_001",
+      "version": 1,
+      "family_id": "f_penalty_units_reparameterization",
+      "status": "approved",
+      "stem": "A linear predictor contains beta times x. The feature is replaced by x-prime = 100x, and the coefficient is adjusted to preserve fitted values. Under an unchanged L2 penalty lambda times beta squared, what follows?",
+      "kind": "calculation",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.2,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The adjusted coefficient remains beta, because changing feature units leaves the numerical coefficient invariant when predictions are preserved.",
+          "correct": false,
+          "misconception_id": "m_coefficients_are_invariant_to_feature_units",
+          "rationale": "To preserve beta times x after multiplying x by 100, its coefficient must be divided by 100."
+        },
+        {
+          "id": "b",
+          "text": "The adjusted coefficient is beta over 100, and its L2 contribution stays equal because equivalent predictions imply equivalent penalties.",
+          "correct": false,
+          "misconception_id": "m_same_predictions_imply_same_penalty",
+          "rationale": "The prediction is preserved, but squaring the rescaled coefficient makes this term ten thousand times smaller."
+        },
+        {
+          "id": "c",
+          "text": "The adjusted coefficient is beta over 100, preserving predictions, while its unchanged-form L2 penalty becomes ten thousand times smaller.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Substitution gives beta-prime x-prime = beta x with beta-prime = beta/100, but coefficient norms are not invariant to that reparameterization."
+        },
+        {
+          "id": "d",
+          "text": "The adjusted coefficient is 100 beta, and the larger penalty is a numerical side effect that leaves the regularized solution unchanged.",
+          "correct": false,
+          "misconception_id": "m_scaling_changes_optimization_only",
+          "rationale": "Multiplying both feature and coefficient changes predictions by a factor of ten thousand, and penalty geometry can change the fitted solution."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "regularization",
+        "reparameterization",
+        "coefficients"
+      ]
+    },
+    {
+      "id": "q_scaling_algorithm_dependence_001",
+      "version": 1,
+      "family_id": "f_algorithm_specific_scaling",
+      "status": "approved",
+      "stem": "A positive affine unit conversion is applied to one continuous feature before fitting several model families. Which comparison best captures why the consequence of scaling depends on the learning algorithm?",
+      "kind": "comparison",
+      "difficulty": 0.75,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 0.2,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Each model family needs standardized inputs for statistical validity, so the same conversion has essentially the same effect across algorithms.",
+          "correct": false,
+          "misconception_id": "m_all_models_require_standardization",
+          "rationale": "Scale sensitivity follows from the model and fitting procedure; it is not a shared validity requirement across model families."
+        },
+        {
+          "id": "b",
+          "text": "A standard decision tree changes its attainable partitions because the conversion changes feature ordering, while Euclidean methods preserve their distances.",
+          "correct": false,
+          "misconception_id": "m_tree_partitions_change_under_unit_conversion",
+          "rationale": "A positive affine conversion preserves order and translates tree thresholds, whereas it changes relative Euclidean coordinate contributions."
+        },
+        {
+          "id": "c",
+          "text": "The conversion alters the information carried by that feature, so any performance difference reflects information gained or lost during rescaling.",
+          "correct": false,
+          "misconception_id": "m_unit_conversion_changes_information_content",
+          "rationale": "An invertible unit conversion preserves information; algorithmic geometry and parameter priors explain different fitted behavior."
+        },
+        {
+          "id": "d",
+          "text": "Tree split membership can remain equivalent because order is preserved, while distances, coefficient penalties, and gradient conditioning can change materially.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This traces invariance or sensitivity to the actual operations used by each algorithm instead of applying a universal scaling rule."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "trees",
+        "distance_methods",
+        "optimization"
+      ]
+    },
+    {
+      "id": "q_scaling_training_transform_001",
+      "version": 1,
+      "family_id": "f_training_fitted_transform",
+      "status": "approved",
+      "stem": "A deployed nearest-neighbor pipeline standardizes each feature. During evaluation, which procedure preserves the meaning of a held-out prediction without letting that observation influence the fitted geometry?",
+      "kind": "application",
+      "difficulty": -0.9,
+      "discrimination": 1.3,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_data_leakage",
+          "weight": 0.15,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Estimate each center and scale from the training fold, then apply those fixed values to its validation fold and later deployment observations.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The fitted transform is part of the learned pipeline, so validation and deployment observations must be mapped with training-derived parameters."
+        },
+        {
+          "id": "b",
+          "text": "Estimate centers and scales from the complete dataset, since standardization changes numerical representation without changing the model's effective geometry.",
+          "correct": false,
+          "misconception_id": "m_standardization_is_purely_numerical",
+          "rationale": "Standardization defines coordinate weights for a distance model, and using held-out values to fit those weights contaminates evaluation."
+        },
+        {
+          "id": "c",
+          "text": "Re-estimate the transform separately for each new observation, since expressing a value in fresh standardized units adds information about its deployment context.",
+          "correct": false,
+          "misconception_id": "m_unit_conversion_changes_information_content",
+          "rationale": "An observation-specific transform changes comparability to the reference data; invertible rescaling does not create new predictive information."
+        },
+        {
+          "id": "d",
+          "text": "Standardize each pipeline by convention, since all model families require zero-centered unit-variance features for statistically valid predictions.",
+          "correct": false,
+          "misconception_id": "m_all_models_require_standardization",
+          "rationale": "The need for a fitted transform depends on the model geometry; it is not a universal condition for statistical validity."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "pipeline",
+        "held_out_data",
+        "distance_geometry"
+      ]
+    },
+    {
+      "id": "q_scaling_regularized_equivalence_001",
+      "version": 1,
+      "family_id": "f_regularized_scaling_equivalence",
+      "status": "approved",
+      "stem": "A ridge model uses two features, and one feature is converted from meters to millimeters. The team wants the same set of fitted prediction functions to receive the same objective values. What must it do?",
+      "kind": "counterfactual",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.25,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Keep both coefficients and penalty weights fixed, because converting a measurement unit leaves the numerical coefficients and objective terms unchanged.",
+          "correct": false,
+          "misconception_id": "m_coefficients_are_invariant_to_feature_units",
+          "rationale": "The converted feature needs an inversely rescaled coefficient even before accounting for the coefficient penalty."
+        },
+        {
+          "id": "b",
+          "text": "Rescale the affected coefficient inversely and transform its penalty weight accordingly; preserving predictions alone does not preserve an isotropic coefficient norm.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A unit conversion is a parameter reexpression, and the regularizer must be transformed with it to preserve objective equivalence."
+        },
+        {
+          "id": "c",
+          "text": "Rescale the affected coefficient inversely but retain one common penalty weight, because prediction-equivalent parameterizations necessarily incur equal regularization costs.",
+          "correct": false,
+          "misconception_id": "m_same_predictions_imply_same_penalty",
+          "rationale": "An ordinary coefficient norm depends on parameter units, so equal fitted values can carry unequal penalty values."
+        },
+        {
+          "id": "d",
+          "text": "Keep the original objective and lower the optimizer step size, because scaling can alter convergence speed but not the regularized solution being selected.",
+          "correct": false,
+          "misconception_id": "m_scaling_changes_optimization_only",
+          "rationale": "A smaller step size can stabilize optimization but cannot restore an objective whose penalty geometry changed under reparameterization."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "ridge",
+        "objective_equivalence",
+        "units"
+      ]
+    },
+    {
+      "id": "q_scaling_lasso_selection_001",
+      "version": 1,
+      "family_id": "f_sparse_penalty_scale_choice",
+      "status": "approved",
+      "stem": "Two predictors encode equally useful signals, but one is measured on a scale one hundred times larger. A lasso fit uses one common penalty coefficient without standardization. Which consequence is most plausible?",
+      "kind": "diagnostic",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Selection is unaffected because coefficients attached to useful signals retain the same numerical values after any invertible feature rescaling.",
+          "correct": false,
+          "misconception_id": "m_coefficients_are_invariant_to_feature_units",
+          "rationale": "Preserving a feature's contribution requires its coefficient to change inversely with the feature's numerical scale."
+        },
+        {
+          "id": "b",
+          "text": "Selection is unaffected because prediction-equivalent coefficients receive equal absolute-value penalties even when their feature units differ by a factor of one hundred.",
+          "correct": false,
+          "misconception_id": "m_same_predictions_imply_same_penalty",
+          "rationale": "The lasso penalty acts on numerical coefficients, so two equivalent predictive contributions can have different penalty costs."
+        },
+        {
+          "id": "c",
+          "text": "The larger-scale predictor can represent the same contribution with a smaller coefficient and may therefore be favored by the unadjusted lasso penalty.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "With a shared coefficient penalty, raw feature scale can alter which predictive directions are cheaper and therefore which variables survive."
+        },
+        {
+          "id": "d",
+          "text": "The fitted sparse model is unchanged and merely converges at a different rate, since scaling influences optimization without influencing feature selection.",
+          "correct": false,
+          "misconception_id": "m_scaling_changes_optimization_only",
+          "rationale": "The penalty is part of the objective, so scale-dependent coefficient costs can change the selected solution itself."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "lasso",
+        "variable_selection",
+        "penalty_geometry"
+      ]
+    },
+    {
+      "id": "q_scaling_tree_threshold_equivalence_001",
+      "version": 1,
+      "family_id": "f_monotone_tree_threshold_equivalence",
+      "status": "approved",
+      "stem": "A fitted decision stump sends observations left when temperature is at most 20 degrees Celsius. The feature is replaced by Fahrenheit using F = 1.8C + 32. Which stump preserves the same partition?",
+      "kind": "calculation",
+      "difficulty": -0.75,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Send observations left when Fahrenheit temperature is at most 68, since the increasing conversion preserves order and translates the threshold.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Twenty Celsius equals sixty-eight Fahrenheit, and a positive affine map preserves which values fall on each threshold side."
+        },
+        {
+          "id": "b",
+          "text": "Keep the threshold at 20 Fahrenheit, because tree partitions are invariant while their numerical thresholds remain fixed under unit conversion.",
+          "correct": false,
+          "misconception_id": "m_tree_partitions_change_under_unit_conversion",
+          "rationale": "Partition equivalence requires transforming the threshold along with the feature; leaving it at twenty changes membership."
+        },
+        {
+          "id": "c",
+          "text": "Refit after standardizing temperature, because a decision tree requires zero-centered unit-variance inputs before its split has statistical meaning.",
+          "correct": false,
+          "misconception_id": "m_all_models_require_standardization",
+          "rationale": "Order-based tree splits can be translated across increasing unit conversions without standardizing the feature."
+        },
+        {
+          "id": "d",
+          "text": "No equivalent stump exists, because converting Celsius to Fahrenheit changes the information content available to a threshold-based learner.",
+          "correct": false,
+          "misconception_id": "m_unit_conversion_changes_information_content",
+          "rationale": "The conversion is invertible and preserves information as well as order; only its numerical coordinate representation changes."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "decision_tree",
+        "threshold",
+        "unit_conversion"
+      ]
+    },
+    {
+      "id": "q_scaling_rbf_bandwidth_001",
+      "version": 1,
+      "family_id": "f_kernel_bandwidth_units",
+      "status": "approved",
+      "stem": "An RBF kernel uses exp(-gamma times squared distance). Every coordinate is converted from meters to centimeters. How should gamma change to preserve each kernel similarity exactly?",
+      "kind": "calculation",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Keep gamma fixed, because rescaling coordinates changes their notation without changing the pairwise distance geometry used by the kernel.",
+          "correct": false,
+          "misconception_id": "m_standardization_is_purely_numerical",
+          "rationale": "Centimeter differences are one hundred times meter differences, so their squared distances are ten thousand times larger."
+        },
+        {
+          "id": "b",
+          "text": "Divide gamma by ten thousand, offsetting the ten-thousand-fold increase in squared distances and leaving each exponent unchanged.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Kernel equivalence requires the product of gamma and squared distance to remain constant under the unit conversion."
+        },
+        {
+          "id": "c",
+          "text": "Multiply gamma by one hundred, because coefficients and hyperparameters retain their original numerical scale when feature units become smaller.",
+          "correct": false,
+          "misconception_id": "m_coefficients_are_invariant_to_feature_units",
+          "rationale": "The necessary adjustment is inverse to the squared coordinate multiplier, not proportional to the linear unit multiplier."
+        },
+        {
+          "id": "d",
+          "text": "Estimate a fresh gamma without an equivalence target, because the conversion creates new information and therefore changes attainable kernel similarities.",
+          "correct": false,
+          "misconception_id": "m_unit_conversion_changes_information_content",
+          "rationale": "An invertible conversion preserves the data information, and a transformed bandwidth can preserve the original similarities exactly."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "feature_scaling",
+        "rbf_kernel",
+        "bandwidth",
+        "distance"
+      ]
+    },
+    {
+      "id": "q_generalization_future_cohort_001",
+      "version": 1,
+      "family_id": "f_generalization_future_cohorts",
+      "status": "approved",
+      "stem": "A demand model is retrained monthly and used on the following month. Randomly splitting rows from all months yields low error, but a sequence of train-on-past, test-on-next-month evaluations is substantially worse. Which estimate is more relevant?",
+      "kind": "application",
+      "difficulty": 0.15,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_generalization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The random split, because low error on examples drawn from the fitted table is the direct definition of generalization.",
+          "correct": false,
+          "misconception_id": "m_training_fit_is_generalization",
+          "rationale": "A row-random split across time does not reproduce the information boundary or future cohort used in deployment."
+        },
+        {
+          "id": "b",
+          "text": "The random split, provided the table is made large enough to eliminate uncertainty caused by changing months.",
+          "correct": false,
+          "misconception_id": "m_sample_size_repairs_distribution_mismatch",
+          "rationale": "More mixed-time rows reduce sampling noise but do not make that evaluation match future-month deployment."
+        },
+        {
+          "id": "c",
+          "text": "The forward evaluations, because their training boundary and target cohort reproduce the intended month-ahead use more closely.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Generalization evidence should sample the units, chronology, and available information of the deployment process."
+        },
+        {
+          "id": "d",
+          "text": "Either estimate, because a favorable overall error implies comparable performance within each future customer segment.",
+          "correct": false,
+          "misconception_id": "m_average_performance_guarantees_subgroups",
+          "rationale": "An aggregate metric neither fixes temporal mismatch nor establishes behavior for particular segments."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "generalization",
+        "temporal_validation",
+        "deployment",
+        "cohort"
+      ]
+    },
+    {
+      "id": "q_generalization_source_population_001",
+      "version": 1,
+      "family_id": "f_generalization_population_transport",
+      "status": "approved",
+      "stem": "A speech recognizer has been evaluated on ten million clean studio recordings from one language region. It will be deployed on noisy mobile recordings from another region, for which no evaluation sample exists. What follows from the large source test?",
+      "kind": "counterfactual",
+      "difficulty": 0.35,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_generalization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The source training fit directly establishes low deployment error because both datasets contain recorded speech.",
+          "correct": false,
+          "misconception_id": "m_training_fit_is_generalization",
+          "rationale": "Shared modality does not make fitted or source-distribution performance an estimate for the target process."
+        },
+        {
+          "id": "b",
+          "text": "The aggregate source score establishes reliable performance for each accent and noise subgroup in the target region.",
+          "correct": false,
+          "misconception_id": "m_average_performance_guarantees_subgroups",
+          "rationale": "The source aggregate contains neither target subgroup weights nor subgroup-specific performance evidence."
+        },
+        {
+          "id": "c",
+          "text": "The source sample is sufficiently large that the region and recording mismatch no longer affects external validity.",
+          "correct": false,
+          "misconception_id": "m_sample_size_repairs_distribution_mismatch",
+          "rationale": "A precise estimate for the source distribution can remain biased for a different deployment distribution."
+        },
+        {
+          "id": "d",
+          "text": "The source error is precise for its sampled conditions, but target generalization remains unmeasured until representative deployment evidence is obtained.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Sample size addresses uncertainty about the source mean, not transport to new acoustics and populations."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "generalization",
+        "external_validity",
+        "population_shift",
+        "sample_size"
+      ]
+    },
+    {
+      "id": "q_generalization_subgroup_failure_001",
+      "version": 1,
+      "family_id": "f_generalization_subgroup_resolution",
+      "status": "approved",
+      "stem": "A vision model reaches 94% accuracy on a deployment-weighted test set. Accuracy is 97% in daylight and 61% at night, where errors carry higher safety cost. Which report best supports a generalization claim?",
+      "kind": "debugging",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_generalization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Report the aggregate and night-specific estimates with uncertainty, sampling design, and consequences for the intended operating policy.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Aggregate and decision-relevant conditional performance answer different deployment questions and both matter here."
+        },
+        {
+          "id": "b",
+          "text": "Report training accuracy because fit on the examples used to learn the detector is the most direct generalization evidence.",
+          "correct": false,
+          "misconception_id": "m_training_fit_is_generalization",
+          "rationale": "Training performance is optimistically coupled to fitting and does not replace untouched deployment-aligned evidence."
+        },
+        {
+          "id": "c",
+          "text": "Collect more daylight examples because a larger overall sample will repair the mismatch in costly nighttime behavior.",
+          "correct": false,
+          "misconception_id": "m_sample_size_repairs_distribution_mismatch",
+          "rationale": "More observations from the well-performing condition do not estimate or improve the underrepresented nighttime condition."
+        },
+        {
+          "id": "d",
+          "text": "Report 94% alone because satisfactory deployment-weighted accuracy establishes adequate performance for the nighttime subgroup.",
+          "correct": false,
+          "misconception_id": "m_average_performance_guarantees_subgroups",
+          "rationale": "The aggregate masks a large, decision-relevant conditional failure with different safety consequences."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "generalization",
+        "subgroups",
+        "aggregate_metric",
+        "safety"
+      ]
+    },
+    {
+      "id": "q_leakage_group_pipeline_001",
+      "version": 1,
+      "family_id": "f_leakage_grouped_preprocessing",
+      "status": "approved",
+      "stem": "A hospital dataset has repeated visits per patient. Missing-value imputation and scaling are currently fitted on all visits before row-wise cross-validation. Which redesign gives deployment-aligned evidence for unseen patients?",
+      "kind": "debugging",
+      "difficulty": 0.2,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_data_leakage",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Keep row-wise folds because leakage requires the target column to be explicitly copied into the features.",
+          "correct": false,
+          "misconception_id": "m_leakage_is_only_target_column",
+          "rationale": "Shared patient identity and preprocessing fitted across fold boundaries can leak without an explicit target feature."
+        },
+        {
+          "id": "b",
+          "text": "Keep separate visits in different folds because each recorded row provides independent evidence about deployment performance.",
+          "correct": false,
+          "misconception_id": "m_duplicates_across_splits_are_independent",
+          "rationale": "Visits from one patient share identity and history, so row separation does not create independent patients."
+        },
+        {
+          "id": "c",
+          "text": "Group visits by patient but continue fitting imputation and scaling globally because those transformations do not use labels.",
+          "correct": false,
+          "misconception_id": "m_preprocessing_on_all_data_is_harmless",
+          "rationale": "Even label-free fitted transformations use held-out distribution information and belong inside each training fold."
+        },
+        {
+          "id": "d",
+          "text": "Assign whole patients to folds and fit learned preprocessing steps from the training patients in each fold.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This preserves the deployment unit and keeps fitted transformations behind the training-evaluation boundary."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "data_leakage",
+        "grouped_cross_validation",
+        "preprocessing",
+        "patients"
+      ]
+    },
+    {
+      "id": "q_partition_fresh_holdout_001",
+      "version": 1,
+      "family_id": "f_partition_adaptive_holdout_replacement",
+      "status": "approved",
+      "stem": "A team inspected one test set after each of 30 workflow changes, chose the best resulting system, and averaged those 30 test scores for its report. What is the defensible next evaluation step?",
+      "kind": "counterfactual",
+      "difficulty": 0.3,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Freeze the selected workflow and evaluate it once on a new untouched sample aligned with deployment.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A fresh holdout restores an evaluation boundary after the original test feedback influenced workflow selection."
+        },
+        {
+          "id": "b",
+          "text": "Report the average of the 30 reused-test scores because averaging removes the adaptivity introduced by repeated inspection.",
+          "correct": false,
+          "misconception_id": "m_averaging_reused_test_scores_restores_holdout",
+          "rationale": "Averaging does not undo that every score participated in an adaptive sequence of design choices."
+        },
+        {
+          "id": "c",
+          "text": "Choose the single split with the highest score because its favorable result best represents expected deployment behavior.",
+          "correct": false,
+          "misconception_id": "m_single_split_is_stable_evidence",
+          "rationale": "Selecting the most favorable noisy partition compounds selection bias and ignores cross-sample uncertainty."
+        },
+        {
+          "id": "d",
+          "text": "Continue using the same test set to tune the frozen workflow because final test data may also guide validation decisions.",
+          "correct": false,
+          "misconception_id": "m_test_set_is_a_validation_set",
+          "rationale": "Further guidance would preserve the contamination rather than provide independent final evidence."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "data_partitioning",
+        "adaptive_overfitting",
+        "holdout",
+        "selection"
+      ]
+    },
+    {
+      "id": "q_shift_stable_marginal_001",
+      "version": 1,
+      "family_id": "f_shift_stable_marginal_changed_conditional",
+      "status": "approved",
+      "stem": "After a treatment guideline changes, the deployment feature distribution p(x) is nearly unchanged, but for the same x the outcome rate p(y|x) differs from training. Which diagnosis matches this evidence?",
+      "kind": "comparison",
+      "difficulty": 0.3,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_distribution_shift",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The conditional outcome mechanism changed despite a stable feature marginal, so the model needs conditional-shift evaluation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The observation directly identifies a change in the relationship from features to outcomes rather than in p(x)."
+        },
+        {
+          "id": "b",
+          "text": "This is covariate shift because covariate shift is defined by a changed p(y|x) with stable p(x).",
+          "correct": false,
+          "misconception_id": "m_covariate_shift_changes_label_mechanism",
+          "rationale": "Covariate shift assumes the conditional outcome relationship is stable while the feature distribution changes."
+        },
+        {
+          "id": "c",
+          "text": "There is no distribution shift because an unchanged feature marginal proves the deployment joint distribution is stable.",
+          "correct": false,
+          "misconception_id": "m_stable_feature_marginal_means_no_shift",
+          "rationale": "The joint can change through p(y|x) even when the marginal distribution of x remains stable."
+        },
+        {
+          "id": "d",
+          "text": "This is label shift because a change in p(y|x) is equivalent to a pure change in class prevalence.",
+          "correct": false,
+          "misconception_id": "m_conditional_change_is_label_shift",
+          "rationale": "Label shift imposes stable class-conditional features and a changed class prior, not an arbitrary conditional mechanism change."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "distribution_shift",
+        "conditional_shift",
+        "stable_marginal",
+        "mechanism_change"
+      ]
+    },
+    {
+      "id": "q_shift_conditional_monitoring_001",
+      "version": 1,
+      "family_id": "f_shift_conditional_monitoring_design",
+      "status": "approved",
+      "stem": "A monitoring dashboard shows nearly identical feature histograms in training and deployment, yet outcome calibration within the same feature strata has changed. Which follow-up is most appropriate?",
+      "kind": "debugging",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_distribution_shift",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Stop investigating because stable feature marginals establish that the deployment distribution has not shifted.",
+          "correct": false,
+          "misconception_id": "m_stable_feature_marginal_means_no_shift",
+          "rationale": "Stable feature histograms do not rule out a changed conditional relationship between features and outcomes."
+        },
+        {
+          "id": "b",
+          "text": "Diagnose covariate shift and estimate feature-density ratios because that term denotes a changed outcome mechanism.",
+          "correct": false,
+          "misconception_id": "m_covariate_shift_changes_label_mechanism",
+          "rationale": "Covariate-shift correction assumes the conditional outcome mechanism remains stable, contrary to the stratified evidence."
+        },
+        {
+          "id": "c",
+          "text": "Diagnose label shift and adjust class priors because a conditional change is fully explained by prevalence.",
+          "correct": false,
+          "misconception_id": "m_conditional_change_is_label_shift",
+          "rationale": "A general change in p(y|x) does not satisfy the stable class-conditional assumptions of label shift."
+        },
+        {
+          "id": "d",
+          "text": "Investigate a changed conditional mechanism, audit policy or measurement changes, and evaluate updating the model.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Changed within-stratum outcome behavior is direct evidence that the deployment conditional relationship needs attention."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "distribution_shift",
+        "monitoring",
+        "conditional_calibration",
+        "debugging"
+      ]
+    },
+    {
+      "id": "q_regularization_scaling_tuning_001",
+      "version": 1,
+      "family_id": "f_regularization_units_and_tuning",
+      "status": "approved",
+      "stem": "A ridge model is refit after one feature changes from dollars to thousands of dollars. With the same global penalty, coefficients and validation error change, and very large penalties underfit. What response is principled?",
+      "kind": "debugging",
+      "difficulty": 0.45,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_regularization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Increase the penalty until validation error falls because stronger regularization improves generalization monotonically.",
+          "correct": false,
+          "misconception_id": "m_stronger_regularization_always_improves_generalization",
+          "rationale": "Excessive shrinkage can add harmful bias and the observed underfitting already contradicts monotonic improvement."
+        },
+        {
+          "id": "b",
+          "text": "Keep the original setup because an L2 penalty is invariant to changing the units of one feature.",
+          "correct": false,
+          "misconception_id": "m_l2_is_scale_invariant",
+          "rationale": "Rescaling one coordinate changes the coefficient magnitude needed for the same prediction and therefore changes its L2 cost."
+        },
+        {
+          "id": "c",
+          "text": "Standardize or define unit-aware penalties inside validation, then tune penalty strength against held-out performance.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Comparable feature geometry and nested tuning address both coordinate dependence and the bias-variance tradeoff."
+        },
+        {
+          "id": "d",
+          "text": "Keep one global penalty unchanged because the shared scalar offsets a rescaling applied to a single coordinate.",
+          "correct": false,
+          "misconception_id": "m_one_global_lambda_repairs_one_feature_rescale",
+          "rationale": "A scalar multiplier changes all coordinate penalties together and cannot selectively undo one feature's unit change."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "regularization",
+        "feature_scaling",
+        "ridge",
+        "validation"
+      ]
+    },
+    {
+      "id": "q_bias_variance_bootstrap_001",
+      "version": 1,
+      "family_id": "f_bias_variance_training_resamples",
+      "status": "approved",
+      "stem": "One fixed validation case receives predicted probabilities ranging from 0.08 to 0.91 across models trained on bootstrap resamples of the same development population. Each model has low error on its own training sample. What does the spread diagnose?",
+      "kind": "calculation",
+      "difficulty": 0.3,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_bias_variance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Low training error rules out variance because each fitted model represents its resampled data accurately.",
+          "correct": false,
+          "misconception_id": "m_training_error_diagnoses_variance",
+          "rationale": "Variance concerns sensitivity to the sampled training set, which this prediction spread directly reveals."
+        },
+        {
+          "id": "b",
+          "text": "Increasing model capacity should reduce the spread because a more flexible fit smooths across bootstrap samples.",
+          "correct": false,
+          "misconception_id": "m_more_capacity_reduces_variance",
+          "rationale": "Additional flexibility often permits greater sample-specific changes rather than stabilizing them."
+        },
+        {
+          "id": "c",
+          "text": "The estimator has high sampling variance at this case; training fit alone does not show stable behavior across plausible datasets.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Holding the evaluation input fixed while varying the training sample isolates sensitivity of the fitted predictor."
+        },
+        {
+          "id": "d",
+          "text": "The spread is merely metric noise from resampling and says nothing about changes in the learned prediction function.",
+          "correct": false,
+          "misconception_id": "m_resampling_variation_is_only_metric_noise",
+          "rationale": "The measured object is the fitted probability itself, so its variation reflects estimator instability."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "bias_variance",
+        "bootstrap",
+        "prediction_stability",
+        "sampling"
+      ]
+    },
+    {
+      "id": "q_bias_variance_capacity_curve_001",
+      "version": 1,
+      "family_id": "f_bias_variance_capacity_curve",
+      "status": "approved",
+      "stem": "As tree depth increases, average training error falls, mean validation error first falls and then rises, and fitted predictions become less stable across resampled training sets. Which explanation best fits the evidence?",
+      "kind": "counterfactual",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_bias_variance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Falling training error shows variance is falling throughout the depth range.",
+          "correct": false,
+          "misconception_id": "m_training_error_diagnoses_variance",
+          "rationale": "Training fit does not measure sensitivity to which observations happened to be sampled."
+        },
+        {
+          "id": "b",
+          "text": "Greater depth reduces variance by letting the model average away differences between resampled datasets.",
+          "correct": false,
+          "misconception_id": "m_more_capacity_reduces_variance",
+          "rationale": "The observed instability moves in the opposite direction as depth increases."
+        },
+        {
+          "id": "c",
+          "text": "The changing validation curve is evaluation noise, while variation among fitted predictors can be ignored.",
+          "correct": false,
+          "misconception_id": "m_resampling_variation_is_only_metric_noise",
+          "rationale": "Consistent instability across resamples is evidence about the estimator, not merely one metric draw."
+        },
+        {
+          "id": "d",
+          "text": "Initial depth reduces approximation bias, but later depth adds sample sensitivity whose variance raises validation error.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The joint pattern of fit, held-out error, and resample instability matches a bias-variance tradeoff."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "bias_variance",
+        "capacity",
+        "validation_curve",
+        "trees"
+      ]
+    },
+    {
+      "id": "q_bias_variance_bagging_001",
+      "version": 1,
+      "family_id": "f_bias_variance_ensemble_averaging",
+      "status": "approved",
+      "stem": "Deep trees fitted to bootstrap samples all have low training error, but their predictions for one fixed input vary widely. What should averaging many such trees do, holding the data-generating process fixed?",
+      "kind": "comparison",
+      "difficulty": 0.25,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_bias_variance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Low training error means the trees already have low variance; averaging mainly removes irreducible outcome noise.",
+          "correct": false,
+          "misconception_id": "m_training_error_diagnoses_variance",
+          "rationale": "Training fit does not measure how the fitted prediction changes across plausible training samples, and averaging cannot remove outcome noise."
+        },
+        {
+          "id": "b",
+          "text": "Making every tree deeper first necessarily makes its fitted predictions less sensitive to which cases were sampled.",
+          "correct": false,
+          "misconception_id": "m_more_capacity_reduces_variance",
+          "rationale": "Additional tree depth typically permits more sample-specific structure and can increase the variance that averaging is meant to reduce."
+        },
+        {
+          "id": "c",
+          "text": "The spread is only a resampling-metric artifact, so averaging predictions cannot change the estimator's sampling variance.",
+          "correct": false,
+          "misconception_id": "m_resampling_variation_is_only_metric_noise",
+          "rationale": "The observed object is the fitted prediction at a fixed input, so its spread directly reflects estimator instability."
+        },
+        {
+          "id": "d",
+          "text": "Averaging can cancel sample-specific prediction fluctuations and reduce ensemble variance, while irreducible outcome noise remains.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Bagging targets variance by averaging unstable fitted predictors; it does not eliminate randomness in outcomes conditional on the inputs."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "bias_variance",
+        "bagging",
+        "ensemble",
+        "bootstrap",
+        "prediction_stability"
+      ]
+    },
+    {
+      "id": "q_leakage_duplicate_documents_001",
+      "version": 1,
+      "family_id": "f_leakage_near_duplicate_units",
+      "status": "approved",
+      "stem": "A document classifier uses a random row split. Many reports are copied from a common template, and near-identical versions of the same report appear in both train and test partitions. Test accuracy is unusually high. What is the strongest correction?",
+      "kind": "diagnostic",
+      "difficulty": 0.2,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_data_leakage",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Group near-duplicate reports before splitting and evaluate on report families that were not represented in training.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The split unit should prevent shared content from turning the test into recognition of training-linked documents."
+        },
+        {
+          "id": "b",
+          "text": "Keep the split because leakage requires the explicit target column to appear among the input features.",
+          "correct": false,
+          "misconception_id": "m_leakage_is_only_target_column",
+          "rationale": "Leakage includes shared or unavailable information that makes held-out rows non-independent of fitting."
+        },
+        {
+          "id": "c",
+          "text": "Keep the duplicates because separate rows provide independent evidence even when their text derives from the same report.",
+          "correct": false,
+          "misconception_id": "m_duplicates_across_splits_are_independent",
+          "rationale": "Near copies share content and can let the model recognize a report rather than generalize to new report families."
+        },
+        {
+          "id": "d",
+          "text": "Fit the text representation on all reports before splitting because label-free preprocessing does not leak evaluation information.",
+          "correct": false,
+          "misconception_id": "m_preprocessing_on_all_data_is_harmless",
+          "rationale": "Learned vocabulary or representation choices can use held-out distribution information and should be fit inside training partitions."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "data_leakage",
+        "duplicates",
+        "group_split",
+        "documents"
+      ]
+    },
+    {
+      "id": "q_leakage_global_feature_selection_001",
+      "version": 1,
+      "family_id": "f_leakage_nested_preprocessing",
+      "status": "approved",
+      "stem": "Before cross-validation, an analyst uses the full labeled dataset to select the 100 features most correlated with the target. The selected features are then evaluated by cross-validation. Why is the estimate optimistic?",
+      "kind": "transfer",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_data_leakage",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Feature selection is safe because leakage refers to copying the target column rather than using target correlations.",
+          "correct": false,
+          "misconception_id": "m_leakage_is_only_target_column",
+          "rationale": "Target-guided feature choice uses information from held-out fold labels even without including the label as a feature."
+        },
+        {
+          "id": "b",
+          "text": "Each validation fold influenced the feature set; selection should be repeated inside each training fold before scoring its held-out fold.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Nesting the supervised preprocessing step restores the information boundary between fitting and validation."
+        },
+        {
+          "id": "c",
+          "text": "The procedure is safe because feature selection is preprocessing, and preprocessing on all rows does not affect evaluation.",
+          "correct": false,
+          "misconception_id": "m_preprocessing_on_all_data_is_harmless",
+          "rationale": "This preprocessing directly uses all target labels and adapts the representation to validation folds."
+        },
+        {
+          "id": "d",
+          "text": "The procedure is safe because rows remain distinct, so shared selected features count as independent evidence across folds.",
+          "correct": false,
+          "misconception_id": "m_duplicates_across_splits_are_independent",
+          "rationale": "Row uniqueness does not repair a transformation that was chosen using each held-out label."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "data_leakage",
+        "feature_selection",
+        "cross_validation",
+        "nesting"
+      ]
+    },
+    {
+      "id": "q_partition_patient_groups_001",
+      "version": 1,
+      "family_id": "f_partition_grouped_patients",
+      "status": "approved",
+      "stem": "A dataset contains several visits per patient, and deployment will predict outcomes for patients absent from training. Which cross-validation unit best matches that use?",
+      "kind": "debugging",
+      "difficulty": -0.25,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Random visits with many folds, because more folds repair dependence between visits from the same patient.",
+          "correct": false,
+          "misconception_id": "m_cross_validation_repairs_bad_split_units",
+          "rationale": "Fold count does not stop one patient's visits from appearing in both fitting and evaluation."
+        },
+        {
+          "id": "b",
+          "text": "Random visits followed by repeated test inspection, because the test set can guide the grouping choice.",
+          "correct": false,
+          "misconception_id": "m_test_set_is_a_validation_set",
+          "rationale": "Using final test feedback to choose the split contaminates the final estimate and leaves patient overlap."
+        },
+        {
+          "id": "c",
+          "text": "Whole patients assigned to folds, so all visits from a patient stay on one side of each evaluation boundary.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Patient-grouped splitting matches the independent unit expected at deployment and prevents identity-linked leakage."
+        },
+        {
+          "id": "d",
+          "text": "The single split with the highest score, because variability across patient partitions is irrelevant to deployment evidence.",
+          "correct": false,
+          "misconception_id": "m_single_split_is_stable_evidence",
+          "rationale": "Selecting a favorable partition hides uncertainty and can bias the reported estimate."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "data_partitioning",
+        "grouped_split",
+        "patients",
+        "cross_validation"
+      ]
+    },
+    {
+      "id": "q_partition_nested_selection_001",
+      "version": 1,
+      "family_id": "f_partition_nested_model_selection",
+      "status": "approved",
+      "stem": "A team compares 200 preprocessing and model configurations by cross-validation and wants an honest estimate of the performance of the selected workflow. Which design best separates selection from final evaluation?",
+      "kind": "transfer",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Increase the number of folds in the same selection loop, because more folds repair reuse of validation feedback.",
+          "correct": false,
+          "misconception_id": "m_cross_validation_repairs_bad_split_units",
+          "rationale": "More folds do not create an untouched evaluation when their results still guide selection."
+        },
+        {
+          "id": "b",
+          "text": "Choose with the final test set and report its best score, because a test set can also serve as validation data.",
+          "correct": false,
+          "misconception_id": "m_test_set_is_a_validation_set",
+          "rationale": "Adaptive use of the final set makes its selected score optimistic rather than a final estimate."
+        },
+        {
+          "id": "c",
+          "text": "Try more configurations against the same held-out scores, because a broader search makes the maximum more reliable.",
+          "correct": false,
+          "misconception_id": "m_more_trials_reduce_selection_bias",
+          "rationale": "Selecting the maximum over more noisy estimates generally increases adaptive selection bias."
+        },
+        {
+          "id": "d",
+          "text": "Run selection inside inner training folds and estimate the full selection procedure on untouched outer folds or a final holdout.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Nested evaluation reproduces the entire adaptive workflow while keeping each outer assessment independent of its selection."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "data_partitioning",
+        "nested_cross_validation",
+        "model_selection",
+        "holdout"
+      ]
+    },
+    {
+      "id": "q_shift_prior_reweighting_001",
+      "version": 1,
+      "family_id": "f_shift_prior_reweighting",
+      "status": "approved",
+      "stem": "Between training and deployment, the positive class prior falls from 0.50 to 0.10 while audited feature distributions within each class remain stable. What follows for the deployment distribution?",
+      "kind": "diagnostic",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_distribution_shift",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "There is no shift because stable class-conditional feature distributions make the joint deployment distribution stable.",
+          "correct": false,
+          "misconception_id": "m_stable_class_conditionals_mean_no_shift",
+          "rationale": "Changing class mixture changes p(y), p(x), and generally posterior probabilities despite stable p(x|y)."
+        },
+        {
+          "id": "b",
+          "text": "This is covariate shift because any resulting change in the feature marginal defines the changed factor.",
+          "correct": false,
+          "misconception_id": "m_prior_change_is_covariate_shift",
+          "rationale": "The assumed primitive change is p(y), while p(x|y) remains stable; that is label shift."
+        },
+        {
+          "id": "c",
+          "text": "This is label shift; class-prior reweighting can update posteriors if the stability and estimation assumptions are credible.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The factorization changes the mixing weights over stable class-conditional feature distributions."
+        },
+        {
+          "id": "d",
+          "text": "This is concept shift because the lower positive prior means the conditional label mechanism has changed.",
+          "correct": false,
+          "misconception_id": "m_prior_change_is_concept_shift",
+          "rationale": "A prior change alone does not assert a changed p(y|x) mechanism, though posteriors can change through Bayes' rule."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "distribution_shift",
+        "label_shift",
+        "prior",
+        "reweighting"
+      ]
+    },
+    {
+      "id": "q_shift_changed_mechanism_001",
+      "version": 1,
+      "family_id": "f_shift_conditional_mechanism",
+      "status": "approved",
+      "stem": "A credit policy changes the legal definition of default. The applicant-feature distribution remains nearly unchanged, but identical feature profiles now receive different outcome labels under the new definition. Which shift is most directly described?",
+      "kind": "transfer",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_distribution_shift",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "No material shift, because stability of the feature marginal establishes stability of the deployment problem.",
+          "correct": false,
+          "misconception_id": "m_stable_feature_marginal_means_no_shift",
+          "rationale": "The meaning and conditional distribution of the target changed even though p(x) did not."
+        },
+        {
+          "id": "b",
+          "text": "Label shift, because a changed conditional label definition is equivalent to changing class prevalence with stable p(x|y).",
+          "correct": false,
+          "misconception_id": "m_conditional_change_is_label_shift",
+          "rationale": "Label shift assumes stable class-conditional features; the scenario directly states a changed outcome mechanism for fixed x."
+        },
+        {
+          "id": "c",
+          "text": "Covariate shift, because that term denotes a changed p(y|x) relationship at stable feature frequency.",
+          "correct": false,
+          "misconception_id": "m_covariate_shift_changes_label_mechanism",
+          "rationale": "Covariate shift instead uses a changed p(x) with a stable conditional outcome relationship."
+        },
+        {
+          "id": "d",
+          "text": "Concept shift, because p(y|x) changed for the same feature profiles and the prior labeling rule no longer applies.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A revised target definition changes the conditional mapping the predictor is meant to estimate."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "distribution_shift",
+        "concept_shift",
+        "label_definition",
+        "deployment"
+      ]
+    },
+    {
+      "id": "q_regularization_validation_curve_001",
+      "version": 1,
+      "family_id": "f_regularization_validation_curve",
+      "status": "approved",
+      "stem": "As an L2 penalty increases, training error rises steadily while validation error first falls and then rises. What is the best interpretation of the rising right side of the validation curve?",
+      "kind": "application",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_regularization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The penalty has become scale invariant, so feature units no longer affect which coefficients are shrunk.",
+          "correct": false,
+          "misconception_id": "m_l2_is_scale_invariant",
+          "rationale": "The curve says nothing about scale invariance; coordinate units still affect an L2 penalty."
+        },
+        {
+          "id": "b",
+          "text": "Regularization is now too strong for this setting, adding enough bias or underfitting to harm held-out performance.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Regularization can reduce variance initially and then damage fit when its constraint overwhelms useful signal."
+        },
+        {
+          "id": "c",
+          "text": "A larger penalty should continue improving generalization because stronger regularization has a monotone benefit.",
+          "correct": false,
+          "misconception_id": "m_stronger_regularization_always_improves_generalization",
+          "rationale": "The observed validation rise is direct evidence against monotone improvement."
+        },
+        {
+          "id": "d",
+          "text": "One revised global lambda can preserve the same solution after any single-feature rescaling while leaving other penalties unchanged.",
+          "correct": false,
+          "misconception_id": "m_one_global_lambda_repairs_one_feature_rescale",
+          "rationale": "A global multiplier cannot selectively undo a coordinate-specific change in penalty geometry."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "regularization",
+        "validation_curve",
+        "underfitting",
+        "l2"
+      ]
+    },
+    {
+      "id": "q_regularization_coordinate_rescale_001",
+      "version": 1,
+      "family_id": "f_regularization_coordinate_penalty",
+      "status": "approved",
+      "stem": "A linear predictor uses two physical measurements with an L2 penalty. The first measurement is rescaled by a factor of 100 and its coefficient is divided by 100 so predictions initially match. With the old penalty strength, what changes during refitting?",
+      "kind": "transfer",
+      "difficulty": 0.6,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_regularization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Nothing changes because L2 regularization is invariant to invertible rescaling of an individual feature coordinate.",
+          "correct": false,
+          "misconception_id": "m_l2_is_scale_invariant",
+          "rationale": "The equivalent coefficient has a different squared magnitude, changing its relative penalty."
+        },
+        {
+          "id": "b",
+          "text": "Increasing the shared lambda restores the prior solution because one global multiplier repairs a single-coordinate rescale.",
+          "correct": false,
+          "misconception_id": "m_one_global_lambda_repairs_one_feature_rescale",
+          "rationale": "Changing one global lambda also changes the penalty on the unscaled coordinate and cannot generally preserve both tradeoffs."
+        },
+        {
+          "id": "c",
+          "text": "The data-fit predictions can start equal, but the penalty geometry changes, so refitting can prefer a different physical predictor.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Coordinate-wise coefficient norms depend on units unless features or penalties are adjusted consistently."
+        },
+        {
+          "id": "d",
+          "text": "The rescale improves held-out performance because a stronger effective penalty on one coordinate benefits generalization.",
+          "correct": false,
+          "misconception_id": "m_stronger_regularization_always_improves_generalization",
+          "rationale": "A changed penalty may help or harm; held-out evidence is needed and the effect is not monotone."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "regularization",
+        "feature_units",
+        "penalty_geometry",
+        "transfer"
+      ]
+    },
+    {
+      "id": "q_bias_variance_repeated_datasets_batch_c_001",
+      "version": 1,
+      "family_id": "f_bias_variance_repeated_dataset_decomposition",
+      "status": "quarantined",
+      "stem": "At a fixed input, the true regression mean is 8. Across many independently sampled training sets, a fitted model predicts a mean of 2 with standard deviation 0.2. Outcomes around the true mean have standard deviation 3. Which diagnosis fits?",
+      "kind": "calculation",
+      "difficulty": 0.75,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_bias_variance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "One low training-error result would establish low bias and low variance, making the repeated-sample predictions unnecessary.",
+          "correct": false,
+          "misconception_id": "m_training_error_diagnoses_variance",
+          "rationale": "Training fit on one sample does not measure the systematic prediction gap or sensitivity across independently drawn training sets."
+        },
+        {
+          "id": "b",
+          "text": "Increasing model capacity necessarily reduces both the six-unit bias and the prediction variance across training samples.",
+          "correct": false,
+          "misconception_id": "m_more_capacity_reduces_variance",
+          "rationale": "Extra flexibility may reduce bias while increasing sensitivity to the particular training sample; the two components need separate evidence."
+        },
+        {
+          "id": "c",
+          "text": "The prediction has large squared bias from the six-unit mean gap, low estimator variance, and substantial irreducible outcome noise.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The across-training prediction spread is small, the average prediction is far from the regression mean, and outcomes remain noisy."
+        },
+        {
+          "id": "d",
+          "text": "The repeated-training spread is merely metric noise and should be discarded, so the evidence does not separate bias from variance.",
+          "correct": false,
+          "misconception_id": "m_resampling_variation_is_only_metric_noise",
+          "rationale": "Variation of the fitted prediction across independent training samples is direct evidence about estimator variance."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "generator": "codex-capacity-batch-c",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Sections 7.2-7.4 (bias-variance decomposition and model assessment)",
+              "claim_scope": "Supports separation of squared bias, estimator variance, and irreducible error."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original repeated-sample numerical scenario, wording, and distractors."
+            }
+          ]
+        },
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "bias_variance",
+        "repeated_training_sets",
+        "irreducible_noise",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_leakage_centered_window_batch_c_001",
+      "version": 1,
+      "family_id": "f_leakage_centered_window",
+      "status": "quarantined",
+      "stem": "At the end of day t, a pipeline issues a forecast for demand on day t plus 1. Before making a chronological train/test split, it gives the row for forecast origin t a centered seven-day mean of observed demand from days t minus 3 through t plus 3. Training rows near the cutoff can therefore also share underlying demand observations with held-out feature windows. Why is this evaluation invalid?",
+      "kind": "debugging",
+      "difficulty": 0.4,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_data_leakage",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It is valid because the day-t-plus-1 target column was not explicitly copied into the model's feature table.",
+          "correct": false,
+          "misconception_id": "m_leakage_is_only_target_column",
+          "rationale": "The centered mean contains demand from the target day and later days even though the target column has no separate feature name."
+        },
+        {
+          "id": "b",
+          "text": "It is valid because distinct timestamp rows are independent evidence even when their windows reuse observations across the split.",
+          "correct": false,
+          "misconception_id": "m_duplicates_across_splits_are_independent",
+          "rationale": "Shared underlying observations couple rows across the boundary, and here some shared values are also future information at forecast time."
+        },
+        {
+          "id": "c",
+          "text": "It is valid because rolling means are label-free preprocessing, so computing all windows before the split does not introduce leakage.",
+          "correct": false,
+          "misconception_id": "m_preprocessing_on_all_data_is_harmless",
+          "rationale": "A preprocessing step can leak even without a field named target when it uses held-out or prediction-time-unavailable observations."
+        },
+        {
+          "id": "d",
+          "text": "Invalid: it uses t+1 through t+3 demand and crosses the holdout. Split first; build each trailing mean from data available at that forecast origin.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Forecast-origin features must respect both information availability and evaluation partitions. A trailing, within-boundary construction removes the stated future and cross-split overlap."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_hyndman_athanasopoulos_fpp3_2021",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "generator": "codex-capacity-batch-c",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Chapter 7, including cross-validation and separation of model selection from final assessment",
+              "claim_scope": "Supports evaluation-boundary discipline; it does not directly supply the time-series window scenario."
+            },
+            {
+              "source_id": "src_hyndman_athanasopoulos_fpp3_2021",
+              "locator": "Sections 1.4 and 5.10",
+              "claim_scope": "Directly supports using only information available before a forecasted observation and rolling-origin time-series evaluation."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original centered-window scenario, split-overlap diagnosis, wording, and distractors."
+            }
+          ]
+        },
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "data_leakage",
+        "temporal_features",
+        "rolling_window",
+        "prediction_boundary",
+        "split_overlap",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_partition_rolling_origin_batch_c_001",
+      "version": 1,
+      "family_id": "f_partition_rolling_origin",
+      "status": "quarantined",
+      "stem": "Monthly data span January 2021 through December 2025. The deployed workflow will retrain on available history and forecast the next month. Hyperparameters must be chosen without using any 2025 outcome, and the team requires one final 2025 performance report. Which partition plan matches those requirements?",
+      "kind": "comparison",
+      "difficulty": 0.55,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Use rolling-origin folds within 2021-2024: train on earlier months, validate the next block, lock the workflow, then evaluate once on untouched 2025 data.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "All tuning feedback precedes 2025 and follows the deployment direction. The locked workflow reaches 2025 only for final assessment."
+        },
+        {
+          "id": "b",
+          "text": "Randomly mix all months from 2021-2024 into many folds, since increasing the fold count repairs the mismatch between random partitions and future deployment.",
+          "correct": false,
+          "misconception_id": "m_cross_validation_repairs_bad_split_units",
+          "rationale": "More random folds still let later observations inform models evaluated on earlier observations and do not reproduce forecasting origins."
+        },
+        {
+          "id": "c",
+          "text": "Evaluate several 2021-2024 temporal splits, select the one with the highest score, and report that favorable split as the final performance estimate.",
+          "correct": false,
+          "misconception_id": "m_single_split_is_stable_evidence",
+          "rationale": "Choosing the most favorable split creates optimism and replaces repeated temporal evidence with a selected result."
+        },
+        {
+          "id": "d",
+          "text": "Inspect the 2025 score after each hyperparameter change, since preserving chronological order lets the final test period guide selection.",
+          "correct": false,
+          "misconception_id": "m_test_set_is_a_validation_set",
+          "rationale": "Repeated feedback makes model development adaptive to 2025 outcomes, so 2025 no longer provides untouched final evidence."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_hyndman_athanasopoulos_fpp3_2021",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "generator": "codex-capacity-batch-c",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Chapter 7 (model selection, validation, and test error)",
+              "claim_scope": "Supports keeping final assessment separate from hyperparameter selection."
+            },
+            {
+              "source_id": "src_hyndman_athanasopoulos_fpp3_2021",
+              "locator": "Section 5.10 (time-series cross-validation)",
+              "claim_scope": "Directly supports rolling forecasting origins in which training observations precede each test observation."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original dates, split plan, wording, and distractors."
+            }
+          ]
+        },
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "data_partitioning",
+        "rolling_origin",
+        "time_series",
+        "untouched_test",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_generalization_finite_target_audit_batch_c_001",
+      "version": 1,
+      "family_id": "f_generalization_finite_target_uncertainty",
+      "status": "quarantined",
+      "stem": "A model has zero training error on 200,000 source cases. A locked model is then audited on 50 independently sampled, representative target-distribution cases and makes zero errors: 45 cases are from a common subgroup and five are from a prespecified rare subgroup. Which report is defensible?",
+      "kind": "calculation",
+      "difficulty": 0.65,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_generalization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The zero source training error establishes zero target error, and observing no audit errors confirms that exact deployment rate.",
+          "correct": false,
+          "misconception_id": "m_training_fit_is_generalization",
+          "rationale": "Fitted source performance is not untouched target evidence, and a finite target sample with zero observed errors is still compatible with nonzero error."
+        },
+        {
+          "id": "b",
+          "text": "The 200,000 source cases make uncertainty in the 50 target cases negligible, because source sample size repairs the target-evidence limitation.",
+          "correct": false,
+          "misconception_id": "m_sample_size_repairs_distribution_mismatch",
+          "rationale": "A large source sample does not increase the number of independent target observations or erase a source-target distribution difference."
+        },
+        {
+          "id": "c",
+          "text": "Zero errors in the aggregate establishes zero error in the rare subgroup as well, so no subgroup-specific uncertainty needs reporting.",
+          "correct": false,
+          "misconception_id": "m_average_performance_guarantees_subgroups",
+          "rationale": "Only five rare-subgroup observations were audited; the aggregate result cannot establish that subgroup's error rate."
+        },
+        {
+          "id": "d",
+          "text": "Report 0/50 observed; the one-sided 95% binomial upper bound is about 6% under stated sampling. Five rare-subgroup cases remain weak evidence, so continue target monitoring.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Solving (1-p)^50 = 0.05 gives p = 1 - 0.05^(1/50), approximately 0.058. That overall bound depends on the sampling assumptions and does not become a precise rare-subgroup bound."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "generator": "codex-capacity-batch-c",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "derivation": "For zero errors in n=50 independent representative Bernoulli trials, the exact one-sided 95% upper endpoint solves (1-p)^50=0.05: p=1-0.05^(1/50)=0.058155....",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Chapter 7 (training error, test error, and model assessment)",
+              "claim_scope": "Supports the separation of fitted performance from independent assessment."
+            },
+            {
+              "source_id": "src_murphy_pml_2022",
+              "locator": "Chapter 4 (sampling distributions and confidence intervals)",
+              "claim_scope": "Supports finite-sample uncertainty and confidence-bound reasoning; the numerical endpoint here is an author-disclosed binomial derivation."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original target-audit scenario, exact binomial calculation, wording, and distractors."
+            }
+          ]
+        },
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "generalization",
+        "target_audit",
+        "finite_sample",
+        "subgroup_uncertainty",
+        "binomial_bound",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_generalization_target_mix_batch_c_001",
+      "version": 1,
+      "family_id": "f_generalization_target_mix_reweighting",
+      "status": "quarantined",
+      "stem": "A fitted model's training error is 3%. On an untouched source-population test, its error is 5% for younger users and 20% for older users; that source test is 90% younger. Deployment is expected to be 40% younger. Assuming the stratum-specific errors remain stable, what deployment error is implied?",
+      "kind": "calculation",
+      "difficulty": 0.5,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_generalization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Use the 3% fitted training error because performance on the examples used for fitting directly transfers to deployment.",
+          "correct": false,
+          "misconception_id": "m_training_fit_is_generalization",
+          "rationale": "Training error is not untouched performance evidence and does not incorporate either the source-test subgroup errors or the target mixture."
+        },
+        {
+          "id": "b",
+          "text": "Use the source-test aggregate of 6.5% once its sample is large, because additional source observations eliminate bias from the different target mix.",
+          "correct": false,
+          "misconception_id": "m_sample_size_repairs_distribution_mismatch",
+          "rationale": "More source data can estimate the source-weighted average precisely but cannot change its 90-to-10 mixture into the target's 40-to-60 mixture."
+        },
+        {
+          "id": "c",
+          "text": "The target-reweighted error is 14%; report the stratum-stability assumption and validate it with representative deployment data when available.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The target-weighted calculation is 0.40 times 0.05 plus 0.60 times 0.20, which equals 0.14."
+        },
+        {
+          "id": "d",
+          "text": "Report the 6.5% source aggregate; because that average is satisfactory, the separate subgroup errors and changed deployment mix need not alter the claim.",
+          "correct": false,
+          "misconception_id": "m_average_performance_guarantees_subgroups",
+          "rationale": "A satisfactory source aggregate neither guarantees subgroup performance nor remains representative when the deployment mixture changes."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "generator": "codex-capacity-batch-c",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "derivation": "The source aggregate is 0.90*0.05+0.10*0.20=0.065. Under the stated stratum-stability assumption, the target aggregate is 0.40*0.05+0.60*0.20=0.14.",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Chapter 7 (training error and independent test assessment)",
+              "claim_scope": "Supports distinguishing fitted training error from untouched evaluation."
+            },
+            {
+              "source_id": "src_murphy_pml_2022",
+              "locator": "Section 19.2.5 (domain adaptation)",
+              "claim_scope": "Supports explicit reasoning about source-target distribution differences; the mixture calculation is author-derived from the stem."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original mixture scenario, calculations, wording, and distractors."
+            }
+          ]
+        },
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "generalization",
+        "population_shift",
+        "reweighting",
+        "training_error",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_regularization_shear_penalty_batch_c_001",
+      "version": 1,
+      "family_id": "f_regularization_shear_metric",
+      "status": "quarantined",
+      "stem": "A linear model predicts w transpose x and uses the penalty lambda times (w1 squared plus w2 squared). Features are reparameterized as x prime = D x, where D = [[2, 1], [0, 1]], and w prime is chosen so w prime transpose x prime = w transpose x for every x. Which penalty in w prime preserves the original objective exactly for the same lambda?",
+      "kind": "calculation",
+      "difficulty": 0.9,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_regularization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Use lambda times (w1 prime squared plus w2 prime squared), because an L2 penalty is invariant under every invertible feature transformation.",
+          "correct": false,
+          "misconception_id": "m_l2_is_scale_invariant",
+          "rationale": "Only orthogonal transformations preserve the Euclidean coefficient norm automatically; this shear changes its metric."
+        },
+        {
+          "id": "b",
+          "text": "Use lambda times (5 w1 prime squared plus 2 w1 prime w2 prime plus w2 prime squared), obtained by substituting w = D transpose w prime.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Prediction equivalence gives w = D transpose w prime = (2 w1 prime, w1 prime plus w2 prime), whose squared norm is the stated quadratic form."
+        },
+        {
+          "id": "c",
+          "text": "Use 4 lambda times (w1 prime squared plus w2 prime squared), because one global penalty multiplier repairs the factor-two rescaling of the first transformed coordinate without affecting the other coordinate.",
+          "correct": false,
+          "misconception_id": "m_one_global_lambda_repairs_one_feature_rescale",
+          "rationale": "A global factor also changes the second-coordinate penalty and cannot create the cross term required by the non-orthogonal transformation."
+        },
+        {
+          "id": "d",
+          "text": "Use 2 lambda times (5 w1 prime squared plus 2 w1 prime w2 prime plus w2 prime squared), because stronger shrinkage must improve held-out generalization.",
+          "correct": false,
+          "misconception_id": "m_stronger_regularization_always_improves_generalization",
+          "rationale": "Doubling the exactly transformed penalty changes the original objective; whether a different overall strength helps is an empirical tuning question."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "generator": "codex-capacity-batch-c",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "semantic_repair": "After independent review, the transform was revised to combine a factor-two first-coordinate rescaling with a non-orthogonal shear, so option c directly instantiates m_one_global_lambda_repairs_one_feature_rescale while the keyed operation still requires deriving a cross-term metric. The repair awaits rereview.",
+        "derivation": "Since x'=Dx and w'^T x'=w^T x for every x, w=D^T w'. For D=[[2,1],[0,1]], w=(2w1',w1'+w2'), so ||w||_2^2=4w1'^2+(w1'+w2')^2=5w1'^2+2w1'w2'+w2'^2.",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_bishop_prml_2006",
+              "locator": "Section 3.1.4 (regularized least squares)",
+              "claim_scope": "Supports quadratic coefficient penalties; it does not supply this shear or transformed quadratic form."
+            },
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Section 3.4.1 (ridge regression and input scaling)",
+              "claim_scope": "Supports the non-equivariance of coordinate-wise L2 regularization under feature scaling."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original non-orthogonal transformation, algebraic derivation, wording, and distractors."
+            }
+          ]
+        },
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "regularization",
+        "quadratic_penalty",
+        "nonorthogonal_transform",
+        "shear",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_shift_prior_odds_correction_001",
+      "version": 1,
+      "family_id": "f_label_shift_prior_odds",
+      "learning_objective_id": null,
+      "status": "quarantined",
+      "stem": "A calibrated classifier was trained where the positive-class prevalence was 0.50. For one case it outputs 0.80. At deployment the prevalence is 0.20, and an audit supports label shift: p(x|y) is unchanged. What is the corrected deployment posterior for this case?",
+      "kind": "calculation",
+      "difficulty": 0.85,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_distribution_shift",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "0.80, because stable class-conditional feature distributions mean the original posterior is unchanged.",
+          "correct": false,
+          "misconception_id": "m_stable_class_conditionals_mean_no_shift",
+          "rationale": "Stable p(x|y) preserves the likelihood ratio, not the posterior; changing prior odds changes posterior odds."
+        },
+        {
+          "id": "b",
+          "text": "0.20, because under covariate shift the new class prevalence replaces every case-specific prediction.",
+          "correct": false,
+          "misconception_id": "m_prior_change_is_covariate_shift",
+          "rationale": "A changed class prior with stable p(x|y) is label shift, and a case's evidence still changes its posterior relative to the population prior."
+        },
+        {
+          "id": "c",
+          "text": "0.50: likelihood ratio 4 times deployment prior odds 0.20/0.80 gives posterior odds 1.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "With source prior odds 1, the 0.80 posterior implies likelihood ratio 4. Under label shift, deployment odds are 4 times 0.25, hence probability 1/(1+1) = 0.50."
+        },
+        {
+          "id": "d",
+          "text": "It cannot be corrected without relearning p(y|x), because any prevalence change is concept shift.",
+          "correct": false,
+          "misconception_id": "m_prior_change_is_concept_shift",
+          "rationale": "The stated label-shift assumption preserves p(x|y), allowing a prior-odds correction without asserting a changed labeling mechanism."
+        }
+      ],
+      "source_ids": [
+        "src_lipton_label_shift_2018",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "67b8fdc87b84bfc75c83e7440f0d5c9080bac7ffdeae9549e721443d08a1b653",
+        "review_sha256": "571f83a21557b2111594c96d95d8dcf29bff52369c3f65115665ec0a90398f64",
+        "review_chain_sha256": [
+          "571f83a21557b2111594c96d95d8dcf29bff52369c3f65115665ec0a90398f64"
+        ],
+        "family_coordination": "Independent review found the two numerical label-shift items isomorphic, so they share one evidence family."
+      },
+      "tags": [
+        "distribution_shift",
+        "label_shift",
+        "prior_odds",
+        "calculation"
+      ]
+    }
+  ]
+}

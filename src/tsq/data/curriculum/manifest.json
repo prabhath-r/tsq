@@ -1,0 +1,73 @@
+{
+  "format": "tsq-curriculum-shards",
+  "format_version": 1,
+  "schema_version": 3,
+  "title": "AI Curriculum Diagnostic Corpus",
+  "shared_file": "shared.json",
+  "topic_files": [
+    {
+      "topic_id": "t_machine_learning",
+      "path": "topics/machine_learning.json"
+    },
+    {
+      "topic_id": "t_ml_foundations",
+      "path": "topics/machine_learning_foundations.json"
+    },
+    {
+      "topic_id": "t_supervised_learning",
+      "path": "topics/supervised_learning.json"
+    },
+    {
+      "topic_id": "t_unsupervised_learning",
+      "path": "topics/unsupervised_learning.json"
+    },
+    {
+      "topic_id": "t_reinforcement_learning",
+      "path": "topics/reinforcement_learning.json"
+    },
+    {
+      "topic_id": "t_deep_learning",
+      "path": "topics/deep_learning.json"
+    },
+    {
+      "topic_id": "t_reliability_generalization",
+      "path": "topics/reliability_and_generalization.json"
+    },
+    {
+      "topic_id": "t_evaluation_decisions",
+      "path": "topics/evaluation_and_decisions.json"
+    },
+    {
+      "topic_id": "t_generative_modeling",
+      "path": "topics/generative_modeling.json"
+    },
+    {
+      "topic_id": "t_causal_inference",
+      "path": "topics/causal_inference.json"
+    },
+    {
+      "topic_id": "t_adaptive_learning",
+      "path": "topics/adaptive_learning_systems.json"
+    },
+    {
+      "topic_id": "t_large_language_models",
+      "path": "topics/large_language_models.json"
+    },
+    {
+      "topic_id": "t_language_modeling",
+      "path": "topics/language_modeling.json"
+    },
+    {
+      "topic_id": "t_transformers",
+      "path": "topics/transformers.json"
+    },
+    {
+      "topic_id": "t_retrieval_augmented_generation",
+      "path": "topics/retrieval_augmented_generation.json"
+    },
+    {
+      "topic_id": "t_llm_agents",
+      "path": "topics/llm_agents.json"
+    }
+  ]
+}

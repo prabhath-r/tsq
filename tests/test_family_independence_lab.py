@@ -19,7 +19,7 @@ from experiments.family_independence_lab import (
     normalized_tokens,
     pair_evidence,
 )
-from tsq.corpus import read_and_parse
+from tsq.corpus import corpus_source_digest, read_and_parse
 
 
 class FamilyIndependenceLabTests(unittest.TestCase):
@@ -215,9 +215,9 @@ class FamilyIndependenceLabTests(unittest.TestCase):
     def test_quarantined_repairs_restore_declared_collapse_in_memory_only(
         self,
     ) -> None:
-        before = DEFAULT_CORPUS.read_bytes()
+        before = corpus_source_digest(DEFAULT_CORPUS)
         report = build_report()
-        after = DEFAULT_CORPUS.read_bytes()
+        after = corpus_source_digest(DEFAULT_CORPUS)
         batch = report["quarantined_candidate_counterfactual"]
 
         self.assertEqual(LAB_VERSION, "family-independence-falsification-v3")
@@ -316,9 +316,9 @@ class FamilyIndependenceLabTests(unittest.TestCase):
     def test_causal_reserve_power_set_is_exact_quarantined_and_read_only(
         self,
     ) -> None:
-        before = DEFAULT_CORPUS.read_bytes()
+        before = corpus_source_digest(DEFAULT_CORPUS)
         report = build_report()
-        after = DEFAULT_CORPUS.read_bytes()
+        after = corpus_source_digest(DEFAULT_CORPUS)
         reserve = report["causal_reserve_counterfactual"]
 
         candidate_ids = {
@@ -465,10 +465,10 @@ class FamilyIndependenceLabTests(unittest.TestCase):
         )
 
     def test_report_is_deterministic_versioned_and_read_only(self) -> None:
-        before = hashlib.sha256(DEFAULT_CORPUS.read_bytes()).hexdigest()
+        before = corpus_source_digest(DEFAULT_CORPUS)
         first = build_report()
         second = build_report()
-        after = hashlib.sha256(DEFAULT_CORPUS.read_bytes()).hexdigest()
+        after = corpus_source_digest(DEFAULT_CORPUS)
 
         self.assertEqual(first, second)
         self.assertEqual(before, after)

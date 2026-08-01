@@ -19,7 +19,7 @@ from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 
 
 class SessionEndIntegrityTestCase(unittest.TestCase):

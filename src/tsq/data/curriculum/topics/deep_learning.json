@@ -1,0 +1,1559 @@
+{
+  "topic": {
+    "id": "t_deep_learning",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Deep Learning",
+    "description": "Neural representations, computational graphs, and gradient-based optimization.",
+    "concept_ids": [
+      "c_gradient_optimization",
+      "c_neural_networks",
+      "c_backpropagation",
+      "c_representation_learning"
+    ],
+    "related_topic_ids": [
+      "t_transformers"
+    ],
+    "sort_order": 50
+  },
+  "concepts": [
+    {
+      "id": "c_gradient_optimization",
+      "name": "Gradient-based optimization",
+      "description": "Iterative optimization driven by local derivatives, curvature, conditioning, and step-size choices.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_neural_networks",
+      "name": "Neural networks",
+      "description": "Compositions of parameterized differentiable transformations that learn representations.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_backpropagation",
+      "name": "Backpropagation and computational graphs",
+      "description": "Reverse-mode differentiation through a computational graph, including explicit gradient stops.",
+      "level": "intermediate"
+    },
+    {
+      "id": "c_representation_learning",
+      "name": "Representation learning",
+      "description": "Learning features that make relevant structure usable by downstream tasks.",
+      "level": "foundation"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_small_learning_rate_fixes_conditioning",
+      "name": "A tiny learning rate fixes conditioning",
+      "description": "Confuses stable steps with efficient progress when curvature differs greatly by direction.",
+      "concept_id": "c_gradient_optimization",
+      "remediation": "Analyze convergence along the largest and smallest Hessian eigen-directions."
+    },
+    {
+      "id": "m_iterations_change_condition_number",
+      "name": "More iterations improve the condition number",
+      "description": "Treats a geometric property of the objective as if it changes merely by running the same optimizer longer.",
+      "concept_id": "c_gradient_optimization",
+      "remediation": "Distinguish modifying the objective geometry from traversing it for more steps."
+    },
+    {
+      "id": "m_momentum_guarantees_perfect_conditioning",
+      "name": "Momentum guarantees perfect conditioning",
+      "description": "Overstates acceleration and assumes momentum removes all sensitivity to curvature and scaling.",
+      "concept_id": "c_gradient_optimization",
+      "remediation": "Treat momentum as an optimizer choice, not an algebraic transformation to condition number one."
+    },
+    {
+      "id": "m_stop_gradient_blocks_downstream",
+      "name": "Stop-gradient blocks downstream parameter updates",
+      "description": "Assumes detaching an intermediate value prevents later layers from receiving gradients from their own operations.",
+      "concept_id": "c_backpropagation",
+      "remediation": "Trace local derivatives backward edge by edge and mark only the detached edge as zero."
+    },
+    {
+      "id": "m_forward_use_guarantees_gradient_flow",
+      "name": "Forward use guarantees gradient flow",
+      "description": "Assumes any parameter that influences a forward value must receive a gradient even across an explicit detach operation.",
+      "concept_id": "c_backpropagation",
+      "remediation": "Separate forward dependence from differentiable backward connectivity."
+    },
+    {
+      "id": "m_stop_gradient_changes_values_not_derivatives",
+      "name": "Stop-gradient changes values but not derivatives",
+      "description": "Reverses the operation: detach preserves the forward value precisely while replacing one backward derivative with zero.",
+      "concept_id": "c_backpropagation",
+      "remediation": "Write the stop-gradient operator as identity in the forward pass and zero derivative in the backward pass."
+    },
+    {
+      "id": "m_depth_without_nonlinearity_adds_expressivity",
+      "name": "Depth alone creates nonlinear expressivity",
+      "description": "Assumes stacking affine layers without nonlinear activations yields functions beyond a single affine transformation.",
+      "concept_id": "c_neural_networks",
+      "remediation": "Compose two affine maps algebraically and identify the activation that prevents their collapse."
+    },
+    {
+      "id": "m_universal_approximation_guarantees_training",
+      "name": "Universal approximation guarantees successful training",
+      "description": "Treats an existence result for representable functions as a guarantee that finite data and an optimizer will find a useful solution.",
+      "concept_id": "c_neural_networks",
+      "remediation": "Separate representational capacity from optimization, sample efficiency, and out-of-sample validation."
+    },
+    {
+      "id": "m_hidden_units_have_fixed_human_meanings",
+      "name": "Hidden units have fixed human meanings",
+      "description": "Assumes each learned coordinate has an intrinsic, uniquely identifiable semantic interpretation across equivalent parameterizations.",
+      "concept_id": "c_neural_networks",
+      "remediation": "Apply a permutation of hidden units and the inverse permutation to the next layer while observing unchanged predictions."
+    },
+    {
+      "id": "m_lossless_representation_is_always_best",
+      "name": "The most lossless representation is always best",
+      "description": "Ranks representations only by retained input detail even when nuisance variation harms the downstream task.",
+      "concept_id": "c_representation_learning",
+      "remediation": "Compare representations using held-out task utility and robustness to known nuisance changes."
+    },
+    {
+      "id": "m_representation_dimension_determines_utility",
+      "name": "Representation dimension determines utility",
+      "description": "Infers downstream usefulness solely from the number of coordinates rather than the information and invariances they encode.",
+      "concept_id": "c_representation_learning",
+      "remediation": "Hold dimension fixed while changing the learned objective, then compare downstream separability and robustness."
+    },
+    {
+      "id": "m_pretraining_objective_guarantees_transfer",
+      "name": "Pretraining guarantees transfer",
+      "description": "Assumes success on a source pretraining objective necessarily improves every target task and domain.",
+      "concept_id": "c_representation_learning",
+      "remediation": "Measure target-task performance under a deployment-aligned split and compare frozen, fine-tuned, and baseline representations."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_gradient_conditioning_001",
+      "version": 1,
+      "family_id": "f_objective_geometry",
+      "status": "approved",
+      "stem": "Gradient descent on a convex quadratic loss zigzags along a steep direction but advances very slowly along a shallow direction. The Hessian has a large ratio between its largest and smallest eigenvalues. Which intervention most directly addresses the cause?",
+      "kind": "debugging",
+      "difficulty": 0.8,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_gradient_optimization",
+          "weight": 0.55,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.3,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.15,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Rescale, whiten, or precondition the coordinates to improve the condition number, then retune the step size.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The pathology is anisotropic curvature; a coordinate transformation or preconditioner directly makes progress more even across directions."
+        },
+        {
+          "id": "b",
+          "text": "Use an extremely small learning rate; once oscillation stops, convergence is equally fast in all eigendirections.",
+          "correct": false,
+          "misconception_id": "m_small_learning_rate_fixes_conditioning",
+          "rationale": "A smaller step can stabilize the steep direction but makes progress along the shallow direction even slower."
+        },
+        {
+          "id": "c",
+          "text": "Run the same update longer, because repeated gradients gradually reduce the Hessian's condition number.",
+          "correct": false,
+          "misconception_id": "m_iterations_change_condition_number",
+          "rationale": "For a fixed quadratic, the Hessian and its condition number do not improve merely because more iterations are executed."
+        },
+        {
+          "id": "d",
+          "text": "Add momentum with any coefficient; momentum algebraically changes the quadratic to condition number one.",
+          "correct": false,
+          "misconception_id": "m_momentum_guarantees_perfect_conditioning",
+          "rationale": "Momentum may accelerate a tuned optimization but neither guarantees perfect conditioning nor removes the need to respect curvature."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "gradient_descent",
+        "conditioning",
+        "preconditioning"
+      ]
+    },
+    {
+      "id": "q_stop_gradient_graph_001",
+      "version": 1,
+      "family_id": "f_gradient_flow",
+      "status": "approved",
+      "stem": "A computation is h = f_theta(x), z = stop_gradient(h), prediction = g_phi(z), followed by a scalar loss. Neither parameter set is used elsewhere. What happens during backpropagation?",
+      "kind": "conceptual",
+      "difficulty": 0.65,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_backpropagation",
+          "weight": 0.6,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_neural_networks",
+          "weight": 0.25,
+          "role": "prerequisite"
+        },
+        {
+          "concept_id": "c_representation_learning",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Neither theta nor phi receives a gradient, because detaching z disconnects everything after h from the loss.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_blocks_downstream",
+          "rationale": "The loss remains differentiably connected to phi through g; only the backward edge from z to h is blocked."
+        },
+        {
+          "id": "b",
+          "text": "Phi receives its ordinary gradient, while theta receives zero through this path; the forward value of z still equals h.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Stop-gradient is identity in the forward pass and has zero derivative at the detached edge in the backward pass."
+        },
+        {
+          "id": "c",
+          "text": "Theta receives a gradient because h influenced the prediction value, while phi receives none because z is treated as constant.",
+          "correct": false,
+          "misconception_id": "m_forward_use_guarantees_gradient_flow",
+          "rationale": "Forward influence does not cross a detached backward edge, whereas treating z as constant still permits differentiation with respect to phi."
+        },
+        {
+          "id": "d",
+          "text": "Both parameter sets update normally because stop_gradient modifies the forward tensor value but leaves its derivative unchanged.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_changes_values_not_derivatives",
+          "rationale": "This reverses the operator's definition: its value is unchanged, but its derivative toward h is set to zero."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "autodiff",
+        "detach",
+        "computational_graph"
+      ]
+    },
+    {
+      "id": "q_neural_affine_composition_001",
+      "version": 1,
+      "family_id": "f_neural_affine_collapse",
+      "status": "approved",
+      "stem": "A feed-forward network computes h = W1 x + b1 and y = W2 h + b2, with no activation or other nonlinear operation between the two layers. Relative to a single affine layer, what function class does this network represent?",
+      "kind": "calculation",
+      "difficulty": -0.2,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_neural_networks",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "A strictly richer nonlinear class, because two learned layers create depth even without an activation.",
+          "correct": false,
+          "misconception_id": "m_depth_without_nonlinearity_adds_expressivity",
+          "rationale": "Depth alone does not prevent affine maps from composing into another affine map."
+        },
+        {
+          "id": "b",
+          "text": "The same affine class, since y = (W2 W1)x + (W2 b1 + b2) can be represented by one layer.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Substitution collapses the composition to one matrix and one bias; nonlinear activations change that conclusion."
+        },
+        {
+          "id": "c",
+          "text": "A class with guaranteed learnability, because a sufficiently wide hidden layer ensures the optimizer finds its best parameters.",
+          "correct": false,
+          "misconception_id": "m_universal_approximation_guarantees_training",
+          "rationale": "Width and representability do not supply an optimization guarantee, and the stated network remains affine."
+        },
+        {
+          "id": "d",
+          "text": "A uniquely interpretable class, because each coordinate of h identifies one stable human-readable feature.",
+          "correct": false,
+          "misconception_id": "m_hidden_units_have_fixed_human_meanings",
+          "rationale": "Hidden coordinates can be reparameterized without changing the represented input-output function."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "neural_networks",
+        "affine_layers",
+        "nonlinearity",
+        "composition"
+      ]
+    },
+    {
+      "id": "q_neural_capacity_evidence_001",
+      "version": 1,
+      "family_id": "f_neural_capacity_optimization",
+      "status": "approved",
+      "stem": "A theorem says a sufficiently wide network can approximate any continuous function on a compact domain to arbitrary accuracy. A team cites it as proof that its training run will learn the correct deployment function. What is missing?",
+      "kind": "conceptual",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_neural_networks",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "An argument that extra depth itself makes the learned mapping nonlinear even if the configured activations are removed.",
+          "correct": false,
+          "misconception_id": "m_depth_without_nonlinearity_adds_expressivity",
+          "rationale": "This changes the architecture question but does not bridge an approximation existence theorem to learning."
+        },
+        {
+          "id": "b",
+          "text": "A mapping from each hidden coordinate to a fixed semantic concept shared by all equivalent parameter settings.",
+          "correct": false,
+          "misconception_id": "m_hidden_units_have_fixed_human_meanings",
+          "rationale": "Unit-level semantic uniqueness is not required for prediction and is not supplied by approximation capacity."
+        },
+        {
+          "id": "c",
+          "text": "Evidence about optimization, finite-sample identification, regularization, and held-out performance under the deployment distribution.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Representability is an existence statement; learning also depends on data, search, inductive bias, and external validation."
+        },
+        {
+          "id": "d",
+          "text": "A larger hidden layer, because universal approximation means added width directly proves that gradient training reaches a useful solution.",
+          "correct": false,
+          "misconception_id": "m_universal_approximation_guarantees_training",
+          "rationale": "Increasing capacity does not turn an existence result into convergence or generalization evidence."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "neural_networks",
+        "universal_approximation",
+        "optimization",
+        "generalization"
+      ]
+    },
+    {
+      "id": "q_neural_hidden_permutation_001",
+      "version": 1,
+      "family_id": "f_neural_hidden_symmetry",
+      "status": "approved",
+      "stem": "In a one-hidden-layer network, the hidden units are permuted and the corresponding input columns of the next layer are permuted inversely. Activations and all numeric weights otherwise stay the same. What happens?",
+      "kind": "counterfactual",
+      "difficulty": 0.45,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_neural_networks",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The network becomes affine because reordering hidden coordinates removes the nonlinear effect of its activations.",
+          "correct": false,
+          "misconception_id": "m_depth_without_nonlinearity_adds_expressivity",
+          "rationale": "A coordinate permutation does not remove or linearize the activation function."
+        },
+        {
+          "id": "b",
+          "text": "The network gains a convergence advantage because the permutation selects an equivalent minimum with better training properties.",
+          "correct": false,
+          "misconception_id": "m_universal_approximation_guarantees_training",
+          "rationale": "Equivalence of parameterizations does not establish how an optimizer reaches either one."
+        },
+        {
+          "id": "c",
+          "text": "Predictions change because each hidden unit has a fixed semantic identity tied to its original coordinate.",
+          "correct": false,
+          "misconception_id": "m_hidden_units_have_fixed_human_meanings",
+          "rationale": "The compensating permutation demonstrates that unit indices are not uniquely identified by the input-output function."
+        },
+        {
+          "id": "d",
+          "text": "Predictions remain unchanged because the inverse permutation restores the same weighted combination at the next layer.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The hidden vector is reindexed and then reindexed back in the downstream linear map, leaving the function invariant."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "neural_networks",
+        "hidden_units",
+        "permutation_symmetry",
+        "interpretability"
+      ]
+    },
+    {
+      "id": "q_representation_nuisance_invariance_001",
+      "version": 1,
+      "family_id": "f_representation_nuisance_invariance",
+      "status": "approved",
+      "stem": "For recognizing manufactured parts, representation A preserves exact lighting and background pixels, while representation B discards those variations but separates part geometry. On held-out factory lines, B yields better recognition. Which conclusion is strongest?",
+      "kind": "application",
+      "difficulty": 0.05,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_representation_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "B is more useful for this task because its invariances suppress nuisance detail while preserving geometry that transfers across lines.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Representation quality is relative to task-relevant information and deployment variation, not raw detail retention alone."
+        },
+        {
+          "id": "b",
+          "text": "A is more useful because the representation retaining the most input information is preferable for downstream prediction.",
+          "correct": false,
+          "misconception_id": "m_lossless_representation_is_always_best",
+          "rationale": "Preserving nuisance information can make a downstream predictor less robust even when reconstruction is excellent."
+        },
+        {
+          "id": "c",
+          "text": "The comparison is settled by whichever representation has more coordinates, independent of what those coordinates encode.",
+          "correct": false,
+          "misconception_id": "m_representation_dimension_determines_utility",
+          "rationale": "Dimension alone does not say whether the coordinates expose geometry or background artifacts."
+        },
+        {
+          "id": "d",
+          "text": "A pretraining objective selecting either representation establishes its benefit on new lines without a held-out recognition test.",
+          "correct": false,
+          "misconception_id": "m_pretraining_objective_guarantees_transfer",
+          "rationale": "Source-objective performance does not substitute for evaluation on the intended target task and domain."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "representation_learning",
+        "invariance",
+        "nuisance",
+        "transfer"
+      ]
+    },
+    {
+      "id": "q_representation_equal_dimension_001",
+      "version": 1,
+      "family_id": "f_representation_equal_dimension",
+      "status": "approved",
+      "stem": "Two encoders each map an image to 128 numbers. A linear probe separates disease status well from encoder X but remains near chance for encoder Y on a patient-grouped test set. What does this comparison establish?",
+      "kind": "diagnostic",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_representation_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Y is preferable if it reconstructs more pixel detail, because retained information dominates the downstream probe result.",
+          "correct": false,
+          "misconception_id": "m_lossless_representation_is_always_best",
+          "rationale": "Reconstruction may preserve irrelevant variation while failing to expose disease information to the chosen downstream model."
+        },
+        {
+          "id": "b",
+          "text": "At equal dimension, X makes disease-relevant structure more usable by this probe under the tested patient-level deployment split.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The controlled dimension and held-out probe provide task-specific evidence about accessibility of relevant information."
+        },
+        {
+          "id": "c",
+          "text": "The encoders are equivalent because equal vector length fixes the amount and organization of useful information.",
+          "correct": false,
+          "misconception_id": "m_representation_dimension_determines_utility",
+          "rationale": "Equal coordinate count permits very different information, geometry, and invariances."
+        },
+        {
+          "id": "d",
+          "text": "Whichever encoder used pretraining should be preferred because source-objective learning establishes transfer to disease status.",
+          "correct": false,
+          "misconception_id": "m_pretraining_objective_guarantees_transfer",
+          "rationale": "Pretraining is a hypothesis about transfer; the deployment-aligned probe supplies the relevant comparative evidence."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "representation_learning",
+        "linear_probe",
+        "dimension",
+        "held_out"
+      ]
+    },
+    {
+      "id": "q_representation_negative_transfer_001",
+      "version": 1,
+      "family_id": "f_representation_negative_transfer",
+      "status": "approved",
+      "stem": "An encoder pretrained to identify camera models transfers poorly to classifying plant disease because it emphasizes sensor artifacts. A smaller encoder trained for leaf morphology performs better on farms using unseen cameras. What lesson is best supported?",
+      "kind": "transfer",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_representation_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The larger encoder remains preferable because preserving sensor-specific detail makes a representation more complete for later tasks.",
+          "correct": false,
+          "misconception_id": "m_lossless_representation_is_always_best",
+          "rationale": "Retaining source-specific nuisance detail can damage robustness to the target camera change."
+        },
+        {
+          "id": "b",
+          "text": "The larger encoder remains preferable because more coordinates determine greater utility independent of learned invariances.",
+          "correct": false,
+          "misconception_id": "m_representation_dimension_determines_utility",
+          "rationale": "Capacity or dimensionality does not ensure that target-relevant factors are encoded accessibly."
+        },
+        {
+          "id": "c",
+          "text": "Transfer depends on alignment between learned factors and the target variation, so pretraining success needs target-domain validation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The result is negative transfer: a source-useful representation emphasizes variation that is spurious for the target."
+        },
+        {
+          "id": "d",
+          "text": "Camera-model pretraining establishes target usefulness because a successful source objective carries over to downstream tasks.",
+          "correct": false,
+          "misconception_id": "m_pretraining_objective_guarantees_transfer",
+          "rationale": "The scenario directly shows that source success can encode the wrong invariances for a new task."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "representation_learning",
+        "negative_transfer",
+        "pretraining",
+        "invariance"
+      ]
+    },
+    {
+      "id": "q_backprop_detached_branch_001",
+      "version": 1,
+      "family_id": "f_backprop_detached_branch",
+      "status": "approved",
+      "stem": "A shared activation h = f_theta(x) feeds two losses: L1(g_phi(h)) and L2(k_psi(stop_gradient(h))). The total loss is L1 + L2. Which gradient routing is correct?",
+      "kind": "debugging",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_backpropagation",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "L2 stops updates to psi because detaching its input blocks gradients for operations downstream of h.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_blocks_downstream",
+          "rationale": "Psi still affects L2 after the detach and receives gradients through its own downstream computation."
+        },
+        {
+          "id": "b",
+          "text": "Both losses update theta because h appears in both forward computations and forward use determines gradient flow.",
+          "correct": false,
+          "misconception_id": "m_forward_use_guarantees_gradient_flow",
+          "rationale": "The explicit stop-gradient removes the derivative path from L2 back into theta."
+        },
+        {
+          "id": "c",
+          "text": "L1 updates theta and phi; L2 updates psi but contributes no gradient to theta through its detached input.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Detach preserves the forward value for k while replacing the backward derivative from that branch to h with zero."
+        },
+        {
+          "id": "d",
+          "text": "L2 changes the forward activation passed to k while preserving its derivative path back into theta.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_changes_values_not_derivatives",
+          "rationale": "Stop-gradient has the opposite semantics: same forward value, blocked derivative at the boundary."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "backpropagation",
+        "stop_gradient",
+        "branching_graph",
+        "gradient_flow"
+      ]
+    },
+    {
+      "id": "q_backprop_target_network_001",
+      "version": 1,
+      "family_id": "f_backprop_detached_targets",
+      "status": "approved",
+      "stem": "A loss is ||p_theta(x) - stop_gradient(t_phi(x))|| squared. During this update, theta and phi are distinct parameter sets and phi is used nowhere else. What parameter update follows from automatic differentiation?",
+      "kind": "transfer",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_backpropagation",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Phi is updated but theta is not, because stop-gradient blocks parameters downstream from the target value.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_blocks_downstream",
+          "rationale": "Theta lies on the live prediction path; phi lies behind the detached target boundary."
+        },
+        {
+          "id": "b",
+          "text": "Both theta and phi are updated because both parameter sets influence values used in the forward loss.",
+          "correct": false,
+          "misconception_id": "m_forward_use_guarantees_gradient_flow",
+          "rationale": "Forward influence does not overcome the explicit derivative stop around t_phi."
+        },
+        {
+          "id": "c",
+          "text": "Phi is updated through an unchanged derivative while its target values are replaced during the forward pass.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_changes_values_not_derivatives",
+          "rationale": "The target value is preserved in the forward pass and the gradient into phi is removed."
+        },
+        {
+          "id": "d",
+          "text": "Theta receives the prediction-error gradient, while phi receives no gradient from this loss during the stated update.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The live branch differentiates through p_theta; the detached target acts as a constant for this backward pass."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "backpropagation",
+        "target_network",
+        "detach",
+        "automatic_differentiation"
+      ]
+    },
+    {
+      "id": "q_gradient_diagonal_preconditioner_001",
+      "version": 1,
+      "family_id": "f_gradient_preconditioned_coordinates",
+      "status": "approved",
+      "stem": "For loss L = 100 x squared + y squared, ordinary gradient descent uses one learning rate and zigzags in x while progressing slowly in y. Which change most directly improves the coordinate conditioning?",
+      "kind": "calculation",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_gradient_optimization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Use a much smaller shared learning rate, which makes progress efficient by removing the curvature ratio.",
+          "correct": false,
+          "misconception_id": "m_small_learning_rate_fixes_conditioning",
+          "rationale": "A smaller step can stabilize x but leaves the 100-to-1 curvature ratio and slow y progress."
+        },
+        {
+          "id": "b",
+          "text": "Run more iterations with the same coordinates, which improves the Hessian condition number over optimization time.",
+          "correct": false,
+          "misconception_id": "m_iterations_change_condition_number",
+          "rationale": "The Hessian of this fixed quadratic and its condition number do not change merely because iterations pass."
+        },
+        {
+          "id": "c",
+          "text": "Rescale or precondition the coordinates so gradient steps account for their different curvature scales.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A suitable coordinate scaling makes the level sets more isotropic and permits balanced progress."
+        },
+        {
+          "id": "d",
+          "text": "Add momentum and infer that curvature sensitivity has been removed, independent of its tuning.",
+          "correct": false,
+          "misconception_id": "m_momentum_guarantees_perfect_conditioning",
+          "rationale": "Momentum may accelerate a tuned problem but does not make the objective perfectly conditioned."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "gradient_optimization",
+        "preconditioning",
+        "quadratic",
+        "conditioning"
+      ]
+    },
+    {
+      "id": "q_gradient_stability_speed_001",
+      "version": 1,
+      "family_id": "f_gradient_stability_efficiency",
+      "status": "approved",
+      "stem": "A learning rate is reduced until gradient descent no longer diverges on an ill-conditioned objective, but loss then decreases extremely slowly. Which statement best distinguishes stability from efficiency?",
+      "kind": "transfer",
+      "difficulty": 0.25,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_gradient_optimization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The small step has repaired conditioning because a stable trajectory implies similar progress along all curvature directions.",
+          "correct": false,
+          "misconception_id": "m_small_learning_rate_fixes_conditioning",
+          "rationale": "Stability in the steep direction can coexist with very slow movement in shallow directions."
+        },
+        {
+          "id": "b",
+          "text": "Continuing the same iterations will improve the objective's condition number and eventually balance the coordinate speeds.",
+          "correct": false,
+          "misconception_id": "m_iterations_change_condition_number",
+          "rationale": "The local curvature ratio is a property of the objective and parameterization, not elapsed iteration count."
+        },
+        {
+          "id": "c",
+          "text": "Adding momentum makes efficiency independent of curvature, so tuning and scaling no longer matter.",
+          "correct": false,
+          "misconception_id": "m_momentum_guarantees_perfect_conditioning",
+          "rationale": "Momentum remains sensitive to hyperparameters and the curvature spectrum even when it improves convergence."
+        },
+        {
+          "id": "d",
+          "text": "The step is stable but inefficient; scaling, preconditioning, or a suitable adaptive method can address directional imbalance.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Avoiding divergence is a weaker property than making useful progress across both steep and shallow directions."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "gradient_optimization",
+        "learning_rate",
+        "stability",
+        "efficiency"
+      ]
+    },
+    {
+      "id": "q_representation_deployment_probe_001",
+      "version": 1,
+      "family_id": "f_representation_deployment_probe",
+      "status": "approved",
+      "stem": "Encoder A has lower pretraining loss, twice as many output coordinates, and strong scanner-ID information. Encoder B performs better on disease classification across held-out hospitals. Which evidence should drive selection?",
+      "kind": "comparison",
+      "difficulty": 0.75,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_representation_learning",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Choose A because preserving scanner detail makes the more lossless representation preferable for the disease task.",
+          "correct": false,
+          "misconception_id": "m_lossless_representation_is_always_best",
+          "rationale": "Scanner information is a nuisance under hospital shift and can harm the deployment-aligned target task."
+        },
+        {
+          "id": "b",
+          "text": "Choose A because its larger coordinate count determines that it contains the more useful downstream representation.",
+          "correct": false,
+          "misconception_id": "m_representation_dimension_determines_utility",
+          "rationale": "Dimension alone does not reveal which target-relevant information and invariances the coordinates encode."
+        },
+        {
+          "id": "c",
+          "text": "Choose A because lower source pretraining loss establishes improved transfer to the hospital distribution.",
+          "correct": false,
+          "misconception_id": "m_pretraining_objective_guarantees_transfer",
+          "rationale": "Source-objective success does not establish target utility under a different domain and grouping structure."
+        },
+        {
+          "id": "d",
+          "text": "Prefer B based on the hospital-grouped target evaluation, while retaining uncertainty until broader deployment checks confirm the result.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Deployment-aligned held-out performance directly tests the desired transfer and robustness better than proxy size or source loss."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-21",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "representation_learning",
+        "transfer",
+        "distribution_shift",
+        "evaluation"
+      ]
+    },
+    {
+      "id": "q_backprop_detach_scalar_001",
+      "version": 1,
+      "family_id": "f_backprop_detach_scalar_jacobian",
+      "status": "quarantined",
+      "stem": "Let x = 3, theta = 2, h = theta x, z = stop_gradient(h), y = phi z with phi = 5, and L = one half y squared. What gradients does reverse-mode automatic differentiation produce?",
+      "kind": "calculation",
+      "difficulty": 0.6,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_backpropagation",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Theta receives 450 and phi receives 180, because both forward dependencies are treated as differentiable backward paths.",
+          "correct": false,
+          "misconception_id": "m_forward_use_guarantees_gradient_flow",
+          "rationale": "The numerical derivatives are those of the graph without a detached edge; forward dependence by itself does not preserve that edge."
+        },
+        {
+          "id": "b",
+          "text": "Theta receives zero and phi receives 180, because z keeps the value 6 but is constant with respect to theta.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The live derivative is dL/dphi = y z = 30 times 6, while the detached z-to-h derivative removes this loss's path to theta."
+        },
+        {
+          "id": "c",
+          "text": "Theta and phi both receive zero, because detaching h also blocks differentiation of operations that consume z.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_blocks_downstream",
+          "rationale": "Phi remains downstream of the detached value and directly changes y, so its local derivative is still active."
+        },
+        {
+          "id": "d",
+          "text": "Phi receives zero because z becomes zero, while theta receives 450 because the backward derivative through h remains live.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_changes_values_not_derivatives",
+          "rationale": "This reverses both semantics: stop-gradient preserves z's forward value and removes the derivative entering h."
+        }
+      ],
+      "source_ids": [
+        "src_rumelhart_backprop_1986",
+        "src_jax_stop_gradient_v0_11_0",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "c82f97a3c27d8a47e0549d83fe1f9b72263d755b23c94647ae00878ccc1b1f26",
+        "review_sha256": "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d",
+        "review_chain_sha256": [
+          "8fba2cde8d75bc2e7ae82dad2bb2db05d0631e46ea03f3043abce9a20552b13f",
+          "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d"
+        ]
+      },
+      "tags": [
+        "backpropagation",
+        "reverse_mode",
+        "stop_gradient",
+        "scalar_jacobian"
+      ],
+      "learning_objective_id": null
+    },
+    {
+      "id": "q_backprop_straight_through_001",
+      "version": 1,
+      "family_id": "f_backprop_straight_through_boundary",
+      "status": "quarantined",
+      "stem": "A program defines q(x) = round(x) and y = x + stop_gradient(q(x) - x). At x = 3.2, which forward value and local automatic-differentiation derivative dy/dx should a debugger observe?",
+      "kind": "debugging",
+      "difficulty": 1.0,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_backpropagation",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The forward value is 3.2 and the derivative follows q'(x), because detaching changes the value but preserves the enclosed derivative.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_changes_values_not_derivatives",
+          "rationale": "Stop-gradient does the reverse: the enclosed expression retains its forward value while its derivative contribution is removed."
+        },
+        {
+          "id": "b",
+          "text": "The forward value is 3 and the derivative is zero, because the detached term blocks gradients for the complete downstream expression.",
+          "correct": false,
+          "misconception_id": "m_stop_gradient_blocks_downstream",
+          "rationale": "The separate leading x remains a live differentiable path even though the correction term is detached."
+        },
+        {
+          "id": "c",
+          "text": "The forward value is 3 and the derivative follows q'(x), because q determines the output value in the forward computation.",
+          "correct": false,
+          "misconception_id": "m_forward_use_guarantees_gradient_flow",
+          "rationale": "A value can determine the forward result while residing behind an explicit zero-derivative boundary."
+        },
+        {
+          "id": "d",
+          "text": "The forward value is 3 and the derivative is one, because the detached correction supplies rounding while the leading x supplies the gradient.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Forward evaluation gives x plus q(x) minus x, while automatic differentiation sees derivative one plus zero from the detached correction."
+        }
+      ],
+      "source_ids": [
+        "src_jax_stop_gradient_v0_11_0",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "c82f97a3c27d8a47e0549d83fe1f9b72263d755b23c94647ae00878ccc1b1f26",
+        "review_sha256": "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d",
+        "review_chain_sha256": [
+          "8fba2cde8d75bc2e7ae82dad2bb2db05d0631e46ea03f3043abce9a20552b13f",
+          "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d"
+        ]
+      },
+      "tags": [
+        "backpropagation",
+        "straight_through_estimator",
+        "stop_gradient",
+        "debugging"
+      ],
+      "learning_objective_id": null
+    },
+    {
+      "id": "q_gradient_spectral_contraction_001",
+      "version": 1,
+      "family_id": "f_gradient_spectral_contraction",
+      "status": "quarantined",
+      "stem": "A least-squares model has Hessian eigenvalues 81 and 1. Gradient descent uses eta = 1/81, so an error component with eigenvalue lambda is multiplied by 1 - eta lambda each step. Which diagnosis is correct?",
+      "kind": "calculation",
+      "difficulty": 0.8,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_gradient_optimization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Both eigendirections now converge at comparable rates, because a stable small step removes the curvature imbalance.",
+          "correct": false,
+          "misconception_id": "m_small_learning_rate_fixes_conditioning",
+          "rationale": "Stability in the steep coordinate does not make progress in the shallow coordinate comparably fast."
+        },
+        {
+          "id": "b",
+          "text": "Once the steep-direction error reaches zero, later iterations change the Hessian condition number from 81 to one.",
+          "correct": false,
+          "misconception_id": "m_iterations_change_condition_number",
+          "rationale": "The fixed least-squares Hessian retains eigenvalues 81 and one regardless of the current error vector."
+        },
+        {
+          "id": "c",
+          "text": "The steep multiplier is zero and the shallow multiplier is 80/81, so stability coexists with unchanged ill-conditioning.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Substitution gives immediate contraction in the steep component and very slow contraction in the shallow one, while the condition number stays 81."
+        },
+        {
+          "id": "d",
+          "text": "Adding a momentum coefficient makes the Hessian condition number one, independent of the selected coefficient.",
+          "correct": false,
+          "misconception_id": "m_momentum_guarantees_perfect_conditioning",
+          "rationale": "Momentum changes the update dynamics but does not algebraically replace the objective's curvature spectrum."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_goodfellow_dl_2016",
+        "src_polyak_momentum_1964",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "c82f97a3c27d8a47e0549d83fe1f9b72263d755b23c94647ae00878ccc1b1f26",
+        "review_sha256": "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d",
+        "review_chain_sha256": [
+          "8fba2cde8d75bc2e7ae82dad2bb2db05d0631e46ea03f3043abce9a20552b13f",
+          "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d"
+        ]
+      },
+      "tags": [
+        "gradient_descent",
+        "quadratic",
+        "spectral_contraction",
+        "conditioning"
+      ],
+      "learning_objective_id": null
+    },
+    {
+      "id": "q_gradient_momentum_stability_001",
+      "version": 1,
+      "family_id": "f_gradient_momentum_stability_region",
+      "status": "quarantined",
+      "stem": "For one Hessian eigen-direction, heavy-ball error follows e_(t+1) = (1 + beta - eta lambda)e_t - beta e_(t-1), whose characteristic polynomial is r^2 - (1 + beta - eta lambda)r + beta. With beta = 0.5, eta = 0.0375, and Hessian eigenvalues 20 and 100, which spectral calculation and response are correct?",
+      "kind": "calculation",
+      "difficulty": 1.2,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_gradient_optimization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "At lambda = 20 the roots have modulus sqrt(0.5), but at lambda = 100 they are -2 and -0.25 with radius 2; a positive eta below 0.03 restores stability without changing conditioning.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "At lambda = 20 the polynomial has a complex-conjugate pair with product 0.5. At lambda = 100 it is r^2 + 2.25r + 0.5; the endpoint condition eta lambda < 2(1 + beta) requires eta < 0.03."
+        },
+        {
+          "id": "b",
+          "text": "At lambda = 100 the root -2 will move inside the unit circle after enough iterations, because continuing the recurrence gradually improves the Hessian condition number.",
+          "correct": false,
+          "misconception_id": "m_iterations_change_condition_number",
+          "rationale": "The characteristic roots and the fixed Hessian spectrum do not change with iteration count; a root of magnitude 2 amplifies error."
+        },
+        {
+          "id": "c",
+          "text": "Reducing eta below 0.03 makes the lambda = 20 and lambda = 100 directions equally conditioned, so the smaller step removes the curvature ratio as well as the instability.",
+          "correct": false,
+          "misconception_id": "m_small_learning_rate_fixes_conditioning",
+          "rationale": "A smaller step can place both recurrences in the stable region, but it does not alter the eigenvalue ratio 100/20."
+        },
+        {
+          "id": "d",
+          "text": "Because the product of the two roots is beta = 0.5, both directions have spectral radius sqrt(0.5); momentum makes their curvature equivalent even when the roots are real.",
+          "correct": false,
+          "misconception_id": "m_momentum_guarantees_perfect_conditioning",
+          "rationale": "A fixed root product implies equal moduli only for a complex-conjugate pair; the lambda = 100 roots are real with maximum magnitude 2."
+        }
+      ],
+      "source_ids": [
+        "src_polyak_momentum_1964",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "c82f97a3c27d8a47e0549d83fe1f9b72263d755b23c94647ae00878ccc1b1f26",
+        "review_sha256": "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d",
+        "review_chain_sha256": [
+          "8fba2cde8d75bc2e7ae82dad2bb2db05d0631e46ea03f3043abce9a20552b13f",
+          "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d"
+        ]
+      },
+      "tags": [
+        "gradient_optimization",
+        "heavy_ball",
+        "characteristic_roots",
+        "spectral_radius"
+      ],
+      "learning_objective_id": null
+    },
+    {
+      "id": "q_neural_local_relu_derivative_001",
+      "version": 1,
+      "family_id": "f_neural_local_relu_derivative",
+      "status": "quarantined",
+      "stem": "A one-hidden-layer network is y(x) = v^T ReLU(Wx + b). At x0, the two hidden preactivations are (-2, 3), their directional changes along u are Wu = (5, -4), and v = (7, 2). For a sufficiently small positive step that crosses neither ReLU boundary, what is D_u y(x0), and what does this local result establish?",
+      "kind": "calculation",
+      "difficulty": 0.9,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_neural_networks",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "D_u y(x0) = -8; the inactive first unit contributes zero and the network is affine within this activation region, without establishing a global training result.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The fixed local ReLU mask is diag(0, 1), so v^T diag(0, 1)Wu = 7(0) + 2(-4) = -8."
+        },
+        {
+          "id": "b",
+          "text": "No single derivative is determined: retaining input-to-hidden and hidden-to-output layers makes the local function more expressive than one affine map even when the activation mask is fixed.",
+          "correct": false,
+          "misconception_id": "m_depth_without_nonlinearity_adds_expressivity",
+          "rationale": "Once the activation signs are fixed, the ReLU mask is linear and the composed local map has a directly computable affine derivative."
+        },
+        {
+          "id": "c",
+          "text": "D_u y(x0) = 27; the first hidden coordinate's learned semantic role means its directional change 5 contributes even while its preactivation is negative.",
+          "correct": false,
+          "misconception_id": "m_hidden_units_have_fixed_human_meanings",
+          "rationale": "A coordinate label cannot override the ReLU gate: the negative preactivation makes that unit's local derivative zero."
+        },
+        {
+          "id": "d",
+          "text": "D_u y(x0) = -8, and this local derivative proves that sufficient hidden width ensures an optimizer will learn the desired global function from finite data.",
+          "correct": false,
+          "misconception_id": "m_universal_approximation_guarantees_training",
+          "rationale": "A correct local derivative calculation says nothing by itself about optimizer convergence, finite-sample generalization, or global approximation quality."
+        }
+      ],
+      "source_ids": [
+        "src_glorot_rectifiers_2011",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "c82f97a3c27d8a47e0549d83fe1f9b72263d755b23c94647ae00878ccc1b1f26",
+        "review_sha256": "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d",
+        "review_chain_sha256": [
+          "8fba2cde8d75bc2e7ae82dad2bb2db05d0631e46ea03f3043abce9a20552b13f",
+          "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d"
+        ]
+      },
+      "tags": [
+        "neural_networks",
+        "relu",
+        "local_derivative",
+        "activation_region"
+      ],
+      "learning_objective_id": null
+    },
+    {
+      "id": "q_neural_relu_rescaling_001",
+      "version": 1,
+      "family_id": "f_neural_relu_rescaling_symmetry",
+      "status": "quarantined",
+      "stem": "One hidden ReLU unit contributes v ReLU(w transpose x + b) to a network output. Its incoming w and b are multiplied by positive alpha = 10 while v is divided by 10. What follows from ReLU's positive homogeneity?",
+      "kind": "counterfactual",
+      "difficulty": 0.85,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_neural_networks",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The output changes because the hidden unit's original magnitude fixes its semantic identity within the network.",
+          "correct": false,
+          "misconception_id": "m_hidden_units_have_fixed_human_meanings",
+          "rationale": "The compensating rescaling is a function-preserving parameter symmetry, so unit scale is not a uniquely identified semantic quantity."
+        },
+        {
+          "id": "b",
+          "text": "The unit becomes affine because compensating adjacent weights removes the nonlinear effect of its ReLU.",
+          "correct": false,
+          "misconception_id": "m_depth_without_nonlinearity_adds_expressivity",
+          "rationale": "Positive rescaling preserves the ReLU operation and its activation boundary rather than replacing it with an identity."
+        },
+        {
+          "id": "c",
+          "text": "The rescaled parameters improve optimization by theorem, because representational capacity establishes how training reaches a useful solution.",
+          "correct": false,
+          "misconception_id": "m_universal_approximation_guarantees_training",
+          "rationale": "Function equivalence and approximation capacity do not establish that one parameter scale has better training dynamics."
+        },
+        {
+          "id": "d",
+          "text": "The network function is unchanged, although parameter magnitudes and Euclidean geometry can change under the equivalent representation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "For positive alpha, ReLU(alpha z) = alpha ReLU(z), which is canceled by dividing the outgoing coefficient by alpha."
+        }
+      ],
+      "source_ids": [
+        "src_neyshabur_path_sgd_2015",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "c82f97a3c27d8a47e0549d83fe1f9b72263d755b23c94647ae00878ccc1b1f26",
+        "review_sha256": "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d",
+        "review_chain_sha256": [
+          "8fba2cde8d75bc2e7ae82dad2bb2db05d0631e46ea03f3043abce9a20552b13f",
+          "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d"
+        ]
+      },
+      "tags": [
+        "neural_networks",
+        "relu",
+        "rescaling_symmetry",
+        "non_identifiability"
+      ],
+      "learning_objective_id": null
+    },
+    {
+      "id": "q_representation_augmentation_semantics_001",
+      "version": 1,
+      "family_id": "f_representation_augmentation_semantics",
+      "status": "quarantined",
+      "stem": "Contrastive pretraining for microscopy treats large stain-color changes as positive pairs. Stain color is partly diagnostic for the downstream assay, and the resulting encoder has low pretraining loss but worse lab-held-out assay accuracy. What is the strongest next step?",
+      "kind": "debugging",
+      "difficulty": 0.75,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_representation_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Switch to the encoder with highest reconstruction fidelity, because retaining more input detail settles downstream representation quality.",
+          "correct": false,
+          "misconception_id": "m_lossless_representation_is_always_best",
+          "rationale": "High-fidelity reconstruction may retain nuisance detail and does not establish which information the assay needs."
+        },
+        {
+          "id": "b",
+          "text": "Increase the embedding dimension, because coordinate count determines whether stain information is useful for the assay.",
+          "correct": false,
+          "misconception_id": "m_representation_dimension_determines_utility",
+          "rationale": "More coordinates do not repair an objective that explicitly trains away target-relevant variation."
+        },
+        {
+          "id": "c",
+          "text": "Revisit which augmentations are label-preserving, then compare candidate objectives on lab-held-out target performance and stain-shift diagnostics.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Contrastive positives induce invariances, so augmentation semantics must align with the target before deployment-aligned evaluation can support selection."
+        },
+        {
+          "id": "d",
+          "text": "Keep the lower-loss encoder, because success on its pretraining objective establishes transfer to the downstream assay.",
+          "correct": false,
+          "misconception_id": "m_pretraining_objective_guarantees_transfer",
+          "rationale": "The observed target degradation is direct evidence that source-objective success did not establish beneficial transfer."
+        }
+      ],
+      "source_ids": [
+        "src_chen_simclr_2020",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_draft",
+        "created_on": "2026-07-22",
+        "generated": true,
+        "provider": "openai_codex",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "c82f97a3c27d8a47e0549d83fe1f9b72263d755b23c94647ae00878ccc1b1f26",
+        "review_sha256": "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d",
+        "review_chain_sha256": [
+          "8fba2cde8d75bc2e7ae82dad2bb2db05d0631e46ea03f3043abce9a20552b13f",
+          "eabad073e17dd27a430c68428fa2eb27e45e3a4b1f7dd58da4fbd2d38220b45d"
+        ]
+      },
+      "tags": [
+        "representation_learning",
+        "contrastive_learning",
+        "augmentation_semantics",
+        "target_evaluation"
+      ],
+      "learning_objective_id": null
+    }
+  ]
+}

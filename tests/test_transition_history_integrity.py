@@ -19,7 +19,7 @@ from tsq.versions import LEGACY_MODEL_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 START = datetime(2108, 2, 3, 9, 0, tzinfo=timezone.utc)
 
 

@@ -37,7 +37,7 @@ if str(PROJECT_ROOT) not in sys.path:
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from tsq.corpus import read_and_parse  # noqa: E402
+from tsq.corpus import corpus_source_digest, read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.inference import classify_response_for_model  # noqa: E402
 from tsq.learner import LearnerModel  # noqa: E402
@@ -52,7 +52,7 @@ from tsq.store import Database  # noqa: E402
 
 
 LAB_VERSION = "policy-falsification-lab-v3"
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_TOPIC = "t_transformers"
 DEFAULT_START = datetime(2110, 1, 4, 9, 0, tzinfo=timezone.utc)
 DEFAULT_OUTPUT = (
@@ -1374,7 +1374,7 @@ def build_report(
     claims = [claim for profile in profiles for claim in profile["claims"]]
     deterministic = {
         "lab_version": LAB_VERSION,
-        "corpus_sha256": hashlib.sha256(corpus.read_bytes()).hexdigest(),
+        "corpus_sha256": corpus_source_digest(corpus),
         "topic": topic,
         "steps_per_session": steps_per_session,
         "seed": seed,

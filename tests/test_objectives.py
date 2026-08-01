@@ -13,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tsq.capacity import VERIFICATION_KINDS
-from tsq.corpus import parse_bundle, parse_catalog, read_and_parse
+from tsq.corpus import load_bundle, parse_bundle, parse_catalog, read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.errors import ConflictError, ExhaustedError, ValidationError
 from tsq.learner import (
@@ -43,7 +43,7 @@ from tsq.versions import BOUND_QUESTION_SELECTED_EVENT_SCHEMA_VERSION
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 START = datetime(2100, 7, 8, 9, 0, tzinfo=timezone.utc)
 
 
@@ -73,7 +73,7 @@ def legacy_bundle(bundle: dict) -> dict:
 class ObjectiveCorpusSchemaTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        cls.bundle = load_bundle(CORPUS)
 
     def test_v2_hydrates_direct_and_diagnostic_objective_mappings(self) -> None:
         questions = parse_bundle(copy.deepcopy(self.bundle))[4]
@@ -811,7 +811,7 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
 
     def test_cross_objective_route_preserves_an_only_parent_family(self) -> None:
         bundle = declared_fixture_bundle(
-            json.loads(CORPUS.read_text(encoding="utf-8"))
+            load_bundle(CORPUS)
         )
         parent_objective = "lo_causal_visibility"
         child_objective = "lo_transformer_information_paths"
@@ -1975,7 +1975,7 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
         mixed = Database(Path(self.tempdir.name) / "mixed.db")
         mixed.initialize()
         raw = declared_fixture_bundle(
-            json.loads(CORPUS.read_text(encoding="utf-8"))
+            load_bundle(CORPUS)
         )
         v1 = legacy_bundle(raw)
         parsed_v1 = parse_bundle(v1)

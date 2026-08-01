@@ -46,11 +46,12 @@ from tsq.learner import (  # noqa: E402
     MIN_POSTERIOR_VARIANCE,
     SESSION_LAPSE_RATE,
 )
+from tsq.corpus import corpus_source_digest, load_bundle  # noqa: E402
 from tsq.models import MASTERY_THRESHOLD, SkillState, logit, sigmoid  # noqa: E402
 
 
 LAB_VERSION = "order-invariant-evidence-lab-v1"
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = (
     PROJECT_ROOT / "experiments" / "results" / "order_invariant_evidence_lab.json"
 )
@@ -605,7 +606,7 @@ def two_epoch_projection(
 def _load_objective_factors(
     corpus_path: Path,
 ) -> tuple[dict[str, float], dict[str, tuple[ResponseFactor, ...]]]:
-    bundle = json.loads(corpus_path.read_text(encoding="utf-8"))
+    bundle = load_bundle(corpus_path)
     priors = {
         objective["id"]: float(objective["prior_mastery"])
         for objective in bundle.get("learning_objectives", [])
@@ -945,7 +946,7 @@ def build_report(corpus_path: Path = DEFAULT_CORPUS) -> dict[str, Any]:
 
     deterministic = {
         "lab_version": LAB_VERSION,
-        "corpus_sha256": hashlib.sha256(corpus_path.read_bytes()).hexdigest(),
+        "corpus_sha256": corpus_source_digest(corpus_path),
         "grid_specs": [
             {
                 "name": spec.name,

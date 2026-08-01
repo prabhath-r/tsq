@@ -31,7 +31,7 @@ from tsq.store import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 TASK_RELEASE_FIXTURE = (
     ROOT / "tests" / "fixtures" / "reviewed_productive_task_release.json"
 )

@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
-import hashlib
+import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import tomllib
 import unittest
+from contextlib import redirect_stderr
 from importlib.resources import files
 from pathlib import Path
+from unittest.mock import patch
 
-from tsq.corpus import parse_bundle, parse_catalog
+from scripts import sync_bundled_corpus
+from tsq.corpus import (
+    corpus_source_digest,
+    load_bundle,
+    parse_bundle,
+    parse_catalog,
+    read_and_parse,
+)
 from tsq.cli import (
     BUNDLED_RELEASE_MARKER,
+    BUNDLED_RESOURCE_DIGEST_MARKER,
     LEGACY_BUNDLED_RELEASE_HASHES,
     _ensure_starter_corpus,
 )
@@ -25,7 +36,7 @@ from tsq.store import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE_CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+SOURCE_CORPUS = ROOT / "corpus"
 
 
 class PackagingTestCase(unittest.TestCase):
@@ -47,6 +58,7 @@ class PackagingTestCase(unittest.TestCase):
         self.assertIn("include NOTICE", manifest)
         self.assertIn("include start", manifest)
         self.assertIn("include tsq", manifest)
+        self.assertIn("recursive-include corpus *.json *.md", manifest)
         self.assertFalse(
             any(line.startswith("recursive-include docs ") for line in manifest)
         )
@@ -57,12 +69,73 @@ class PackagingTestCase(unittest.TestCase):
                     source_file.read_text().splitlines()[:3],
                 )
 
-    def test_bundled_seed_is_byte_identical_to_canonical_corpus(self) -> None:
-        source = SOURCE_CORPUS.read_bytes()
-        bundled = files("tsq.data").joinpath("ai_curriculum.json").read_bytes()
+    def test_bundled_seed_tree_is_byte_identical_to_canonical_corpus(self) -> None:
+        source = {
+            path.relative_to(SOURCE_CORPUS).as_posix(): path.read_bytes()
+            for path in SOURCE_CORPUS.rglob("*.json")
+        }
+        resource_root = files("tsq.data").joinpath("curriculum")
 
-        self.assertEqual(hashlib.sha256(bundled).digest(), hashlib.sha256(source).digest())
+        def resource_inventory(resource, prefix: tuple[str, ...] = ()):
+            inventory = {}
+            for child in resource.iterdir():
+                relative = (*prefix, child.name)
+                if child.is_dir():
+                    inventory.update(resource_inventory(child, relative))
+                elif child.name.endswith(".json"):
+                    inventory["/".join(relative)] = child.read_bytes()
+            return inventory
+
+        bundled = resource_inventory(resource_root)
         self.assertEqual(bundled, source)
+
+    def test_sharding_preserves_the_semantic_release_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "release.db")
+            database.initialize()
+            result = database.import_corpus(
+                *read_and_parse(SOURCE_CORPUS, include_catalog=True)
+            )
+
+        self.assertEqual(
+            result["release_id"],
+            "rel_e8047a6bdb517fd42e1cb2d6",
+        )
+        self.assertEqual(result["questions"], 288)
+        self.assertEqual(result["topics"], 16)
+
+    def test_sync_refuses_invalid_source_before_touching_packaged_tree(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            packaged = root / "packaged"
+            shutil.copytree(SOURCE_CORPUS, source)
+            shutil.copytree(
+                ROOT / "src" / "tsq" / "data" / "curriculum",
+                packaged,
+            )
+            manifest_path = source / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 2
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            def snapshot(path: Path) -> dict[str, bytes]:
+                return {
+                    item.relative_to(path).as_posix(): item.read_bytes()
+                    for item in path.rglob("*")
+                    if item.is_file()
+                }
+
+            before = snapshot(packaged)
+            with (
+                patch.object(sync_bundled_corpus, "SOURCE", source),
+                patch.object(sync_bundled_corpus, "PACKAGED", packaged),
+                redirect_stderr(io.StringIO()),
+            ):
+                code = sync_bundled_corpus.main(["--write"])
+
+            self.assertEqual(code, 1)
+            self.assertEqual(snapshot(packaged), before)
 
     def test_init_default_does_not_depend_on_checkout_working_directory(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -90,7 +163,7 @@ class PackagingTestCase(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
-            self.assertEqual(payload["corpus"], "tsq.data:ai_curriculum.json")
+            self.assertEqual(payload["corpus"], "tsq.data:curriculum")
             self.assertGreaterEqual(payload["questions"], 20)
             self.assertTrue(database.is_file())
 
@@ -155,8 +228,48 @@ class PackagingTestCase(unittest.TestCase):
             self.assertEqual(after, before)
             self.assertTrue(database.verify_integrity()["ok"])
 
+    def test_starter_migrates_the_old_monolith_digest_without_a_new_release(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            database = Database(Path(temporary) / "old-resource-marker.db")
+            database.initialize()
+            imported = database.import_corpus(
+                *read_and_parse(SOURCE_CORPUS, include_catalog=True)
+            )
+            release_id = str(imported["release_id"])
+            with database.transaction() as connection:
+                connection.executemany(
+                    "INSERT INTO meta(key, value) VALUES (?, ?)",
+                    (
+                        (BUNDLED_RELEASE_MARKER, release_id),
+                        (
+                            BUNDLED_RESOURCE_DIGEST_MARKER,
+                            "ad5d34693371d606e318cfd51cc61913894390d578b1810a45b9af43190302b0",
+                        ),
+                    ),
+                )
+
+            status = _ensure_starter_corpus(database)
+
+            self.assertFalse(status)
+            with database.read() as connection:
+                active = connection.execute(
+                    "SELECT value FROM meta WHERE key='active_corpus_release'"
+                ).fetchone()["value"]
+                marker = connection.execute(
+                    "SELECT value FROM meta WHERE key=?",
+                    (BUNDLED_RESOURCE_DIGEST_MARKER,),
+                ).fetchone()["value"]
+                release_count = connection.execute(
+                    "SELECT COUNT(*) AS n FROM corpus_releases"
+                ).fetchone()["n"]
+            self.assertEqual(active, release_id)
+            self.assertEqual(marker, corpus_source_digest(SOURCE_CORPUS))
+            self.assertEqual(release_count, 1)
+
     def test_starter_tracks_its_lineage_without_overriding_custom_corpus(self) -> None:
-        bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(SOURCE_CORPUS)
         # Remove one explicitly marked generated/quarantined item so the
         # immutable legacy-unattested cohort remains complete and byte-stable.
         removed_id = "q_attention_runtime_workspace_boundary_001"
@@ -205,7 +318,7 @@ class PackagingTestCase(unittest.TestCase):
             self.assertEqual(marker, upgraded)
 
     def test_starter_does_not_replace_uncataloged_custom_corpus(self) -> None:
-        bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(SOURCE_CORPUS)
         bundle.pop("domains")
         bundle.pop("topics")
         removed_id = "q_attention_runtime_workspace_boundary_001"
@@ -244,7 +357,7 @@ class PackagingTestCase(unittest.TestCase):
             self.assertTrue(database.verify_integrity()["ok"])
 
     def test_untrusted_registry_conflict_is_not_silently_retained(self) -> None:
-        bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(SOURCE_CORPUS)
         source = next(
             item
             for item in bundle["sources"]
@@ -297,7 +410,7 @@ class PackagingTestCase(unittest.TestCase):
             database = Database(database_path)
             database.initialize()
             database.import_corpus(
-                *parse_bundle(json.loads(SOURCE_CORPUS.read_text(encoding="utf-8")))
+                *parse_bundle(load_bundle(SOURCE_CORPUS))
             )
             engine = AdaptiveEngine(database)
             engine.create_learner("bounded-cli")
@@ -346,7 +459,7 @@ class PackagingTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             isolated = Path(temporary)
             database_path = isolated / "legacy.db"
-            bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+            bundle = load_bundle(SOURCE_CORPUS)
             bundle.pop("domains")
             bundle.pop("topics")
             legacy_source = next(
@@ -433,7 +546,7 @@ class PackagingTestCase(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             isolated = Path(temporary)
             database_path = isolated / "immutable-source.db"
-            bundle = json.loads(SOURCE_CORPUS.read_text(encoding="utf-8"))
+            bundle = load_bundle(SOURCE_CORPUS)
             historical_source = next(
                 source
                 for source in bundle["sources"]

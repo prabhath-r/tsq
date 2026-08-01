@@ -1,0 +1,1263 @@
+{
+  "topic": {
+    "id": "t_supervised_learning",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Supervised Learning",
+    "description": "Conditional prediction, decision boundaries, and labeled-example objectives.",
+    "concept_ids": [
+      "c_linear_models",
+      "c_discriminative_models"
+    ],
+    "related_topic_ids": [
+      "t_evaluation_decisions"
+    ],
+    "sort_order": 20
+  },
+  "concepts": [
+    {
+      "id": "c_linear_models",
+      "name": "Linear predictive models",
+      "description": "Models whose score is affine in their represented features, including logistic regression.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_discriminative_models",
+      "name": "Discriminative modeling",
+      "description": "Modeling a conditional target distribution or decision boundary directly.",
+      "level": "foundation"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_discriminative_models_cannot_be_probabilistic",
+      "name": "Discriminative models cannot output probabilities",
+      "description": "Confuses direct conditional modeling with deterministic classification.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Use logistic regression as a counterexample that directly models P(Y|X)."
+    },
+    {
+      "id": "m_logistic_probability_is_linear",
+      "name": "Logistic probability is linear in the features",
+      "description": "Confuses a linear log-odds score with a probability that changes linearly across the feature space.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Apply the sigmoid to the affine score and distinguish the score surface from the probability surface."
+    },
+    {
+      "id": "m_logistic_threshold_does_not_move_boundary",
+      "name": "Changing a logistic threshold leaves the boundary fixed",
+      "description": "Assumes a probability threshold has no effect on the intercept level defining the classifier's decision surface.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Convert the probability threshold to a log-odds threshold and solve for the new boundary."
+    },
+    {
+      "id": "m_discriminative_model_specifies_feature_distribution",
+      "name": "A discriminative model specifies the feature distribution",
+      "description": "Treats a conditional model for labels given features as a complete probability model for features and labels jointly.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Factor a joint distribution and identify which factors are and are not supplied by a conditional classifier."
+    },
+    {
+      "id": "m_conditional_model_cannot_classify_without_joint",
+      "name": "Classification requires an explicit joint model",
+      "description": "Assumes prediction of labels given observed features requires separately modeling how the features were generated.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Use the learned conditional probabilities directly for a decision under a stated loss."
+    },
+    {
+      "id": "m_class_weights_only_change_optimization_speed",
+      "name": "Class weights change optimization speed but not the target",
+      "description": "Ignores that class-dependent weights alter the population objective and therefore the probability represented by its optimum.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Derive the pointwise minimizer of weighted log loss and compare it with the unweighted posterior."
+    },
+    {
+      "id": "m_weighted_probabilities_remain_population_calibrated",
+      "name": "Weighted-loss probabilities retain population calibration",
+      "description": "Reads scores learned under class-weighted log loss as unadjusted event probabilities in the deployment population.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Account for the weighting-induced odds shift or recalibrate on representative held-out data."
+    },
+    {
+      "id": "m_linear_model_forbids_nonlinear_features",
+      "name": "A linear model forbids nonlinear feature maps",
+      "description": "Defines linearity by the raw input shape rather than by linearity in the fitted coefficients.",
+      "concept_id": "c_linear_models",
+      "remediation": "Express polynomial regression as an inner product between coefficients and transformed features."
+    },
+    {
+      "id": "m_linear_model_means_linear_probability",
+      "name": "A linear model implies a linear probability",
+      "description": "Transfers linearity of a score or parameterization to the response scale after a nonlinear link function.",
+      "concept_id": "c_linear_models",
+      "remediation": "Name the scale on which additivity holds and then apply the response link."
+    },
+    {
+      "id": "m_basis_expansion_makes_parameters_nonlinear",
+      "name": "Basis expansion makes the parameters nonlinear",
+      "description": "Confuses nonlinear transformations of inputs with nonlinear dependence on the unknown coefficients.",
+      "concept_id": "c_linear_models",
+      "remediation": "Hold the transformed design matrix fixed and inspect how coefficients enter the prediction."
+    },
+    {
+      "id": "m_multicollinearity_invalidates_all_predictions",
+      "name": "Multicollinearity invalidates all predictions",
+      "description": "Equates uncertainty in individual coefficients with unusable fitted values throughout the observed predictor region.",
+      "concept_id": "c_linear_models",
+      "remediation": "Separate identifiable linear combinations used for prediction from unstable attribution to individual columns."
+    },
+    {
+      "id": "m_high_fit_identifies_individual_coefficients",
+      "name": "High fit quality identifies individual coefficients",
+      "description": "Treats a strong aggregate fit as evidence that correlated predictors have separately determined effects.",
+      "concept_id": "c_linear_models",
+      "remediation": "Examine the coefficient covariance or equivalent fits along a nearly collinear direction."
+    },
+    {
+      "id": "m_linearity_guarantees_extrapolation",
+      "name": "Linearity validates extrapolation",
+      "description": "Assumes a simple functional form provides empirical support beyond the range where predictor-response behavior was observed.",
+      "concept_id": "c_linear_models",
+      "remediation": "Distinguish the model's algebraic extension from evidence that the relationship persists outside support."
+    },
+    {
+      "id": "m_thresholding_repairs_probability_semantics",
+      "name": "Changing a threshold repairs probability semantics",
+      "description": "Assumes selecting a different classification cutoff converts systematically shifted scores back into calibrated population probabilities.",
+      "concept_id": "c_discriminative_models",
+      "remediation": "Separate ranking and classification decisions from calibration of the reported numeric probabilities."
+    },
+    {
+      "id": "m_dropping_correlated_feature_preserves_interpretation",
+      "name": "Dropping a correlated feature preserves coefficient interpretation",
+      "description": "Assumes removing one correlated predictor leaves the remaining coefficient's estimand unchanged despite reallocation of shared association.",
+      "concept_id": "c_linear_models",
+      "remediation": "Compare partial-regression interpretations before and after removing a correlated covariate."
+    },
+    {
+      "id": "m_predictions_are_clipped_to_training_range",
+      "name": "Linear predictions are clipped to the training response range",
+      "description": "Assumes the fitted affine equation stops or saturates when a predictor leaves its observed range.",
+      "concept_id": "c_linear_models",
+      "remediation": "Evaluate the fitted equation at a predictor value outside the training support."
+    },
+    {
+      "id": "m_low_training_error_validates_extrapolation",
+      "name": "Low training error validates extrapolation",
+      "description": "Uses in-range fit quality as direct evidence for the response relationship in an unobserved predictor region.",
+      "concept_id": "c_linear_models",
+      "remediation": "Identify which observations, assumptions, or domain constraints support behavior beyond the sample range."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_logistic_boundary_probability_001",
+      "version": 1,
+      "family_id": "f_log_odds_linear_boundary",
+      "status": "approved",
+      "stem": "A logistic classifier uses log odds z = -2 + x1 + x2 and predicts class 1 when its estimated probability is at least 0.5. Which statement correctly describes its probability surface and decision boundary?",
+      "kind": "calculation",
+      "difficulty": -0.55,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.2,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.15,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Probability is the sigmoid of z, so it varies nonlinearly; the 0.5 boundary is the affine line x1 + x2 = 2.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The sigmoid maps zero log odds to probability 0.5, and setting the affine score to zero yields the stated line."
+        },
+        {
+          "id": "b",
+          "text": "Probability equals z directly, so the classifier has a linear probability surface and the boundary is x1 + x2 = 0 throughout feature space.",
+          "correct": false,
+          "misconception_id": "m_logistic_probability_is_linear",
+          "rationale": "The affine expression is a log-odds score, not a probability; the intercept also shifts its zero level."
+        },
+        {
+          "id": "c",
+          "text": "Probability is the sigmoid of z, but changing the classification threshold leaves the same line x1 + x2 = 2.",
+          "correct": false,
+          "misconception_id": "m_logistic_threshold_does_not_move_boundary",
+          "rationale": "A different probability threshold corresponds to a different log-odds level and therefore shifts the parallel decision line."
+        },
+        {
+          "id": "d",
+          "text": "No probability boundary is defined, because a discriminative classifier produces class scores without a valid conditional probability interpretation.",
+          "correct": false,
+          "misconception_id": "m_discriminative_models_cannot_be_probabilistic",
+          "rationale": "Logistic regression directly parameterizes a conditional class probability even though it does not model the feature distribution."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "logistic_regression",
+        "decision_boundary",
+        "log_odds",
+        "probability"
+      ]
+    },
+    {
+      "id": "q_conditional_model_scope_001",
+      "version": 1,
+      "family_id": "f_conditional_model_scope",
+      "status": "approved",
+      "stem": "A neural classifier estimates p(y given x) accurately on its deployment population, but its designers never specified a model for p(x). What can and cannot be inferred from this discriminative model alone?",
+      "kind": "conceptual",
+      "difficulty": 0.15,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Its conditional probabilities determine p(x) through normalization, so samples of realistic features can be generated directly from the classifier.",
+          "correct": false,
+          "misconception_id": "m_discriminative_model_specifies_feature_distribution",
+          "rationale": "Normalizing across labels at a fixed x supplies no probability mass across different feature values."
+        },
+        {
+          "id": "b",
+          "text": "It can support label decisions for observed x under a stated loss, but p(x) and the full joint distribution remain unspecified.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A conditional classifier is sufficient for many prediction decisions, while a joint model would additionally require a feature marginal."
+        },
+        {
+          "id": "c",
+          "text": "It does not classify an observed x coherently for prediction until a separate feature generator supplies p(x) and completes the joint distribution.",
+          "correct": false,
+          "misconception_id": "m_conditional_model_cannot_classify_without_joint",
+          "rationale": "Conditional probabilities can be used directly for Bayes decisions once x is observed and the decision loss is specified."
+        },
+        {
+          "id": "d",
+          "text": "Its outputs are nonprobabilistic scores, because probabilistic predictions arise from generative models that specify both labels and features.",
+          "correct": false,
+          "misconception_id": "m_discriminative_models_cannot_be_probabilistic",
+          "rationale": "Discriminative models can produce valid conditional probabilities without supplying a generative feature model."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "discriminative_models",
+        "conditional_probability",
+        "joint_distribution",
+        "decision_theory"
+      ]
+    },
+    {
+      "id": "q_weighted_log_loss_calibration_001",
+      "version": 1,
+      "family_id": "f_discriminative_loss_weighting",
+      "status": "approved",
+      "stem": "A rare-event logistic model is trained with positive examples weighted twenty times more than negative examples. Its ranking is useful, but predicted values greatly exceed observed event frequencies on representative validation data. What is the strongest explanation and remedy?",
+      "kind": "debugging",
+      "difficulty": 1.05,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.09,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        },
+        {
+          "concept_id": "c_calibration",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Class weights affect optimizer speed rather than the population target; continue training until the raw values match validation frequencies on representative data.",
+          "correct": false,
+          "misconception_id": "m_class_weights_only_change_optimization_speed",
+          "rationale": "Class-dependent weights change the pointwise loss optimum, so convergence does not restore the unweighted posterior."
+        },
+        {
+          "id": "b",
+          "text": "Weighted log loss still estimates unshifted population probabilities; the frequency mismatch therefore proves the validation labels are unreliable.",
+          "correct": false,
+          "misconception_id": "m_weighted_probabilities_remain_population_calibrated",
+          "rationale": "The weighting changes the odds represented by the optimal score, so systematic overprediction is compatible with reliable validation labels."
+        },
+        {
+          "id": "c",
+          "text": "Class weighting shifts the effective posterior odds; undo the known shift or recalibrate on representative held-out data before reporting probabilities.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This preserves possible ranking benefits while restoring probability semantics using the weighting relation or unbiased calibration evidence."
+        },
+        {
+          "id": "d",
+          "text": "Choose a larger classification threshold and report the unchanged raw values, because threshold selection also calibrates the numeric probabilities.",
+          "correct": false,
+          "misconception_id": "m_thresholding_repairs_probability_semantics",
+          "rationale": "A decision threshold changes class assignments but does not alter or calibrate the probability values shown to users."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "class_weighting",
+        "log_loss",
+        "calibration",
+        "rare_events"
+      ]
+    },
+    {
+      "id": "q_linear_basis_expansion_001",
+      "version": 1,
+      "family_id": "f_basis_expansion_linearity",
+      "status": "approved",
+      "stem": "A regression model predicts y-hat = beta-zero + beta-one x + beta-two x-squared. The fitted curve can bend as x changes. In what precise sense is this still a linear model?",
+      "kind": "conceptual",
+      "difficulty": -0.75,
+      "discrimination": 1.25,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It is linear in the unknown coefficients applied to the fixed basis features 1, x, and x-squared, despite curvature in raw x.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Linear-model terminology concerns the coefficients' entry into the predictor; transformed inputs can represent nonlinear raw-input shapes."
+        },
+        {
+          "id": "b",
+          "text": "It stops being linear when x-squared is included, because a linear model permits untransformed first-power input columns in the design matrix.",
+          "correct": false,
+          "misconception_id": "m_linear_model_forbids_nonlinear_features",
+          "rationale": "A fixed nonlinear feature map does not prevent the predictor from remaining linear in its fitted coefficients."
+        },
+        {
+          "id": "c",
+          "text": "It is linear because beta-two becomes a nonlinear parameter whose value changes with x to trace the quadratic response curve.",
+          "correct": false,
+          "misconception_id": "m_basis_expansion_makes_parameters_nonlinear",
+          "rationale": "The fitted coefficient beta-two is a fixed parameter; the basis value x-squared changes with the observation."
+        },
+        {
+          "id": "d",
+          "text": "It is linear on the response scale because equal steps in x produce equal changes in y-hat after adding the quadratic basis term.",
+          "correct": false,
+          "misconception_id": "m_linear_model_means_linear_probability",
+          "rationale": "With a nonzero quadratic coefficient, equal raw-input steps generally produce different response changes."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "basis_expansion",
+        "polynomial_regression",
+        "parameters"
+      ]
+    },
+    {
+      "id": "q_linear_collinearity_interpretation_001",
+      "version": 1,
+      "family_id": "f_collinearity_prediction_interpretation",
+      "status": "approved",
+      "stem": "Two predictors in a linear regression are nearly duplicates. Repeated samples produce very different individual coefficients, yet fitted values for observations in the same predictor region change little. Which interpretation is best?",
+      "kind": "diagnostic",
+      "difficulty": 0.35,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.7,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_bias_variance",
+          "weight": 0.15,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Near collinearity makes the fitted values unusable, because unstable individual coefficients invalidate predictions throughout the observed predictor region.",
+          "correct": false,
+          "misconception_id": "m_multicollinearity_invalidates_all_predictions",
+          "rationale": "Some linear combinations can be estimated stably for in-support prediction even when attribution to individual columns is unstable."
+        },
+        {
+          "id": "b",
+          "text": "The data identify their combined predictive direction better than their separate effects; coefficient attribution is unstable even when in-support predictions are stable.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Nearly redundant columns create a weakly identified coefficient direction while preserving fitted values along directions supported by the data."
+        },
+        {
+          "id": "c",
+          "text": "Stable fitted values establish that each coefficient is well identified, and the across-sample variation is evidence of harmless optimizer randomness in repeated samples.",
+          "correct": false,
+          "misconception_id": "m_high_fit_identifies_individual_coefficients",
+          "rationale": "Strong aggregate prediction does not identify how association should be divided between nearly duplicate predictors."
+        },
+        {
+          "id": "d",
+          "text": "Dropping either predictor preserves the remaining coefficient's substantive meaning, because correlated variables carry interchangeable interpretations as well as information.",
+          "correct": false,
+          "misconception_id": "m_dropping_correlated_feature_preserves_interpretation",
+          "rationale": "Removing a correlated variable changes the conditioning set and can reallocate shared association to the retained coefficient."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "multicollinearity",
+        "coefficient_interpretation",
+        "prediction"
+      ]
+    },
+    {
+      "id": "q_linear_extrapolation_support_001",
+      "version": 1,
+      "family_id": "f_linear_extrapolation_support",
+      "status": "approved",
+      "stem": "A linear model fits plant growth well for temperatures from 15 to 30 degrees Celsius. A user requests a prediction at 80 degrees, far beyond observed support. Which response correctly separates computation from evidence?",
+      "kind": "transfer",
+      "difficulty": 0.1,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.35,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The linear form validates the 80-degree prediction under deployment, because a straight relationship has the same slope beyond the observed temperature range.",
+          "correct": false,
+          "misconception_id": "m_linearity_guarantees_extrapolation",
+          "rationale": "The assumed equation extends algebraically, but the observed data do not establish that its slope persists under extreme conditions."
+        },
+        {
+          "id": "b",
+          "text": "The model returns the response observed near 30 degrees, because linear predictions are clipped at the largest training feature value.",
+          "correct": false,
+          "misconception_id": "m_predictions_are_clipped_to_training_range",
+          "rationale": "An ordinary affine predictor continues its equation outside the feature range unless clipping is added explicitly."
+        },
+        {
+          "id": "c",
+          "text": "The equation produces a number at 80 degrees, but its reliability depends on unsupported structural assumptions and domain behavior beyond the sample.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This distinguishes the ability to evaluate a formula from empirical or scientific support for extrapolating that formula."
+        },
+        {
+          "id": "d",
+          "text": "Low training error validates the extrapolation, because accurate interpolation demonstrates that the same mechanism governs unobserved extreme temperatures.",
+          "correct": false,
+          "misconception_id": "m_low_training_error_validates_extrapolation",
+          "rationale": "In-range residuals provide no direct observations of the relationship at 80 degrees and cannot rule out regime changes."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "extrapolation",
+        "support",
+        "generalization"
+      ]
+    },
+    {
+      "id": "q_linear_reference_coding_001",
+      "version": 1,
+      "family_id": "f_categorical_reference_coding",
+      "status": "approved",
+      "stem": "A linear regression represents a three-level category with an intercept and two indicator columns. The analyst changes which category is the reference level and refits the same model space. What should happen?",
+      "kind": "counterfactual",
+      "difficulty": -0.35,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The coefficient meanings and values change with the reference, while fitted group means can remain identical because the represented prediction space is unchanged.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Reference coding reparameterizes the same group-mean model; coefficients become different contrasts without changing attainable fitted values."
+        },
+        {
+          "id": "b",
+          "text": "The model ceases to be linear because indicator features are nonlinear transformations that a linear design matrix does not legitimately contain.",
+          "correct": false,
+          "misconception_id": "m_linear_model_forbids_nonlinear_features",
+          "rationale": "Linearity concerns how fixed design columns combine with coefficients, and indicator columns are valid basis features."
+        },
+        {
+          "id": "c",
+          "text": "The original coefficient values persist because an equally good fit uniquely identifies each individual coefficient under any parameter coding.",
+          "correct": false,
+          "misconception_id": "m_high_fit_identifies_individual_coefficients",
+          "rationale": "A fit can be represented with different intercepts and contrasts when the reference basis changes."
+        },
+        {
+          "id": "d",
+          "text": "The coefficients become observation-dependent nonlinear parameters, and that parameter nonlinearity is what preserves the same fitted means after recoding.",
+          "correct": false,
+          "misconception_id": "m_basis_expansion_makes_parameters_nonlinear",
+          "rationale": "The coefficients remain fixed numbers; preservation comes from changing the basis and its coefficient representation together."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "categorical_features",
+        "reference_coding",
+        "interpretation"
+      ]
+    },
+    {
+      "id": "q_linear_rank_deficiency_001",
+      "version": 1,
+      "family_id": "f_rank_deficient_parameterization",
+      "status": "approved",
+      "stem": "A regression design includes an intercept plus all three indicators for a three-level category, making one column an exact linear combination of the others. What is the precise consequence?",
+      "kind": "debugging",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The fitted group predictions are invalid, because any exact collinearity destroys the model's ability to represent stable in-sample fitted values.",
+          "correct": false,
+          "misconception_id": "m_multicollinearity_invalidates_all_predictions",
+          "rationale": "Rank deficiency prevents unique coefficient attribution but can still permit uniquely determined fitted values in the column space."
+        },
+        {
+          "id": "b",
+          "text": "Multiple coefficient vectors produce the same fitted values; removing a redundant column or imposing a constraint selects an identifiable parameterization.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The null direction changes coefficients without changing the linear predictor, so an additional coding convention is needed for uniqueness."
+        },
+        {
+          "id": "c",
+          "text": "A high training fit chooses one substantively identified coefficient vector, because predictive accuracy resolves the exact dependency among design columns.",
+          "correct": false,
+          "misconception_id": "m_high_fit_identifies_individual_coefficients",
+          "rationale": "All vectors differing along the null direction have the same fitted values and therefore the same training fit."
+        },
+        {
+          "id": "d",
+          "text": "Dropping any indicator preserves the remaining coefficients' original interpretations, because redundant columns are interchangeable in both information and meaning.",
+          "correct": false,
+          "misconception_id": "m_dropping_correlated_feature_preserves_interpretation",
+          "rationale": "Choosing a reference changes coefficient contrasts even though it can preserve the represented group predictions."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "rank_deficiency",
+        "dummy_variable_trap",
+        "identifiability"
+      ]
+    },
+    {
+      "id": "q_logistic_threshold_boundary_001",
+      "version": 1,
+      "family_id": "f_logit_threshold_geometry",
+      "status": "approved",
+      "stem": "A logistic model has log odds z = x and predicts class 1 when its probability is at least 0.8. Approximately where is the one-dimensional decision boundary?",
+      "kind": "calculation",
+      "difficulty": -0.4,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It is x = 0.8, because the model probability is the same linear quantity as its log-odds score throughout the feature space.",
+          "correct": false,
+          "misconception_id": "m_logistic_probability_is_linear",
+          "rationale": "Probability is obtained by applying the sigmoid, so the probability threshold must first be converted to log odds."
+        },
+        {
+          "id": "b",
+          "text": "It remains x = 0, because changing a classification threshold changes labels without moving the decision boundary of a logistic model.",
+          "correct": false,
+          "misconception_id": "m_logistic_threshold_does_not_move_boundary",
+          "rationale": "The 0.5 boundary occurs at log odds zero, while a threshold of 0.8 requires positive log odds."
+        },
+        {
+          "id": "c",
+          "text": "It is x = log(0.8/0.2), about 1.39, because the threshold probability corresponds to that value of the log-odds score.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Solving sigmoid(x) = 0.8 gives x = logit(0.8) = log four, approximately 1.386."
+        },
+        {
+          "id": "d",
+          "text": "No probability boundary exists, because a discriminative model supplies a score without representing a conditional class probability.",
+          "correct": false,
+          "misconception_id": "m_discriminative_models_cannot_be_probabilistic",
+          "rationale": "Logistic regression is a discriminative conditional probability model, so probability thresholds define score boundaries."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "discriminative_models",
+        "logistic_regression",
+        "threshold",
+        "log_odds"
+      ]
+    },
+    {
+      "id": "q_case_control_probability_correction_001",
+      "version": 1,
+      "family_id": "f_case_control_prior_correction",
+      "status": "approved",
+      "stem": "An event occurs in 1% of the deployment population, but a training sample deliberately contains 50% events and 50% nonevents. A logistic model ranks cases well. What is required before treating its raw outputs as deployment probabilities?",
+      "kind": "application",
+      "difficulty": 0.85,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Continue optimization longer, because altered class proportions influence convergence speed but leave the fitted population probability target unchanged.",
+          "correct": false,
+          "misconception_id": "m_class_weights_only_change_optimization_speed",
+          "rationale": "Outcome-dependent sampling changes the effective class prior represented by the uncorrected conditional fit, not merely optimizer speed."
+        },
+        {
+          "id": "b",
+          "text": "Use the raw outputs directly, because probabilities fitted under balanced sampling remain calibrated to the original population prevalence without adjustment.",
+          "correct": false,
+          "misconception_id": "m_weighted_probabilities_remain_population_calibrated",
+          "rationale": "The balanced sample carries different prior odds, so raw conditional values need an odds correction or representative calibration data."
+        },
+        {
+          "id": "c",
+          "text": "Choose a threshold near 0.99 and keep reporting the raw values, because threshold adjustment also repairs their numerical probability meaning.",
+          "correct": false,
+          "misconception_id": "m_thresholding_repairs_probability_semantics",
+          "rationale": "A threshold changes actions but does not transform the displayed scores into calibrated deployment probabilities."
+        },
+        {
+          "id": "d",
+          "text": "Correct for the sampling-prior odds or recalibrate on representative held-out data; useful ranking alone does not establish deployment calibration.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Case-control sampling can preserve useful likelihood-ratio ordering while shifting the intercept and raw posterior odds."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "discriminative_models",
+        "case_control_sampling",
+        "prior_shift",
+        "calibration"
+      ]
+    },
+    {
+      "id": "q_linear_joint_support_001",
+      "version": 1,
+      "family_id": "f_multivariate_support_extrapolation",
+      "status": "approved",
+      "stem": "Training observations satisfy x2 approximately equal to x1, with each coordinate between negative one and one. A linear model is queried at x1 = 1 and x2 = -1. How should this request be interpreted?",
+      "kind": "diagnostic",
+      "difficulty": 0.65,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The linear form validates the query because each coordinate lies inside its separate observed range, establishing reliable interpolation.",
+          "correct": false,
+          "misconception_id": "m_linearity_guarantees_extrapolation",
+          "rationale": "Support is joint rather than coordinatewise; the queried combination lies far from the observed diagonal relationship."
+        },
+        {
+          "id": "b",
+          "text": "The model clips x2 to x1 before prediction, because linear predictors restrict multivariate inputs to combinations appearing in training data.",
+          "correct": false,
+          "misconception_id": "m_predictions_are_clipped_to_training_range",
+          "rationale": "A standard linear equation accepts the supplied coordinates and extrapolates without an automatic support constraint."
+        },
+        {
+          "id": "c",
+          "text": "Low training error validates the query, because accurate fitted values on the diagonal identify coefficient behavior in the unobserved off-diagonal direction.",
+          "correct": false,
+          "misconception_id": "m_low_training_error_validates_extrapolation",
+          "rationale": "Near-collinearity leaves the off-diagonal direction weakly identified even when predictions on the observed diagonal fit well."
+        },
+        {
+          "id": "d",
+          "text": "The equation returns a value, but the query extrapolates outside joint support and depends strongly on a coefficient direction the sample barely identifies.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Marginal ranges conceal a novel feature combination, and the data contain little evidence about response changes orthogonal to their observed manifold."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "joint_support",
+        "extrapolation",
+        "collinearity"
+      ]
+    },
+    {
+      "id": "q_linear_log_odds_scale_001",
+      "version": 1,
+      "family_id": "f_linear_predictor_response_scale",
+      "status": "approved",
+      "stem": "A logistic regression uses eta = beta-zero plus beta-one x. Which statement locates the model's linearity without confusing its predictor scale with its probability scale?",
+      "kind": "conceptual",
+      "difficulty": -0.5,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 0.2,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Eta is affine in the coefficients and feature, while probability is sigmoid of eta and therefore changes nonlinearly with x.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The generalized linear model is linear on its link scale; the inverse link maps that predictor to a bounded probability."
+        },
+        {
+          "id": "b",
+          "text": "Probability equals eta, so equal steps in x produce equal probability changes throughout the real line.",
+          "correct": false,
+          "misconception_id": "m_linear_model_means_linear_probability",
+          "rationale": "The sigmoid creates varying slopes and keeps the response between zero and one."
+        },
+        {
+          "id": "c",
+          "text": "Applying a sigmoid makes beta-one depend on x, turning the fitted coefficient into a nonlinear parameter that changes by observation.",
+          "correct": false,
+          "misconception_id": "m_basis_expansion_makes_parameters_nonlinear",
+          "rationale": "The coefficient remains fixed; the nonlinear response arises from applying the inverse link to the affine score."
+        },
+        {
+          "id": "d",
+          "text": "A sigmoid response disqualifies the model as linear, because linear models permit untransformed response functions and raw features alone.",
+          "correct": false,
+          "misconception_id": "m_linear_model_forbids_nonlinear_features",
+          "rationale": "Linear-model terminology can refer to linearity in parameters on a specified link scale rather than raw response shape."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "logistic_regression",
+        "link_function",
+        "response_scale"
+      ]
+    },
+    {
+      "id": "q_linear_adjusted_coefficient_001",
+      "version": 1,
+      "family_id": "f_adjusted_coefficient_meaning",
+      "status": "approved",
+      "stem": "A regression of health outcome on exercise alone gives a positive exercise coefficient. After adding age, which is associated with both exercise and outcome, the coefficient becomes smaller. What is the strongest interpretation?",
+      "kind": "application",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_linear_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The smaller coefficient proves the multivariable model predicts poorly, because correlated predictors invalidate fitted values across the observed feature region.",
+          "correct": false,
+          "misconception_id": "m_multicollinearity_invalidates_all_predictions",
+          "rationale": "Coefficient meaning can change after adjustment without implying that predictions are unusable."
+        },
+        {
+          "id": "b",
+          "text": "The two coefficients answer different adjustment questions; the change is compatible with age accounting for association previously attributed to exercise.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The marginal exercise slope and the age-adjusted partial slope are different estimands in their respective model specifications."
+        },
+        {
+          "id": "c",
+          "text": "The original high fit uniquely identified exercise's individual effect, so the coefficient change reflects optimizer noise rather than altered conditioning.",
+          "correct": false,
+          "misconception_id": "m_high_fit_identifies_individual_coefficients",
+          "rationale": "Fit quality does not make a marginal association equal an adjusted effect or uniquely identify a causal coefficient."
+        },
+        {
+          "id": "d",
+          "text": "Dropping age preserves the exercise coefficient's adjusted interpretation, because correlated variables are interchangeable in information and substantive meaning.",
+          "correct": false,
+          "misconception_id": "m_dropping_correlated_feature_preserves_interpretation",
+          "rationale": "Removing an associated predictor changes the conditioning set and therefore changes what the remaining coefficient summarizes."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "linear_models",
+        "coefficient_interpretation",
+        "adjustment",
+        "omitted_variable"
+      ]
+    },
+    {
+      "id": "q_discriminative_novelty_limit_001",
+      "version": 1,
+      "family_id": "f_conditional_prediction_novelty_limit",
+      "status": "approved",
+      "stem": "A classifier estimates p(class given x) for an observed input but has no model for p(x). Which task is supported directly, and which task requires additional modeling or evidence?",
+      "kind": "comparison",
+      "difficulty": 0.25,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The conditional probabilities also determine feature density, so the classifier directly supports both class decisions and likelihood-based novelty detection.",
+          "correct": false,
+          "misconception_id": "m_discriminative_model_specifies_feature_distribution",
+          "rationale": "A conditional distribution over classes at each x does not specify how frequently different x values occur."
+        },
+        {
+          "id": "b",
+          "text": "Neither task is supported until p(x) is supplied, because conditional class probabilities do not classify an observed feature vector coherently.",
+          "correct": false,
+          "misconception_id": "m_conditional_model_cannot_classify_without_joint",
+          "rationale": "Class prediction under a stated loss can use p(class given x) directly without a marginal feature model."
+        },
+        {
+          "id": "c",
+          "text": "It directly supports class decisions for observed x; density-based novelty detection needs p(x), a score model, or other out-of-distribution evidence.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Conditional prediction and modeling whether an input itself is likely are separate inferential tasks."
+        },
+        {
+          "id": "d",
+          "text": "It supports novelty detection but not class probabilities, because discriminative models emit nonprobabilistic scores rather than conditional distributions.",
+          "correct": false,
+          "misconception_id": "m_discriminative_models_cannot_be_probabilistic",
+          "rationale": "Many discriminative models are explicitly probabilistic conditionals, while lacking a marginal model for x."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "discriminative_models",
+        "conditional_model",
+        "novelty_detection",
+        "feature_density"
+      ]
+    },
+    {
+      "id": "q_softmax_common_offset_001",
+      "version": 1,
+      "family_id": "f_softmax_logit_invariance",
+      "status": "approved",
+      "stem": "A three-class softmax classifier outputs logits 1, 2, and 4. A constant 7 is added to all three logits for the same observation. What changes?",
+      "kind": "calculation",
+      "difficulty": -0.55,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Each probability increases by 7, because class probability is a linear function of its corresponding discriminative score.",
+          "correct": false,
+          "misconception_id": "m_logistic_probability_is_linear",
+          "rationale": "Softmax exponentiates and normalizes logits; probabilities cannot be shifted by adding seven directly."
+        },
+        {
+          "id": "b",
+          "text": "The predicted class stays fixed but its probability rises, because a score offset changes confidence while leaving the decision boundary unchanged.",
+          "correct": false,
+          "misconception_id": "m_logistic_threshold_does_not_move_boundary",
+          "rationale": "A shared offset cancels from both numerator and denominator, so neither ranking nor probability changes."
+        },
+        {
+          "id": "c",
+          "text": "Probabilities become undefined, because discriminative classifiers provide relative scores without a coherent conditional probability interpretation.",
+          "correct": false,
+          "misconception_id": "m_discriminative_models_cannot_be_probabilistic",
+          "rationale": "Softmax defines a valid conditional categorical distribution from any finite logit vector."
+        },
+        {
+          "id": "d",
+          "text": "Nothing changes: the common exponential factor cancels during normalization, leaving all probabilities and the predicted class identical.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Softmax depends on logit differences, making it invariant to a common additive offset."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "discriminative_models",
+        "softmax",
+        "logits",
+        "invariance"
+      ]
+    },
+    {
+      "id": "q_monotone_score_transform_001",
+      "version": 1,
+      "family_id": "f_ranking_probability_transform",
+      "status": "approved",
+      "stem": "A binary classifier's scores undergo a strictly increasing nonlinear transformation. The ordering of all examples is unchanged, but the transformed values no longer match observed event frequencies. Which statement follows?",
+      "kind": "transfer",
+      "difficulty": 0.7,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Ranking metrics based on pairwise ordering can remain unchanged while probability calibration worsens; these are distinct properties of the outputs.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A monotone transformation preserves order but can alter the numerical scale required for calibrated probabilities."
+        },
+        {
+          "id": "b",
+          "text": "Selecting a new class threshold repairs the transformed values as probabilities, because threshold choice also restores their frequency interpretation.",
+          "correct": false,
+          "misconception_id": "m_thresholding_repairs_probability_semantics",
+          "rationale": "A threshold changes decisions at one operating point but does not calibrate the full numeric score scale."
+        },
+        {
+          "id": "c",
+          "text": "The transformed values remain population calibrated because probability calibration is preserved by any transformation that preserves ranking.",
+          "correct": false,
+          "misconception_id": "m_weighted_probabilities_remain_population_calibrated",
+          "rationale": "Calibration depends on numerical values, not merely their order, and can change under a nonlinear monotone map."
+        },
+        {
+          "id": "d",
+          "text": "Optimizer speed alone can change, because post-processing scores has no effect on either ranking or their probability meaning.",
+          "correct": false,
+          "misconception_id": "m_class_weights_only_change_optimization_speed",
+          "rationale": "Although ranking stays fixed, the transformation directly changes numeric score interpretation independently of optimization."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "discriminative_models",
+        "ranking",
+        "calibration",
+        "monotone_transform"
+      ]
+    }
+  ]
+}

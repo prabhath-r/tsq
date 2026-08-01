@@ -1,0 +1,1207 @@
+{
+  "topic": {
+    "id": "t_adaptive_learning",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Adaptive Learning Systems",
+    "description": "Uncertain learner models, information value, and constrained adaptive assessment.",
+    "concept_ids": [
+      "c_knowledge_tracing",
+      "c_information_gain",
+      "c_adaptive_testing"
+    ],
+    "related_topic_ids": [
+      "t_evaluation_decisions"
+    ],
+    "sort_order": 100
+  },
+  "concepts": [
+    {
+      "id": "c_knowledge_tracing",
+      "name": "Probabilistic knowledge tracing",
+      "description": "Maintaining uncertain learner-skill state from noisy, multi-skill response evidence over time.",
+      "level": "advanced"
+    },
+    {
+      "id": "c_information_gain",
+      "name": "Information gain",
+      "description": "Expected reduction in uncertainty from an observation or intervention.",
+      "level": "intermediate"
+    },
+    {
+      "id": "c_adaptive_testing",
+      "name": "Adaptive assessment",
+      "description": "Selecting questions sequentially to balance diagnosis, learning, coverage, and operational constraints.",
+      "level": "advanced"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_wrong_response_proves_all_skills_missing",
+      "name": "One wrong response disproves every required skill",
+      "description": "Deterministically marks all linked concepts unmastered despite slips and ambiguity in which skill caused failure.",
+      "concept_id": "c_knowledge_tracing",
+      "remediation": "Update a posterior through the response likelihood instead of assigning a hard state."
+    },
+    {
+      "id": "m_highest_weight_skill_is_unique_failure_cause",
+      "name": "The highest-weight skill is the unique failure cause",
+      "description": "Interprets content weights as a deterministic causal label for a multi-skill response.",
+      "concept_id": "c_knowledge_tracing",
+      "remediation": "Marginalize over plausible latent skill states and retain uncertainty about attribution."
+    },
+    {
+      "id": "m_ambiguous_multiskill_evidence_is_useless",
+      "name": "Ambiguous multi-skill evidence is useless",
+      "description": "Discards a response because it does not isolate one concept, rather than making a smaller joint posterior update.",
+      "concept_id": "c_knowledge_tracing",
+      "remediation": "Use a multi-skill observation model: ambiguous evidence can still shift several hypotheses probabilistically."
+    },
+    {
+      "id": "m_maximum_difficulty_means_maximum_information",
+      "name": "The hardest item is always most informative",
+      "description": "Ignores the learner's current ability and the nearly deterministic response expected on an excessively hard item.",
+      "concept_id": "c_adaptive_testing",
+      "remediation": "Plot expected information across item difficulty relative to the current learner posterior."
+    },
+    {
+      "id": "m_mastery_uncertainty_is_the_only_selection_goal",
+      "name": "Mastery uncertainty is the only selection goal",
+      "description": "Selects solely by a 0.5 mastery probability while ignoring item discrimination, prerequisites, learning value, and coverage.",
+      "concept_id": "c_adaptive_testing",
+      "remediation": "Compute expected posterior change per candidate and add explicit pedagogical and content constraints."
+    },
+    {
+      "id": "m_greedy_information_needs_no_constraints",
+      "name": "Greedy information gain needs no constraints",
+      "description": "Assumes repeatedly selecting one diagnostic item family is acceptable despite exposure, fatigue, coverage, and instructional goals.",
+      "concept_id": "c_adaptive_testing",
+      "remediation": "Optimize information or learning value under content balancing and exposure constraints."
+    },
+    {
+      "id": "m_information_gain_is_realized_surprise",
+      "name": "Information gain is the surprise of one outcome",
+      "description": "Confuses the expected reduction in uncertainty before observing a result with the surprise of the particular result obtained.",
+      "concept_id": "c_information_gain",
+      "remediation": "Average posterior entropy over all possible outcomes before subtracting it from prior entropy."
+    },
+    {
+      "id": "m_correlated_evidence_adds_full_information",
+      "name": "Correlated evidence adds full independent information",
+      "description": "Counts repeated or shared-family observations as independent reductions in uncertainty despite their common error source.",
+      "concept_id": "c_information_gain",
+      "remediation": "Condition the second observation on the first and measure only its remaining mutual information."
+    },
+    {
+      "id": "m_outcome_entropy_guarantees_information",
+      "name": "High outcome entropy guarantees useful information",
+      "description": "Assumes an unpredictable measurement is informative about the target even when it is statistically independent noise.",
+      "concept_id": "c_information_gain",
+      "remediation": "Compare marginal outcome entropy with conditional entropy given the target hypothesis."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_multiskill_posterior_update_001",
+      "version": 1,
+      "family_id": "f_adaptive_learner_state",
+      "status": "approved",
+      "stem": "An MCQ requires both conditional-probability reasoning and calibration knowledge. A learner answers incorrectly. The item model includes nonzero slip and guess probabilities, and neither skill is known with certainty. Which learner-state update is most defensible?",
+      "kind": "application",
+      "difficulty": 1.15,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.09,
+      "concepts": [
+        {
+          "concept_id": "c_knowledge_tracing",
+          "weight": 0.55,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_calibration",
+          "weight": 0.25,
+          "role": "transfer"
+        },
+        {
+          "concept_id": "c_adaptive_testing",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Set mastery of both skills to zero, because an incorrect response proves all required components were absent.",
+          "correct": false,
+          "misconception_id": "m_wrong_response_proves_all_skills_missing",
+          "rationale": "The response could arise from one missing skill, both, or a slip; hard-zeroing both overstates the evidence."
+        },
+        {
+          "id": "b",
+          "text": "Mark the highest-weight skill alone as unmastered, because a content weight identifies the unique cause of failure.",
+          "correct": false,
+          "misconception_id": "m_highest_weight_skill_is_unique_failure_cause",
+          "rationale": "Concept weights describe item relevance, not observed causal attribution for this individual response."
+        },
+        {
+          "id": "c",
+          "text": "Use Bayes' rule with the multi-skill response likelihood, retaining uncertainty over mastery, slips, guesses, and failure attribution.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A probabilistic observation model uses the response as noisy evidence and avoids pretending that a multi-skill item isolates one latent cause."
+        },
+        {
+          "id": "d",
+          "text": "Leave both skill posteriors unchanged, because evidence involving more than one concept does not update either concept validly.",
+          "correct": false,
+          "misconception_id": "m_ambiguous_multiskill_evidence_is_useless",
+          "rationale": "Ambiguity weakens attribution but does not make the response uninformative under a specified multi-skill likelihood."
+        }
+      ],
+      "source_ids": [
+        "src_corbett_anderson_1995",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "knowledge_tracing",
+        "bayesian_update",
+        "multi_skill",
+        "slip_guess"
+      ]
+    },
+    {
+      "id": "q_adaptive_item_selection_001",
+      "version": 1,
+      "family_id": "f_adaptive_selection_policy",
+      "status": "approved",
+      "stem": "An adaptive tutor has a posterior over a learner's concepts and a bank with calibrated item-response models. It must choose the next MCQ for both diagnosis and learning while avoiding repetition. Which policy is the strongest default?",
+      "kind": "transfer",
+      "difficulty": 1.1,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.09,
+      "concepts": [
+        {
+          "concept_id": "c_adaptive_testing",
+          "weight": 0.55,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_knowledge_tracing",
+          "weight": 0.3,
+          "role": "prerequisite"
+        },
+        {
+          "concept_id": "c_information_gain",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Choose the bank's hardest item each time, because maximum difficulty produces maximum information for any learner.",
+          "correct": false,
+          "misconception_id": "m_maximum_difficulty_means_maximum_information",
+          "rationale": "An item far above the learner can yield an almost certain incorrect response and little discrimination among plausible learner states."
+        },
+        {
+          "id": "b",
+          "text": "Choose any item whose concept mastery is closest to 0.5, without considering its response model, prerequisites, or instructional value during selection.",
+          "correct": false,
+          "misconception_id": "m_mastery_uncertainty_is_the_only_selection_goal",
+          "rationale": "Posterior uncertainty matters, but an item can be weakly discriminating, premature, or pedagogically unhelpful."
+        },
+        {
+          "id": "c",
+          "text": "Repeatedly choose the single item with greatest immediate information gain, with no content balancing or exposure limits.",
+          "correct": false,
+          "misconception_id": "m_greedy_information_needs_no_constraints",
+          "rationale": "Unconstrained greedy selection can overexpose an item family, neglect coverage, and harm engagement or learning."
+        },
+        {
+          "id": "d",
+          "text": "Optimize expected information gain or learning value under prerequisite, coverage, exposure, diversity, and fatigue constraints, then update from the observed response.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This uses the learner posterior and item model while recognizing that a useful tutor has pedagogical and operational constraints beyond pure uncertainty reduction."
+        }
+      ],
+      "source_ids": [
+        "src_van_der_linden_adaptive_2010",
+        "src_corbett_anderson_1995",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "adaptive_testing",
+        "information_gain",
+        "exposure_control",
+        "pedagogy"
+      ]
+    },
+    {
+      "id": "q_information_gain_diagnostic_noise_001",
+      "version": 1,
+      "family_id": "f_information_gain_relevance",
+      "status": "approved",
+      "stem": "A hidden hypothesis H is equally likely to be red or blue. Test A reports H without error. Test B returns an independent fair coin unrelated to H. Before observing either result, which test has more expected information about H?",
+      "kind": "calculation",
+      "difficulty": -0.25,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_information_gain",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Test A: it reduces one bit of prior entropy to zero, while the independent fair result from B reduces none.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Information about H depends on uncertainty reduction conditional on the result, not unpredictability of the result alone."
+        },
+        {
+          "id": "b",
+          "text": "Test B: its fair outcome has maximum entropy, so an unpredictable measurement carries the most information about H.",
+          "correct": false,
+          "misconception_id": "m_outcome_entropy_guarantees_information",
+          "rationale": "B has high marginal entropy but remains independent of H, making its mutual information with H zero."
+        },
+        {
+          "id": "c",
+          "text": "They tie until one outcome is seen, because information gain is defined as the surprise of the realized result.",
+          "correct": false,
+          "misconception_id": "m_information_gain_is_realized_surprise",
+          "rationale": "Expected information is computed before observation by averaging posterior uncertainty across possible results."
+        },
+        {
+          "id": "d",
+          "text": "They add two bits together, because each binary observation contributes a full independent unit of information.",
+          "correct": false,
+          "misconception_id": "m_correlated_evidence_adds_full_information",
+          "rationale": "A binary outcome contributes information about H only through statistical dependence with H."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "information_gain",
+        "entropy",
+        "mutual_information",
+        "diagnostic"
+      ]
+    },
+    {
+      "id": "q_information_gain_binary_test_001",
+      "version": 1,
+      "family_id": "f_information_gain_expected_entropy",
+      "status": "approved",
+      "stem": "Two hypotheses have prior probabilities 0.5 and 0.5. A symmetric binary test reports the correct hypothesis with probability 0.75. Its two outcomes are equally likely. Approximately how much expected information does the test provide in bits?",
+      "kind": "calculation",
+      "difficulty": 0.75,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_information_gain",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "About 0.415 bits, because the surprise of the less likely posterior hypothesis is the information gained.",
+          "correct": false,
+          "misconception_id": "m_information_gain_is_realized_surprise",
+          "rationale": "Expected gain averages posterior entropy; it is not the self-information of one posterior branch."
+        },
+        {
+          "id": "b",
+          "text": "About 0.189 bits, because the gain is 1 minus the binary entropy of probabilities 0.75 and 0.25.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Each outcome yields posterior probabilities 0.75 and 0.25, whose entropy is about 0.811 bits."
+        },
+        {
+          "id": "c",
+          "text": "Exactly 1 bit, because an equally likely binary test result has one bit of outcome entropy.",
+          "correct": false,
+          "misconception_id": "m_outcome_entropy_guarantees_information",
+          "rationale": "Outcome entropy includes test noise; conditional uncertainty about the hypothesis remains after either result."
+        },
+        {
+          "id": "d",
+          "text": "Exactly 0.75 bits, because each test contributes its accuracy as a full independent amount of evidence.",
+          "correct": false,
+          "misconception_id": "m_correlated_evidence_adds_full_information",
+          "rationale": "Accuracy is neither measured in bits nor additive without accounting for conditional dependence and uncertainty."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "information_gain",
+        "binary_entropy",
+        "expected_entropy",
+        "calculation"
+      ]
+    },
+    {
+      "id": "q_information_gain_duplicate_sensor_001",
+      "version": 1,
+      "family_id": "f_information_gain_conditional_dependence",
+      "status": "approved",
+      "stem": "A second dashboard field is an exact cached copy of a diagnostic sensor already observed. The first reading changed the posterior over a fault. How much additional information about the fault does the copied field provide conditional on the first reading?",
+      "kind": "application",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_information_gain",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It provides the surprise value of the copied result again because realized information is counted per displayed observation.",
+          "correct": false,
+          "misconception_id": "m_information_gain_is_realized_surprise",
+          "rationale": "Once the first field is known, the exact copy has no uncertainty and cannot change the posterior."
+        },
+        {
+          "id": "b",
+          "text": "It provides high information because a sensor field with variable outcomes has high marginal entropy across incidents.",
+          "correct": false,
+          "misconception_id": "m_outcome_entropy_guarantees_information",
+          "rationale": "Marginal variability does not imply conditional information after the source reading is already observed."
+        },
+        {
+          "id": "c",
+          "text": "It provides zero additional information because its value is determined by the first reading and leaves the posterior unchanged.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Conditional mutual information is zero for a deterministic duplicate of evidence already in the conditioning set."
+        },
+        {
+          "id": "d",
+          "text": "It provides the same full gain as the first reading because separately displayed measurements count as independent evidence.",
+          "correct": false,
+          "misconception_id": "m_correlated_evidence_adds_full_information",
+          "rationale": "Presentation as a second field does not make a shared underlying observation independent."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "information_gain",
+        "conditional_information",
+        "duplicate_evidence",
+        "dependence"
+      ]
+    },
+    {
+      "id": "q_adaptive_difficulty_information_001",
+      "version": 1,
+      "family_id": "f_adaptive_information_curve",
+      "status": "approved",
+      "stem": "An adaptive test estimates a learner near ability 0. It can choose among equally discriminating items with difficulties -3, 0, and 3. Guess and slip parameters are equal. Which item is the strongest diagnostic choice before applying content constraints?",
+      "kind": "calculation",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_adaptive_testing",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The difficulty-3 item, because the hardest available response provides the largest information gain for any learner.",
+          "correct": false,
+          "misconception_id": "m_maximum_difficulty_means_maximum_information",
+          "rationale": "An item far above current ability produces a nearly predictable failure and little local discrimination."
+        },
+        {
+          "id": "b",
+          "text": "Whichever item targets a concept with mastery probability closest to one half, without considering its response curve.",
+          "correct": false,
+          "misconception_id": "m_mastery_uncertainty_is_the_only_selection_goal",
+          "rationale": "State uncertainty matters, but the observation model determines whether a candidate can reduce that uncertainty."
+        },
+        {
+          "id": "c",
+          "text": "The highest-scoring item from one familiar family, even if repeated exposure and coverage constraints exclude it.",
+          "correct": false,
+          "misconception_id": "m_greedy_information_needs_no_constraints",
+          "rationale": "A local score does not override exposure, family independence, or content requirements."
+        },
+        {
+          "id": "d",
+          "text": "The difficulty-0 item, because its response is least predetermined near the current ability and therefore most discriminating locally.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "With equal slopes and asymptotes, information is greatest near the region where response probability changes most with ability."
+        }
+      ],
+      "source_ids": [
+        "src_van_der_linden_adaptive_2010",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "adaptive_testing",
+        "item_information",
+        "difficulty",
+        "ability"
+      ]
+    },
+    {
+      "id": "q_adaptive_family_constraint_001",
+      "version": 1,
+      "family_id": "f_adaptive_constrained_selection",
+      "status": "approved",
+      "stem": "A tutor's top information score belongs to a fourth paraphrase from a family the learner has already answered three times. A slightly lower-scoring item uses a fresh solution path and preserves later repair coverage. Which selection is better supported?",
+      "kind": "application",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_adaptive_testing",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Choose the fresh-family item because dependence, exposure, and future repair capacity are hard constraints on useful evidence.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A constrained policy values independent evidence and preserves viable pedagogy rather than maximizing one myopic score."
+        },
+        {
+          "id": "b",
+          "text": "Choose the paraphrase because the largest point estimate of information should override family dependence and coverage.",
+          "correct": false,
+          "misconception_id": "m_greedy_information_needs_no_constraints",
+          "rationale": "The score overstates useful evidence when repeated observations share a solution path and consume options needed later."
+        },
+        {
+          "id": "c",
+          "text": "Choose the most difficult of the two because harder responses dominate selection quality after several exposures.",
+          "correct": false,
+          "misconception_id": "m_maximum_difficulty_means_maximum_information",
+          "rationale": "Difficulty contributes through its match to the learner and item curve, not as a monotone quality ranking."
+        },
+        {
+          "id": "d",
+          "text": "Choose by mastery probability alone because uncertainty near one half settles the next-question decision without item context.",
+          "correct": false,
+          "misconception_id": "m_mastery_uncertainty_is_the_only_selection_goal",
+          "rationale": "Candidate response behavior, independence, prerequisites, and instructional route remain material."
+        }
+      ],
+      "source_ids": [
+        "src_van_der_linden_adaptive_2010",
+        "src_corbett_anderson_1995",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "adaptive_testing",
+        "constraints",
+        "family_independence",
+        "coverage"
+      ]
+    },
+    {
+      "id": "q_tracing_slip_sequence_001",
+      "version": 1,
+      "family_id": "f_tracing_slip_sequence",
+      "status": "approved",
+      "stem": "A learner has several strong, independent successes on one skill and then misses one moderately discriminating item. The observation model permits slips. What posterior response is most defensible?",
+      "kind": "diagnostic",
+      "difficulty": -0.05,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_knowledge_tracing",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Decrease mastery probability by an amount determined by the prior and response likelihood, while retaining uncertainty about a slip.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Bayesian evidence shifts rather than resets belief, and prior independent successes remain relevant."
+        },
+        {
+          "id": "b",
+          "text": "Set the skill to unmastered because one wrong response proves the required knowledge is absent.",
+          "correct": false,
+          "misconception_id": "m_wrong_response_proves_all_skills_missing",
+          "rationale": "A nonzero slip probability makes the response compatible with a knowledgeable learner."
+        },
+        {
+          "id": "c",
+          "text": "Assign failure to the highest-weight skill as the unique cause, independent of competing error explanations.",
+          "correct": false,
+          "misconception_id": "m_highest_weight_skill_is_unique_failure_cause",
+          "rationale": "Content weights do not provide deterministic causal attribution for a noisy response."
+        },
+        {
+          "id": "d",
+          "text": "Ignore the response because evidence with possible slips is ambiguous and therefore unusable for state estimation.",
+          "correct": false,
+          "misconception_id": "m_ambiguous_multiskill_evidence_is_useless",
+          "rationale": "Noisy evidence can still update a posterior by a smaller, likelihood-weighted amount."
+        }
+      ],
+      "source_ids": [
+        "src_corbett_anderson_1995",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "knowledge_tracing",
+        "slip",
+        "posterior",
+        "sequence"
+      ]
+    },
+    {
+      "id": "q_tracing_multiskill_ambiguity_001",
+      "version": 1,
+      "family_id": "f_tracing_multiskill_transfer",
+      "status": "approved",
+      "stem": "A debugging item requires both tensor-shape reasoning and backpropagation. A learner chooses a distractor consistent with a shape error, but the item is not perfectly diagnostic. How should a knowledge tracer use the response?",
+      "kind": "transfer",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_knowledge_tracing",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Mark both skills absent because an incorrect multi-skill response disproves all prerequisites used by the item.",
+          "correct": false,
+          "misconception_id": "m_wrong_response_proves_all_skills_missing",
+          "rationale": "The response has multiple possible causes and a noisy observation model, so deterministic failure labels overstate evidence."
+        },
+        {
+          "id": "b",
+          "text": "Increase the shape-error hypothesis and modestly update linked skill beliefs according to the option and observation likelihoods.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The named distractor is informative but not conclusive; a probabilistic joint update preserves competing explanations."
+        },
+        {
+          "id": "c",
+          "text": "Assign the miss to whichever skill has the largest item weight and leave other hypotheses unchanged.",
+          "correct": false,
+          "misconception_id": "m_highest_weight_skill_is_unique_failure_cause",
+          "rationale": "A loading describes item relevance, not exclusive causal responsibility for one response."
+        },
+        {
+          "id": "d",
+          "text": "Discard the attempt because evidence involving more than one skill provides no useful learner-state update.",
+          "correct": false,
+          "misconception_id": "m_ambiguous_multiskill_evidence_is_useless",
+          "rationale": "Ambiguity reduces attribution strength but does not make the option-specific observation uninformative."
+        }
+      ],
+      "source_ids": [
+        "src_corbett_anderson_1995",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "knowledge_tracing",
+        "multiskill",
+        "misconception",
+        "uncertainty"
+      ]
+    },
+    {
+      "id": "q_adaptive_stopping_utility_001",
+      "version": 1,
+      "family_id": "f_adaptive_stopping_utility",
+      "status": "quarantined",
+      "stem": "At the current decision point, an adaptive diagnostic converts every term to common utility points and scores continuation as expected entropy reduction minus a fatigue-and-reliability penalty minus response burden. Candidate H, the hardest item, scores 0.31 - 0.30 - 0.06. Candidate M, mapped to mastery nearest 0.50, scores 0.36 - 0.22 - 0.17. Candidate I, with the largest unconstrained information estimate, scores 0.48 - 0.34 - 0.18. Stopping now scores 0. Which current action maximizes the defined utility?",
+      "kind": "calculation",
+      "difficulty": 0.55,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_adaptive_testing",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Stop the current diagnostic block because its utility of 0 exceeds H at -0.05, M at -0.03, and I at -0.04.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The stated sequential objective includes stopping as an action. All three continuation actions have negative current net utility; this conclusion makes no claim about a later rested or instructed state."
+        },
+        {
+          "id": "b",
+          "text": "Administer H because the hardest available item is presumed to dominate easier alternatives even when its computed current utility is -0.05.",
+          "correct": false,
+          "misconception_id": "m_maximum_difficulty_means_maximum_information",
+          "rationale": "Difficulty alone does not determine information for this learner, and the supplied common-scale objective already assigns H less utility than stopping."
+        },
+        {
+          "id": "c",
+          "text": "Administer M because mastery nearest 0.50 settles the choice even though its fatigue-adjusted current utility is -0.03.",
+          "correct": false,
+          "misconception_id": "m_mastery_uncertainty_is_the_only_selection_goal",
+          "rationale": "A scalar mastery summary cannot override the specified observation reliability, burden, and stopping utility."
+        },
+        {
+          "id": "d",
+          "text": "Administer I because its gross information term is largest and should override the penalties and the available stopping action.",
+          "correct": false,
+          "misconception_id": "m_greedy_information_needs_no_constraints",
+          "rationale": "Greedy use of the gross term discards the reliability and burden terms in the defined constrained objective; I's net value is -0.04."
+        }
+      ],
+      "source_ids": [
+        "src_choi_grady_dodd_stopping_2011",
+        "src_van_der_linden_adaptive_2010",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_quantitative_scenario",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "H=-0.05, M=-0.03, I=-0.04, stop=0 under the utility function defined in the stem.",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "adaptive_testing",
+        "stopping_rule",
+        "fatigue",
+        "constrained_utility",
+        "calculation"
+      ]
+    },
+    {
+      "id": "q_adaptive_posterior_shape_001",
+      "version": 1,
+      "family_id": "f_adaptive_posterior_shape",
+      "status": "quarantined",
+      "stem": "Define mastery as P(theta > 0). Learner A places probability 0.5 at theta = -0.1 and 0.5 at +0.1; learner B places probability 0.5 at -2 and 0.5 at +2, so both have mastery 0.50. For a candidate item, P(correct | theta) = sigmoid(theta), so both also predict a correct response with probability 0.50. A policy concludes that the item has equal information value for A and B. Which diagnosis is correct?",
+      "kind": "calculation",
+      "difficulty": 1.15,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_adaptive_testing",
+          "weight": 0.6,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_information_gain",
+          "weight": 0.25,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.15,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Replace the item with the bank's hardest one for both learners because a global difficulty ranking determines information across posterior shapes.",
+          "correct": false,
+          "misconception_id": "m_maximum_difficulty_means_maximum_information",
+          "rationale": "Information depends on the learner distribution and response curve, so globally maximal difficulty does not repair the collapsed posterior."
+        },
+        {
+          "id": "b",
+          "text": "The equality is valid because mastery 0.50 is a sufficient learner-state summary once the two marginal response probabilities also match.",
+          "correct": false,
+          "misconception_id": "m_mastery_uncertainty_is_the_only_selection_goal",
+          "rationale": "Both scalar summaries discard how strongly a response distinguishes the latent states inside each posterior."
+        },
+        {
+          "id": "c",
+          "text": "Use the bank's largest stored one-step score while ignoring exposure, curriculum, fatigue, and later repair capacity because constraints do not justify a lower score.",
+          "correct": false,
+          "misconception_id": "m_greedy_information_needs_no_constraints",
+          "rationale": "A deployable policy cannot replace posterior-aware scoring with an unconstrained global ranking, and operational constraints remain part of selection value."
+        },
+        {
+          "id": "d",
+          "text": "Compute I(theta; response) from each full posterior: it is about 0.002 bits for A but 0.473 bits for B, before applying operational constraints.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Both response marginals have one bit of entropy, but E[H(response | theta)] is about 0.998 for A and 0.527 for B. Equal predictive entropy therefore does not imply equal expected posterior entropy reduction."
+        }
+      ],
+      "source_ids": [
+        "src_van_der_linden_adaptive_2010",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_quantitative_scenario",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "For each symmetric two-point posterior, I(theta;R)=1-h(sigmoid(|theta|)); values are approximately 0.0018 and 0.4729 bits.",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "adaptive_testing",
+        "posterior_shape",
+        "mutual_information",
+        "item_response_model",
+        "constrained_selection"
+      ]
+    },
+    {
+      "id": "q_information_gain_orthogonal_partition_001",
+      "version": 1,
+      "family_id": "f_information_gain_orthogonal_partition",
+      "status": "quarantined",
+      "stem": "Four hypotheses A, B, C, and D are equally likely. Probe X reports whether the truth is in {A, B} or {C, D}; probe Z reports whether it is in {A, C} or {B, D}; probe Y returns an independent fair coin. Which two-probe plan has the greatest expected information?",
+      "kind": "calculation",
+      "difficulty": 0.4,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_information_gain",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Run X twice; each displayed binary result contributes a fresh bit even though the second result repeats the first partition.",
+          "correct": false,
+          "misconception_id": "m_correlated_evidence_adds_full_information",
+          "rationale": "Once X is known, its repeated value is determined and contributes zero conditional information about the remaining pair."
+        },
+        {
+          "id": "b",
+          "text": "Run X and Y; both outcomes have one bit of marginal entropy, so together they resolve two bits about the hypothesis.",
+          "correct": false,
+          "misconception_id": "m_outcome_entropy_guarantees_information",
+          "rationale": "Y is unpredictable but independent of the hypothesis, so its outcome entropy does not reduce hypothesis uncertainty."
+        },
+        {
+          "id": "c",
+          "text": "Run X and Z; their orthogonal deterministic partitions identify one of four hypotheses and reduce the two-bit prior entropy to zero.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "X resolves one axis of the hypothesis space and Z resolves the other, producing two bits of target-relevant information."
+        },
+        {
+          "id": "d",
+          "text": "Choose no plan prospectively; information is defined by the surprise of the particular outcomes after they have been observed.",
+          "correct": false,
+          "misconception_id": "m_information_gain_is_realized_surprise",
+          "rationale": "Expected information is available before observation by averaging posterior entropy over the possible outcomes of a proposed plan."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_scenario",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "prior_independent_verdict": "accept",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "information_gain",
+        "conditional_information",
+        "partitions",
+        "sequential_design"
+      ]
+    },
+    {
+      "id": "q_information_gain_conditional_table_001",
+      "version": 1,
+      "family_id": "f_information_gain_conditional_table",
+      "status": "quarantined",
+      "stem": "After existing evidence E, a fault has posterior P(F = 1 | E) = 0.80. A second check Z shares part of the evidence pipeline, so its conditional table is used rather than an independence assumption: P(Z = 1 | F = 1, E) = 0.75 and P(Z = 1 | F = 0, E) = 0.25. Thus P(Z = 1 | E) = 0.65. Approximately what expected additional information I(F; Z | E) does Z provide?",
+      "kind": "calculation",
+      "difficulty": 0.85,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_information_gain",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "About 0.622 bits, the surprise -log2(0.65) of seeing the more likely result Z = 1.",
+          "correct": false,
+          "misconception_id": "m_information_gain_is_realized_surprise",
+          "rationale": "That number is the surprise of one possible realized output, not the prospective reduction in fault uncertainty averaged over both outputs."
+        },
+        {
+          "id": "b",
+          "text": "About 0.123 bits, since H(Z | E) = h(0.65) is about 0.934 and H(Z | F, E) = h(0.75) is about 0.811.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Conditional mutual information is H(Z | E) - H(Z | F,E), so the supplied table yields approximately 0.934 - 0.811 = 0.123 bits."
+        },
+        {
+          "id": "c",
+          "text": "About 0.934 bits, because the marginal entropy h(0.65) of the check's output is all information about the fault.",
+          "correct": false,
+          "misconception_id": "m_outcome_entropy_guarantees_information",
+          "rationale": "Most output entropy remains after conditioning on the fault and is therefore not target-relevant information."
+        },
+        {
+          "id": "d",
+          "text": "About 0.722 bits, because another displayed check should eliminate all entropy h(0.80) remaining after E despite the shared pipeline.",
+          "correct": false,
+          "misconception_id": "m_correlated_evidence_adds_full_information",
+          "rationale": "A shared or noisy check is not automatically a full independent resolution; its incremental value must come from the conditional table."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_probability_table",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "h(0.65)=0.934068, h(0.75)=0.811278, and their difference is 0.122790 bits.",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "information_gain",
+        "conditional_mutual_information",
+        "probability_table",
+        "shared_evidence"
+      ]
+    },
+    {
+      "id": "q_tracing_multiskill_likelihood_001",
+      "version": 1,
+      "family_id": "f_tracing_multiskill_likelihood",
+      "status": "quarantined",
+      "stem": "A database-migration exercise requires transaction-boundary reasoning T and foreign-key ordering F. As a separate authoring annotation, its content mapping assigns weight 0.70 to T and 0.30 to F. Before the response, a tracer assigns independent mastery priors P(T) = P(F) = 0.70. Its wrong-answer likelihoods are 0.10 when both are mastered, 0.60 when T is mastered and F is unmastered, 0.70 when T is unmastered and F is mastered, and 0.90 when both are unmastered. After a wrong answer, which update follows from Bayes' rule?",
+      "kind": "calculation",
+      "difficulty": 1.15,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_knowledge_tracing",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Set both skills' unmastered probabilities to 1.00 because the wrong response disproves each skill required by the exercise.",
+          "correct": false,
+          "misconception_id": "m_wrong_response_proves_all_skills_missing",
+          "rationale": "The nonzero wrong-answer likelihood when both skills are mastered preserves posterior mass for a slip and for every joint state."
+        },
+        {
+          "id": "b",
+          "text": "Choose T as the unique missing skill and leave F at its prior because T's higher 0.70 content weight identifies the dominant failure cause.",
+          "correct": false,
+          "misconception_id": "m_highest_weight_skill_is_unique_failure_cause",
+          "rationale": "A content mapping weight describes authored coverage rather than a latent-cause observation. The supplied response likelihood table, not the content weight, drives the Bayes update for both skills."
+        },
+        {
+          "id": "c",
+          "text": "Update P(T unmastered) to about 0.57 and P(F unmastered) to about 0.51 while retaining all four joint states.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The wrong-answer evidence has probability 0.403. The posterior numerators are 0.228 for T unmastered and 0.207 for F unmastered."
+        },
+        {
+          "id": "d",
+          "text": "Leave both unmastered probabilities at 0.30 because a response involving two skills is too ambiguous to update either belief.",
+          "correct": false,
+          "misconception_id": "m_ambiguous_multiskill_evidence_is_useless",
+          "rationale": "Ambiguity prevents deterministic attribution but the supplied likelihood ratios still update marginal and joint skill-state probabilities."
+        }
+      ],
+      "source_ids": [
+        "src_corbett_anderson_1995",
+        "src_xu_mostow_multiskill_2011",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_multiskill_derivation",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "P(wrong)=0.49*0.10+0.21*0.60+0.21*0.70+0.09*0.90=0.403; missing-skill numerators are 0.228 and 0.207.",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "knowledge_tracing",
+        "multiskill",
+        "bayes_update",
+        "database_migration",
+        "calculation"
+      ]
+    },
+    {
+      "id": "q_tracing_disambiguation_probe_001",
+      "version": 1,
+      "family_id": "f_tracing_disambiguation_probe",
+      "status": "quarantined",
+      "stem": "After a wrong response to a two-skill item, a joint tracer retains correlated uncertainty with P(A unmastered) = 0.30 and P(B unmastered) = 0.55. The original item had content weights A = 0.70 and B = 0.30. An A-only probe has P(correct | A mastered) = 0.65 and P(correct | A unmastered) = 0.35; a B-only probe has corresponding probabilities 0.90 and 0.10. The goal is to reduce failure-attribution uncertainty without making a hard mastery label. What is the strongest next step?",
+      "kind": "transfer",
+      "difficulty": 0.95,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_knowledge_tracing",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_adaptive_testing",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Retain the joint posterior, choose the B-specific probe because its likelihoods separate B states more strongly, and update from its response.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The B probe supplies about 0.526 expected bits about B versus about 0.056 for the A probe about A under the stated marginals, while preserving probabilistic attribution."
+        },
+        {
+          "id": "b",
+          "text": "Mark A and B unmastered now and repeat the original item because one wrong response establishes that both required skills failed.",
+          "correct": false,
+          "misconception_id": "m_wrong_response_proves_all_skills_missing",
+          "rationale": "The joint tracer deliberately retains slip and alternative-state mass; a single response does not establish both skills are absent."
+        },
+        {
+          "id": "c",
+          "text": "Choose the A-specific probe because the 0.70 content weight identifies A as the unique cause of the original failure.",
+          "correct": false,
+          "misconception_id": "m_highest_weight_skill_is_unique_failure_cause",
+          "rationale": "A content mapping weight is not a causal observation, and A's available probe is substantially less discriminating in the supplied model."
+        },
+        {
+          "id": "d",
+          "text": "Discard the original response and avoid either probe because uncertain multi-skill attribution does not support a defensible learner-state update.",
+          "correct": false,
+          "misconception_id": "m_ambiguous_multiskill_evidence_is_useless",
+          "rationale": "Ambiguous evidence remains useful probabilistically, and a targeted follow-up can reduce rather than erase the remaining attribution uncertainty."
+        }
+      ],
+      "source_ids": [
+        "src_xu_mostow_multiskill_2011",
+        "src_van_der_linden_adaptive_2010",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_disambiguation_scenario",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "derivation": "For the A probe, H(R)-H(R|A) is approximately h(0.56)-h(0.65)=0.056 bits. For B it is approximately h(0.46)-h(0.90)=0.526 bits.",
+        "provider": "openai_codex",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "knowledge_tracing",
+        "multiskill",
+        "disambiguation",
+        "targeted_probe",
+        "adaptive_follow_up"
+      ]
+    }
+  ]
+}

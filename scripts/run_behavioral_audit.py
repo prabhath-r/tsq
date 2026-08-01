@@ -106,7 +106,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--corpus",
         type=Path,
-        default=PROJECT_ROOT / "corpus" / "ai_curriculum.json",
+        default=PROJECT_ROOT / "corpus",
     )
     result.add_argument("--database", type=Path)
     result.add_argument("--root", default="t_machine_learning")

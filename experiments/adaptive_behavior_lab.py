@@ -30,7 +30,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from tsq.adaptive import BOUNDARY_ALGORITHM_VERSION  # noqa: E402
-from tsq.corpus import read_and_parse  # noqa: E402
+from tsq.corpus import corpus_source_digest, read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.errors import NotFoundError  # noqa: E402
 from tsq.models import Presentation, SessionPhase  # noqa: E402
@@ -382,7 +382,7 @@ def canonical_hash(value: Any) -> str:
 
 
 def corpus_sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return corpus_source_digest(path)
 
 
 def validate_profile_references(
@@ -2379,7 +2379,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--corpus",
         type=Path,
-        default=PROJECT_ROOT / "corpus" / "ai_curriculum.json",
+        default=PROJECT_ROOT / "corpus",
     )
     result.add_argument("--root", default=DEFAULT_ROOT)
     result.add_argument("--steps", type=int, default=24)
@@ -2634,7 +2634,7 @@ def main() -> int:
         return 0
     if arguments.steps <= 0:
         raise SystemExit("--steps must be positive")
-    if not arguments.corpus.is_file():
+    if not arguments.corpus.exists():
         raise SystemExit(f"Corpus does not exist: {arguments.corpus}")
 
     if arguments.database_dir:

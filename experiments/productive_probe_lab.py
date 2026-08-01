@@ -56,7 +56,7 @@ from tsq.store import Database, question_content_hash  # noqa: E402
 
 LAB_VERSION = "productive-probe-lab-v3"
 START = datetime(2115, 3, 4, 9, 0, tzinfo=timezone.utc)
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "productive_probe_lab.json"
 _D0 = "0" * 64
 _D1 = "1" * 64
