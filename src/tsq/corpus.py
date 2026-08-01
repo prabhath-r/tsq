@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 from collections import Counter, deque
 from math import isfinite
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from .errors import ValidationError
@@ -44,6 +46,34 @@ def _relation(value: str) -> RelationType:
 
 _LIST_FIELDS = ("concepts", "edges", "misconceptions", "sources", "questions")
 _CATALOG_LIST_FIELDS = ("domains", "topics")
+
+_SHARD_MANIFEST_NAME = "manifest.json"
+_SHARD_FORMAT = "tsq-curriculum-shards"
+_SHARD_FORMAT_VERSION = 1
+_SHARD_MANIFEST_FIELDS = frozenset(
+    {
+        "format",
+        "format_version",
+        "schema_version",
+        "title",
+        "shared_file",
+        "topic_files",
+    }
+)
+_SHARD_MANIFEST_TOPIC_FIELDS = frozenset({"topic_id", "path"})
+_SHARED_SHARD_FIELDS = frozenset(
+    {"domains", "edges", "objective_edges", "sources"}
+)
+_TOPIC_SHARD_FIELDS = frozenset(
+    {
+        "topic",
+        "concepts",
+        "learning_objectives",
+        "misconceptions",
+        "questions",
+    }
+)
+_TOPIC_SHARD_PATH = re.compile(r"topics/[a-z0-9]+(?:_[a-z0-9]+)*\.json\Z")
 
 
 def _reject_json_constant(value: str) -> None:
@@ -752,19 +782,485 @@ def _raise_issues(prefix: str, issues: list[QualityIssue]) -> None:
     raise ValidationError(f"{prefix} failed {len(errors)} checks: {rendered}{suffix}", issues=errors)
 
 
-def load_bundle(path: str | Path, *, validate: bool = True) -> dict[str, Any]:
-    source_path = Path(path)
+def _read_json_document(path: Path) -> tuple[object, bytes]:
     try:
-        bundle = json.loads(
-            source_path.read_text(encoding="utf-8"),
+        payload = path.read_bytes()
+        document = json.loads(
+            payload.decode("utf-8"),
             parse_constant=_reject_json_constant,
             object_pairs_hook=_object_without_duplicate_keys,
         )
-    except (OSError, ValueError) as exc:
-        raise ValidationError(f"Could not read corpus bundle {source_path}: {exc}") from exc
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
+        raise ValidationError(f"Could not read corpus JSON {path}: {exc}") from exc
+    return document, payload
+
+
+def _require_exact_fields(
+    value: object,
+    expected: frozenset[str],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValidationError(f"{label} must be a JSON object.")
+    actual = set(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        details: list[str] = []
+        if missing:
+            details.append("missing " + ", ".join(missing))
+        if unexpected:
+            details.append("unexpected " + ", ".join(unexpected))
+        raise ValidationError(
+            f"{label} has invalid fields ({'; '.join(details)})."
+        )
+    return value
+
+
+def _canonical_relative_json_path(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f"{label} must be a non-blank relative JSON path.")
+    path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if (
+        "\\" in value
+        or path.is_absolute()
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+        or path.suffix != ".json"
+    ):
+        raise ValidationError(
+            f"{label} must use one canonical relative POSIX JSON path; "
+            f"received {value!r}."
+        )
+    return value
+
+
+def _declared_file(root: Path, relative_path: str, *, label: str) -> Path:
+    candidate = root.joinpath(*PurePosixPath(relative_path).parts)
+    try:
+        resolved_root = root.resolve(strict=True)
+        resolved_candidate = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise ValidationError(
+            f"Could not resolve declared {label} {relative_path!r}: {exc}"
+        ) from exc
+    if not resolved_candidate.is_relative_to(resolved_root):
+        raise ValidationError(
+            f"Declared {label} escapes the corpus directory: {relative_path!r}."
+        )
+    if candidate.is_symlink() or not candidate.is_file():
+        raise ValidationError(
+            f"Declared {label} must be a regular file: {relative_path!r}."
+        )
+    return candidate
+
+
+def _canonical_topic_ids(topic_rows: list[dict[str, Any]]) -> list[str] | None:
+    """Return depth-first catalog order when the raw hierarchy is sortable."""
+
+    by_id: dict[str, dict[str, Any]] = {}
+    children: dict[str | None, list[dict[str, Any]]] = {}
+    for topic in topic_rows:
+        topic_id = topic.get("id")
+        parent_id = topic.get("parent_id")
+        sort_order = topic.get("sort_order", 0)
+        if (
+            not isinstance(topic_id, str)
+            or not topic_id
+            or topic_id in by_id
+            or (parent_id is not None and not isinstance(parent_id, str))
+            or not isinstance(sort_order, int)
+            or isinstance(sort_order, bool)
+        ):
+            return None
+        by_id[topic_id] = topic
+        children.setdefault(parent_id, []).append(topic)
+    if any(parent_id is not None and parent_id not in by_id for parent_id in children):
+        return None
+
+    ordered: list[str] = []
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(topic: dict[str, Any]) -> bool:
+        topic_id = topic["id"]
+        if topic_id in visiting:
+            return False
+        if topic_id in visited:
+            return True
+        visiting.add(topic_id)
+        ordered.append(topic_id)
+        for child in sorted(
+            children.get(topic_id, ()),
+            key=lambda row: (row.get("sort_order", 0), row["id"]),
+        ):
+            if not visit(child):
+                return False
+        visiting.remove(topic_id)
+        visited.add(topic_id)
+        return True
+
+    for root in sorted(
+        children.get(None, ()),
+        key=lambda row: (row.get("sort_order", 0), row["id"]),
+    ):
+        if not visit(root):
+            return None
+    return ordered if len(ordered) == len(topic_rows) else None
+
+
+def _shard_row_ids(
+    rows: object,
+    *,
+    field: str,
+    source: str,
+) -> list[str]:
+    if not isinstance(rows, list):
+        raise ValidationError(f"{source}.{field} must be a JSON list.")
+    identifiers: list[str] = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValidationError(f"{source}.{field}[{index}] must be an object.")
+        identifier = row.get("id")
+        if not isinstance(identifier, str) or not identifier.strip():
+            raise ValidationError(
+                f"{source}.{field}[{index}].id must be a non-blank string."
+            )
+        identifiers.append(identifier)
+    if len(identifiers) != len(set(identifiers)):
+        raise ValidationError(f"{source}.{field} contains duplicate IDs.")
+    return identifiers
+
+
+def _validate_topic_shard_ownership(
+    shard: dict[str, Any],
+    *,
+    source: str,
+) -> None:
+    topic = shard["topic"]
+    if not isinstance(topic, dict):
+        raise ValidationError(f"{source}.topic must be a JSON object.")
+    topic_id = topic.get("id")
+    if not isinstance(topic_id, str) or not topic_id.strip():
+        raise ValidationError(f"{source}.topic.id must be a non-blank string.")
+    concept_ids = _shard_row_ids(
+        shard["concepts"], field="concepts", source=source
+    )
+    declared_concepts = topic.get("concept_ids")
+    if not isinstance(declared_concepts, list) or any(
+        not isinstance(concept_id, str) or not concept_id.strip()
+        for concept_id in declared_concepts
+    ):
+        raise ValidationError(
+            f"{source}.topic.concept_ids must be a list of non-blank strings."
+        )
+    if len(declared_concepts) != len(set(declared_concepts)):
+        raise ValidationError(
+            f"{source}.topic.concept_ids contains duplicate concept IDs."
+        )
+    owned = set(declared_concepts)
+    if owned != set(concept_ids):
+        missing = sorted(owned - set(concept_ids))
+        unexpected = sorted(set(concept_ids) - owned)
+        raise ValidationError(
+            f"{source} concept ownership does not match topic {topic_id}: "
+            f"missing={missing}, unexpected={unexpected}."
+        )
+
+    ownership_fields = (
+        ("learning_objectives", "primary_concept_id"),
+        ("misconceptions", "concept_id"),
+    )
+    for field, owner_field in ownership_fields:
+        _shard_row_ids(shard[field], field=field, source=source)
+        for index, row in enumerate(shard[field]):
+            owner = row.get(owner_field)
+            if owner not in owned:
+                raise ValidationError(
+                    f"{source}.{field}[{index}] is owned by concept {owner!r}, "
+                    f"not topic {topic_id}."
+                )
+
+    _shard_row_ids(shard["questions"], field="questions", source=source)
+    for index, question in enumerate(shard["questions"]):
+        mappings = question.get("concepts")
+        if not isinstance(mappings, list):
+            raise ValidationError(
+                f"{source}.questions[{index}].concepts must be a JSON list."
+            )
+        primary = [
+            mapping.get("concept_id")
+            for mapping in mappings
+            if isinstance(mapping, dict) and mapping.get("role") == "primary"
+        ]
+        if len(primary) != 1:
+            raise ValidationError(
+                f"{source}.questions[{index}] must declare exactly one primary concept."
+            )
+        if primary[0] not in owned:
+            raise ValidationError(
+                f"{source}.questions[{index}] has primary concept {primary[0]!r}, "
+                f"not owned by topic {topic_id}."
+            )
+
+
+def _load_sharded_bundle(
+    manifest_path: Path,
+    manifest_document: object,
+    manifest_bytes: bytes,
+    *,
+    validate: bool,
+) -> tuple[dict[str, Any], tuple[tuple[str, bytes], ...]]:
+    if manifest_path.name != _SHARD_MANIFEST_NAME:
+        raise ValidationError(
+            f"A sharded corpus manifest must be named {_SHARD_MANIFEST_NAME}."
+        )
+    if manifest_path.is_symlink():
+        raise ValidationError("The corpus manifest must be a regular file, not a symlink.")
+    manifest = _require_exact_fields(
+        manifest_document,
+        _SHARD_MANIFEST_FIELDS,
+        label="Corpus shard manifest",
+    )
+    if manifest["format"] != _SHARD_FORMAT:
+        raise ValidationError(
+            f"Unsupported corpus shard format {manifest['format']!r}."
+        )
+    if (
+        not isinstance(manifest["format_version"], int)
+        or isinstance(manifest["format_version"], bool)
+        or manifest["format_version"] != _SHARD_FORMAT_VERSION
+    ):
+        raise ValidationError(
+            f"Only corpus shard format_version {_SHARD_FORMAT_VERSION} is supported."
+        )
+    if (
+        not isinstance(manifest["schema_version"], int)
+        or isinstance(manifest["schema_version"], bool)
+        or manifest["schema_version"] != 3
+    ):
+        raise ValidationError(
+            "Corpus shard format_version 1 requires corpus schema_version 3."
+        )
+    if not isinstance(manifest["title"], str) or not manifest["title"].strip():
+        raise ValidationError("Corpus shard manifest title must be a non-blank string.")
+    shared_path = _canonical_relative_json_path(
+        manifest["shared_file"], label="shared_file"
+    )
+    if shared_path != "shared.json":
+        raise ValidationError("Corpus shard manifest shared_file must be 'shared.json'.")
+    entries = manifest["topic_files"]
+    if not isinstance(entries, list):
+        raise ValidationError("Corpus shard manifest topic_files must be a JSON list.")
+
+    topic_ids: list[str] = []
+    topic_paths: list[str] = []
+    for index, value in enumerate(entries):
+        entry = _require_exact_fields(
+            value,
+            _SHARD_MANIFEST_TOPIC_FIELDS,
+            label=f"Corpus shard manifest topic_files[{index}]",
+        )
+        topic_id = entry["topic_id"]
+        if not isinstance(topic_id, str) or not topic_id.strip():
+            raise ValidationError(
+                f"Corpus shard manifest topic_files[{index}].topic_id must be "
+                "a non-blank string."
+            )
+        topic_path = _canonical_relative_json_path(
+            entry["path"],
+            label=f"topic_files[{index}].path",
+        )
+        if _TOPIC_SHARD_PATH.fullmatch(topic_path) is None:
+            raise ValidationError(
+                f"topic_files[{index}].path must be topics/<lowercase_slug>.json."
+            )
+        topic_ids.append(topic_id)
+        topic_paths.append(topic_path)
+    if len(topic_ids) != len(set(topic_ids)):
+        raise ValidationError("Corpus shard manifest contains duplicate topic IDs.")
+    all_paths = [shared_path, *topic_paths]
+    if len(all_paths) != len(set(all_paths)) or len(
+        {path.casefold() for path in all_paths}
+    ) != len(all_paths):
+        raise ValidationError(
+            "Corpus shard manifest contains duplicate or case-colliding paths."
+        )
+
+    root = manifest_path.parent
+    expected_json = {_SHARD_MANIFEST_NAME, *all_paths}
+    try:
+        actual_json = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*.json")
+            if path.is_file() or path.is_symlink()
+        }
+    except OSError as exc:
+        raise ValidationError(f"Could not inventory corpus directory {root}: {exc}") from exc
+    unlisted = sorted(actual_json - expected_json)
+    missing = sorted(expected_json - actual_json)
+    if unlisted or missing:
+        raise ValidationError(
+            "Corpus shard JSON inventory differs from the manifest: "
+            f"unlisted={unlisted}, missing={missing}."
+        )
+
+    shared_file = _declared_file(root, shared_path, label="shared shard")
+    shared_document, shared_bytes = _read_json_document(shared_file)
+    shared = _require_exact_fields(
+        shared_document,
+        _SHARED_SHARD_FIELDS,
+        label=f"Shared corpus shard {shared_path}",
+    )
+    for field in _SHARED_SHARD_FIELDS:
+        if not isinstance(shared[field], list):
+            raise ValidationError(f"{shared_path}.{field} must be a JSON list.")
+
+    topic_shards: list[dict[str, Any]] = []
+    framed_parts: list[tuple[str, bytes]] = [
+        (_SHARD_MANIFEST_NAME, manifest_bytes),
+        (shared_path, shared_bytes),
+    ]
+    seen_entity_ids: dict[str, set[str]] = {
+        "concepts": set(),
+        "learning_objectives": set(),
+        "misconceptions": set(),
+        "questions": set(),
+    }
+    topic_rows: list[dict[str, Any]] = []
+    for topic_id, topic_path in zip(topic_ids, topic_paths, strict=True):
+        topic_file = _declared_file(root, topic_path, label="topic shard")
+        topic_document, topic_bytes = _read_json_document(topic_file)
+        shard = _require_exact_fields(
+            topic_document,
+            _TOPIC_SHARD_FIELDS,
+            label=f"Topic corpus shard {topic_path}",
+        )
+        topic = shard["topic"]
+        if not isinstance(topic, dict):
+            raise ValidationError(f"{topic_path}.topic must be a JSON object.")
+        if topic.get("id") != topic_id:
+            raise ValidationError(
+                f"Topic shard {topic_path} declares {topic.get('id')!r}; "
+                f"manifest expects {topic_id!r}."
+            )
+        _validate_topic_shard_ownership(shard, source=topic_path)
+        for field in seen_entity_ids:
+            identifiers = _shard_row_ids(
+                shard[field], field=field, source=topic_path
+            )
+            duplicates = sorted(seen_entity_ids[field].intersection(identifiers))
+            if duplicates:
+                raise ValidationError(
+                    f"Corpus topic shards duplicate {field} IDs: {duplicates}."
+                )
+            seen_entity_ids[field].update(identifiers)
+        topic_rows.append(topic)
+        topic_shards.append(shard)
+        framed_parts.append((topic_path, topic_bytes))
+
+    canonical_topic_ids = _canonical_topic_ids(topic_rows)
+    if canonical_topic_ids is not None and topic_ids != canonical_topic_ids:
+        raise ValidationError(
+            "Corpus shard manifest topic_files are not in canonical catalog order: "
+            f"expected {canonical_topic_ids}."
+        )
+
+    bundle: dict[str, Any] = {
+        "schema_version": manifest["schema_version"],
+        "title": manifest["title"],
+        "learning_objectives": [],
+        "objective_edges": shared["objective_edges"],
+        "domains": shared["domains"],
+        "topics": topic_rows,
+        "concepts": [],
+        "edges": shared["edges"],
+        "misconceptions": [],
+        "sources": shared["sources"],
+        "questions": [],
+    }
+    for shard in topic_shards:
+        for field in (
+            "learning_objectives",
+            "concepts",
+            "misconceptions",
+            "questions",
+        ):
+            bundle[field].extend(shard[field])
     if validate:
         _raise_issues("Corpus structure", validate_bundle(bundle))
+    return bundle, tuple(framed_parts)
+
+
+def _load_corpus_source(
+    path: str | Path,
+    *,
+    validate: bool,
+) -> tuple[dict[str, Any], tuple[tuple[str, bytes], ...] | None, bytes | None]:
+    source_path = Path(path)
+    if source_path.is_dir():
+        manifest_path = source_path / _SHARD_MANIFEST_NAME
+        manifest, manifest_bytes = _read_json_document(manifest_path)
+        bundle, framed_parts = _load_sharded_bundle(
+            manifest_path,
+            manifest,
+            manifest_bytes,
+            validate=validate,
+        )
+        return bundle, framed_parts, None
+
+    document, source_bytes = _read_json_document(source_path)
+    if source_path.name == _SHARD_MANIFEST_NAME or (
+        isinstance(document, dict) and document.get("format") == _SHARD_FORMAT
+    ):
+        bundle, framed_parts = _load_sharded_bundle(
+            source_path,
+            document,
+            source_bytes,
+            validate=validate,
+        )
+        return bundle, framed_parts, None
+    if validate:
+        _raise_issues("Corpus structure", validate_bundle(document))
+    if not isinstance(document, dict):
+        # Keep load_bundle's declared return type honest when validation is
+        # deliberately disabled by the audit command.
+        return document, None, source_bytes  # type: ignore[return-value]
+    return document, None, source_bytes
+
+
+def load_bundle(path: str | Path, *, validate: bool = True) -> dict[str, Any]:
+    """Load a manifest-sharded corpus directory or a legacy JSON bundle."""
+
+    bundle, _, _ = _load_corpus_source(path, validate=validate)
     return bundle
+
+
+def corpus_source_digest(path: str | Path) -> str:
+    """Hash exactly one declared corpus source without path ambiguity.
+
+    Legacy monoliths retain their historical raw-file SHA-256. Sharded sources
+    frame each manifest-declared relative path and its exact bytes, preventing
+    concatenation ambiguity while remaining independent of the checkout path.
+    """
+
+    _, framed_parts, legacy_bytes = _load_corpus_source(path, validate=False)
+    if framed_parts is None:
+        assert legacy_bytes is not None
+        return hashlib.sha256(legacy_bytes).hexdigest()
+    digest = hashlib.sha256()
+    digest.update(b"tsq-curriculum-shards-source-v1\x00")
+    for relative_path, payload in framed_parts:
+        encoded_path = relative_path.encode("utf-8")
+        digest.update(len(encoded_path).to_bytes(8, "big"))
+        digest.update(encoded_path)
+        digest.update(len(payload).to_bytes(8, "big"))
+        digest.update(payload)
+    return digest.hexdigest()
 
 
 def parse_catalog(

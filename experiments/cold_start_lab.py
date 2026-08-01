@@ -32,7 +32,11 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from tsq.corpus import read_and_parse  # noqa: E402
+from tsq.corpus import (  # noqa: E402
+    corpus_source_digest,
+    load_bundle,
+    read_and_parse,
+)
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.models import Presentation  # noqa: E402
 from tsq.objective_posterior import decode_objective_posterior  # noqa: E402
@@ -55,7 +59,7 @@ from tsq.store import (  # noqa: E402
 
 LAB_VERSION = "cold-start-lab-v3"
 SEMANTIC_PROJECTION_SIGNATURE_SCHEMA = 1
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "cold_start_lab.json"
 DEFAULT_TOPICS = (
     "t_large_language_models",
@@ -1337,7 +1341,7 @@ def _run_once(
     seeds: Sequence[int],
     max_steps: int,
 ) -> dict[str, Any]:
-    bundle = json.loads(corpus.read_text(encoding="utf-8"))
+    bundle = load_bundle(corpus)
     objective_depth = _objective_depths(bundle)
     question_difficulty = {
         question["id"]: float(question["difficulty"])
@@ -1432,8 +1436,16 @@ def run_cold_start_audit(
     if type(max_steps) is not int or max_steps <= 0:
         raise ValueError("max_steps must be a positive integer.")
     corpus = corpus.resolve()
-    corpus_bytes = corpus.read_bytes()
-    corpus_digest = hashlib.sha256(corpus_bytes).hexdigest()
+    corpus_digest = corpus_source_digest(corpus)
+    corpus_bytes = (
+        json.dumps(
+            load_bundle(corpus),
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
     with tempfile.TemporaryDirectory(prefix="tsq-cold-start-") as directory:
         root = Path(directory)
         corpus_snapshot = root / "corpus-snapshot.json"

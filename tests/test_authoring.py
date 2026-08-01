@@ -26,7 +26,7 @@ from tsq.authoring import (
     deterministic_test_pipeline,
 )
 from tsq.cli import command_topics, main
-from tsq.corpus import parse_bundle, read_and_parse
+from tsq.corpus import load_bundle, parse_bundle, read_and_parse
 from tsq.errors import ConflictError, NotFoundError, ValidationError
 from tsq.store import Database
 
@@ -34,7 +34,7 @@ from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 
 
 class FakeGenerator:
@@ -963,7 +963,7 @@ class AuthoringTestCase(unittest.TestCase):
                 )
 
     def test_family_review_reports_same_family_truncation(self) -> None:
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         candidate = next(
             question
             for question in bundle["questions"]
@@ -1385,7 +1385,7 @@ class AuthoringTestCase(unittest.TestCase):
             )
         )
 
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         bundle["questions"].append(item)
         parsed_questions = parse_bundle(bundle)[4]
         parsed = next(question for question in parsed_questions if question.id == item["id"])
@@ -1892,7 +1892,7 @@ class AuthoringTestCase(unittest.TestCase):
                     64,
                 )
 
-                bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+                bundle = load_bundle(CORPUS)
                 bundle["questions"].append(result["item"])
                 parsed = parse_bundle(bundle)[4]
                 self.assertIn(

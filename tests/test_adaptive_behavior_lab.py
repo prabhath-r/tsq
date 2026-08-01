@@ -29,7 +29,7 @@ from tsq.store import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 START = datetime(2102, 4, 5, 9, 0, tzinfo=timezone.utc)
 
 

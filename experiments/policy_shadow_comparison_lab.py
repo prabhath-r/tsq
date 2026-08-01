@@ -33,7 +33,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from tsq.corpus import read_and_parse  # noqa: E402
+from tsq.corpus import corpus_source_digest, read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.policy import POLICY_VERSION  # noqa: E402
 from tsq.policy_shadow import GREEDY_POLICY_VERSION  # noqa: E402
@@ -50,7 +50,7 @@ from tsq.store import Database  # noqa: E402
 
 
 LAB_VERSION = "policy-shadow-comparison-lab-v1"
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_TOPIC = "t_transformers"
 DEFAULT_TRIALS_PER_PROFILE = 32
 DEFAULT_SEED = 63_011
@@ -689,7 +689,7 @@ def _run_once(
             "prospective_ope": PROSPECTIVE_ONE_STEP_OPE_VERSION,
             "challenger": GREEDY_POLICY_VERSION,
         },
-        "corpus_sha256": hashlib.sha256(corpus.read_bytes()).hexdigest(),
+        "corpus_sha256": corpus_source_digest(corpus),
         "topic": topic,
         "trials_per_profile": trials_per_profile,
         "seed": seed,
@@ -820,7 +820,7 @@ def run_lab(
     ):
         raise ValueError("Profile modes must be learn, diagnose, or review.")
     corpus = corpus.resolve()
-    corpus_before = corpus.read_bytes()
+    corpus_before = corpus_source_digest(corpus)
     with tempfile.TemporaryDirectory(
         prefix="tsq-policy-shadow-comparison-"
     ) as directory:
@@ -867,7 +867,7 @@ def run_lab(
         failures.extend(second["failures"])
         if not deterministic_rerun:
             failures.append("Fresh-database rerun changed the stable artifact.")
-    if corpus.read_bytes() != corpus_before:
+    if corpus_source_digest(corpus) != corpus_before:
         failures.append("The comparison lab mutated its source corpus.")
     signature = {
         **stable_first,
@@ -883,7 +883,7 @@ def run_lab(
             first["ok"]
             and (second is None or second["ok"])
             and deterministic_rerun is not False
-            and corpus.read_bytes() == corpus_before
+            and corpus_source_digest(corpus) == corpus_before
         ),
     }
 

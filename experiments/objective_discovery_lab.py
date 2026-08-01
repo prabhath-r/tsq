@@ -30,7 +30,7 @@ SOURCE_ROOT = PROJECT_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from tsq.corpus import read_and_parse  # noqa: E402
+from tsq.corpus import corpus_source_digest, read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.learner import (  # noqa: E402
     FamilyResponseRecord,
@@ -52,7 +52,7 @@ from tsq.store import Database  # noqa: E402
 
 
 LAB_VERSION = "objective-discovery-lab-v5"
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = (
     PROJECT_ROOT / "experiments" / "results" / "objective_discovery_lab.json"
 )
@@ -183,7 +183,7 @@ def canonical_hash(value: Any) -> str:
 
 
 def corpus_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    return corpus_source_digest(path)
 
 
 def bounded_family_recovery_probe(

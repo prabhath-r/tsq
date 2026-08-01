@@ -30,7 +30,7 @@ from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 EXPECTED_REPLAY = (
     ROOT / "tests" / "fixtures" / "learner_replay_expected.json"
 )

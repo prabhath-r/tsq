@@ -5,12 +5,12 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from tsq.corpus import read_and_parse
+from tsq.corpus import corpus_source_digest, read_and_parse
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CANONICAL_CORPUS = ROOT / "corpus" / "ai_curriculum.json"
-PACKAGED_CORPUS = ROOT / "src" / "tsq" / "data" / "ai_curriculum.json"
+CANONICAL_CORPUS = ROOT / "corpus"
+PACKAGED_CORPUS = ROOT / "src" / "tsq" / "data" / "curriculum"
 
 NEW_TRANSFORMER_QUESTIONS = {
     "q_attention_duplicate_value_identifiability_001",
@@ -72,8 +72,8 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
 
     def test_corpus_copies_remain_byte_identical(self) -> None:
         self.assertEqual(
-            CANONICAL_CORPUS.read_bytes(),
-            PACKAGED_CORPUS.read_bytes(),
+            corpus_source_digest(CANONICAL_CORPUS),
+            corpus_source_digest(PACKAGED_CORPUS),
         )
 
     def test_transformer_intervention_routes_mask_claim_to_visibility(self) -> None:

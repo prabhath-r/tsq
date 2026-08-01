@@ -35,7 +35,7 @@ from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 START = datetime(2101, 1, 2, 9, 0, tzinfo=timezone.utc)
 
 

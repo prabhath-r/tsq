@@ -1,0 +1,1696 @@
+{
+  "topic": {
+    "id": "t_evaluation_decisions",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Evaluation and Decisions",
+    "description": "Calibration, ranking, class imbalance, and utility-aware operating decisions.",
+    "concept_ids": [
+      "c_calibration",
+      "c_ranking_metrics",
+      "c_decision_thresholds",
+      "c_class_imbalance"
+    ],
+    "related_topic_ids": [
+      "t_supervised_learning",
+      "t_retrieval_augmented_generation",
+      "t_causal_inference",
+      "t_adaptive_learning"
+    ],
+    "sort_order": 70
+  },
+  "concepts": [
+    {
+      "id": "c_calibration",
+      "name": "Probabilistic calibration",
+      "description": "Agreement between predicted probabilities and empirical event frequencies at the relevant granularity.",
+      "level": "intermediate"
+    },
+    {
+      "id": "c_ranking_metrics",
+      "name": "Ranking metrics",
+      "description": "Threshold-independent evaluation of ordering, including ROC AUC and precision-recall behavior.",
+      "level": "intermediate"
+    },
+    {
+      "id": "c_decision_thresholds",
+      "name": "Decision thresholds and utility",
+      "description": "Converting scores or probabilities into actions using costs, benefits, and capacity constraints.",
+      "level": "intermediate"
+    },
+    {
+      "id": "c_class_imbalance",
+      "name": "Class imbalance",
+      "description": "Learning and evaluation when outcome prevalence is highly unequal across classes.",
+      "level": "foundation"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_default_half_threshold_is_optimal",
+      "name": "Probability 0.5 is the universal action threshold",
+      "description": "Ignores asymmetric consequences and treats the conventional classification cutoff as a decision rule.",
+      "concept_id": "c_decision_thresholds",
+      "remediation": "Compare the conditional expected cost of each action at probability p."
+    },
+    {
+      "id": "m_threshold_should_equal_prevalence",
+      "name": "The decision threshold equals prevalence",
+      "description": "Confuses the population base rate with the cost ratio at which two actions have equal expected loss.",
+      "concept_id": "c_class_imbalance",
+      "remediation": "Derive the threshold from costs, then separately examine how prevalence affects predicted probabilities."
+    },
+    {
+      "id": "m_f1_encodes_operating_costs",
+      "name": "F1 automatically represents real costs",
+      "description": "Treats an unweighted harmonic mean of precision and recall as if it encoded a stated false-positive/false-negative utility.",
+      "concept_id": "c_ranking_metrics",
+      "remediation": "Optimize the stated utility directly and use F1 only when its implicit tradeoff is intended."
+    },
+    {
+      "id": "m_auc_implies_calibration",
+      "name": "High AUC implies calibrated probabilities",
+      "description": "Infers accurate probability magnitudes from a metric that depends primarily on ordering.",
+      "concept_id": "c_ranking_metrics",
+      "remediation": "Compare a monotonic score transformation: ranking can stay fixed while calibration changes."
+    },
+    {
+      "id": "m_calibration_determines_ranking",
+      "name": "Calibration determines ranking quality",
+      "description": "Assumes a better reliability curve guarantees higher discrimination at every operating point.",
+      "concept_id": "c_calibration",
+      "remediation": "Evaluate calibration and ranking as distinct axes of probabilistic performance."
+    },
+    {
+      "id": "m_recalibration_requires_new_ranking",
+      "name": "Recalibration must change the ranking",
+      "description": "Assumes correcting probability magnitudes necessarily retrains or reorders the underlying score.",
+      "concept_id": "c_calibration",
+      "remediation": "Study monotone calibration maps, which can change probabilities while preserving order."
+    },
+    {
+      "id": "m_roc_and_pr_share_prevalence_invariance",
+      "name": "ROC and precision-recall share prevalence invariance",
+      "description": "Assumes precision-recall values are unchanged by class prevalence just because ROC rates condition within each class.",
+      "concept_id": "c_ranking_metrics",
+      "remediation": "Hold sensitivity and false-positive rate fixed while recomputing precision under two prevalences."
+    },
+    {
+      "id": "m_accuracy_is_sufficient_under_imbalance",
+      "name": "Accuracy is sufficient under class imbalance",
+      "description": "Treats a high aggregate accuracy as informative even when a majority-class rule ignores the rare outcome of interest.",
+      "concept_id": "c_class_imbalance",
+      "remediation": "Inspect the confusion matrix and decision costs rather than relying on the aggregate correct fraction."
+    },
+    {
+      "id": "m_resampling_preserves_probability_calibration",
+      "name": "Class resampling preserves population probabilities",
+      "description": "Reads probabilities learned after changing class proportions as calibrated deployment probabilities without correction or representative validation.",
+      "concept_id": "c_class_imbalance",
+      "remediation": "Account for the sampling-induced odds shift or recalibrate on a representative held-out sample."
+    },
+    {
+      "id": "m_global_calibration_implies_subgroup_calibration",
+      "name": "Global calibration implies subgroup calibration",
+      "description": "Infers calibrated probabilities in every relevant subgroup from calibration after pooling groups with different error patterns.",
+      "concept_id": "c_calibration",
+      "remediation": "Check reliability within prespecified decision-relevant groups and report uncertainty from limited samples."
+    },
+    {
+      "id": "m_ranking_metric_determines_optimal_threshold",
+      "name": "A ranking metric determines the action threshold",
+      "description": "Assumes ROC AUC or another ordering summary identifies the probability cutoff that maximizes deployment utility.",
+      "concept_id": "c_decision_thresholds",
+      "remediation": "Combine calibrated probabilities with explicit costs, benefits, and capacity constraints to choose an action rule."
+    },
+    {
+      "id": "m_threshold_survives_context_change",
+      "name": "A threshold survives cost and prevalence changes",
+      "description": "Reuses a previously optimized cutoff after deployment probabilities or action consequences change without re-evaluation.",
+      "concept_id": "c_decision_thresholds",
+      "remediation": "Recompute expected utility under the new probability calibration, costs, and operating constraints."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_cost_sensitive_threshold_001",
+      "version": 1,
+      "family_id": "f_probabilities_to_actions",
+      "status": "approved",
+      "stem": "A calibrated model outputs p = P(disease | x). A false negative costs 20 units, a false positive costs 1 unit, and correct decisions have zero cost. Ignoring capacity constraints, when should the system predict disease?",
+      "kind": "application",
+      "difficulty": 0.85,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_decision_thresholds",
+          "weight": 0.45,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.25,
+          "role": "prerequisite"
+        },
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 0.15,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_ranking_metrics",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Predict disease when p > 1/21, because the expected false-positive cost then falls below the expected false-negative cost.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Positive costs 1(1-p), negative costs 20p, and 1-p < 20p exactly when p > 1/21."
+        },
+        {
+          "id": "b",
+          "text": "Predict disease when p > 1/2, because calibrated probabilities should use the class with greater posterior probability.",
+          "correct": false,
+          "misconception_id": "m_default_half_threshold_is_optimal",
+          "rationale": "The maximum-posterior rule is optimal only under a matching symmetric-cost setup, which is explicitly absent here."
+        },
+        {
+          "id": "c",
+          "text": "Predict disease when p exceeds disease prevalence, because prevalence is the correct cutoff for an imbalanced outcome.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "Prevalence affects the posterior distribution but the action indifference point here is determined by the stated cost ratio."
+        },
+        {
+          "id": "d",
+          "text": "Choose the threshold that maximizes F1, because F1 by itself weights a false negative twenty times more heavily in this setting.",
+          "correct": false,
+          "misconception_id": "m_f1_encodes_operating_costs",
+          "rationale": "F1 does not contain the stated 20-to-1 cost ratio and need not maximize expected utility."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "bayes_decision",
+        "calibrated_probability",
+        "cost_sensitive"
+      ]
+    },
+    {
+      "id": "q_calibration_vs_ranking_001",
+      "version": 1,
+      "family_id": "f_metric_semantics",
+      "status": "approved",
+      "stem": "On a deployment-matched validation set, model A has ROC AUC 0.92 and expected calibration error 0.14; model B has ROC AUC 0.84 and expected calibration error 0.02. The system must rank patients and also trigger an intervention when stated risk exceeds 30%. Which conclusion is sound?",
+      "kind": "application",
+      "difficulty": 0.95,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_calibration",
+          "weight": 0.45,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_ranking_metrics",
+          "weight": 0.35,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_decision_thresholds",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Model A dominates for both uses because an AUC above 0.9 establishes trustworthy probability values at deployment.",
+          "correct": false,
+          "misconception_id": "m_auc_implies_calibration",
+          "rationale": "AUC measures ordering, not whether a displayed 0.30 risk corresponds to an event frequency near 30%."
+        },
+        {
+          "id": "b",
+          "text": "A ranks better, but its 30% cutoff needs calibration validation; monotone recalibration can preserve its ranking.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The two uses demand different properties, and a monotone recalibration can improve probability semantics while preserving order."
+        },
+        {
+          "id": "c",
+          "text": "Model B has higher precision throughout the threshold range because better calibration entails better discrimination.",
+          "correct": false,
+          "misconception_id": "m_calibration_determines_ranking",
+          "rationale": "Calibration quality does not impose threshold-by-threshold ranking dominance; the lower AUC is evidence against that claim."
+        },
+        {
+          "id": "d",
+          "text": "Recalibrating model A necessarily changes its ROC AUC substantially, so ranking and probability repair do not separate.",
+          "correct": false,
+          "misconception_id": "m_recalibration_requires_new_ranking",
+          "rationale": "Strictly monotone recalibration preserves pairwise ordering and therefore ordinarily preserves ROC AUC."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "auc",
+        "calibration",
+        "threshold",
+        "metrics"
+      ]
+    },
+    {
+      "id": "q_ranking_prevalence_metrics_001",
+      "version": 1,
+      "family_id": "f_ranking_prevalence_response",
+      "status": "approved",
+      "stem": "A scoring model keeps the same class-conditional score distributions when moved to a population with much lower positive prevalence. Which metric behavior is expected before any retraining?",
+      "kind": "counterfactual",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_ranking_metrics",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Its ROC AUC establishes calibrated probabilities in the lower-prevalence population because ranking fixes probability magnitude.",
+          "correct": false,
+          "misconception_id": "m_auc_implies_calibration",
+          "rationale": "ROC AUC concerns pairwise ordering and does not determine posterior probability calibration."
+        },
+        {
+          "id": "b",
+          "text": "Its F1 score continues to encode the deployment error costs because the harmonic mean adapts to the new prevalence.",
+          "correct": false,
+          "misconception_id": "m_f1_encodes_operating_costs",
+          "rationale": "F1 contains no explicit utilities and will depend on the chosen threshold and resulting precision and recall."
+        },
+        {
+          "id": "c",
+          "text": "ROC AUC can remain stable while precision-recall values fall because precision depends on the changed positive base rate.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Stable class-conditional scores preserve ROC rates, while fewer positives reduce positive predictive value at the same operating point."
+        },
+        {
+          "id": "d",
+          "text": "ROC and precision-recall curves remain stable together because both ranking summaries are invariant to prevalence changes.",
+          "correct": false,
+          "misconception_id": "m_roc_and_pr_share_prevalence_invariance",
+          "rationale": "Precision includes prevalence through the balance of true and false positives, unlike class-conditional ROC coordinates."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "ranking_metrics",
+        "roc_auc",
+        "precision_recall",
+        "prevalence"
+      ]
+    },
+    {
+      "id": "q_ranking_auc_threshold_001",
+      "version": 1,
+      "family_id": "f_ranking_operating_points",
+      "status": "approved",
+      "stem": "Two models have the same ROC AUC. At the hospital's feasible false-positive capacity, model X has substantially higher sensitivity than model Y. The action costs are asymmetric. Which conclusion is justified?",
+      "kind": "application",
+      "difficulty": 0.3,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_ranking_metrics",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Equal AUC means their reported probabilities are equally calibrated at the hospital's operating threshold.",
+          "correct": false,
+          "misconception_id": "m_auc_implies_calibration",
+          "rationale": "Models with equal ranking summaries can have very different probability calibration."
+        },
+        {
+          "id": "b",
+          "text": "Equal AUC means their F1 values encode the same false-positive capacity and asymmetric clinical costs.",
+          "correct": false,
+          "misconception_id": "m_f1_encodes_operating_costs",
+          "rationale": "Neither AUC equality nor F1 embeds the stated resource constraint and utility without an explicit decision analysis."
+        },
+        {
+          "id": "c",
+          "text": "Equal AUC makes prevalence irrelevant to precision and therefore removes the need to inspect local operating behavior.",
+          "correct": false,
+          "misconception_id": "m_roc_and_pr_share_prevalence_invariance",
+          "rationale": "Precision and utility at a threshold still depend on prevalence and the local confusion rates."
+        },
+        {
+          "id": "d",
+          "text": "The global AUC tie does not settle deployment choice; compare feasible operating points, calibration, and expected utility under the stated constraints.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A global ordering summary can conceal material differences in the region where actions are actually taken."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "ranking_metrics",
+        "roc_auc",
+        "operating_point",
+        "utility"
+      ]
+    },
+    {
+      "id": "q_ranking_monotone_transform_001",
+      "version": 1,
+      "family_id": "f_ranking_monotone_scores",
+      "status": "approved",
+      "stem": "Every score from a binary classifier is replaced by a strictly increasing transformation. The ordering of all examples is unchanged, but the transformed numbers are no longer calibrated probabilities. What remains the same?",
+      "kind": "conceptual",
+      "difficulty": 0.1,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_ranking_metrics",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "ROC AUC remains the same because it depends on pairwise ordering, while numeric probability calibration can change.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A strictly increasing map preserves every positive-negative score comparison but can distort the probability scale."
+        },
+        {
+          "id": "b",
+          "text": "Probability calibration remains the same because a high ranking score determines the correct event frequency.",
+          "correct": false,
+          "misconception_id": "m_auc_implies_calibration",
+          "rationale": "Ordering does not fix the numerical relationship between a score and observed frequency."
+        },
+        {
+          "id": "c",
+          "text": "F1 remains the same at the original numeric cutoff because F1 directly encodes the unchanged deployment costs.",
+          "correct": false,
+          "misconception_id": "m_f1_encodes_operating_costs",
+          "rationale": "The set above a fixed numeric cutoff can change after transformation, and F1 does not encode costs."
+        },
+        {
+          "id": "d",
+          "text": "Precision-recall behavior is independent of prevalence because its invariance matches the preserved ROC ordering.",
+          "correct": false,
+          "misconception_id": "m_roc_and_pr_share_prevalence_invariance",
+          "rationale": "At corresponding ranks a monotone map preserves the curve on the same sample, but precision still depends on prevalence."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "ranking_metrics",
+        "monotone_transform",
+        "auc",
+        "calibration"
+      ]
+    },
+    {
+      "id": "q_imbalance_majority_accuracy_001",
+      "version": 1,
+      "family_id": "f_imbalance_majority_baseline",
+      "status": "approved",
+      "stem": "In a screening population, 1% of cases are positive. A classifier predicts negative for every case and reports 99% accuracy. What is the most useful assessment?",
+      "kind": "diagnostic",
+      "difficulty": -0.45,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The classifier is well calibrated because 99% accuracy implies its negative predictions have correct probability values.",
+          "correct": false,
+          "misconception_id": "m_resampling_preserves_probability_calibration",
+          "rationale": "A hard-label accuracy says nothing about the probability values or their reliability."
+        },
+        {
+          "id": "b",
+          "text": "Accuracy is dominated by prevalence; inspect sensitivity, false positives, predictive values, and decision costs against relevant baselines.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The majority rule misses every positive, so the high aggregate fraction does not establish screening utility."
+        },
+        {
+          "id": "c",
+          "text": "The 99% figure is sufficient because aggregate accuracy remains informative when one class is much more common.",
+          "correct": false,
+          "misconception_id": "m_accuracy_is_sufficient_under_imbalance",
+          "rationale": "A majority-class rule can achieve high accuracy while failing completely on the rare outcome."
+        },
+        {
+          "id": "d",
+          "text": "The action threshold should be set to 1% because the class prevalence directly identifies the optimal cutoff.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "The optimal action threshold depends on calibrated risk and consequences, not prevalence alone."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "class_imbalance",
+        "accuracy",
+        "majority_baseline",
+        "screening"
+      ]
+    },
+    {
+      "id": "q_imbalance_case_control_sampling_001",
+      "version": 1,
+      "family_id": "f_imbalance_sampling_odds",
+      "status": "approved",
+      "stem": "A rare-event training set is constructed by retaining every positive case but only one tenth of negative cases. A probabilistic classifier is fit without sampling weights. How should its raw probabilities be treated at deployment with the original prevalence?",
+      "kind": "application",
+      "difficulty": 0.6,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Treat them as calibrated because changing class sampling affects optimization speed but not the represented event odds.",
+          "correct": false,
+          "misconception_id": "m_resampling_preserves_probability_calibration",
+          "rationale": "Unequal retention changes the sampled class odds and therefore the raw probability scale absent correction."
+        },
+        {
+          "id": "b",
+          "text": "Set the decision cutoff equal to the original prevalence, which directly reverses the altered training class ratio.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "A threshold does not generally repair probability semantics, and prevalence alone does not encode action costs."
+        },
+        {
+          "id": "c",
+          "text": "Correct for the known sampling odds or recalibrate on representative held-out data before interpreting the outputs as deployment probabilities.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Case-control sampling can support ranking or slope estimation while requiring an intercept or calibration correction for population risk."
+        },
+        {
+          "id": "d",
+          "text": "Use training accuracy to validate them because a high correct fraction summarizes rare-class performance adequately.",
+          "correct": false,
+          "misconception_id": "m_accuracy_is_sufficient_under_imbalance",
+          "rationale": "Training accuracy neither tests probability calibration nor resolves majority-class dominance."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "class_imbalance",
+        "case_control",
+        "resampling",
+        "calibration"
+      ]
+    },
+    {
+      "id": "q_imbalance_capacity_threshold_001",
+      "version": 1,
+      "family_id": "f_imbalance_capacity_policy",
+      "status": "approved",
+      "stem": "A fraud queue can investigate 500 of 100,000 daily transactions. Fraud prevalence varies by season, and investigation benefits and costs are known. Which policy best handles the imbalance?",
+      "kind": "transfer",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Optimize aggregate accuracy because the correct fraction summarizes the rare fraud cases and common legitimate cases adequately.",
+          "correct": false,
+          "misconception_id": "m_accuracy_is_sufficient_under_imbalance",
+          "rationale": "Accuracy can favor ignoring fraud and does not represent queue capacity or asymmetric consequences."
+        },
+        {
+          "id": "b",
+          "text": "Use resampled-training probabilities directly because balancing classes preserves their interpretation under seasonal deployment prevalence.",
+          "correct": false,
+          "misconception_id": "m_resampling_preserves_probability_calibration",
+          "rationale": "Changed sampling or prevalence can shift probability calibration and should be corrected or monitored."
+        },
+        {
+          "id": "c",
+          "text": "Set the probability threshold to the observed fraud prevalence because base rate alone determines the investigation rule.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "Prevalence affects risk but does not by itself encode costs or the fixed review capacity."
+        },
+        {
+          "id": "d",
+          "text": "Calibrate and monitor risks on representative data, then rank expected utility and choose the feasible top actions under queue capacity.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This combines population risk, asymmetric value, and the operational limit instead of relying on a prevalence shortcut."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "class_imbalance",
+        "capacity",
+        "expected_utility",
+        "ranking"
+      ]
+    },
+    {
+      "id": "q_calibration_rank_preservation_001",
+      "version": 1,
+      "family_id": "f_calibration_rank_reliability_separation",
+      "status": "approved",
+      "stem": "A strictly increasing recalibration map improves a model's pooled reliability curve. Its score ordering is unchanged, but one protected subgroup remains systematically overconfident. Which conclusion is justified?",
+      "kind": "comparison",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_calibration",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Improved pooled calibration is sufficient for improved ranking because probability reliability determines all ordering metrics.",
+          "correct": false,
+          "misconception_id": "m_calibration_determines_ranking",
+          "rationale": "A strictly increasing map preserves pairwise ordering even while changing probability magnitudes."
+        },
+        {
+          "id": "b",
+          "text": "The result is not genuine recalibration because correcting probability magnitudes necessarily reorders the cases.",
+          "correct": false,
+          "misconception_id": "m_recalibration_requires_new_ranking",
+          "rationale": "Monotone calibration methods can change reported probabilities without changing any rank."
+        },
+        {
+          "id": "c",
+          "text": "Ranking performance can stay unchanged while pooled calibration improves, and subgroup reliability still requires separate evaluation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The observations separate ordering from reliability and show that pooled agreement can conceal subgroup error."
+        },
+        {
+          "id": "d",
+          "text": "Agreement in the pooled reliability curve proves calibration within each subgroup represented in that pool.",
+          "correct": false,
+          "misconception_id": "m_global_calibration_implies_subgroup_calibration",
+          "rationale": "Opposing or unequal subgroup errors can coexist with an apparently reliable pooled curve."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "calibration",
+        "ranking",
+        "monotone_map",
+        "subgroups"
+      ]
+    },
+    {
+      "id": "q_threshold_review_utility_001",
+      "version": 1,
+      "family_id": "f_threshold_review_expected_utility",
+      "status": "approved",
+      "stem": "A calibrated fraud model outputs probability p. Manual review costs $10 and, when fraud is present, prevents a $500 loss; assume review otherwise has no benefit. Ignoring capacity limits, when should a case be reviewed?",
+      "kind": "calculation",
+      "difficulty": 0.35,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_decision_thresholds",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Review when p exceeds 0.50 because calibrated probabilities use the conventional classification cutoff.",
+          "correct": false,
+          "misconception_id": "m_default_half_threshold_is_optimal",
+          "rationale": "The action boundary follows the stated costs, not a conventional symmetric classification threshold."
+        },
+        {
+          "id": "b",
+          "text": "Review when p exceeds 0.02 because the expected prevented loss, 500p, then exceeds the $10 review cost.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Comparing the two expected action values gives 500p greater than 10 exactly when p is greater than 0.02."
+        },
+        {
+          "id": "c",
+          "text": "Choose whichever probability cutoff maximizes ROC AUC because that ranking metric identifies the utility-optimal action boundary.",
+          "correct": false,
+          "misconception_id": "m_ranking_metric_determines_optimal_threshold",
+          "rationale": "AUC summarizes ordering across cutoffs and does not encode the review cost or prevented loss."
+        },
+        {
+          "id": "d",
+          "text": "Reuse the cutoff from the previous fraud program even if its review cost and prevented loss were different.",
+          "correct": false,
+          "misconception_id": "m_threshold_survives_context_change",
+          "rationale": "A cutoff optimized under another utility structure need not remain optimal under these consequences."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "decision_thresholds",
+        "expected_utility",
+        "fraud",
+        "costs"
+      ]
+    },
+    {
+      "id": "q_threshold_capacity_policy_001",
+      "version": 1,
+      "family_id": "f_threshold_capacity_constrained_actions",
+      "status": "approved",
+      "stem": "A calibrated risk service can intervene on only 100 of 10,000 cases each day. Benefit and cost are known for every intervention, and capacity may change next month. How should the action boundary be chosen?",
+      "kind": "application",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_decision_thresholds",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Intervene above probability 0.50 because a calibrated score keeps the same optimal cutoff as capacity changes.",
+          "correct": false,
+          "misconception_id": "m_default_half_threshold_is_optimal",
+          "rationale": "Neither asymmetric utility nor a binding daily capacity is represented by the conventional 0.50 cutoff."
+        },
+        {
+          "id": "b",
+          "text": "Select the cutoff that maximizes ROC AUC because the ranking metric directly incorporates the 100-case capacity.",
+          "correct": false,
+          "misconception_id": "m_ranking_metric_determines_optimal_threshold",
+          "rationale": "AUC does not encode a particular operating capacity or the consequences of intervention."
+        },
+        {
+          "id": "c",
+          "text": "Rank cases by expected net benefit, take the best feasible 100, and recompute the induced boundary when capacity or utility changes.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The constrained action set should maximize expected utility, with a threshold induced by the current score distribution and limit."
+        },
+        {
+          "id": "d",
+          "text": "Preserve today's numerical cutoff next month because a deployment threshold remains valid when operational constraints change.",
+          "correct": false,
+          "misconception_id": "m_threshold_survives_context_change",
+          "rationale": "Changing capacity can change which expected-benefit rank is marginal and therefore change the induced cutoff."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "decision_thresholds",
+        "capacity",
+        "expected_benefit",
+        "ranking"
+      ]
+    },
+    {
+      "id": "q_threshold_cost_shift_001",
+      "version": 1,
+      "family_id": "f_threshold_recomputed_deployment_utility",
+      "status": "approved",
+      "stem": "A classifier's probabilities have been recalibrated for a new hospital, and the harm of a missed case has doubled while the intervention harm is unchanged. What should happen to its action policy?",
+      "kind": "transfer",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_decision_thresholds",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Use 0.50 because recalibrated probabilities make the conventional cutoff optimal despite asymmetric clinical harms.",
+          "correct": false,
+          "misconception_id": "m_default_half_threshold_is_optimal",
+          "rationale": "Calibration supplies probability meaning but does not make unequal action consequences symmetric."
+        },
+        {
+          "id": "b",
+          "text": "Choose a cutoff by maximizing ROC AUC because the metric determines which hospital action has the best utility.",
+          "correct": false,
+          "misconception_id": "m_ranking_metric_determines_optimal_threshold",
+          "rationale": "AUC contains neither the new miss harm nor the intervention harm required for the action comparison."
+        },
+        {
+          "id": "c",
+          "text": "Retain the previous hospital's cutoff because recalibration changes probabilities without invalidating an existing action boundary.",
+          "correct": false,
+          "misconception_id": "m_threshold_survives_context_change",
+          "rationale": "Both changed probability meaning and changed consequences require the boundary to be evaluated again."
+        },
+        {
+          "id": "d",
+          "text": "Recompute expected harm for each action using the new probabilities and costs, then derive a new boundary.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The optimal decision compares deployment-specific expected consequences, so a larger miss harm generally favors intervention at lower risk."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "decision_thresholds",
+        "cost_shift",
+        "recalibration",
+        "clinical_decision"
+      ]
+    },
+    {
+      "id": "q_calibration_hidden_subgroups_001",
+      "version": 1,
+      "family_id": "f_calibration_subgroup_cancellation",
+      "status": "approved",
+      "stem": "Among all cases assigned risk 0.30, the event rate is 0.30. Within group A it is 0.15 and within group B it is 0.45, with balanced group counts. What conclusion is justified?",
+      "kind": "diagnostic",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_calibration",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The score is calibrated after pooling at 0.30 but miscalibrated within both groups, whose errors cancel in aggregate.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Marginal reliability can coexist with opposing conditional errors, which matter when decisions differ by group."
+        },
+        {
+          "id": "b",
+          "text": "The pooled calibration result establishes calibration within each group because their combined event rate matches the score.",
+          "correct": false,
+          "misconception_id": "m_global_calibration_implies_subgroup_calibration",
+          "rationale": "Opposite subgroup deviations can average to zero without either subgroup being calibrated."
+        },
+        {
+          "id": "c",
+          "text": "The subgroup errors establish poor ranking because calibration differences determine whether positives receive higher scores.",
+          "correct": false,
+          "misconception_id": "m_calibration_determines_ranking",
+          "rationale": "The scenario concerns frequency agreement at one score, not pairwise ordering across cases."
+        },
+        {
+          "id": "d",
+          "text": "Repairing the subgroup probabilities requires changing the ordering because recalibration necessarily changes rank.",
+          "correct": false,
+          "misconception_id": "m_recalibration_requires_new_ranking",
+          "rationale": "A calibration map or group-aware model can alter probability magnitudes without a general requirement to reverse order."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "calibration",
+        "subgroups",
+        "aggregation",
+        "reliability"
+      ]
+    },
+    {
+      "id": "q_calibration_monotone_map_001",
+      "version": 1,
+      "family_id": "f_calibration_monotone_repair",
+      "status": "approved",
+      "stem": "A held-out calibration set supports a strictly increasing recalibration map for a model's scores. The map improves reliability and preserves the ordering of every pair. What changes?",
+      "kind": "transfer",
+      "difficulty": 0.3,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_calibration",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Ranking improves by necessity because a better reliability curve forces more positive-negative pairs into the right order.",
+          "correct": false,
+          "misconception_id": "m_calibration_determines_ranking",
+          "rationale": "The stated strictly increasing map preserves every ordering comparison, so rank metrics remain unchanged."
+        },
+        {
+          "id": "b",
+          "text": "Probability magnitudes and threshold locations can change while rank-based discrimination remains unchanged on the evaluated cases.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Monotone recalibration changes the score scale without changing pairwise order."
+        },
+        {
+          "id": "c",
+          "text": "Calibration improvement requires changed ranking because probability correction depends on score reordering.",
+          "correct": false,
+          "misconception_id": "m_recalibration_requires_new_ranking",
+          "rationale": "Monotone calibration methods are a direct counterexample: they adjust magnitudes while preserving ranks."
+        },
+        {
+          "id": "d",
+          "text": "The pooled improvement establishes reliability in each deployment subgroup without separate conditional checks.",
+          "correct": false,
+          "misconception_id": "m_global_calibration_implies_subgroup_calibration",
+          "rationale": "Global calibration can conceal group-specific errors even after a pooled mapping."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "calibration",
+        "monotone_map",
+        "ranking",
+        "recalibration"
+      ]
+    },
+    {
+      "id": "q_threshold_expected_loss_001",
+      "version": 1,
+      "family_id": "f_threshold_expected_loss",
+      "status": "approved",
+      "stem": "A calibrated probability p estimates an adverse event. Acting prevents the event at cost 1, while not acting costs 9 if the event occurs and 0 otherwise. Acting has no remaining event loss. At what p does acting have lower expected cost?",
+      "kind": "calculation",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_decision_thresholds",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "When p exceeds 1/9, because acting costs 1 and not acting has expected cost 9p.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Comparing the two action-specific expected losses yields 1 < 9p, hence p > 1/9."
+        },
+        {
+          "id": "b",
+          "text": "When p exceeds 0.5, because one half is the standard probability cutoff for a binary action.",
+          "correct": false,
+          "misconception_id": "m_default_half_threshold_is_optimal",
+          "rationale": "The asymmetric cost makes acting worthwhile well below one half."
+        },
+        {
+          "id": "c",
+          "text": "When p exceeds the event prevalence, because the population base rate identifies the decision cutoff.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "Prevalence helps form calibrated individual risks but does not replace the comparison of action consequences."
+        },
+        {
+          "id": "d",
+          "text": "At the cutoff selected by the model's ROC AUC, because a ranking metric determines the utility-maximizing action point.",
+          "correct": false,
+          "misconception_id": "m_ranking_metric_determines_optimal_threshold",
+          "rationale": "AUC summarizes ordering across thresholds and contains neither the action costs nor a chosen operating point."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "decision_thresholds",
+        "expected_loss",
+        "cost_sensitive",
+        "calibrated_probability"
+      ]
+    },
+    {
+      "id": "q_threshold_context_change_001",
+      "version": 1,
+      "family_id": "f_threshold_context_change",
+      "status": "approved",
+      "stem": "A risk threshold was optimized when intervention capacity was 1,000 cases per week. Capacity falls to 300, event prevalence rises, and intervention benefit is revised. What should happen before reusing the old cutoff?",
+      "kind": "transfer",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_decision_thresholds",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Keep 0.5 as the action boundary because conventional binary classification cutoffs remain optimal after operational changes.",
+          "correct": false,
+          "misconception_id": "m_default_half_threshold_is_optimal",
+          "rationale": "The decision problem now has different capacity, risk distribution, and benefit, none represented by a conventional cutoff."
+        },
+        {
+          "id": "b",
+          "text": "Recheck calibration, recompute expected utility under the new benefits and capacity, and select a feasible operating policy.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Thresholds are policy choices conditional on current probabilities, consequences, and constraints."
+        },
+        {
+          "id": "c",
+          "text": "Set the cutoff to the new prevalence because changing the base rate directly determines the revised action threshold.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "The base rate influences risk calibration but does not encode intervention benefit or capacity."
+        },
+        {
+          "id": "d",
+          "text": "Keep the old cutoff because a threshold optimized once transfers across changes in prevalence, benefit, and capacity.",
+          "correct": false,
+          "misconception_id": "m_threshold_survives_context_change",
+          "rationale": "All three changes can alter which actions maximize deployment utility."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "decision_thresholds",
+        "capacity",
+        "prevalence",
+        "utility"
+      ]
+    },
+    {
+      "id": "q_calibration_subgroup_uncertainty_batch_c_001",
+      "version": 1,
+      "family_id": "f_calibration_subgroup_uncertainty",
+      "status": "quarantined",
+      "stem": "A risk model assigns 0.70 to 1,000 deployment cases, and 700 events occur. A prespecified subgroup contains ten of those cases, with seven events. Which interpretation is statistically defensible?",
+      "kind": "comparison",
+      "difficulty": 0.65,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_calibration",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The pooled agreement establishes reliable 0.70 risks in the subgroup; its small count does not affect that conclusion.",
+          "correct": false,
+          "misconception_id": "m_global_calibration_implies_subgroup_calibration",
+          "rationale": "Pooled reliability does not remove the large sampling uncertainty attached to seven events among ten subgroup cases."
+        },
+        {
+          "id": "b",
+          "text": "The pooled estimate agrees with 0.70, but seven of ten gives weak subgroup evidence; report uncertainty and assess subgroup reliability separately.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The subgroup point estimate happens to agree, but its small denominator supports a much less precise calibration claim."
+        },
+        {
+          "id": "c",
+          "text": "Agreement at 0.70 establishes strong ranking within the subgroup, even though no pairwise score ordering was examined.",
+          "correct": false,
+          "misconception_id": "m_calibration_determines_ranking",
+          "rationale": "Frequency agreement at one risk value contains no evidence about how well cases are ordered within the subgroup."
+        },
+        {
+          "id": "d",
+          "text": "A subgroup calibration adjustment has to reorder the model scores, so preserving ranking rules out a reliability correction.",
+          "correct": false,
+          "misconception_id": "m_recalibration_requires_new_ranking",
+          "rationale": "A monotone adjustment may alter probability magnitudes while preserving the ordering used by ranking metrics."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_murphy_pml_2022",
+              "locator": "Chapter 4 (sampling distributions and confidence intervals) and Chapter 5 (probabilistic classification assessment)",
+              "claim_scope": "Supports the distinction between a point estimate and sampling uncertainty; it does not supply this generated subgroup scenario."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original stem, options, counts, and distractor analysis."
+            }
+          ]
+        },
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "calibration",
+        "subgroup_reliability",
+        "sampling_uncertainty",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_imbalance_predictive_value_batch_c_001",
+      "version": 1,
+      "family_id": "f_imbalance_predictive_value_base_rate",
+      "status": "quarantined",
+      "stem": "A screening test is applied to 10,000 people with 1% prevalence. Sensitivity is 90% and specificity is 95%. What does the expected confusion count imply?",
+      "kind": "calculation",
+      "difficulty": 0.55,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The roughly 95% accuracy is sufficient evidence of useful positive predictions because most screened people are classified correctly.",
+          "correct": false,
+          "misconception_id": "m_accuracy_is_sufficient_under_imbalance",
+          "rationale": "A high correct fraction is dominated by negatives and does not reveal that false positives greatly outnumber true positives."
+        },
+        {
+          "id": "b",
+          "text": "Balancing the evaluation sample would preserve the deployment positive predictive value, so the sampled precision could be reported unchanged.",
+          "correct": false,
+          "misconception_id": "m_resampling_preserves_probability_calibration",
+          "rationale": "Predictive values depend on class proportions, so a balanced evaluation sample needs reweighting to represent deployment prevalence."
+        },
+        {
+          "id": "c",
+          "text": "About 90 true positives and 495 false positives are expected, giving positive predictive value near 15% despite high sensitivity.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "There are about 100 positives and 9,900 negatives, so 90 divided by 90 plus 495 is approximately 0.154."
+        },
+        {
+          "id": "d",
+          "text": "The action threshold should be set to 1%, since matching the cutoff to prevalence directly resolves the false-positive burden.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "A useful cutoff depends on calibrated risk and action consequences; prevalence alone does not encode that decision."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Chapter 7 (model assessment and selection)",
+              "claim_scope": "General evaluation context only; it does not supply these generated confusion counts."
+            },
+            {
+              "source_id": "src_murphy_pml_2022",
+              "locator": "Sections 5.1.3-5.1.4 (ROC and precision-recall evaluation)",
+              "claim_scope": "Supports confusion-derived predictive metrics and the importance of class imbalance."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original scenario, arithmetic choices, wording, and distractor analysis."
+            }
+          ]
+        },
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "class_imbalance",
+        "positive_predictive_value",
+        "base_rate",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_imbalance_cost_matrix_batch_c_001",
+      "version": 1,
+      "family_id": "f_imbalance_cost_matrix_comparison",
+      "status": "quarantined",
+      "stem": "Among 10,000 cases, 100 are positive. Model A predicts every case negative. Model B has 80 true positives, 20 false negatives, and 300 false positives. A false negative costs 50 units and a false positive costs one. Which comparison is correct?",
+      "kind": "calculation",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Prefer Model A because its 99% accuracy exceeds Model B's 96.8%, making the aggregate correct fraction decisive.",
+          "correct": false,
+          "misconception_id": "m_accuracy_is_sufficient_under_imbalance",
+          "rationale": "Accuracy gives each error equal weight and therefore ignores the stated fifty-fold difference in consequences."
+        },
+        {
+          "id": "b",
+          "text": "Prefer the model favored on a balanced development sample, since class resampling preserves deployment probabilities and expected cost.",
+          "correct": false,
+          "misconception_id": "m_resampling_preserves_probability_calibration",
+          "rationale": "Changing class proportions changes probability and predictive-value semantics unless representative weighting or recalibration is applied."
+        },
+        {
+          "id": "c",
+          "text": "Set both models' cutoffs to the 1% prevalence, because that base rate determines the minimum-cost action rule.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "The cutoff follows from calibrated probabilities and relative costs rather than equaling the observed class proportion."
+        },
+        {
+          "id": "d",
+          "text": "Under the stated costs, Model A loses 5,000 units and Model B loses 1,300, so Model B is preferable.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Model A incurs 100 times 50, while Model B incurs 20 times 50 plus 300 times one."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_hastie_esl_2009",
+              "locator": "Chapter 7 (model assessment and selection)",
+              "claim_scope": "Supports held-out model comparison context, not the generated cost table."
+            },
+            {
+              "source_id": "src_murphy_pml_2022",
+              "locator": "Section 5.1.1 (decision theory) and Sections 5.1.3-5.1.4 (classifier metrics)",
+              "claim_scope": "Supports cost-sensitive decisions and confusion-based evaluation."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original counts, costs, calculations, wording, and distractors."
+            }
+          ]
+        },
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "class_imbalance",
+        "cost_matrix",
+        "accuracy",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_ranking_pairwise_auc_batch_c_001",
+      "version": 1,
+      "family_id": "f_ranking_pairwise_auc",
+      "status": "quarantined",
+      "stem": "Two positive cases receive scores 0.90 and 0.40, while two negative cases receive scores 0.80 and 0.30. With no ties, which statement correctly interprets ROC AUC?",
+      "kind": "calculation",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_ranking_metrics",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Three of four positive-negative pairs are ordered correctly, so ROC AUC is 0.75; this does not establish calibration.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The 0.90 score beats both negatives and the 0.40 score beats 0.30, yielding three successful pair comparisons."
+        },
+        {
+          "id": "b",
+          "text": "ROC AUC is 0.75 and therefore the numerical scores represent event probabilities with approximately correct frequency.",
+          "correct": false,
+          "misconception_id": "m_auc_implies_calibration",
+          "rationale": "Pairwise ordering places no constraint on whether values such as 0.90 or 0.40 match observed event frequencies."
+        },
+        {
+          "id": "c",
+          "text": "ROC AUC equals the classifier's F1 score here, so 0.75 also summarizes the deployment error-cost tradeoff.",
+          "correct": false,
+          "misconception_id": "m_f1_encodes_operating_costs",
+          "rationale": "F1 requires a chosen threshold and confusion counts, and neither F1 nor AUC explicitly contains deployment utilities."
+        },
+        {
+          "id": "d",
+          "text": "The 0.75 AUC also means that precision at corresponding thresholds will stay unchanged after a prevalence shift, because precision-recall shares ROC's prevalence invariance.",
+          "correct": false,
+          "misconception_id": "m_roc_and_pr_share_prevalence_invariance",
+          "rationale": "ROC coordinates condition within each class, but precision combines true and false positives and therefore changes with prevalence even when class-conditional score behavior is fixed."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_murphy_pml_2022",
+              "locator": "Section 5.1.3 (ROC curves and AUC)",
+              "claim_scope": "Supports pairwise ranking interpretation of AUC and its distinction from probability calibration."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original four-score calculation, wording, and distractors."
+            }
+          ]
+        },
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "ranking_metrics",
+        "roc_auc",
+        "pairwise_ordering",
+        "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_ranking_confusion_metrics_batch_c_001",
+      "version": 1,
+      "family_id": "f_ranking_confusion_metrics",
+      "status": "quarantined",
+      "stem": "A classifier has ROC AUC 0.90. At one fixed score threshold it produces 40 true positives, 10 false positives, and 20 false negatives. Which calculation and interpretation are sound?",
+      "kind": "calculation",
+      "difficulty": 0.5,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_ranking_metrics",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "ROC AUC 0.90 establishes calibrated scores because strong ranking determines whether each numerical score has frequency meaning.",
+          "correct": false,
+          "misconception_id": "m_auc_implies_calibration",
+          "rationale": "AUC describes ordering and does not compare predicted probability magnitudes with observed event frequencies."
+        },
+        {
+          "id": "b",
+          "text": "Precision is 0.80, recall is about 0.67, and F1 is about 0.73; deployment utility still needs explicit costs.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The ratios are 40 over 50 and 40 over 60, whose harmonic mean is approximately 0.727."
+        },
+        {
+          "id": "c",
+          "text": "F1 near 0.73 proves this threshold is cost-optimal because the harmonic mean already incorporates the action consequences.",
+          "correct": false,
+          "misconception_id": "m_f1_encodes_operating_costs",
+          "rationale": "F1 weights precision and recall through a fixed formula rather than through the deployment's false-positive and false-negative utilities."
+        },
+        {
+          "id": "d",
+          "text": "Precision remains 0.80 under a prevalence change, since precision-recall metrics have the same prevalence invariance as ROC rates.",
+          "correct": false,
+          "misconception_id": "m_roc_and_pr_share_prevalence_invariance",
+          "rationale": "At fixed sensitivity and false-positive rate, a changed class proportion changes the balance of true and false positives."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_generated_candidate",
+        "created_on": "2026-07-22",
+        "review_status": "independent_model_review_passed",
+        "generated": true,
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "activation": "manual_after_independent_model_review",
+        "authoring_review": "not_independent",
+        "source_attestation": {
+          "status": "author_scope_checked_requires_independent_rereview",
+          "verbatim_source_context_stored": false,
+          "independent_source_review_required": true,
+          "wording": "original_generated_synthesis",
+          "locators": [
+            {
+              "source_id": "src_murphy_pml_2022",
+              "locator": "Sections 5.1.3-5.1.4 (ROC and precision-recall curves)",
+              "claim_scope": "Supports AUC, precision, recall, F1, and their different interpretation; it does not supply these generated counts."
+            },
+            {
+              "source_id": "src_expert_synthesis_2026",
+              "locator": "This bundle",
+              "claim_scope": "Original confusion counts, arithmetic, wording, and distractors."
+            }
+          ]
+        },
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "27dd0c562ad6cf03fffc9d3b35b5c309f6e76f0d599d7b033a095c21024c4261",
+        "review_sha256": "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec",
+        "review_chain_sha256": [
+          "77cb9ad269e06feb8e1cb8c5444699f19a623afc8711b0308d2cf8d51d2eb9b7",
+          "94493ed5d7081deec0acaca2fcba3f1ec51a60520dea1c525b5d19cd4e9d29ec"
+        ]
+      },
+      "tags": [
+        "ranking_metrics",
+        "precision",
+        "recall",
+        "f1",
+        "capacity_batch_c"
+      ]
+    }
+  ]
+}

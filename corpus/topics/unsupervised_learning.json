@@ -1,0 +1,1226 @@
+{
+  "topic": {
+    "id": "t_unsupervised_learning",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Unsupervised Learning",
+    "description": "Structure discovery through clustering and lower-dimensional representations.",
+    "concept_ids": [
+      "c_clustering",
+      "c_dimensionality_reduction"
+    ],
+    "related_topic_ids": [
+      "t_generative_modeling"
+    ],
+    "sort_order": 30
+  },
+  "concepts": [
+    {
+      "id": "c_dimensionality_reduction",
+      "name": "Dimensionality reduction",
+      "description": "Mapping data to fewer coordinates while preserving a selected notion of structure.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_clustering",
+      "name": "Clustering",
+      "description": "Grouping observations under explicit similarity, density, or graph assumptions.",
+      "level": "foundation"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_pca_optimizes_label_separation",
+      "name": "PCA finds the most predictive directions",
+      "description": "Equates high marginal feature variance with separation of a downstream label.",
+      "concept_id": "c_dimensionality_reduction",
+      "remediation": "Contrast PCA's unlabeled variance objective with a supervised prediction objective."
+    },
+    {
+      "id": "m_pca_is_scale_invariant",
+      "name": "PCA is invariant to feature units",
+      "description": "Ignores that covariance eigenvectors change when one coordinate is rescaled.",
+      "concept_id": "c_dimensionality_reduction",
+      "remediation": "Compute a two-feature covariance matrix before and after changing one unit."
+    },
+    {
+      "id": "m_more_components_always_generalize_better",
+      "name": "More retained components always improve generalization",
+      "description": "Assumes retaining information cannot increase variance or reintroduce noise for a downstream learner.",
+      "concept_id": "c_dimensionality_reduction",
+      "remediation": "Select representation dimension using held-out downstream performance, not reconstruction alone."
+    },
+    {
+      "id": "m_kmeans_is_density_based",
+      "name": "K-means is density based",
+      "description": "Assumes centroid assignment discovers arbitrarily shaped or variable-density regions.",
+      "concept_id": "c_clustering",
+      "remediation": "Relate the k-means objective to Voronoi cells and within-cluster squared Euclidean distance."
+    },
+    {
+      "id": "m_internal_metric_proves_true_clusters",
+      "name": "An internal metric proves true clusters",
+      "description": "Treats a high silhouette score under one geometry as evidence of uniquely real semantic groups.",
+      "concept_id": "c_clustering",
+      "remediation": "Validate stability, sensitivity, and external usefulness while acknowledging clustering assumptions."
+    },
+    {
+      "id": "m_feature_scale_does_not_affect_kmeans",
+      "name": "Feature scale does not affect k-means",
+      "description": "Ignores that rescaling a coordinate changes squared Euclidean distances and therefore the objective.",
+      "concept_id": "c_clustering",
+      "remediation": "Expand the distance formula and inspect each coordinate's contribution after rescaling."
+    },
+    {
+      "id": "m_kmeans_centroids_are_outlier_robust",
+      "name": "K-means centroids are robust to outliers",
+      "description": "Treats the squared-distance centroid objective as insensitive to a small number of extreme observations.",
+      "concept_id": "c_clustering",
+      "remediation": "Expand the squared-distance contribution of an extreme point and compare robust clustering objectives."
+    },
+    {
+      "id": "m_cluster_labels_have_fixed_identity",
+      "name": "Cluster labels have fixed identity",
+      "description": "Compares numeric cluster labels across fits without first aligning the arbitrary permutations of those labels.",
+      "concept_id": "c_clustering",
+      "remediation": "Align partitions by membership or use a label-permutation-invariant agreement measure."
+    },
+    {
+      "id": "m_more_clusters_resolve_instability",
+      "name": "Adding clusters resolves instability",
+      "description": "Assumes increasing k repairs sensitivity to sampling, initialization, or weak separation without examining the fitted partitions.",
+      "concept_id": "c_clustering",
+      "remediation": "Measure resampling stability and inspect whether the added groups persist and remain useful."
+    },
+    {
+      "id": "m_pca_variance_fraction_uses_standard_deviations",
+      "name": "PCA variance fractions use standard deviations",
+      "description": "Adds square roots of covariance eigenvalues when computing explained variance instead of adding the eigenvalues themselves.",
+      "concept_id": "c_dimensionality_reduction",
+      "remediation": "Recall that covariance eigenvalues are variances along principal directions."
+    },
+    {
+      "id": "m_pca_components_select_original_features",
+      "name": "Principal components select original features",
+      "description": "Interprets each principal component as one retained input column rather than a direction formed from feature loadings.",
+      "concept_id": "c_dimensionality_reduction",
+      "remediation": "Write a component score explicitly as a weighted linear combination of centered inputs."
+    },
+    {
+      "id": "m_pca_loading_sign_has_intrinsic_meaning",
+      "name": "A PCA loading sign has intrinsic meaning",
+      "description": "Treats the sign of an eigenvector as identified even though multiplying the full direction by negative one gives the same component axis.",
+      "concept_id": "c_dimensionality_reduction",
+      "remediation": "Compare an eigenvector with its negation and distinguish relative loading signs from global orientation."
+    },
+    {
+      "id": "m_orthogonal_components_are_statistically_independent",
+      "name": "Orthogonal components are statistically independent",
+      "description": "Equates zero covariance of PCA scores with statistical independence without distributional assumptions such as joint Gaussianity.",
+      "concept_id": "c_dimensionality_reduction",
+      "remediation": "Separate geometric orthogonality and zero covariance from the stronger factorization required by independence."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_pca_downstream_prediction_001",
+      "version": 1,
+      "family_id": "f_unsupervised_preprocessing",
+      "status": "approved",
+      "stem": "A dataset contains a dollar-valued feature with enormous variance and several standardized biomarker features with smaller variance. The label is mainly separated along a low-variance biomarker direction. A team applies PCA before classification. Which practice is best justified?",
+      "kind": "application",
+      "difficulty": 0.95,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 0.5,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.3,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Retain the highest-variance components because PCA orders directions by their ability to separate any downstream label in later prediction tasks.",
+          "correct": false,
+          "misconception_id": "m_pca_optimizes_label_separation",
+          "rationale": "PCA does not inspect labels, so a low-variance direction can carry most of the predictive signal."
+        },
+        {
+          "id": "b",
+          "text": "Scale by domain meaning, fit PCA within training folds, and choose dimension by held-out prediction rather than variance.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Scaling defines the variance geometry, fold-local fitting avoids leakage, and the supervised objective determines whether compression helps."
+        },
+        {
+          "id": "c",
+          "text": "Skip scaling because PCA eigenvectors are invariant to changing a feature from dollars to cents.",
+          "correct": false,
+          "misconception_id": "m_pca_is_scale_invariant",
+          "rationale": "Changing units rescales covariance contributions and can rotate principal directions toward the rescaled feature."
+        },
+        {
+          "id": "d",
+          "text": "Retain all principal components because adding components does not worsen a downstream model's expected generalization.",
+          "correct": false,
+          "misconception_id": "m_more_components_always_generalize_better",
+          "rationale": "More components can restore noise and estimation variance; finite-data generalization must be validated."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "pca",
+        "scaling",
+        "downstream_validation",
+        "leakage"
+      ]
+    },
+    {
+      "id": "q_clustering_geometry_001",
+      "version": 1,
+      "family_id": "f_unsupervised_geometry",
+      "status": "approved",
+      "stem": "Customer observations form two curved, interleaving regions with unequal density. Features mix dollar amounts and unitless ratios. K-means produces unstable segments. Which response best matches the evidence?",
+      "kind": "debugging",
+      "difficulty": 0.7,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.2,
+          "role": "prerequisite"
+        },
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 0.15,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Increase k until the curved regions emerge, because k-means is a density method for arbitrary cluster shapes.",
+          "correct": false,
+          "misconception_id": "m_kmeans_is_density_based",
+          "rationale": "K-means partitions space by centroid proximity and does not directly model curved, variable-density regions."
+        },
+        {
+          "id": "b",
+          "text": "Choose the k with maximum silhouette score and treat those groups as the uniquely true customer segments.",
+          "correct": false,
+          "misconception_id": "m_internal_metric_proves_true_clusters",
+          "rationale": "Silhouette evaluates one distance-based partition criterion; it does not establish unique semantic reality."
+        },
+        {
+          "id": "c",
+          "text": "Define meaningful scaling, try a graph- or density-based method, and test stability and business usefulness under those explicit assumptions.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The geometry violates k-means assumptions, units distort distance, and unsupervised groups require stability plus external interpretation."
+        },
+        {
+          "id": "d",
+          "text": "Replicate the ratio columns until they match the dollar range; k-means distances are otherwise invariant to feature scale or units.",
+          "correct": false,
+          "misconception_id": "m_feature_scale_does_not_affect_kmeans",
+          "rationale": "Replication and rescaling both reweight distance contributions; neither is an invariant or automatically meaningful correction."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "kmeans",
+        "density_clustering",
+        "feature_geometry",
+        "validation"
+      ]
+    },
+    {
+      "id": "q_clustering_outlier_objective_001",
+      "version": 1,
+      "family_id": "f_centroid_objective_robustness",
+      "status": "approved",
+      "stem": "A standardized two-dimensional dataset has two compact groups and one extremely distant observation. Repeated k-means fits pull one centroid toward that observation and split a compact group inconsistently. Which diagnosis and response best match the objective being optimized?",
+      "kind": "debugging",
+      "difficulty": -0.65,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 0.7,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        },
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.1,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Squared distances give the extreme point high leverage; inspect it and compare a robust transform, trimmed objective, or medoid-based method.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "K-means minimizes within-cluster squared distance, so a remote point can dominate the objective; the proposed checks directly address that sensitivity."
+        },
+        {
+          "id": "b",
+          "text": "The behavior shows k-means has become density-based; use k-means++ initialization to remove the distant point's influence on fitted centroids.",
+          "correct": false,
+          "misconception_id": "m_kmeans_is_density_based",
+          "rationale": "Initialization can improve a local solution but does not turn the centroid objective into a density method or remove squared-distance leverage."
+        },
+        {
+          "id": "c",
+          "text": "Because inputs were standardized once, returning one coordinate to its original units would leave the fitted centroids and partition unchanged.",
+          "correct": false,
+          "misconception_id": "m_feature_scale_does_not_affect_kmeans",
+          "rationale": "Changing a coordinate's scale changes its squared-distance contribution and can alter centroid locations, assignments, and the apparent outlier influence."
+        },
+        {
+          "id": "d",
+          "text": "A high silhouette score would establish the recovered groups as real; retain whichever value of k maximizes that score on this sample.",
+          "correct": false,
+          "misconception_id": "m_internal_metric_proves_true_clusters",
+          "rationale": "An internal score describes geometry under a chosen metric; it does not establish external reality or robustness to the influential point."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "clustering",
+        "kmeans",
+        "outliers",
+        "objective"
+      ]
+    },
+    {
+      "id": "q_clustering_stability_resampling_001",
+      "version": 1,
+      "family_id": "f_cluster_stability_resampling",
+      "status": "approved",
+      "stem": "A team proposes customer segments from one k-means fit. You need to determine whether the segmentation is a reproducible structure rather than an artifact of initialization or sampling. Which evaluation is most informative?",
+      "kind": "transfer",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 0.25,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Express high-variance features in several measurement units and expect identical memberships, because coordinate scaling leaves k-means geometry unchanged.",
+          "correct": false,
+          "misconception_id": "m_feature_scale_does_not_affect_kmeans",
+          "rationale": "K-means uses Euclidean squared distance, so rescaling coordinates can change the partition rather than provide a neutral stability check."
+        },
+        {
+          "id": "b",
+          "text": "Refit across resamples and initializations, align memberships with a permutation-invariant agreement measure, and check whether stable groups support the intended use.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This tests reproducibility while handling arbitrary labels and supplements geometric stability with the segmentation's external purpose."
+        },
+        {
+          "id": "c",
+          "text": "Choose the fit with the largest silhouette score on the original data and treat that internal optimum as evidence of reproducible segments.",
+          "correct": false,
+          "misconception_id": "m_internal_metric_proves_true_clusters",
+          "rationale": "A single-sample internal optimum does not test sensitivity to resampling or initialization and does not validate the intended interpretation."
+        },
+        {
+          "id": "d",
+          "text": "Replace resampling with density-contour inspection, because k-means estimates density modes whose identities persist across samples and initializations.",
+          "correct": false,
+          "misconception_id": "m_kmeans_is_density_based",
+          "rationale": "K-means minimizes a centroid distortion objective rather than estimating density modes, and visual contours do not quantify resampling stability."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "clustering",
+        "stability",
+        "resampling",
+        "label_permutation"
+      ]
+    },
+    {
+      "id": "q_pca_variance_accounting_001",
+      "version": 1,
+      "family_id": "f_projection_reconstruction_geometry",
+      "status": "approved",
+      "stem": "Centered observations have covariance eigenvalues 9, 4, and 1. PCA retains the first two principal components. What fraction of total sample variance is represented by the retained two-dimensional projection?",
+      "kind": "calculation",
+      "difficulty": -0.8,
+      "discrimination": 1.25,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The fraction is 5/6, about 83.3%, because explained variation is obtained by summing the principal-direction standard deviations.",
+          "correct": false,
+          "misconception_id": "m_pca_variance_fraction_uses_standard_deviations",
+          "rationale": "The square roots 3, 2, and 1 are standard deviations, whereas explained variance ratios use the covariance eigenvalues."
+        },
+        {
+          "id": "b",
+          "text": "The fraction is 9/10, or 90%, because PCA normalizes coordinate scale before calculating variance and removes the smallest feature's units.",
+          "correct": false,
+          "misconception_id": "m_pca_is_scale_invariant",
+          "rationale": "Ordinary covariance PCA does not silently standardize coordinates; explained variance is the sum of retained eigenvalues divided by their total."
+        },
+        {
+          "id": "c",
+          "text": "The fraction is 13/14, about 92.9%, because the retained covariance eigenvalues sum to 13 while total variance is 14.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The trace of the covariance matrix is total variance, and each retained eigenvalue is variance along its principal direction."
+        },
+        {
+          "id": "d",
+          "text": "The fraction is undetermined until labels are supplied, because PCA measures how much class separation the first two directions preserve.",
+          "correct": false,
+          "misconception_id": "m_pca_optimizes_label_separation",
+          "rationale": "PCA is unsupervised and its explained-variance calculation depends on the feature covariance, not class labels."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "pca",
+        "explained_variance",
+        "eigenvalues",
+        "calculation"
+      ]
+    },
+    {
+      "id": "q_pca_component_interpretation_001",
+      "version": 1,
+      "family_id": "f_rotated_coordinate_interpretation",
+      "status": "approved",
+      "stem": "A PCA report says the first score is 0.70 times centered height plus 0.70 times centered weight, while software on another run prints both loadings as negative. Which interpretation is statistically defensible?",
+      "kind": "conceptual",
+      "difficulty": 0.2,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_feature_scaling",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The second run found the opposite substantive relationship, because the global sign of each principal-component loading has an identified interpretation across software implementations.",
+          "correct": false,
+          "misconception_id": "m_pca_loading_sign_has_intrinsic_meaning",
+          "rationale": "An eigenvector and its negation describe the same axis, so global sign flips do not change the projected geometry."
+        },
+        {
+          "id": "b",
+          "text": "Converting weight from kilograms to grams leaves both 0.70 loadings unchanged, because PCA geometry is invariant to feature measurement units.",
+          "correct": false,
+          "misconception_id": "m_pca_is_scale_invariant",
+          "rationale": "Covariance PCA is scale-sensitive, so a large unit conversion can rotate the principal directions unless standardization is applied deliberately."
+        },
+        {
+          "id": "c",
+          "text": "The displayed component should be supplemented by the remaining components in prediction, because retaining more principal components improves expected generalization.",
+          "correct": false,
+          "misconception_id": "m_more_components_always_generalize_better",
+          "rationale": "Extra components preserve more sample variance but may add noise and estimation variance for a particular supervised task."
+        },
+        {
+          "id": "d",
+          "text": "The score is a rotated linear combination; relative loading patterns can aid interpretation, while a simultaneous sign flip leaves the component axis unchanged.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This distinguishes the meaningful relative composition of a component from its arbitrary global orientation."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "pca",
+        "loadings",
+        "sign_indeterminacy",
+        "interpretation"
+      ]
+    },
+    {
+      "id": "q_clustering_centroid_update_001",
+      "version": 1,
+      "family_id": "f_centroid_mean_update",
+      "status": "approved",
+      "stem": "One k-means cluster contains one-dimensional observations at 0, 0, 0, and 20. With assignments held fixed for the update step, where is the squared-distance minimizing centroid, and what does it reveal?",
+      "kind": "calculation",
+      "difficulty": -0.95,
+      "discrimination": 1.3,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It is 0, because a k-means centroid is a robust center that stays at the majority location despite one extreme observation.",
+          "correct": false,
+          "misconception_id": "m_kmeans_centroids_are_outlier_robust",
+          "rationale": "The arithmetic mean, not the median or mode, minimizes the within-cluster sum of squared distances."
+        },
+        {
+          "id": "b",
+          "text": "It is near 20, because k-means follows the highest-density location and the isolated point forms the sharpest local density peak.",
+          "correct": false,
+          "misconception_id": "m_kmeans_is_density_based",
+          "rationale": "The centroid update averages assigned coordinates; it does not seek a mode of an estimated density."
+        },
+        {
+          "id": "c",
+          "text": "Its location is chosen by whichever candidate gives the largest silhouette value, which identifies the true center for this observed cluster.",
+          "correct": false,
+          "misconception_id": "m_internal_metric_proves_true_clusters",
+          "rationale": "Silhouette is an evaluation summary, whereas the fixed-assignment k-means update has a direct least-squares minimizer."
+        },
+        {
+          "id": "d",
+          "text": "It is 5, the arithmetic mean; the movement away from the three zeros shows the leverage that squared distance gives the outlier.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Differentiating the sum of squared deviations gives the sample mean, and the value 20 moves that mean from zero to five."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "clustering",
+        "kmeans",
+        "centroid",
+        "outlier_leverage"
+      ]
+    },
+    {
+      "id": "q_clustering_label_alignment_001",
+      "version": 1,
+      "family_id": "f_partition_label_alignment",
+      "status": "approved",
+      "stem": "Two clustering runs assign every observation to exactly the same companions, but one run names the groups 1 and 2 while the other swaps those names. How should their agreement be evaluated?",
+      "kind": "application",
+      "difficulty": -0.55,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Treat the partitions as equivalent by aligning labels or using a permutation-invariant agreement measure, since the numeric names carry no cluster identity.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A clustering is a partition, and relabeling its blocks does not change which observations are grouped together."
+        },
+        {
+          "id": "b",
+          "text": "Treat the runs as disagreements because label 1 denotes a fixed population group whose identity persists across initializations and samples.",
+          "correct": false,
+          "misconception_id": "m_cluster_labels_have_fixed_identity",
+          "rationale": "Ordinary clustering labels are arbitrary identifiers; direct numeric comparison confuses a renaming with a membership change."
+        },
+        {
+          "id": "c",
+          "text": "Increase the requested cluster count until both runs retain matching numeric names, because additional groups resolve instability caused by label switching.",
+          "correct": false,
+          "misconception_id": "m_more_clusters_resolve_instability",
+          "rationale": "Changing the number of blocks does not give arbitrary numeric labels semantic identity and can introduce new instability."
+        },
+        {
+          "id": "d",
+          "text": "Choose the run with the larger internal score and call its numeric labels correct, because an internal optimum establishes the canonical partition naming.",
+          "correct": false,
+          "misconception_id": "m_internal_metric_proves_true_clusters",
+          "rationale": "An internal score does not make label names canonical or establish that one observed partition is uniquely true."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "clustering",
+        "label_switching",
+        "partition_agreement",
+        "stability"
+      ]
+    },
+    {
+      "id": "q_clustering_concentric_rings_001",
+      "version": 1,
+      "family_id": "f_cluster_shape_objective_match",
+      "status": "approved",
+      "stem": "Noise-free points lie on two concentric circular rings in two equally scaled coordinates. The desired groups are the inner and outer rings. Which modeling decision best matches that structure?",
+      "kind": "comparison",
+      "difficulty": 0.6,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Use ordinary k-means because its centroid objective is density-based and therefore separates any two disconnected high-density curves into their natural rings.",
+          "correct": false,
+          "misconception_id": "m_kmeans_is_density_based",
+          "rationale": "K-means creates Voronoi regions around centroids and can cut each ring into angular pieces rather than recover nested curves."
+        },
+        {
+          "id": "b",
+          "text": "Use a graph, spectral, or suitable density method whose neighborhood assumptions can represent nested groups, then test sensitivity to its scale choices.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The desired membership follows connectivity along curved manifolds, which can be encoded by neighborhood-based methods rather than centroid Voronoi cells."
+        },
+        {
+          "id": "c",
+          "text": "Multiply one coordinate by a large constant, because feature scaling leaves k-means memberships invariant while forcing its centroids to follow circular boundaries.",
+          "correct": false,
+          "misconception_id": "m_feature_scale_does_not_affect_kmeans",
+          "rationale": "Anisotropic rescaling changes Euclidean geometry but does not convert centroid Voronoi regions into concentric ring boundaries."
+        },
+        {
+          "id": "d",
+          "text": "Increase k until each ring receives a stable numeric label, because additional centroids necessarily resolve mismatches between cluster shape and objective.",
+          "correct": false,
+          "misconception_id": "m_more_clusters_resolve_instability",
+          "rationale": "More centroids can approximate ring fragments while still failing to produce the requested two connected ring memberships."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "clustering",
+        "cluster_shape",
+        "spectral_clustering",
+        "concentric_rings"
+      ]
+    },
+    {
+      "id": "q_pca_reconstruction_error_001",
+      "version": 1,
+      "family_id": "f_projection_reconstruction_error",
+      "status": "approved",
+      "stem": "In an orthonormal principal-component basis, a centered observation has scores 3, 4, and 1. If reconstruction retains the first two components, what is its squared Euclidean reconstruction error?",
+      "kind": "calculation",
+      "difficulty": -0.7,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The error is 1, because orthogonal projection discards the third score and its squared magnitude is the residual squared distance.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "With an orthonormal basis, squared reconstruction error is the sum of squared omitted component scores."
+        },
+        {
+          "id": "b",
+          "text": "The error is 5, because PCA reconstruction adds the standard deviations of the retained directions rather than squaring the omitted coordinate.",
+          "correct": false,
+          "misconception_id": "m_pca_variance_fraction_uses_standard_deviations",
+          "rationale": "Reconstruction error for this observation uses squared omitted scores, not sums of direction-level standard deviations."
+        },
+        {
+          "id": "c",
+          "text": "The error is undetermined, because principal components select original feature columns and the omitted original column has not been identified.",
+          "correct": false,
+          "misconception_id": "m_pca_components_select_original_features",
+          "rationale": "Principal components are basis directions, and the supplied scores already determine the norm of the omitted projection."
+        },
+        {
+          "id": "d",
+          "text": "The error could be either 1 or negative 1, because changing a loading sign changes the substantive direction of reconstruction loss.",
+          "correct": false,
+          "misconception_id": "m_pca_loading_sign_has_intrinsic_meaning",
+          "rationale": "Squared distance is nonnegative and invariant when a component loading and its score are both sign-flipped."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "dimensionality_reduction",
+        "pca",
+        "projection",
+        "reconstruction_error"
+      ]
+    },
+    {
+      "id": "q_pca_uncorrelated_independence_001",
+      "version": 1,
+      "family_id": "f_component_dependence_limits",
+      "status": "approved",
+      "stem": "A PCA fit produces two retained score coordinates with sample covariance zero. Without a distributional assumption such as joint Gaussianity, what dependence claim is justified?",
+      "kind": "conceptual",
+      "difficulty": 0.4,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The coordinates are independent, because orthogonal principal axes remove linear and nonlinear forms of statistical dependence between their scores.",
+          "correct": false,
+          "misconception_id": "m_orthogonal_components_are_statistically_independent",
+          "rationale": "Zero covariance rules out a linear association in the fitted sample but does not rule out nonlinear dependence."
+        },
+        {
+          "id": "b",
+          "text": "The coordinates are uncorrelated in the fitted sample, but they may remain nonlinearly dependent unless stronger assumptions make zero covariance imply independence.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "PCA diagonalizes the sample covariance matrix; independence is a stronger property of the joint distribution."
+        },
+        {
+          "id": "c",
+          "text": "The dependence conclusion changes if either loading vector is multiplied by negative one, because loading sign has an intrinsic probabilistic interpretation.",
+          "correct": false,
+          "misconception_id": "m_pca_loading_sign_has_intrinsic_meaning",
+          "rationale": "A global sign flip is a coordinate convention and does not alter whether the represented variables are dependent."
+        },
+        {
+          "id": "d",
+          "text": "The coordinates are conditionally independent given any downstream label, because PCA selects axes that optimize separation for possible target variables.",
+          "correct": false,
+          "misconception_id": "m_pca_optimizes_label_separation",
+          "rationale": "Unsupervised PCA uses feature covariance and neither observes labels nor guarantees class-conditional independence."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "dimensionality_reduction",
+        "pca",
+        "uncorrelated",
+        "independence"
+      ]
+    },
+    {
+      "id": "q_clustering_medoid_centroid_001",
+      "version": 1,
+      "family_id": "f_medoid_centroid_robustness",
+      "status": "approved",
+      "stem": "A cluster consists of many nearby customer profiles plus one extreme profile. Why can replacing a squared-distance centroid update with a medoid update reduce the extreme profile's influence?",
+      "kind": "comparison",
+      "difficulty": 0.25,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Both centers have equal outlier sensitivity, because an arithmetic centroid is already robust to a single distant assigned observation.",
+          "correct": false,
+          "misconception_id": "m_kmeans_centroids_are_outlier_robust",
+          "rationale": "A distant point can move the arithmetic mean substantially because squared deviations give it high leverage."
+        },
+        {
+          "id": "b",
+          "text": "A medoid estimates the highest density mode, so its robustness follows from converting the clustering objective into a density estimator.",
+          "correct": false,
+          "misconception_id": "m_kmeans_is_density_based",
+          "rationale": "A medoid minimizes aggregate dissimilarity over candidate observations; it does not inherently estimate a density mode."
+        },
+        {
+          "id": "c",
+          "text": "A medoid is an observed profile minimizing unsquared dissimilarities, so one extreme distance has less leverage than under a squared-distance mean.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The changed representative and loss geometry reduce the quadratic amplification responsible for centroid sensitivity."
+        },
+        {
+          "id": "d",
+          "text": "A larger silhouette score for the medoid partition establishes that its groups are the uniquely true customer populations.",
+          "correct": false,
+          "misconception_id": "m_internal_metric_proves_true_clusters",
+          "rationale": "An internal score compares a chosen geometry on observed data but cannot establish unique real-world group truth."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "clustering",
+        "medoid",
+        "centroid",
+        "robustness"
+      ]
+    },
+    {
+      "id": "q_clustering_version_label_drift_001",
+      "version": 1,
+      "family_id": "f_cluster_version_alignment",
+      "status": "approved",
+      "stem": "A monthly segmentation pipeline reports that cluster 2 lost most members. Inspection shows the new cluster 2 centroid closely matches last month's cluster 5 centroid. What should be checked before declaring population drift?",
+      "kind": "debugging",
+      "difficulty": 0.55,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_clustering",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Increase the cluster count until numeric identifiers stabilize, because extra groups resolve label changes between independently fitted models.",
+          "correct": false,
+          "misconception_id": "m_more_clusters_resolve_instability",
+          "rationale": "Adding groups changes the partitioning problem and does not give arbitrary cluster identifiers persistent meaning."
+        },
+        {
+          "id": "b",
+          "text": "Trust the original numeric comparison, because cluster labels denote fixed identities that persist across independent fitting runs.",
+          "correct": false,
+          "misconception_id": "m_cluster_labels_have_fixed_identity",
+          "rationale": "Unsupervised label numbers are arbitrary and may be permuted even when the underlying partition structure is similar."
+        },
+        {
+          "id": "c",
+          "text": "Choose whichever month has the higher silhouette score, because that score determines the canonical identities used for longitudinal comparison.",
+          "correct": false,
+          "misconception_id": "m_internal_metric_proves_true_clusters",
+          "rationale": "An internal score neither aligns labels between runs nor assigns persistent semantic identity to numeric names."
+        },
+        {
+          "id": "d",
+          "text": "Align clusters across versions using memberships, centroids, and domain meaning, then distinguish label permutation from genuine distribution or membership change.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Longitudinal drift analysis requires a correspondence step because the optimizer does not preserve label numbering across fits."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "clustering",
+        "label_alignment",
+        "monitoring",
+        "drift"
+      ]
+    },
+    {
+      "id": "q_pca_correlated_loadings_001",
+      "version": 1,
+      "family_id": "f_correlated_feature_component",
+      "status": "approved",
+      "stem": "Two standardized sensors measure nearly the same signal and have strong positive correlation. What first principal-component loading pattern is most plausible, up to an arbitrary global sign?",
+      "kind": "application",
+      "difficulty": -0.45,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It selects one original sensor and assigns the other exactly zero, because each principal component is an original feature chosen by variance.",
+          "correct": false,
+          "misconception_id": "m_pca_components_select_original_features",
+          "rationale": "PCA generally forms linear combinations, and two positively correlated standardized sensors support a shared direction."
+        },
+        {
+          "id": "b",
+          "text": "It gives both sensors similar same-sign magnitudes, representing their common variation; reversing both signs describes the same component axis.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The sum-like direction captures high covariance, and eigenvector orientation is unchanged by a global sign flip."
+        },
+        {
+          "id": "c",
+          "text": "Its signs are fixed by sensor meaning, so software returning both negative loadings has discovered a substantively opposite component.",
+          "correct": false,
+          "misconception_id": "m_pca_loading_sign_has_intrinsic_meaning",
+          "rationale": "Multiplying an eigenvector and its scores by negative one preserves the represented axis and reconstructions."
+        },
+        {
+          "id": "d",
+          "text": "Changing either sensor from volts to millivolts leaves unstandardized loadings unchanged, because PCA geometry is invariant to feature units.",
+          "correct": false,
+          "misconception_id": "m_pca_is_scale_invariant",
+          "rationale": "Without compensating standardization, a unit conversion changes covariance geometry and can change principal directions."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "dimensionality_reduction",
+        "pca",
+        "loadings",
+        "correlation"
+      ]
+    },
+    {
+      "id": "q_pca_uncorrelated_counterexample_001",
+      "version": 1,
+      "family_id": "f_uncorrelated_nonlinear_counterexample",
+      "status": "approved",
+      "stem": "A centered score U is symmetric around zero, and another score is V = U squared minus its mean. Their covariance is zero. What does this construction demonstrate?",
+      "kind": "counterfactual",
+      "difficulty": 0.65,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Zero covariance makes U and V independent, because orthogonal score coordinates remove nonlinear dependence as well as linear association.",
+          "correct": false,
+          "misconception_id": "m_orthogonal_components_are_statistically_independent",
+          "rationale": "V is determined by U even though symmetry makes their linear covariance vanish."
+        },
+        {
+          "id": "b",
+          "text": "The dependence disappears after reversing U's sign, because a component loading sign carries intrinsic probabilistic meaning.",
+          "correct": false,
+          "misconception_id": "m_pca_loading_sign_has_intrinsic_meaning",
+          "rationale": "A sign convention does not change that V is a deterministic function of the magnitude of U."
+        },
+        {
+          "id": "c",
+          "text": "Uncorrelated coordinates can remain strongly dependent; covariance captures linear association but does not characterize the full joint distribution.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "This explicit nonlinear relationship supplies a counterexample to equating orthogonality with statistical independence."
+        },
+        {
+          "id": "d",
+          "text": "Their zero covariance shows PCA optimized an unobserved class label, because decorrelated axes are necessarily directions of label separation.",
+          "correct": false,
+          "misconception_id": "m_pca_optimizes_label_separation",
+          "rationale": "Covariance diagonalization is unsupervised and makes no claim about a target label."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "dimensionality_reduction",
+        "pca",
+        "uncorrelated",
+        "nonlinear_dependence"
+      ]
+    },
+    {
+      "id": "q_pca_whitening_noise_001",
+      "version": 1,
+      "family_id": "f_whitening_low_variance_noise",
+      "status": "approved",
+      "stem": "PCA whitening divides each retained component by its sample standard deviation. A component has tiny variance dominated by measurement noise. What risk does retaining and whitening it create?",
+      "kind": "diagnostic",
+      "difficulty": 0.8,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_dimensionality_reduction",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "No risk arises because PCA is invariant to component scale, so dividing by a tiny standard deviation leaves downstream geometry unchanged.",
+          "correct": false,
+          "misconception_id": "m_pca_is_scale_invariant",
+          "rationale": "Whitening deliberately rescales component coordinates, giving low-variance directions unit variance in the transformed geometry."
+        },
+        {
+          "id": "b",
+          "text": "The component becomes predictive because PCA orders directions by label separation, making even low-variance retained scores useful after whitening.",
+          "correct": false,
+          "misconception_id": "m_pca_optimizes_label_separation",
+          "rationale": "PCA does not use target labels, so whitening cannot establish that a noisy direction carries predictive signal."
+        },
+        {
+          "id": "c",
+          "text": "Retaining more whitened components improves expected generalization, because added orthogonal coordinates contribute information without adding estimation noise.",
+          "correct": false,
+          "misconception_id": "m_more_components_always_generalize_better",
+          "rationale": "An extra component can amplify noise and increase downstream estimation burden even though it is orthogonal in the sample."
+        },
+        {
+          "id": "d",
+          "text": "Dividing by a tiny scale amplifies noisy variation to unit magnitude, so retention should be justified by purpose and held-out behavior.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Whitening equalizes variance, which can magnify a low-variance noise direction relative to meaningful components."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "dimensionality_reduction",
+        "pca",
+        "whitening",
+        "noise_amplification"
+      ]
+    }
+  ]
+}

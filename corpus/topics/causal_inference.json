@@ -1,0 +1,405 @@
+{
+  "topic": {
+    "id": "t_causal_inference",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Causal Inference",
+    "description": "Interventions, confounding, and counterfactual conclusions beyond association.",
+    "concept_ids": [
+      "c_causal_inference"
+    ],
+    "related_topic_ids": [
+      "t_evaluation_decisions"
+    ],
+    "sort_order": 90
+  },
+  "concepts": [
+    {
+      "id": "c_causal_inference",
+      "name": "Causal inference",
+      "description": "Reasoning about interventions and counterfactual outcomes beyond observational association.",
+      "level": "intermediate"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_prediction_implies_intervention_effect",
+      "name": "Predictive association implies intervention effect",
+      "description": "Interprets a conditional association learned for prediction as the effect of setting a treatment.",
+      "concept_id": "c_causal_inference",
+      "remediation": "Write separate observational and interventional queries: P(Y|T) versus P(Y|do(T))."
+    },
+    {
+      "id": "m_covariate_adjustment_always_removes_confounding",
+      "name": "Any rich adjustment removes confounding",
+      "description": "Assumes controlling many observed variables guarantees exchangeability, regardless of timing, colliders, or unmeasured causes.",
+      "concept_id": "c_causal_inference",
+      "remediation": "Justify an adjustment set with a causal graph and explicit identification assumptions."
+    },
+    {
+      "id": "m_more_observations_identify_causality",
+      "name": "More observational data identify causality",
+      "description": "Treats sampling precision as a remedy for structural non-identifiability.",
+      "concept_id": "c_causal_inference",
+      "remediation": "Separate variance reduction from assumptions needed to identify an intervention effect."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_prediction_vs_causal_effect_001",
+      "version": 1,
+      "family_id": "f_prediction_intervention_boundary",
+      "status": "approved",
+      "stem": "In observational school data, students assigned tutoring improve less on average than students without tutoring. Assignment is targeted toward students whom teachers expect to struggle. A flexible predictor reproduces the negative association after controlling for many recorded variables. What can be concluded about the effect of offering tutoring?",
+      "kind": "application",
+      "difficulty": 0.9,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_causal_inference",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 0.2,
+          "role": "contrast"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Tutoring is harmful because accurate prediction of the observed association estimates the intervention effect.",
+          "correct": false,
+          "misconception_id": "m_prediction_implies_intervention_effect",
+          "rationale": "The model estimates an observational conditional association, while targeted assignment can confound the treatment comparison."
+        },
+        {
+          "id": "b",
+          "text": "Tutoring is beneficial because controlling for many variables by itself removes all sources of confounding.",
+          "correct": false,
+          "misconception_id": "m_covariate_adjustment_always_removes_confounding",
+          "rationale": "Adjustment works only for a justified set under assumptions; variable count alone neither establishes direction nor identification."
+        },
+        {
+          "id": "c",
+          "text": "Collecting enough additional records will reveal the causal effect even if assignment remains governed by the same unmeasured judgments.",
+          "correct": false,
+          "misconception_id": "m_more_observations_identify_causality",
+          "rationale": "More samples can tighten an association estimate but do not resolve unmeasured confounding or non-identifiability."
+        },
+        {
+          "id": "d",
+          "text": "The causal effect is not identified here; estimating it requires a credible design or explicit assumptions about assignment.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Targeted treatment creates confounding by indication, so predictive fit does not answer the interventional question without identification."
+        }
+      ],
+      "source_ids": [
+        "src_pearl_causality_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "confounding",
+        "prediction",
+        "intervention",
+        "identification"
+      ]
+    },
+    {
+      "id": "q_causal_collider_adjustment_001",
+      "version": 1,
+      "family_id": "f_causal_collider_adjustment",
+      "status": "approved",
+      "stem": "Treatment and disease severity both increase the chance of hospital admission, but treatment does not affect severity. An analysis is restricted to admitted patients and adjusts for admission. What risk does this create?",
+      "kind": "debugging",
+      "difficulty": 0.8,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_causal_inference",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "A flexible outcome predictor turns the admitted-sample association into the intervention effect without further assumptions.",
+          "correct": false,
+          "misconception_id": "m_prediction_implies_intervention_effect",
+          "rationale": "Predictive fit within a selected sample does not identify the effect of setting treatment."
+        },
+        {
+          "id": "b",
+          "text": "Adding admission and many related covariates removes confounding because richer adjustment improves causal identification.",
+          "correct": false,
+          "misconception_id": "m_covariate_adjustment_always_removes_confounding",
+          "rationale": "Admission is a common effect, so conditioning on it can open a noncausal path rather than close one."
+        },
+        {
+          "id": "c",
+          "text": "Conditioning on the common effect admission can induce an association between treatment and severity, producing collider bias.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Selection on a variable caused by both treatment and severity creates dependence between its causes."
+        },
+        {
+          "id": "d",
+          "text": "A larger admitted cohort resolves the problem because more observations identify the causal structure behind selection.",
+          "correct": false,
+          "misconception_id": "m_more_observations_identify_causality",
+          "rationale": "More selected observations reduce sampling error but do not remove collider-induced bias."
+        }
+      ],
+      "source_ids": [
+        "src_pearl_causality_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "causal_inference",
+        "collider",
+        "selection_bias",
+        "adjustment"
+      ]
+    },
+    {
+      "id": "q_causal_randomized_offer_001",
+      "version": 1,
+      "family_id": "f_causal_randomized_encouragement",
+      "status": "approved",
+      "stem": "Eligible users are randomly assigned an offer for a training program. Some offered users decline, and some control users find similar training elsewhere. Which quantity is identified most directly by comparing outcomes by assigned offer?",
+      "kind": "counterfactual",
+      "difficulty": 0.65,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_causal_inference",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The effect of program participation, because assignment predicts participation and predictive association equals intervention effect.",
+          "correct": false,
+          "misconception_id": "m_prediction_implies_intervention_effect",
+          "rationale": "Noncompliance separates the intervention of assignment from the intervention of actual participation."
+        },
+        {
+          "id": "b",
+          "text": "The participation effect after adjusting for a large set of observed user features, independent of compliance assumptions.",
+          "correct": false,
+          "misconception_id": "m_covariate_adjustment_always_removes_confounding",
+          "rationale": "Observed adjustment does not by itself identify the treatment-received effect under noncompliance."
+        },
+        {
+          "id": "c",
+          "text": "The participation effect once the sample is large, because random assignment and sample size remove the distinction between offer and uptake.",
+          "correct": false,
+          "misconception_id": "m_more_observations_identify_causality",
+          "rationale": "Precision does not collapse two different interventions; offer assignment and participation remain distinct."
+        },
+        {
+          "id": "d",
+          "text": "The intention-to-treat effect of being assigned the offer, with participation effects requiring additional assumptions and analysis.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Randomization identifies the causal contrast for assignment even when actual participation crosses assignment groups."
+        }
+      ],
+      "source_ids": [
+        "src_pearl_causality_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "causal_inference",
+        "randomization",
+        "noncompliance",
+        "intention_to_treat"
+      ]
+    },
+    {
+      "id": "q_causal_total_effect_adjustment_001",
+      "version": 1,
+      "family_id": "f_causal_total_effect_adjustment",
+      "status": "quarantined",
+      "stem": "A causal graph has pre-treatment severity C causing both treatment T and outcome Y. Treatment also affects Y directly and through a post-treatment mediator M: T to M to Y. An analyst wants the total effect of T on Y. Which adjustment strategy matches that estimand?",
+      "kind": "debugging",
+      "difficulty": 0.9,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_causal_inference",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Fit a strong predictor of Y from T, C, and M, then read its conditional T association as the total intervention effect.",
+          "correct": false,
+          "misconception_id": "m_prediction_implies_intervention_effect",
+          "rationale": "Predictive conditioning does not define the requested intervention contrast, and conditioning on M changes the total-effect estimand."
+        },
+        {
+          "id": "b",
+          "text": "Adjust for C, M, and further measured variables because a richer adjustment set yields a cleaner total-effect estimate.",
+          "correct": false,
+          "misconception_id": "m_covariate_adjustment_always_removes_confounding",
+          "rationale": "M lies on the treatment pathway, so controlling it blocks mediated effect rather than merely removing pre-treatment confounding."
+        },
+        {
+          "id": "c",
+          "text": "Use the unadjusted T-Y comparison after collecting a much larger sample because sampling precision resolves the confounding path through C.",
+          "correct": false,
+          "misconception_id": "m_more_observations_identify_causality",
+          "rationale": "More records estimate the confounded association more precisely but do not close the backdoor path through C."
+        },
+        {
+          "id": "d",
+          "text": "Adjust for the pre-treatment confounder C and leave mediator M unconditioned, subject to the graph's identification assumptions.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Conditioning on C blocks the stated backdoor path, while leaving M open preserves both direct and mediated components of the total effect."
+        }
+      ],
+      "source_ids": [
+        "src_pearl_causality_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_scenario",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "prior_independent_verdict": "accept",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "causal_inference",
+        "total_effect",
+        "mediator",
+        "adjustment_set"
+      ]
+    },
+    {
+      "id": "q_causal_observational_equivalence_001",
+      "version": 1,
+      "family_id": "f_causal_observational_equivalence",
+      "status": "quarantined",
+      "stem": "Let U be a fair binary variable. In model A, T = U and Y = T. In model B, T = U and Y = U. Both models therefore produce T = Y in every observational record, but they respond differently when T is externally set. What follows?",
+      "kind": "counterfactual",
+      "difficulty": 1.1,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_causal_inference",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The perfect observational prediction Y = T identifies a unit treatment effect in both models because association supplies the intervention contrast.",
+          "correct": false,
+          "misconception_id": "m_prediction_implies_intervention_effect",
+          "rationale": "Model B predicts observational outcomes perfectly while changing T leaves Y governed by U, so prediction does not identify the effect."
+        },
+        {
+          "id": "b",
+          "text": "The observational distribution does not identify the effect; distinguishing the models needs intervention evidence or additional causal assumptions.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The models are observationally equivalent but imply different interventional distributions, which is a direct non-identifiability witness."
+        },
+        {
+          "id": "c",
+          "text": "Adding many measured features to a flexible adjustment model distinguishes the structures because rich conditioning recovers their causal direction.",
+          "correct": false,
+          "misconception_id": "m_covariate_adjustment_always_removes_confounding",
+          "rationale": "The stipulated observational distributions coincide; conditioning on more variables without identifying assumptions does not separate the causal models."
+        },
+        {
+          "id": "d",
+          "text": "An arbitrarily large observational sample distinguishes the models because enough records reveal whether T or U generated Y.",
+          "correct": false,
+          "misconception_id": "m_more_observations_identify_causality",
+          "rationale": "Larger samples converge more tightly to the same shared observational distribution and cannot resolve structural non-identifiability."
+        }
+      ],
+      "source_ids": [
+        "src_pearl_causality_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "generated_source_grounded_original_scenario",
+        "generated": true,
+        "created_on": "2026-07-23",
+        "review_status": "independent_model_review_passed",
+        "prior_independent_verdict": "accept",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "expert_prior_needs_empirical_calibration",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "a722e7b031a251737bb277f34805e2c0d3ff10dd2d783c7ff3192d6eff714895",
+        "review_sha256": "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd",
+        "review_chain_sha256": [
+          "1930b5e7aba52b9efecb1f706f73855a0e2df42b7e3d2c01ec518261a74eb4bd"
+        ]
+      },
+      "tags": [
+        "causal_inference",
+        "observational_equivalence",
+        "intervention",
+        "identifiability"
+      ]
+    }
+  ]
+}

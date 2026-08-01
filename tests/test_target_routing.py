@@ -9,13 +9,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from tsq.corpus import parse_bundle, parse_catalog, read_and_parse
+from tsq.corpus import load_bundle, parse_bundle, parse_catalog, read_and_parse
 from tsq.engine import AdaptiveEngine
 from tsq.store import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 START = datetime(2100, 4, 1, 9, 0, tzinfo=timezone.utc)
 
 
@@ -182,7 +182,7 @@ class TargetFirstRoutingTests(unittest.TestCase):
         )
 
     def test_legacy_objective_release_retains_broad_concept_fallback(self) -> None:
-        raw = json.loads(CORPUS.read_text(encoding="utf-8"))
+        raw = load_bundle(CORPUS)
         raw["schema_version"] = 2
         raw.pop("objective_edges")
         parsed = parse_bundle(raw)
@@ -235,7 +235,7 @@ class TargetFirstRoutingTests(unittest.TestCase):
         self.assertNotIn("focus_objective_id", second_result.boundary_decision)
 
     def test_declared_empty_objective_graph_disables_broad_fallback(self) -> None:
-        raw = json.loads(CORPUS.read_text(encoding="utf-8"))
+        raw = load_bundle(CORPUS)
         raw["objective_edges"] = []
         parsed = parse_bundle(raw)
         catalog = parse_catalog(raw, parsed[0], parsed[4])

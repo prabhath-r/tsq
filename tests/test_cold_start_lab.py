@@ -82,7 +82,7 @@ class ColdStartLabTests(unittest.TestCase):
 
     def test_small_agents_audit_is_deterministic_and_integral(self) -> None:
         artifact = COLD_START_LAB.run_cold_start_audit(
-            corpus=ROOT / "corpus" / "ai_curriculum.json",
+            corpus=ROOT / "corpus",
             topics=("t_llm_agents",),
             seeds=(0,),
             max_steps=4,
@@ -223,7 +223,7 @@ class ColdStartLabTests(unittest.TestCase):
 
     def test_unreplicated_audit_is_not_labeled_deterministic(self) -> None:
         artifact = COLD_START_LAB.run_cold_start_audit(
-            corpus=ROOT / "corpus" / "ai_curriculum.json",
+            corpus=ROOT / "corpus",
             topics=("t_llm_agents",),
             seeds=(0,),
             max_steps=1,
@@ -240,7 +240,7 @@ class ColdStartLabTests(unittest.TestCase):
 
     def test_broad_llm_candidate_trace_labels_truncated_prefix(self) -> None:
         artifact = COLD_START_LAB.run_cold_start_audit(
-            corpus=ROOT / "corpus" / "ai_curriculum.json",
+            corpus=ROOT / "corpus",
             topics=("t_large_language_models",),
             seeds=(0,),
             max_steps=1,

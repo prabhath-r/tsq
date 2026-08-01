@@ -37,7 +37,7 @@ from tsq.store import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 NOW = datetime(2103, 2, 3, 9, 0, tzinfo=timezone.utc)
 MISCONCEPTION_ID = "m_target"
 CONCEPT_ID = "c_target"

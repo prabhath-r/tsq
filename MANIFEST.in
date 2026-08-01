@@ -3,6 +3,6 @@ include LICENSE
 include NOTICE
 include start
 include tsq
-include corpus/ai_curriculum.json
+recursive-include corpus *.json *.md
 recursive-include benchmarks *.md *.py
 recursive-include scripts *.py

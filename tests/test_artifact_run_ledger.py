@@ -60,7 +60,7 @@ from tsq.store import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 BASE = datetime(2120, 8, 9, 10, 0, tzinfo=timezone.utc)
 _D0 = "0" * 64
 _D1 = "1" * 64

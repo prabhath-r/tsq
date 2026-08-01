@@ -58,7 +58,7 @@ from tsq.store import Database  # noqa: E402
 
 LAB_VERSION = "scoring-reconciliation-lab-v1"
 START = datetime(2117, 5, 6, 9, 0, tzinfo=timezone.utc)
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 TASK_RELEASE = (
     PROJECT_ROOT / "tests" / "fixtures" / "reviewed_productive_task_release.json"
 )

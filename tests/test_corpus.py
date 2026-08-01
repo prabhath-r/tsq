@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
 
 from tsq.corpus import (
+    corpus_source_digest,
     load_bundle,
     parse_bundle,
     parse_catalog,
@@ -32,7 +35,7 @@ from tsq.store import Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 
 
 def declare_test_fixture_generation_provenance(
@@ -92,7 +95,7 @@ class CorpusTestCase(unittest.TestCase):
         self.assertNotIn("c_ai_learning_systems", owners)
 
     def test_catalog_rejects_ambiguous_ownership_and_asymmetric_relations(self) -> None:
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         concepts, _, _, _, questions = parse_bundle(bundle)
         bundle["topics"][0]["concept_ids"].append(
             bundle["topics"][1]["concept_ids"][0]
@@ -269,7 +272,7 @@ class CorpusTestCase(unittest.TestCase):
             ConceptWeight("c_test", 1.0, "invented-role")
 
     def test_raw_bundle_validation_aggregates_type_range_and_finite_issues(self) -> None:
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         for question in bundle["questions"]:
             question["guess_rate"] = 0.25
         bundle["schema_version"] = "1"
@@ -340,8 +343,172 @@ class CorpusTestCase(unittest.TestCase):
                     with self.assertRaises(ValidationError):
                         load_bundle(path)
 
+    def test_sharded_directory_and_manifest_are_one_deterministic_corpus(self) -> None:
+        directory_bundle = load_bundle(CORPUS)
+        manifest_bundle = load_bundle(CORPUS / "manifest.json")
+
+        self.assertEqual(directory_bundle, manifest_bundle)
+        self.assertEqual(
+            corpus_source_digest(CORPUS),
+            corpus_source_digest(CORPUS / "manifest.json"),
+        )
+        self.assertEqual(len(directory_bundle["topics"]), 16)
+        self.assertEqual(len(directory_bundle["questions"]), 288)
+
+        with tempfile.TemporaryDirectory() as directory:
+            legacy = Path(directory) / "legacy.json"
+            encoded = json.dumps(
+                directory_bundle,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            legacy.write_bytes(encoded)
+            self.assertEqual(
+                corpus_source_digest(legacy),
+                hashlib.sha256(encoded).hexdigest(),
+            )
+            self.assertEqual(load_bundle(legacy), directory_bundle)
+
+    def test_sharding_preserves_the_immutable_release_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "release.db")
+            database.initialize()
+            imported = database.import_corpus(
+                *read_and_parse(CORPUS, include_catalog=True)
+            )
+
+        self.assertEqual(imported["release_id"], "rel_e8047a6bdb517fd42e1cb2d6")
+
+    def test_sharded_loader_rejects_path_and_inventory_ambiguity(self) -> None:
+        cases = (
+            ("traversal", "../outside.json", "canonical relative"),
+            ("absolute", "/tmp/outside.json", "canonical relative"),
+            (
+                "noncanonical",
+                "topics/../topics/machine_learning.json",
+                "canonical relative",
+            ),
+        )
+        for case, replacement, expected in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                copied = Path(directory) / "corpus"
+                shutil.copytree(CORPUS, copied)
+                manifest_path = copied / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["topic_files"][0]["path"] = replacement
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValidationError, expected):
+                    load_bundle(copied)
+
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / "corpus"
+            shutil.copytree(CORPUS, copied)
+            (copied / "topics" / "unlisted.json").write_text("{}", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValidationError, "unlisted"):
+                load_bundle(copied)
+
+    def test_sharded_loader_rejects_duplicate_ids_paths_and_wrong_order(self) -> None:
+        mutations = (
+            (
+                "topic id",
+                lambda manifest: manifest["topic_files"][1].update(
+                    topic_id=manifest["topic_files"][0]["topic_id"]
+                ),
+                "duplicate topic IDs",
+            ),
+            (
+                "path",
+                lambda manifest: manifest["topic_files"][1].update(
+                    path=manifest["topic_files"][0]["path"]
+                ),
+                "duplicate or case-colliding paths",
+            ),
+            (
+                "order",
+                lambda manifest: manifest["topic_files"].__setitem__(
+                    slice(0, 2), reversed(manifest["topic_files"][:2])
+                ),
+                "canonical catalog order",
+            ),
+        )
+        for case, mutate, expected in mutations:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                copied = Path(directory) / "corpus"
+                shutil.copytree(CORPUS, copied)
+                manifest_path = copied / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                mutate(manifest)
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValidationError, expected):
+                    load_bundle(copied)
+
+    def test_sharded_format_requires_the_current_corpus_schema(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            copied = Path(directory) / "corpus"
+            shutil.copytree(CORPUS, copied)
+            manifest_path = copied / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["schema_version"] = 2
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                ValidationError,
+                "format_version 1 requires corpus schema_version 3",
+            ):
+                load_bundle(copied)
+
+    def test_sharded_loader_rejects_topic_content_in_the_wrong_file(self) -> None:
+        mutations = (
+            (
+                "concept inventory",
+                "machine_learning_foundations.json",
+                lambda shard: shard["concepts"].pop(),
+                "concept ownership",
+            ),
+            (
+                "objective owner",
+                "transformers.json",
+                lambda shard: shard["learning_objectives"][0].update(
+                    primary_concept_id="c_agent_tool_use"
+                ),
+                "not topic",
+            ),
+            (
+                "misconception owner",
+                "machine_learning_foundations.json",
+                lambda shard: shard["misconceptions"][0].update(
+                    concept_id="c_transformers"
+                ),
+                "not topic",
+            ),
+            (
+                "question owner",
+                "machine_learning_foundations.json",
+                lambda shard: next(
+                    mapping
+                    for mapping in shard["questions"][0]["concepts"]
+                    if mapping["role"] == "primary"
+                ).update(concept_id="c_transformers"),
+                "not owned by topic",
+            ),
+        )
+        for case, filename, mutate, expected in mutations:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                copied = Path(directory) / "corpus"
+                shutil.copytree(CORPUS, copied)
+                shard_path = copied / "topics" / filename
+                shard = json.loads(shard_path.read_text(encoding="utf-8"))
+                mutate(shard)
+                shard_path.write_text(json.dumps(shard), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValidationError, expected):
+                    load_bundle(copied)
+
     def test_semantic_bundle_validation_aggregates_reference_issues(self) -> None:
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         declare_test_fixture_generation_provenance(bundle)
         for question in bundle["questions"]:
             question["guess_rate"] = 0.25
@@ -367,7 +534,7 @@ class CorpusTestCase(unittest.TestCase):
         self.assertIn("unknown_source_reference", codes)
 
     def test_distractor_misconception_owner_must_be_mapped_on_item(self) -> None:
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         declare_test_fixture_generation_provenance(bundle)
         question = bundle["questions"][0]
         mapped = {mapping["concept_id"] for mapping in question["concepts"]}
@@ -392,7 +559,7 @@ class CorpusTestCase(unittest.TestCase):
         self.assertIn(foreign_misconception["concept_id"], matching[0].message)
 
     def test_revision_graph_preserves_identity_and_acyclic_order(self) -> None:
-        baseline = json.loads(CORPUS.read_text(encoding="utf-8"))
+        baseline = load_bundle(CORPUS)
         declare_test_fixture_generation_provenance(baseline)
         cases = (
             ("self", "revision_self_reference"),

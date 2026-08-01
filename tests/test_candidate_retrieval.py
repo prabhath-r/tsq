@@ -18,7 +18,7 @@ from tsq.store import CANDIDATE_POOL_SQL, Database
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 
 
 REFERENCE_SQL = """SELECT q.id,

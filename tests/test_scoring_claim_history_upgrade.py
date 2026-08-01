@@ -39,7 +39,7 @@ from tests.schema_upgrade_helpers import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 TASK_RELEASE = ROOT / "tests" / "fixtures" / "reviewed_productive_task_release.json"
 TASK_RELEASE_CORPUS_PLACEHOLDER = "rel_fixture_requires_explicit_pinning"
 START = datetime(2116, 4, 5, 10, 0, tzinfo=timezone.utc)

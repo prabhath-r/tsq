@@ -49,7 +49,11 @@ from tsq.capacity import (  # noqa: E402
     TargetCapacity,
     analyze_sustained_capacity,
 )
-from tsq.corpus import load_bundle, read_and_parse  # noqa: E402
+from tsq.corpus import (  # noqa: E402
+    corpus_source_digest,
+    load_bundle,
+    read_and_parse,
+)
 from tsq.graph import KnowledgeGraph  # noqa: E402
 from tsq.models import (  # noqa: E402
     LearningObjective,
@@ -62,7 +66,7 @@ from tsq.versions import DEFAULT_LEARNER_MODEL_VERSION  # noqa: E402
 
 LAB_VERSION = "family-independence-falsification-v3"
 NORMALIZATION_VERSION = "lower-alnum-stopwords-v1"
-DEFAULT_CORPUS = PROJECT_ROOT / "corpus" / "ai_curriculum.json"
+DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = (
     PROJECT_ROOT / "experiments" / "results" / "family_independence_lab.json"
 )
@@ -1135,8 +1139,8 @@ def _cluster_pair_evidence(
 
 
 def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
-    source_bytes_before = corpus.read_bytes()
-    source_sha256 = hashlib.sha256(source_bytes_before).hexdigest()
+    source_digest_before = corpus_source_digest(corpus)
+    source_sha256 = source_digest_before
     raw = load_bundle(corpus)
     (
         concepts,
@@ -1332,8 +1336,8 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
         graph=graph,
         misconceptions=misconceptions,
     )
-    source_bytes_after = corpus.read_bytes()
-    if source_bytes_after != source_bytes_before:
+    source_digest_after = corpus_source_digest(corpus)
+    if source_digest_after != source_digest_before:
         raise LabInvariantError(
             "The source corpus changed while the laboratory was running."
         )

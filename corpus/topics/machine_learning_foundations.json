@@ -1,0 +1,2227 @@
+{
+  "topic": {
+    "id": "t_ml_foundations",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_machine_learning",
+    "name": "Machine Learning Foundations",
+    "description": "Core learning paradigms, probability, and empirical objectives used across machine learning.",
+    "concept_ids": [
+      "c_supervised_learning",
+      "c_unsupervised_learning",
+      "c_probability_reasoning",
+      "c_empirical_risk_minimization"
+    ],
+    "related_topic_ids": [
+      "t_language_modeling"
+    ],
+    "sort_order": 10
+  },
+  "concepts": [
+    {
+      "id": "c_supervised_learning",
+      "name": "Supervised learning",
+      "description": "Learning a predictive mapping from labeled examples under an explicit loss.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_unsupervised_learning",
+      "name": "Unsupervised learning",
+      "description": "Discovering structure or representations without task labels.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_probability_reasoning",
+      "name": "Probability reasoning",
+      "description": "Reasoning about uncertainty, conditional probability, expectation, and dependence.",
+      "level": "foundation"
+    },
+    {
+      "id": "c_empirical_risk_minimization",
+      "name": "Empirical risk minimization",
+      "description": "Selecting a hypothesis by minimizing average observed loss over a sample.",
+      "level": "foundation"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_lower_training_loss_guarantees_lower_test_loss",
+      "name": "Lower training loss guarantees lower test loss",
+      "description": "Transfers the monotonic empirical-risk property of nested model classes to unknown population risk.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Separate optimization error, empirical risk, and the estimation gap."
+    },
+    {
+      "id": "m_erm_directly_minimizes_population_risk",
+      "name": "ERM directly minimizes population risk",
+      "description": "Treats a sample average as if it were the inaccessible deployment expectation.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Write empirical and expected risk as distinct quantities indexed by the selected hypothesis."
+    },
+    {
+      "id": "m_erm_is_loss_independent",
+      "name": "ERM is independent of the loss function",
+      "description": "Assumes the same fitted hypothesis minimizes empirical risk after changing the pointwise loss.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Solve a simple constant-prediction problem under squared and absolute loss."
+    },
+    {
+      "id": "m_zero_one_and_log_loss_share_optimizer",
+      "name": "Zero-one loss and log loss have the same empirical optimizer",
+      "description": "Conflates agreement in some decision boundaries with identity of objectives and fitted probability scores.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Write both empirical objectives and identify what each rewards among probability predictions."
+    },
+    {
+      "id": "m_regularization_is_extra_training_data",
+      "name": "Regularization contributes extra observed examples",
+      "description": "Treats a parameter penalty as additional empirical evidence rather than an explicit preference in the optimization objective.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Separate the data-fit sum from the penalty and state the information source represented by each term."
+    },
+    {
+      "id": "m_penalty_does_not_change_erm_solution",
+      "name": "A penalty leaves the empirical minimizer unchanged",
+      "description": "Assumes adding a nonconstant regularization term preserves the minimizer of the unpenalized sample loss.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Compare first-order conditions before and after adding the penalty."
+    },
+    {
+      "id": "m_sensitivity_equals_positive_predictive_value",
+      "name": "Sensitivity equals positive predictive value",
+      "description": "Reverses the conditioning direction between the probability of a positive test given disease and disease given a positive test.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Write each conditional probability with its event after the conditioning bar and apply Bayes' rule."
+    },
+    {
+      "id": "m_base_rate_can_be_ignored_after_positive_test",
+      "name": "A positive test makes the base rate irrelevant",
+      "description": "Updates from test accuracy without accounting for how many diseased and nondiseased cases enter the tested population.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Construct expected counts from prevalence, sensitivity, and false-positive rate."
+    },
+    {
+      "id": "m_false_positive_rate_is_posterior_error",
+      "name": "False-positive rate is the posterior error rate",
+      "description": "Confuses the fraction of nondiseased cases testing positive with the fraction of positive tests coming from nondiseased cases.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Compare the denominators of the two rates in a contingency table."
+    },
+    {
+      "id": "m_conditional_independence_implies_marginal_independence",
+      "name": "Conditional independence implies marginal independence",
+      "description": "Drops the conditioning variable and assumes a factorization persists after mixing across its values.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Marginalize a conditionally independent model over a shared latent cause and inspect the resulting dependence."
+    },
+    {
+      "id": "m_expectation_commutes_with_nonlinear_functions",
+      "name": "Expectation commutes with nonlinear functions",
+      "description": "Substitutes the mean into a nonlinear transformation as if linearity of expectation applied to the transformation itself.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Evaluate both quantities for a two-point random variable and compare."
+    },
+    {
+      "id": "m_squared_loss_targets_sample_median",
+      "name": "Squared loss targets the sample median",
+      "description": "Transfers the robust constant-predictor solution for absolute loss to a squared-error objective.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Differentiate the sum of squared residuals with respect to a constant prediction."
+    },
+    {
+      "id": "m_absolute_loss_targets_sample_mean",
+      "name": "Absolute loss targets the sample mean",
+      "description": "Assumes the balancing condition for squared residuals also minimizes the sum of absolute residual magnitudes.",
+      "concept_id": "c_empirical_risk_minimization",
+      "remediation": "Inspect the slope of absolute loss on either side of the ordered sample values."
+    },
+    {
+      "id": "m_shared_cause_does_not_induce_dependence",
+      "name": "A shared cause does not induce marginal dependence",
+      "description": "Assumes variables remain unrelated after mixing over a latent cause that changes both of their probabilities.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Marginalize over the shared cause and compare a joint probability with the product of its marginals."
+    },
+    {
+      "id": "m_conditional_independence_means_identical_tests",
+      "name": "Conditional independence means identical test behavior",
+      "description": "Confuses factorization of a conditional joint distribution with equality of the variables' sensitivities and false-positive rates.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Write separate conditional Bernoulli parameters while preserving the conditional factorization."
+    },
+    {
+      "id": "m_expected_value_is_most_likely_outcome",
+      "name": "The expected value is the most likely outcome",
+      "description": "Treats a distributional average as a mode or even as a value that the random variable can attain.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Compare the mean, support, and mode of a symmetric two-point distribution."
+    },
+    {
+      "id": "m_variance_determines_every_nonlinear_expectation",
+      "name": "Mean and variance determine all nonlinear expectations",
+      "description": "Assumes the first two moments determine expectations of arbitrary nonlinear functions across different distributions.",
+      "concept_id": "c_probability_reasoning",
+      "remediation": "Construct two distributions with matching first two moments but different higher-order moments."
+    },
+    {
+      "id": "m_supervised_means_classification",
+      "name": "Supervised learning means classification",
+      "description": "Restricts supervised learning to discrete class labels and excludes regression with observed numeric targets.",
+      "concept_id": "c_supervised_learning",
+      "remediation": "Identify the observed target and loss in both a classification task and a regression task."
+    },
+    {
+      "id": "m_supervised_labels_guarantee_generalization",
+      "name": "Labeled training data guarantee generalization",
+      "description": "Treats access to labels and low training loss as sufficient evidence of performance on future deployment examples.",
+      "concept_id": "c_supervised_learning",
+      "remediation": "Separate the supervised training signal from held-out evidence under the intended deployment process."
+    },
+    {
+      "id": "m_supervision_identifies_deployment_goal",
+      "name": "Any observed target defines the deployment goal",
+      "description": "Assumes a conveniently recorded label is automatically the outcome that the deployed decision should optimize.",
+      "concept_id": "c_supervised_learning",
+      "remediation": "State the deployment decision and verify that the training target and loss represent its desired outcome."
+    },
+    {
+      "id": "m_unsupervised_has_no_objective",
+      "name": "Unsupervised learning has no objective",
+      "description": "Confuses absence of task labels with absence of an explicit reconstruction, density, contrastive, or clustering objective.",
+      "concept_id": "c_unsupervised_learning",
+      "remediation": "Write the criterion optimized by an unlabeled-data method and distinguish it from an external task label."
+    },
+    {
+      "id": "m_clusters_are_observed_truth",
+      "name": "Clusters are observed ground truth",
+      "description": "Treats groups returned by an unsupervised algorithm as uniquely correct labels rather than consequences of a chosen objective and representation.",
+      "concept_id": "c_unsupervised_learning",
+      "remediation": "Compare clusterings produced by two defensible similarity choices and evaluate them against the intended use."
+    },
+    {
+      "id": "m_reconstruction_guarantees_task_value",
+      "name": "Reconstruction guarantees downstream usefulness",
+      "description": "Assumes preserving input detail under an unsupervised objective necessarily preserves the information needed by a later task.",
+      "concept_id": "c_unsupervised_learning",
+      "remediation": "Evaluate the learned representation on held-out downstream outcomes rather than inferring utility from reconstruction alone."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_erm_nested_classes_001",
+      "version": 1,
+      "family_id": "f_generalization_diagnosis",
+      "status": "approved",
+      "stem": "Let H1 be contained in a richer hypothesis class H2. Both models are fit by exact empirical risk minimization on the same finite training sample. Which statement follows without assuming the sample equals the deployment distribution perfectly?",
+      "kind": "conceptual",
+      "difficulty": 0.9,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.45,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.3,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_bias_variance",
+          "weight": 0.15,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 0.1,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The H2 solution has no greater training risk and therefore has no greater population risk.",
+          "correct": false,
+          "misconception_id": "m_lower_training_loss_guarantees_lower_test_loss",
+          "rationale": "The first clause follows from nesting; the population-risk conclusion does not because the selected richer model can have a larger estimation gap."
+        },
+        {
+          "id": "b",
+          "text": "H2 has no higher minimum training risk, but either class may generalize better because estimation error can offset approximation gains.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Class inclusion guarantees only empirical monotonicity; finite-sample generalization depends on how selection interacts with complexity and noise."
+        },
+        {
+          "id": "c",
+          "text": "Exact ERM directly minimizes population risk, so H2 is guaranteed to match or outperform H1 in deployment.",
+          "correct": false,
+          "misconception_id": "m_erm_directly_minimizes_population_risk",
+          "rationale": "ERM minimizes a sample average; the inaccessible population expectation is a different quantity."
+        },
+        {
+          "id": "d",
+          "text": "Once a validation set exists, H2 may be searched without limit because validation removes complexity and selection effects under repeated reuse.",
+          "correct": false,
+          "misconception_id": "m_validation_removes_need_for_complexity_control",
+          "rationale": "A finite validation set can itself be overfit through sufficiently adaptive search and does not erase estimation uncertainty."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "nested_hypothesis_classes",
+        "population_risk",
+        "overfitting"
+      ]
+    },
+    {
+      "id": "q_erm_loss_defines_target_001",
+      "version": 1,
+      "family_id": "f_loss_defines_empirical_target",
+      "status": "approved",
+      "stem": "A model class contains constant predictions only, and the observed targets are 1, 2, and 100. How does changing the empirical loss from squared error to absolute error change the fitted constant?",
+      "kind": "calculation",
+      "difficulty": -0.5,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Both losses fit 34 and one third, because empirical risk minimization selects the sample mean independently of the chosen loss.",
+          "correct": false,
+          "misconception_id": "m_erm_is_loss_independent",
+          "rationale": "The empirical objective includes the loss definition, so changing that definition can change its minimizer."
+        },
+        {
+          "id": "b",
+          "text": "Squared error fits 2, while absolute error fits 34 and one third, because squared residuals target the sample median.",
+          "correct": false,
+          "misconception_id": "m_squared_loss_targets_sample_median",
+          "rationale": "Squared loss is minimized at the arithmetic mean; the median is the constant solution for absolute loss."
+        },
+        {
+          "id": "c",
+          "text": "Squared error fits 34 and one third, while absolute error also fits that value because absolute residuals target the sample mean.",
+          "correct": false,
+          "misconception_id": "m_absolute_loss_targets_sample_mean",
+          "rationale": "Absolute-error slopes balance at a median, which is 2 for this ordered three-point sample."
+        },
+        {
+          "id": "d",
+          "text": "Squared error fits 34 and one third, while absolute error fits 2; the loss determines which empirical summary is optimal.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The sample mean minimizes summed squared deviations, whereas any sample median minimizes summed absolute deviations."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "loss_functions",
+        "mean",
+        "median"
+      ]
+    },
+    {
+      "id": "q_regularized_erm_selection_001",
+      "version": 1,
+      "family_id": "f_regularized_empirical_objective",
+      "status": "approved",
+      "stem": "A team minimizes average training loss plus lambda times the squared coefficient norm, choosing lambda on a finite validation set. Which statement most accurately describes what this procedure optimizes and what remains uncertain?",
+      "kind": "conceptual",
+      "difficulty": 0.55,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.5,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.25,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_generalization",
+          "weight": 0.15,
+          "role": "supporting"
+        },
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 0.1,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "For fixed lambda it minimizes a penalized sample objective; validation selects among such fits, while deployment risk still has estimation uncertainty.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The statement distinguishes data fit, an explicit parameter preference, validation-based selection, and the unknown population expectation."
+        },
+        {
+          "id": "b",
+          "text": "Among candidate lambdas, the fit with lower training loss also has lower deployment risk, so validation evidence is unnecessary for selection.",
+          "correct": false,
+          "misconception_id": "m_lower_training_loss_guarantees_lower_test_loss",
+          "rationale": "Training loss omits the estimation gap, so a less constrained fit can improve sample fit while worsening population performance."
+        },
+        {
+          "id": "c",
+          "text": "After lambda is chosen on validation, further complexity control and selection accounting are unnecessary because validation prevents adaptive overfitting.",
+          "correct": false,
+          "misconception_id": "m_validation_removes_need_for_complexity_control",
+          "rationale": "A finite validation set can itself be overfit through broad adaptive search, and its selection uncertainty remains relevant."
+        },
+        {
+          "id": "d",
+          "text": "Choosing lambda on validation turns the selected sample objective into population risk, eliminating the estimation gap for the final hypothesis.",
+          "correct": false,
+          "misconception_id": "m_erm_directly_minimizes_population_risk",
+          "rationale": "Validation provides finite evidence for selection but does not make an unknown deployment expectation identical to a sample quantity."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "regularization",
+        "validation",
+        "population_risk"
+      ]
+    },
+    {
+      "id": "q_bayes_base_rate_positive_test_001",
+      "version": 1,
+      "family_id": "f_conditional_inversion_base_rates",
+      "status": "approved",
+      "stem": "In a screened population, disease prevalence is 1%, sensitivity is 90%, and the false-positive rate is 9%. For a randomly selected person who tests positive, what is the approximate probability of disease?",
+      "kind": "calculation",
+      "difficulty": -0.55,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.85,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_calibration",
+          "weight": 0.15,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "About 90%, because sensitivity is the probability that a person has disease after receiving a positive result.",
+          "correct": false,
+          "misconception_id": "m_sensitivity_equals_positive_predictive_value",
+          "rationale": "Sensitivity conditions on disease, whereas the requested posterior conditions on the observed positive test."
+        },
+        {
+          "id": "b",
+          "text": "About 50%, because a positive result overrides the initial rarity and places disease and nondisease on equal footing.",
+          "correct": false,
+          "misconception_id": "m_base_rate_can_be_ignored_after_positive_test",
+          "rationale": "The low prevalence produces many more nondiseased people who can contribute false positives."
+        },
+        {
+          "id": "c",
+          "text": "About 91%, because one minus the false-positive rate is the fraction of positive results that are true positives.",
+          "correct": false,
+          "misconception_id": "m_false_positive_rate_is_posterior_error",
+          "rationale": "One minus the false-positive rate is specificity, whose denominator is nondiseased people rather than positive tests."
+        },
+        {
+          "id": "d",
+          "text": "About 9.2%, because among 10,000 people there are about 90 true positives and 891 false positives, giving 90 divided by 981.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Expected-count Bayes reasoning makes the denominator explicit and yields a posterior near 0.0917."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "bayes_rule",
+        "base_rate",
+        "diagnostic_testing"
+      ]
+    },
+    {
+      "id": "q_conditional_independence_common_cause_001",
+      "version": 1,
+      "family_id": "f_conditional_dependence_structure",
+      "status": "quarantined",
+      "stem": "Two laboratory tests are independent conditional on a patient's disease status. Each test is more likely positive when disease is present. Before disease status is observed, how are the two test results generally related?",
+      "kind": "conceptual",
+      "difficulty": 0.25,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "They are generally positively associated: one positive raises belief in disease, which raises the predictive probability that the other test is positive.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Mixing conditionally independent tests over a common latent cause can induce marginal dependence through posterior updating."
+        },
+        {
+          "id": "b",
+          "text": "They remain marginally independent, because conditional independence continues after the disease variable is averaged out of the joint distribution.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_implies_marginal_independence",
+          "rationale": "Averaging over disease mixes groups with different positive rates and generally creates dependence between the test results."
+        },
+        {
+          "id": "c",
+          "text": "They are unrelated through disease, because a shared latent cause changes individual test rates without inducing association between observed outcomes.",
+          "correct": false,
+          "misconception_id": "m_shared_cause_does_not_induce_dependence",
+          "rationale": "Variation in the shared disease state moves both positive probabilities together and therefore induces marginal association."
+        },
+        {
+          "id": "d",
+          "text": "They have identical sensitivities and false-positive rates, because conditional independence requires both tests to use the same conditional distribution.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_means_identical_tests",
+          "rationale": "Conditional independence factorizes the joint distribution but permits the two tests to have different conditional parameters."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "conditional_independence",
+        "latent_variable",
+        "common_cause"
+      ]
+    },
+    {
+      "id": "q_expectation_nonlinear_transform_001",
+      "version": 1,
+      "family_id": "f_expectation_nonlinear_transform",
+      "status": "approved",
+      "stem": "A random variable X equals negative one or positive one with equal probability, and g(x) = x-squared. Which comparison between E[g(X)] and g(E[X]) is correct, and what principle does it illustrate?",
+      "kind": "calculation",
+      "difficulty": -0.65,
+      "discrimination": 1.3,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Both equal zero, because expectation can be moved through the square before evaluating the two possible outcomes.",
+          "correct": false,
+          "misconception_id": "m_expectation_commutes_with_nonlinear_functions",
+          "rationale": "Linearity of expectation does not permit replacing the expectation of a square by the square of the expectation."
+        },
+        {
+          "id": "b",
+          "text": "E[g(X)] equals one while g(E[X]) equals zero; expectation generally does not commute with a nonlinear transformation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Each realized square is one, but the symmetric random variable has mean zero, whose square is zero."
+        },
+        {
+          "id": "c",
+          "text": "Both equal zero because zero is the expected and therefore most likely value of X before the square is applied.",
+          "correct": false,
+          "misconception_id": "m_expected_value_is_most_likely_outcome",
+          "rationale": "Zero is the mean but is not in the support of this random variable, and each realized square equals one."
+        },
+        {
+          "id": "d",
+          "text": "The values here are one and zero, and matching mean and variance would determine E[g(X)] for any nonlinear g in other distributions.",
+          "correct": false,
+          "misconception_id": "m_variance_determines_every_nonlinear_expectation",
+          "rationale": "The numerical pair is right here, but arbitrary nonlinear expectations can depend on higher moments and distributional shape."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "expectation",
+        "nonlinear_transform",
+        "moments"
+      ]
+    },
+    {
+      "id": "q_probability_claim_triage_001",
+      "version": 1,
+      "family_id": "f_probability_claim_triage",
+      "status": "approved",
+      "stem": "A learner summarizes three probability lessons involving diagnostic tests, shared latent causes, and nonlinear transformations. Which combined summary is valid across all three settings?",
+      "kind": "transfer",
+      "difficulty": 0.8,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Sensitivity gives disease probability after a positive test, while shared causes and nonlinear transformations require separate distributional calculations.",
+          "correct": false,
+          "misconception_id": "m_sensitivity_equals_positive_predictive_value",
+          "rationale": "The first clause reverses conditioning; posterior disease probability also depends on prevalence and the false-positive process."
+        },
+        {
+          "id": "b",
+          "text": "Conditional independence persists marginally after a shared cause is hidden, while Bayes calculations and nonlinear expectations use their stated distributions.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_implies_marginal_independence",
+          "rationale": "Marginalizing a common cause can associate variables that factorize after conditioning on that cause."
+        },
+        {
+          "id": "c",
+          "text": "Bayes denominators use base rates, shared latent causes can induce marginal dependence, and nonlinear expectations require averaging transformed outcomes.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Each clause preserves the relevant conditioning direction or distributional operation without collapsing distinct probability concepts."
+        },
+        {
+          "id": "d",
+          "text": "Expectation can pass through nonlinear transformations, while base rates and shared causes affect diagnostic-test calculations in their usual way.",
+          "correct": false,
+          "misconception_id": "m_expectation_commutes_with_nonlinear_functions",
+          "rationale": "The expectation identity holds for affine transformations but not for a general nonlinear function."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "bayes_rule",
+        "conditional_independence",
+        "expectation"
+      ]
+    },
+    {
+      "id": "q_erm_hard_vs_probabilistic_loss_001",
+      "version": 1,
+      "family_id": "f_empirical_loss_resolution",
+      "status": "approved",
+      "stem": "On four binary training examples, two classifiers make the same four hard class predictions, but one assigns much higher probability to each observed label. How can their empirical zero-one and log losses compare?",
+      "kind": "comparison",
+      "difficulty": -0.45,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_discriminative_models",
+          "weight": 0.2,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Both empirical losses tie because zero-one loss and log loss share an optimizer whenever the classifiers produce the same hard labels.",
+          "correct": false,
+          "misconception_id": "m_zero_one_and_log_loss_share_optimizer",
+          "rationale": "Zero-one loss discards probability confidence, while log loss distinguishes the probability assigned to the observed label."
+        },
+        {
+          "id": "b",
+          "text": "Their log losses tie because empirical risk minimization ignores the selected loss once the model class and training observations are fixed.",
+          "correct": false,
+          "misconception_id": "m_erm_is_loss_independent",
+          "rationale": "Empirical risk is defined by the chosen loss, so identical hard predictions need not imply identical probabilistic loss."
+        },
+        {
+          "id": "c",
+          "text": "Their zero-one losses tie, while the more confident correct classifier has lower log loss because log loss retains probability information beyond the decision.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The two losses summarize different aspects of the same fitted outputs and can therefore rank the classifiers differently."
+        },
+        {
+          "id": "d",
+          "text": "The lower training log loss proves lower deployment loss, because improving a finer empirical score eliminates uncertainty about future examples from the target process.",
+          "correct": false,
+          "misconception_id": "m_lower_training_loss_guarantees_lower_test_loss",
+          "rationale": "A lower sample objective is not a guarantee about an unknown population expectation, even when the loss is strictly proper."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "zero_one_loss",
+        "log_loss",
+        "probability"
+      ]
+    },
+    {
+      "id": "q_erm_penalty_constraint_001",
+      "version": 1,
+      "family_id": "f_penalty_constraint_equivalence",
+      "status": "approved",
+      "stem": "For a fixed training sample, increasing the coefficient on a norm penalty changes the fitted parameter and raises the unpenalized training loss. Which interpretation of this regularized empirical fit is sound?",
+      "kind": "conceptual",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.25,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The penalty contributes synthetic labeled observations, so its coefficient literally increases the empirical sample size used by the risk calculation.",
+          "correct": false,
+          "misconception_id": "m_regularization_is_extra_training_data",
+          "rationale": "A penalty adds a parameter preference to the objective; it does not add observed feature-label pairs to the sample."
+        },
+        {
+          "id": "b",
+          "text": "The penalty leaves the empirical minimizer unchanged and merely records a complexity score after the unpenalized training solution has been selected.",
+          "correct": false,
+          "misconception_id": "m_penalty_does_not_change_erm_solution",
+          "rationale": "When included during optimization, the penalty trades data fit against parameter size and can move the minimizing parameter."
+        },
+        {
+          "id": "c",
+          "text": "The new fit directly minimizes deployment risk, because adding a norm converts the finite-sample objective into the unknown population expectation.",
+          "correct": false,
+          "misconception_id": "m_erm_directly_minimizes_population_risk",
+          "rationale": "Regularization can improve expected generalization but does not make a sample objective identical to population risk."
+        },
+        {
+          "id": "d",
+          "text": "It minimizes a different empirical objective that trades sample fit for norm size; an equivalent constrained form can bound the allowed parameter norm.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Penalized and suitably constrained formulations express the same fit-versus-complexity tradeoff under standard convex conditions."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_bishop_prml_2006",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "regularization",
+        "constraint",
+        "empirical_objective"
+      ]
+    },
+    {
+      "id": "q_bayes_two_positive_tests_001",
+      "version": 1,
+      "family_id": "f_repeated_evidence_base_rates",
+      "status": "approved",
+      "stem": "Disease prevalence is 10%. Two tests are conditionally independent given disease status; each has 80% sensitivity and a 20% false-positive rate. Given two positive results, what is the disease probability?",
+      "kind": "calculation",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It is 80%, because sensitivity is the probability of disease after positive evidence and a second positive leaves that interpretation unchanged.",
+          "correct": false,
+          "misconception_id": "m_sensitivity_equals_positive_predictive_value",
+          "rationale": "Sensitivity conditions on disease, while the requested posterior also depends on prevalence and false positives among nondiseased people."
+        },
+        {
+          "id": "b",
+          "text": "It is 50%, because two positive results balance disease and nondisease evidence once the original base rate is removed from the calculation.",
+          "correct": false,
+          "misconception_id": "m_base_rate_can_be_ignored_after_positive_test",
+          "rationale": "The prior odds remain a factor in the posterior even after multiple likelihood contributions are observed."
+        },
+        {
+          "id": "c",
+          "text": "It is 96%, because one minus the joint false-positive probability of 0.04 is the fraction of double-positive results that are true cases.",
+          "correct": false,
+          "misconception_id": "m_false_positive_rate_is_posterior_error",
+          "rationale": "One minus a conditional false-positive probability is specificity, not the posterior fraction of positive patterns caused by disease."
+        },
+        {
+          "id": "d",
+          "text": "It is 64%, because disease contributes 0.10 times 0.80 squared and nondisease contributes 0.90 times 0.20 squared to double positives.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The normalized disease mass is 0.064 divided by 0.064 plus 0.036, which equals 0.64."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "bayes_rule",
+        "conditional_independence",
+        "repeated_tests"
+      ]
+    },
+    {
+      "id": "q_probability_moments_nonlinear_001",
+      "version": 1,
+      "family_id": "f_moments_nonlinear_limits",
+      "status": "approved",
+      "stem": "Two random variables have the same mean and variance but different distribution shapes. Without further information, which statement about their expected values after applying a nonlinear function h is justified?",
+      "kind": "conceptual",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Their transformed expectations equal h of the shared mean, because expectation passes through a nonlinear function when first moments match.",
+          "correct": false,
+          "misconception_id": "m_expectation_commutes_with_nonlinear_functions",
+          "rationale": "Expectation commutes generally with affine functions, not with an arbitrary nonlinear transformation."
+        },
+        {
+          "id": "b",
+          "text": "Their transformed expectations match because equal variance captures the distributional information needed for the expectation of any nonlinear function.",
+          "correct": false,
+          "misconception_id": "m_variance_determines_every_nonlinear_expectation",
+          "rationale": "Nonlinear expectations can depend on higher moments, tails, asymmetry, or other features not fixed by mean and variance."
+        },
+        {
+          "id": "c",
+          "text": "Their transformed expectations can differ, because h averages over the full outcome distributions and matching two moments does not determine that average.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Different shapes with common first and second moments can assign different mass where a nonlinear function is large."
+        },
+        {
+          "id": "d",
+          "text": "Their transformed expectations are the transformed most-likely outcomes, because an expected value represents the mode before and after applying h.",
+          "correct": false,
+          "misconception_id": "m_expected_value_is_most_likely_outcome",
+          "rationale": "A mean need not be a mode or even a possible outcome, and transformation does not create that identity."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "moments",
+        "nonlinear_expectation",
+        "distribution_shape"
+      ]
+    },
+    {
+      "id": "q_naive_bayes_marginal_dependence_001",
+      "version": 1,
+      "family_id": "f_naive_bayes_dependence_transfer",
+      "status": "approved",
+      "stem": "A naive Bayes model treats two word indicators as independent after conditioning on whether an email is spam. Each word is more common in spam. Before the class is known, how are the indicators generally related?",
+      "kind": "transfer",
+      "difficulty": 0.8,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "They remain marginally independent, because conditional independence persists when the unknown spam class is averaged out of the joint distribution.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_implies_marginal_independence",
+          "rationale": "Mixing class-conditional distributions with different word rates generally induces marginal association between the indicators."
+        },
+        {
+          "id": "b",
+          "text": "They remain unrelated through the class, because a shared latent spam status changes each word rate without inducing association between observed words.",
+          "correct": false,
+          "misconception_id": "m_shared_cause_does_not_induce_dependence",
+          "rationale": "Variation in a shared latent class moves both word probabilities and can therefore associate their observed occurrences."
+        },
+        {
+          "id": "c",
+          "text": "They have identical class-conditional frequencies, because conditional independence requires both word indicators to use the same conditional distribution.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_means_identical_tests",
+          "rationale": "Conditional independence factorizes the joint distribution but permits distinct word probabilities within each class."
+        },
+        {
+          "id": "d",
+          "text": "They are generally positively associated: observing one word raises spam belief, which raises the predictive probability of observing the other word.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Marginal association can arise through the unobserved class even though the naive Bayes factorization holds within each class."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "conditional_independence",
+        "naive_bayes",
+        "latent_class"
+      ]
+    },
+    {
+      "id": "q_erm_even_sample_absolute_loss_001",
+      "version": 1,
+      "family_id": "f_absolute_loss_minimizer_interval",
+      "status": "approved",
+      "stem": "A constant model is fit to targets 0, 0, 10, and 10. Which constants minimize empirical squared loss and empirical absolute loss, respectively?",
+      "kind": "calculation",
+      "difficulty": -0.6,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Squared loss is minimized at 5; absolute loss is minimized by any constant from 0 through 10, reflecting the median interval.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The mean is five, while the two middle order statistics bound the set of medians for an even sample."
+        },
+        {
+          "id": "b",
+          "text": "Squared loss is minimized at 0 or 10, while absolute loss is minimized at 5 because squared residuals target sample medians.",
+          "correct": false,
+          "misconception_id": "m_squared_loss_targets_sample_median",
+          "rationale": "Squared loss has the unique mean minimizer five; the absolute-loss minimizers form the median interval."
+        },
+        {
+          "id": "c",
+          "text": "Both losses are uniquely minimized at 5, because absolute residuals target the arithmetic mean just as squared residuals do.",
+          "correct": false,
+          "misconception_id": "m_absolute_loss_targets_sample_mean",
+          "rationale": "Every point between the middle observations balances the absolute-loss slopes, so five is not the unique absolute minimizer."
+        },
+        {
+          "id": "d",
+          "text": "Both losses have the same minimizer set from 0 through 10, because empirical risk minimization is independent of the selected loss.",
+          "correct": false,
+          "misconception_id": "m_erm_is_loss_independent",
+          "rationale": "Changing the loss changes the empirical geometry and can change both the location and uniqueness of its minimizer."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "squared_loss",
+        "absolute_loss",
+        "median_interval"
+      ]
+    },
+    {
+      "id": "q_erm_lasso_soft_threshold_001",
+      "version": 1,
+      "family_id": "f_lasso_objective_solution_change",
+      "status": "approved",
+      "stem": "In a one-predictor least-squares problem, increasing a lasso penalty eventually changes a nonzero fitted coefficient to exactly zero. What does this show about the empirical optimization problem?",
+      "kind": "counterfactual",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.25,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The penalty has added labeled zero-valued observations, so the coefficient vanishes because the empirical sample itself became larger.",
+          "correct": false,
+          "misconception_id": "m_regularization_is_extra_training_data",
+          "rationale": "The observed sample is unchanged; the objective acquired a parameter cost that trades against its data-fit term."
+        },
+        {
+          "id": "b",
+          "text": "The penalty changes the empirical objective and its minimizer; its kink at zero can make an exactly sparse solution preferable.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The absolute-value penalty modifies first-order optimality and can place the optimum at the nondifferentiable zero point."
+        },
+        {
+          "id": "c",
+          "text": "The unpenalized minimizer remains selected, while the penalty records a complexity value after fitting and leaves the coefficient unchanged.",
+          "correct": false,
+          "misconception_id": "m_penalty_does_not_change_erm_solution",
+          "rationale": "A penalty included in optimization participates in selection and can move or zero the fitted coefficient."
+        },
+        {
+          "id": "d",
+          "text": "The zero coefficient directly minimizes population risk, because a regularized sample objective equals the deployment expectation after its penalty grows sufficiently large.",
+          "correct": false,
+          "misconception_id": "m_erm_directly_minimizes_population_risk",
+          "rationale": "The regularized fit remains a finite-sample choice whose population performance is uncertain."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "lasso",
+        "sparsity",
+        "penalized_objective"
+      ]
+    },
+    {
+      "id": "q_erm_separable_log_loss_001",
+      "version": 1,
+      "family_id": "f_separable_loss_minimizers",
+      "status": "approved",
+      "stem": "A linearly separable training set admits many separating directions. Scaling one separating coefficient vector upward preserves all hard labels while driving logistic log loss toward zero. What follows?",
+      "kind": "conceptual",
+      "difficulty": 0.9,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_linear_models",
+          "weight": 0.2,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Zero-one and log loss have the same finite optimizer because they assign equal empirical risk to coefficient vectors producing equal hard labels.",
+          "correct": false,
+          "misconception_id": "m_zero_one_and_log_loss_share_optimizer",
+          "rationale": "Zero-one loss ties separating vectors, while unregularized logistic loss continues to reward increasing classification margins."
+        },
+        {
+          "id": "b",
+          "text": "Logistic loss becomes independent of its loss definition once separation occurs, so coefficient scale no longer affects empirical risk.",
+          "correct": false,
+          "misconception_id": "m_erm_is_loss_independent",
+          "rationale": "The log-loss values continue changing with predicted probabilities even after hard classifications stop changing."
+        },
+        {
+          "id": "c",
+          "text": "Zero-one loss can have many finite minimizers, while unregularized logistic loss may have an unattained infimum approached as coefficient norms diverge.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Separation exposes a genuine difference between a hard-decision loss and a probability-sensitive surrogate objective."
+        },
+        {
+          "id": "d",
+          "text": "The smallest observed log loss identifies the deployment-optimal coefficient scale, because lower training loss implies lower future loss on separable data.",
+          "correct": false,
+          "misconception_id": "m_lower_training_loss_guarantees_lower_test_loss",
+          "rationale": "Driving training margins upward can worsen estimation and calibration; sample loss alone does not establish deployment performance."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "erm",
+        "logistic_loss",
+        "separable_data",
+        "optimizer_existence"
+      ]
+    },
+    {
+      "id": "q_bayes_likelihood_ratio_001",
+      "version": 1,
+      "family_id": "f_bayes_likelihood_ratio_odds",
+      "status": "approved",
+      "stem": "Disease prevalence is 10%. A test has 60% sensitivity and a 20% false-positive rate, so a positive result has likelihood ratio 3. What is disease probability after one positive?",
+      "kind": "calculation",
+      "difficulty": -0.35,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It is 25%, because prior odds 1 to 9 become posterior odds 3 to 9, which normalize to 3 divided by 12.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Bayes in odds form multiplies the prior odds by the likelihood ratio and then converts odds back to probability."
+        },
+        {
+          "id": "b",
+          "text": "It is 60%, because sensitivity directly reports disease probability among people whose observed test result is positive.",
+          "correct": false,
+          "misconception_id": "m_sensitivity_equals_positive_predictive_value",
+          "rationale": "Sensitivity conditions on disease, while the requested posterior also accounts for prevalence and nondiseased positive results."
+        },
+        {
+          "id": "c",
+          "text": "It is 50%, because a positive result removes the original rarity and places disease and nondisease on equal prior footing.",
+          "correct": false,
+          "misconception_id": "m_base_rate_can_be_ignored_after_positive_test",
+          "rationale": "The likelihood ratio updates rather than erases the prior odds, which begin strongly in favor of nondisease."
+        },
+        {
+          "id": "d",
+          "text": "It is 80%, because one minus the false-positive rate is the fraction of positive tests arising from people with disease.",
+          "correct": false,
+          "misconception_id": "m_false_positive_rate_is_posterior_error",
+          "rationale": "One minus false-positive rate is specificity, not the positive predictive value."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability",
+        "bayes_rule",
+        "likelihood_ratio",
+        "odds"
+      ]
+    },
+    {
+      "id": "q_supervised_numeric_target_001",
+      "version": 1,
+      "family_id": "f_supervised_numeric_targets",
+      "status": "approved",
+      "stem": "A utility company fits a function from weather and household features to observed next-day electricity use, minimizing squared error on labeled examples. Which characterization is most accurate?",
+      "kind": "conceptual",
+      "difficulty": -0.8,
+      "discrimination": 1.25,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It is supervised regression because each training input is paired with an observed numeric target used by the loss.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Supervision comes from paired targets and a target-dependent loss; the target need not be a discrete class."
+        },
+        {
+          "id": "b",
+          "text": "It is unsupervised learning because electricity use is continuous rather than one of several named classes.",
+          "correct": false,
+          "misconception_id": "m_supervised_means_classification",
+          "rationale": "Regression with observed numeric outcomes is a standard supervised-learning setting."
+        },
+        {
+          "id": "c",
+          "text": "It establishes deployment performance once squared error is small on the labeled examples used for fitting.",
+          "correct": false,
+          "misconception_id": "m_supervised_labels_guarantee_generalization",
+          "rationale": "Training fit is not independent evidence about future households or weather conditions."
+        },
+        {
+          "id": "d",
+          "text": "It optimizes the correct business decision because recorded electricity use is available as a training target.",
+          "correct": false,
+          "misconception_id": "m_supervision_identifies_deployment_goal",
+          "rationale": "A recorded target does not by itself encode the costs or objective of the eventual business decision."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "supervised_learning",
+        "regression",
+        "targets",
+        "loss"
+      ]
+    },
+    {
+      "id": "q_supervised_shuffled_labels_001",
+      "version": 1,
+      "family_id": "f_supervised_label_permutation",
+      "status": "approved",
+      "stem": "A high-capacity classifier is trained after the class labels are randomly permuted across examples. It reaches nearly zero training loss but chance accuracy on an untouched set with the real labels. What does this experiment show?",
+      "kind": "counterfactual",
+      "difficulty": 0.1,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The labeled fitting process has learned a transferable rule because its supervised training loss is nearly zero.",
+          "correct": false,
+          "misconception_id": "m_supervised_labels_guarantee_generalization",
+          "rationale": "Memorizing randomized pairings can minimize training loss while conveying no relationship that transfers to real labels."
+        },
+        {
+          "id": "b",
+          "text": "The procedure remains supervised fitting, but its target pairing contains no useful signal for generalization to the real task.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The loss still uses paired labels, while the permutation destroys the input-target relationship needed for held-out prediction."
+        },
+        {
+          "id": "c",
+          "text": "The procedure becomes unsupervised because a class name counts as supervision when its semantic assignment is correct.",
+          "correct": false,
+          "misconception_id": "m_supervised_means_classification",
+          "rationale": "Supervision describes how targets enter the loss; semantic validity and generalization are separate questions."
+        },
+        {
+          "id": "d",
+          "text": "The procedure is aligned with deployment because any observed class column defines a valid supervised objective.",
+          "correct": false,
+          "misconception_id": "m_supervision_identifies_deployment_goal",
+          "rationale": "A target column can be corrupted or misaligned with the decision even though it is used in supervised training."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "supervised_learning",
+        "label_permutation",
+        "memorization",
+        "generalization"
+      ]
+    },
+    {
+      "id": "q_supervised_proxy_target_001",
+      "version": 1,
+      "family_id": "f_supervised_proxy_objectives",
+      "status": "approved",
+      "stem": "A fraud team trains a binary classifier to predict whether the previous rules engine sent a transaction to manual review. The desired deployment outcome is prevented financial loss. Which conclusion best separates supervision from objective choice?",
+      "kind": "application",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The binary target makes the task well aligned because supervised classification directly represents financial loss.",
+          "correct": false,
+          "misconception_id": "m_supervised_means_classification",
+          "rationale": "Being a classification target says nothing about whether it measures the downstream consequence of interest."
+        },
+        {
+          "id": "b",
+          "text": "Enough reviewed labels make held-out loss unnecessary because labeled examples already demonstrate future usefulness.",
+          "correct": false,
+          "misconception_id": "m_supervised_labels_guarantee_generalization",
+          "rationale": "Labels provide a fitting signal, not independent deployment evidence, especially when produced by an earlier policy."
+        },
+        {
+          "id": "c",
+          "text": "The training is supervised, but review status is a policy-dependent proxy whose relation to prevented loss needs separate validation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The observed target supplies supervision while alignment requires evidence that optimizing it improves the intended deployment outcome."
+        },
+        {
+          "id": "d",
+          "text": "The recorded review decision defines the deployment goal because an available target should determine the operational objective.",
+          "correct": false,
+          "misconception_id": "m_supervision_identifies_deployment_goal",
+          "rationale": "Convenient observability does not make a historical policy decision the desired causal or utility target."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "supervised_learning",
+        "proxy_target",
+        "policy_labels",
+        "alignment"
+      ]
+    },
+    {
+      "id": "q_unsupervised_cluster_objective_001",
+      "version": 1,
+      "family_id": "f_unsupervised_cluster_objectives",
+      "status": "approved",
+      "stem": "Two analysts cluster the same unlabeled customer records. One uses standardized Euclidean distance and the other uses a density-based method; they obtain different partitions. What is the strongest interpretation?",
+      "kind": "comparison",
+      "difficulty": -0.15,
+      "discrimination": 1.35,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Neither result is a learning output because unlabeled methods lack an objective that can define a fitted solution.",
+          "correct": false,
+          "misconception_id": "m_unsupervised_has_no_objective",
+          "rationale": "Each method optimizes or operationalizes a criterion even though no task labels enter that criterion."
+        },
+        {
+          "id": "b",
+          "text": "One partition is the hidden true labeling, so disagreement means one optimizer failed to recover the observed groups.",
+          "correct": false,
+          "misconception_id": "m_clusters_are_observed_truth",
+          "rationale": "The groups are not observed labels; they depend on representation, similarity, density, and other modeling choices."
+        },
+        {
+          "id": "c",
+          "text": "The partition retaining more input detail is preferable for any later decision that uses the customer records.",
+          "correct": false,
+          "misconception_id": "m_reconstruction_guarantees_task_value",
+          "rationale": "Retained detail may concern nuisance variation and does not establish usefulness for an unspecified downstream task."
+        },
+        {
+          "id": "d",
+          "text": "Both are unsupervised fits under different structural criteria, and usefulness should be evaluated for the intended downstream purpose.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Unsupervised results are conditional on an objective and representation; external validity comes from their intended use."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "unsupervised_learning",
+        "clustering",
+        "objective",
+        "validation"
+      ]
+    },
+    {
+      "id": "q_unsupervised_reconstruction_001",
+      "version": 1,
+      "family_id": "f_unsupervised_reconstruction_tradeoff",
+      "status": "approved",
+      "stem": "An autoencoder trained without task labels reconstructs camera backgrounds extremely well but suppresses a small defect that determines whether a manufactured part should be rejected. Which evaluation is most appropriate?",
+      "kind": "debugging",
+      "difficulty": 0.4,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Treat reconstruction as the unlabeled training objective, then test whether the representation preserves defect information on held-out parts.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The training criterion is well defined, but downstream utility requires a separate evaluation tied to the defect decision."
+        },
+        {
+          "id": "b",
+          "text": "Discard the result as undefined because learning without defect labels has no measurable objective to optimize.",
+          "correct": false,
+          "misconception_id": "m_unsupervised_has_no_objective",
+          "rationale": "Reconstruction error is a measurable objective even when it is not aligned with the later defect task."
+        },
+        {
+          "id": "c",
+          "text": "Accept the representation because low reconstruction error establishes that downstream defect information has been retained.",
+          "correct": false,
+          "misconception_id": "m_reconstruction_guarantees_task_value",
+          "rationale": "Average reconstruction can favor dominant background detail while dropping a small task-relevant feature."
+        },
+        {
+          "id": "d",
+          "text": "Interpret latent groups as the correct defect classes because structure discovered from the inputs provides target labels.",
+          "correct": false,
+          "misconception_id": "m_clusters_are_observed_truth",
+          "rationale": "Unsupervised structure is not automatically equivalent to the externally defined defect outcome."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "unsupervised_learning",
+        "autoencoder",
+        "reconstruction",
+        "downstream_validation"
+      ]
+    },
+    {
+      "id": "q_unsupervised_model_selection_001",
+      "version": 1,
+      "family_id": "f_unsupervised_external_validation",
+      "status": "approved",
+      "stem": "A team has two unlabeled-data representations of support tickets. The representations have equal dimension; one has lower reconstruction loss, while the other may better support routing to specialists. How should the team choose?",
+      "kind": "transfer",
+      "difficulty": 0.65,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Choose neither because an unlabeled representation has no fitted criterion that can be compared across models.",
+          "correct": false,
+          "misconception_id": "m_unsupervised_has_no_objective",
+          "rationale": "Both methods can have explicit unlabeled objectives; the issue is whether those objectives align with routing."
+        },
+        {
+          "id": "b",
+          "text": "Evaluate routing utility on a deployment-aligned labeled sample while retaining reconstruction as evidence about its own objective.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "A downstream evaluation tests the intended use without pretending that reconstruction and routing are the same criterion."
+        },
+        {
+          "id": "c",
+          "text": "Choose the lower reconstruction loss because preservation of more ticket detail establishes better routing performance.",
+          "correct": false,
+          "misconception_id": "m_reconstruction_guarantees_task_value",
+          "rationale": "A representation can reconstruct frequent wording while obscuring the distinctions that drive specialist assignment."
+        },
+        {
+          "id": "d",
+          "text": "Choose the representation with clearer clusters because discovered groups constitute the true specialist categories.",
+          "correct": false,
+          "misconception_id": "m_clusters_are_observed_truth",
+          "rationale": "Cluster shape reflects the chosen geometry and is not an observed routing ground truth."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "unsupervised_learning",
+        "representation",
+        "model_selection",
+        "transfer"
+      ]
+    },
+    {
+      "id": "q_probability_expected_shortfall_001",
+      "version": 1,
+      "family_id": "f_probability_expected_shortfall",
+      "status": "approved",
+      "stem": "Daily demand X is 0 units or 10 units with equal probability. A supplier prepays for 5 units and pays an emergency charge proportional to max(X - 5, 0). What is the expected emergency quantity?",
+      "kind": "application",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "2.5 units, because the emergency quantity is 0 or 5 with equal probability and those costs are averaged.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Applying the nonlinear shortfall function to each outcome gives an expectation of one half times 0 plus one half times 5."
+        },
+        {
+          "id": "b",
+          "text": "5 units, because the expected demand is the outcome most likely to occur and should be used as the emergency quantity.",
+          "correct": false,
+          "misconception_id": "m_expected_value_is_most_likely_outcome",
+          "rationale": "Demand 5 has probability zero in this distribution, and emergency quantity is not equal to mean demand."
+        },
+        {
+          "id": "c",
+          "text": "0 units, because max(E[X] - 5, 0) equals zero and expectation commutes with the shortfall function.",
+          "correct": false,
+          "misconception_id": "m_expectation_commutes_with_nonlinear_functions",
+          "rationale": "The positive-part function is nonlinear, so applying it after averaging loses the costly high-demand outcome."
+        },
+        {
+          "id": "d",
+          "text": "10 units, because demand variance by itself determines the expectation of this nonlinear emergency quantity.",
+          "correct": false,
+          "misconception_id": "m_variance_determines_every_nonlinear_expectation",
+          "rationale": "The expectation depends on the distribution relative to the threshold; variance alone does not produce this value."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability_reasoning",
+        "expectation",
+        "nonlinear_loss",
+        "decision"
+      ]
+    },
+    {
+      "id": "q_probability_conditional_tests_001",
+      "version": 1,
+      "family_id": "f_probability_conditional_test_dependence",
+      "status": "approved",
+      "stem": "Two screening tests use different biological signals. Given disease status, their errors are independent. Both tests are more likely to be positive for diseased people than for nondiseased people. Before disease status is observed, how are the test results related?",
+      "kind": "transfer",
+      "difficulty": 0.5,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "They are marginally independent because conditional independence persists after disease status is averaged out.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_implies_marginal_independence",
+          "rationale": "Mixing diseased and nondiseased groups can induce dependence between tests that factor within each group."
+        },
+        {
+          "id": "b",
+          "text": "They are marginally independent because a shared disease cause does not create association between its effects.",
+          "correct": false,
+          "misconception_id": "m_shared_cause_does_not_induce_dependence",
+          "rationale": "Disease changes both positive rates, so unobserved disease status makes positive results co-occur more often."
+        },
+        {
+          "id": "c",
+          "text": "They have identical marginal behavior because conditional independence requires equal sensitivity and false-positive rates.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_means_identical_tests",
+          "rationale": "Independence specifies factorization within disease strata, not equality of each test's parameters."
+        },
+        {
+          "id": "d",
+          "text": "They are generally marginally dependent because mixing over their shared disease cause associates the two results.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Disease is a common cause; conditional factorization need not survive marginalization over a variable that changes both tests."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "probability_reasoning",
+        "conditional_independence",
+        "common_cause",
+        "screening"
+      ]
+    },
+    {
+      "id": "q_supervised_loss_uses_target_001",
+      "version": 1,
+      "family_id": "f_supervised_target_in_objective",
+      "status": "approved",
+      "stem": "A dataset contains input vectors and observed next-week demand. Four training descriptions use the same table. Which description identifies the supervised-learning signal precisely?",
+      "kind": "debugging",
+      "difficulty": -0.2,
+      "discrimination": 1.4,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Cluster the input vectors and name the groups high and low demand, since named categories make the fit supervised.",
+          "correct": false,
+          "misconception_id": "m_supervised_means_classification",
+          "rationale": "Names assigned after clustering are not observed targets used to compute the fitting loss."
+        },
+        {
+          "id": "b",
+          "text": "Compare each prediction with its paired observed demand in the loss, so target errors drive the parameter updates.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The defining supervision is the example-level target entering the objective used for learning."
+        },
+        {
+          "id": "c",
+          "text": "Minimize reconstruction error on inputs and infer deployment validity because the demand column exists in the table.",
+          "correct": false,
+          "misconception_id": "m_supervision_identifies_deployment_goal",
+          "rationale": "A target that is present but unused in the objective does not supervise the reconstruction updates or establish alignment."
+        },
+        {
+          "id": "d",
+          "text": "Minimize demand error on fitted rows and infer future accuracy because a labeled training loss is low.",
+          "correct": false,
+          "misconception_id": "m_supervised_labels_guarantee_generalization",
+          "rationale": "This is supervised fitting, but training loss does not provide independent evidence for future performance."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "supervised_learning",
+        "target",
+        "loss",
+        "debugging"
+      ]
+    },
+    {
+      "id": "q_supervised_self_supervision_001",
+      "version": 1,
+      "family_id": "f_supervised_derived_targets",
+      "status": "approved",
+      "stem": "An encoder learns by rotating each unlabeled image by a sampled angle and predicting that known angle. It is later evaluated for defect recognition. Which description best distinguishes the training signal from downstream evidence?",
+      "kind": "transfer",
+      "difficulty": 0.45,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_supervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The angle prediction is unsupervised because a continuous target does not count as a supervision signal.",
+          "correct": false,
+          "misconception_id": "m_supervised_means_classification",
+          "rationale": "A numeric target can supervise a loss; here it is generated from the input rather than externally annotated."
+        },
+        {
+          "id": "b",
+          "text": "Accurate angle prediction establishes defect generalization because success on target-driven pretraining transfers to later labels.",
+          "correct": false,
+          "misconception_id": "m_supervised_labels_guarantee_generalization",
+          "rationale": "Performance on the derived target is not independent evidence about defect recognition."
+        },
+        {
+          "id": "c",
+          "text": "It is self-supervised target-driven fitting; whether its representation helps defects requires deployment-aligned downstream evaluation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The transformation supplies known targets without manual labels, while target-task usefulness remains an empirical question."
+        },
+        {
+          "id": "d",
+          "text": "The generated angle becomes the deployment objective because an observed training target determines what the system should optimize.",
+          "correct": false,
+          "misconception_id": "m_supervision_identifies_deployment_goal",
+          "rationale": "A convenient pretext target supplies a learning signal but does not define the later defect decision."
+        }
+      ],
+      "source_ids": [
+        "src_goodfellow_dl_2016",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "expert_authored_original_scenario",
+        "created_on": "2026-07-20",
+        "review_status": "structurally_validated_content_seed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "supervised_learning",
+        "self_supervision",
+        "derived_target",
+        "transfer"
+      ]
+    },
+    {
+      "id": "q_unsupervised_nmf_scaling_001",
+      "version": 1,
+      "family_id": "f_unsupervised_nmf_scaling_invariance",
+      "learning_objective_id": null,
+      "status": "quarantined",
+      "stem": "A non-negative matrix factorization uses X approximately equal to WH for soft customer segmentation. One row of W is (0.60, 0.40). With D = diag(0.5, 2), the author replaces W by WD and H by D^-1 H. The reconstruction is unchanged, but that row becomes (0.30, 0.80), reversing its largest component. What follows?",
+      "kind": "counterfactual",
+      "difficulty": 1.05,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The rescaling is invalid because an unlabeled factorization has no objective whose solution can be transformed.",
+          "correct": false,
+          "misconception_id": "m_unsupervised_has_no_objective",
+          "rationale": "NMF has an explicit reconstruction or divergence objective, and positive reciprocal component scaling leaves the product WH unchanged."
+        },
+        {
+          "id": "b",
+          "text": "Raw largest-component segments are not scale-identified; normalize the factors and validate any semantic assignment separately.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "WD D^-1 H equals WH, so reconstruction cannot choose between the two component scales even though an unnormalized argmax changes."
+        },
+        {
+          "id": "c",
+          "text": "The new second-component assignment is the observed true customer class because its loading is now largest.",
+          "correct": false,
+          "misconception_id": "m_clusters_are_observed_truth",
+          "rationale": "A factor label and an argmax convention are model-derived; reciprocal rescaling can change that convention without changing the fitted data."
+        },
+        {
+          "id": "d",
+          "text": "Identical reconstruction proves both raw assignments are equally useful for the later customer decision.",
+          "correct": false,
+          "misconception_id": "m_reconstruction_guarantees_task_value",
+          "rationale": "An objective tie does not identify semantic segments or establish equal downstream utility under an arbitrary scale-dependent assignment."
+        }
+      ],
+      "source_ids": [
+        "src_lee_seung_nmf_2000",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_redesign",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "redesign_reason": "Replaces a duplicate autoencoder scenario with an algebraic non-identifiability operation.",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "67b8fdc87b84bfc75c83e7440f0d5c9080bac7ffdeae9549e721443d08a1b653",
+        "review_sha256": "571f83a21557b2111594c96d95d8dcf29bff52369c3f65115665ec0a90398f64",
+        "review_chain_sha256": [
+          "571f83a21557b2111594c96d95d8dcf29bff52369c3f65115665ec0a90398f64"
+        ]
+      },
+      "tags": [
+        "unsupervised_learning",
+        "nmf",
+        "scale_invariance",
+        "nonidentifiability",
+        "counterfactual"
+      ]
+    },
+    {
+      "id": "q_unsupervised_dbscan_noise_001",
+      "version": 1,
+      "family_id": "f_unsupervised_dbscan_noise_semantics",
+      "learning_objective_id": null,
+      "status": "quarantined",
+      "stem": "DBSCAN is run with minPts = 5, counting the point itself. A transaction p has only four points including itself within epsilon and is not density-reachable from any other core point, so the fit labels p as noise. Which conclusion is justified?",
+      "kind": "application",
+      "difficulty": 0.75,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_unsupervised_learning",
+          "weight": 0.65,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_clustering",
+          "weight": 0.35,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It establishes that p is non-core and unreachable under this metric and parameter setting; fraud status needs separate evidence.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Four is below minPts and no core point reaches p, so the algorithmic noise label follows without becoming an observed fraud label."
+        },
+        {
+          "id": "b",
+          "text": "No fitted conclusion exists because an unlabeled method has no objective or operational definition of noise.",
+          "correct": false,
+          "misconception_id": "m_unsupervised_has_no_objective",
+          "rationale": "DBSCAN defines core, reachable, and noise points from an explicit neighborhood-density rule even without fraud outcomes."
+        },
+        {
+          "id": "c",
+          "text": "The noise label establishes that p belongs to the true observed fraud class.",
+          "correct": false,
+          "misconception_id": "m_clusters_are_observed_truth",
+          "rationale": "Density-defined noise is conditional on features, distance, epsilon, and minPts; it is not an externally observed fraud outcome."
+        },
+        {
+          "id": "d",
+          "text": "K-means should confirm the label because its centroid assignments are density-based tests of the same noise condition.",
+          "correct": false,
+          "misconception_id": "m_kmeans_is_density_based",
+          "rationale": "K-means minimizes squared distance to centroids and does not implement DBSCAN's core-point or density-reachability definitions."
+        }
+      ],
+      "source_ids": [
+        "src_ester_dbscan_1996",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_redesign",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "review_status": "independent_model_review_passed",
+        "independent_review": "required_before_pilot_or_activation",
+        "psychometrics": "uncalibrated_expert_prior",
+        "redesign_reason": "Replaces a duplicate internal-validation scenario with a parameterized density-reachability interpretation.",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "activation": "manual_after_independent_model_review",
+        "batch_sha256": "67b8fdc87b84bfc75c83e7440f0d5c9080bac7ffdeae9549e721443d08a1b653",
+        "review_sha256": "571f83a21557b2111594c96d95d8dcf29bff52369c3f65115665ec0a90398f64",
+        "review_chain_sha256": [
+          "571f83a21557b2111594c96d95d8dcf29bff52369c3f65115665ec0a90398f64"
+        ]
+      },
+      "tags": [
+        "unsupervised_learning",
+        "clustering",
+        "dbscan",
+        "noise",
+        "density_reachability"
+      ]
+    },
+    {
+      "id": "q_erm_penalty_observation_provenance_001",
+      "version": 1,
+      "family_id": "f_penalty_observation_provenance",
+      "learning_objective_id": null,
+      "status": "quarantined",
+      "stem": "A scalar model predicts w. The only observed training target is 4. Procedure P minimizes J_P(w) = (w - 4)^2 + w^2, where the second term is a declared ridge penalty and no row was added. Procedure D instead observes a second genuine training target 0 and minimizes J_D(w) = one half times [(w - 4)^2 + (w - 0)^2]. Which comparison is correct?",
+      "kind": "calculation",
+      "difficulty": 0.55,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_empirical_risk_minimization",
+          "weight": 0.75,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_regularization",
+          "weight": 0.25,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "P still fits w = 4 because a penalty cannot change an empirical minimizer, while D fits w = 2 after adding the observed zero.",
+          "correct": false,
+          "misconception_id": "m_penalty_does_not_change_erm_solution",
+          "rationale": "The penalty is part of P's optimized objective. Differentiating J_P gives 4w - 8, so its minimizer moves from 4 to 2."
+        },
+        {
+          "id": "b",
+          "text": "Both fit w = 2 and both contain two observed targets, because any algebraically equivalent penalty term is literally another measured training case.",
+          "correct": false,
+          "misconception_id": "m_regularization_is_extra_training_data",
+          "rationale": "The objectives are proportional and share a minimizer, but P's second term is an authored parameter preference; only D adds an observed target."
+        },
+        {
+          "id": "c",
+          "text": "Both fit w = 2, but only D adds empirical evidence; proportional objectives can share a minimizer without giving a penalty the provenance of an observation.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "J_P equals two times J_D, so both derivatives vanish at w = 2. A positive rescaling preserves an argmin, while the stated information source of each term remains different."
+        },
+        {
+          "id": "d",
+          "text": "Both fit w = 2, and agreement of the two finite objectives proves that w = 2 minimizes expected loss in the deployment population.",
+          "correct": false,
+          "misconception_id": "m_erm_directly_minimizes_population_risk",
+          "rationale": "Neither the one-case penalized fit nor the two-case sample average is the inaccessible population expectation merely because their minimizers coincide."
+        }
+      ],
+      "source_ids": [
+        "src_hoerl_kennard_ridge_1970",
+        "src_hastie_esl_2009",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_original_objective_comparison",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "review_status": "independent_model_review_passed",
+        "activation": "manual_after_independent_model_review",
+        "psychometrics": "uncalibrated_expert_prior",
+        "derivation": "J_P=(w-4)^2+w^2 and J_D=0.5[(w-4)^2+w^2], hence J_P=2J_D and both uniquely minimize at w=2. The equality is algebraic and does not change which procedure received a genuine observed target.",
+        "reviewed_on": "2026-07-23",
+        "human_review": false,
+        "batch_sha256": "0c0bb03ac6bbd3ea6808343c45f713242a27631480d0358b0ba7d3e2b5d953ab",
+        "review_sha256": "7afcbbb82e5d1b329778e69437c45d473cb8bbb021046235aa0524248ed3be5b",
+        "review_chain_sha256": [
+          "338c95be6f181df93eee71fa2d1031764f451ba1f453132be7f3379b06b4c905",
+          "7afcbbb82e5d1b329778e69437c45d473cb8bbb021046235aa0524248ed3be5b"
+        ]
+      },
+      "tags": [
+        "erm",
+        "ridge",
+        "empirical_evidence",
+        "objective_equivalence",
+        "calculation"
+      ]
+    }
+  ]
+}

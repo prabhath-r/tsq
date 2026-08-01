@@ -1,0 +1,395 @@
+{
+  "topic": {
+    "id": "t_language_modeling",
+    "domain_id": "d_artificial_intelligence",
+    "parent_id": "t_large_language_models",
+    "name": "Language Modeling",
+    "description": "Autoregressive sequence probability, contextual conditioning, and the limits of next-token objectives.",
+    "concept_ids": [
+      "c_autoregressive_language_modeling"
+    ],
+    "related_topic_ids": [
+      "t_ml_foundations",
+      "t_generative_modeling",
+      "t_transformers"
+    ],
+    "sort_order": 10
+  },
+  "concepts": [
+    {
+      "id": "c_autoregressive_language_modeling",
+      "name": "Autoregressive language modeling",
+      "description": "Factoring a sequence probability into next-token conditionals over prior context while keeping learned parameters fixed at inference.",
+      "level": "intermediate"
+    }
+  ],
+  "learning_objectives": [],
+  "misconceptions": [
+    {
+      "id": "m_ar_parallel_independence",
+      "name": "Parallel logits imply independent tokens",
+      "description": "Mistakes parallel teacher-forced computation for a factorization that removes dependence on earlier tokens.",
+      "concept_id": "c_autoregressive_language_modeling",
+      "remediation": "Write the sequence likelihood as a product of conditionals before reasoning about how those conditionals are computed."
+    },
+    {
+      "id": "m_ar_prompt_retrains_weights",
+      "name": "Prompt conditioning retrains model weights",
+      "description": "Treats an inference-time prompt as a parameter update rather than input context for a fixed model.",
+      "concept_id": "c_autoregressive_language_modeling",
+      "remediation": "Separate changes to the conditional context from optimizer-driven changes to parameters."
+    },
+    {
+      "id": "m_ar_likelihood_guarantees_factuality",
+      "name": "Next-token likelihood certifies factuality",
+      "description": "Equates probability under a text distribution with external truth or evidential support.",
+      "concept_id": "c_autoregressive_language_modeling",
+      "remediation": "Distinguish modeling text continuation frequencies from verifying claims against the world."
+    }
+  ],
+  "questions": [
+    {
+      "id": "q_ar_teacher_forcing_factorization_001",
+      "version": 1,
+      "family_id": "f_ar_teacher_forcing_factorization",
+      "status": "approved",
+      "stem": "A decoder is trained with teacher forcing, so logits for every position are computed in one parallel forward pass. Which statement correctly describes the modeled probability of the token sequence?",
+      "kind": "conceptual",
+      "difficulty": 0.35,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_autoregressive_language_modeling",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "It remains a product of next-token probabilities conditioned on earlier tokens; parallel training does not remove that factorization.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Teacher forcing supplies every prefix at once, but each position still represents its conditional factor in the sequence likelihood."
+        },
+        {
+          "id": "b",
+          "text": "It becomes a product of independent token marginals because positions whose logits are computed together no longer condition on prefixes.",
+          "correct": false,
+          "misconception_id": "m_ar_parallel_independence",
+          "rationale": "Computational parallelism does not erase the causal context used by each position."
+        },
+        {
+          "id": "c",
+          "text": "It is defined by prompt-specific weight updates because conditioning on earlier tokens retrains the decoder during each forward pass.",
+          "correct": false,
+          "misconception_id": "m_ar_prompt_retrains_weights",
+          "rationale": "Conditioning changes activations and probabilities while the model parameters remain fixed during the forward pass."
+        },
+        {
+          "id": "d",
+          "text": "It assigns factual confidence to the sequence because high teacher-forced likelihood verifies that each generated claim is externally supported.",
+          "correct": false,
+          "misconception_id": "m_ar_likelihood_guarantees_factuality",
+          "rationale": "Sequence likelihood describes fit to token patterns, not independent verification of factual claims."
+        }
+      ],
+      "source_ids": [
+        "src_brown_gpt3_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-21",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "llm",
+        "autoregressive",
+        "teacher_forcing",
+        "factorization"
+      ]
+    },
+    {
+      "id": "q_ar_prompt_conditioning_001",
+      "version": 1,
+      "family_id": "f_ar_prompt_conditioning",
+      "status": "approved",
+      "stem": "Two prompts are sent to the same deployed language model with sampling disabled and no fine-tuning between requests. Why can the next-token distributions differ?",
+      "kind": "debugging",
+      "difficulty": 0.2,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_autoregressive_language_modeling",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The model first predicts all tokens independently, then the prompt selects which marginal distribution should be exposed to the user.",
+          "correct": false,
+          "misconception_id": "m_ar_parallel_independence",
+          "rationale": "Autoregressive predictions are conditional on context rather than selected from context-free token marginals."
+        },
+        {
+          "id": "b",
+          "text": "The parameters stay fixed, while each prompt supplies a different prefix and therefore a different conditional next-token distribution.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Inference-time context changes hidden states and conditional probabilities without performing an optimizer update."
+        },
+        {
+          "id": "c",
+          "text": "Each prompt performs a temporary training step on its own text, producing new weights that are discarded after the response.",
+          "correct": false,
+          "misconception_id": "m_ar_prompt_retrains_weights",
+          "rationale": "Ordinary prompting is a forward-pass conditioning operation, not an implicit gradient update."
+        },
+        {
+          "id": "d",
+          "text": "The prompt with the higher-probability continuation has supplied stronger evidence that the continuation's factual claims are correct.",
+          "correct": false,
+          "misconception_id": "m_ar_likelihood_guarantees_factuality",
+          "rationale": "Conditional probability under the model is not a factuality or source-support score."
+        }
+      ],
+      "source_ids": [
+        "src_brown_gpt3_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-21",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "llm",
+        "prompting",
+        "conditioning",
+        "inference"
+      ]
+    },
+    {
+      "id": "q_ar_likelihood_factuality_001",
+      "version": 1,
+      "family_id": "f_ar_likelihood_factuality",
+      "status": "approved",
+      "stem": "An autoregressive model gives a fluent historical claim high continuation probability, but a trusted archive contradicts it. What conclusion follows from the language-model objective?",
+      "kind": "transfer",
+      "difficulty": 0.65,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_autoregressive_language_modeling",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_generative_models",
+          "weight": 0.2,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The contradiction occurs because the archive prompt silently retrained the model weights toward a different historical account.",
+          "correct": false,
+          "misconception_id": "m_ar_prompt_retrains_weights",
+          "rationale": "Supplying or consulting context does not imply that the deployed model parameters were optimized again."
+        },
+        {
+          "id": "b",
+          "text": "The claim should be accepted because a probable continuation under the text model carries stronger evidential status than an external record.",
+          "correct": false,
+          "misconception_id": "m_ar_likelihood_guarantees_factuality",
+          "rationale": "The objective learns token-distribution regularities and does not rank external sources by truth."
+        },
+        {
+          "id": "c",
+          "text": "High continuation probability can reflect common textual patterns; factual acceptance still requires evidence outside the next-token likelihood.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Likelihood under a language model and warranted belief about the world are different quantities."
+        },
+        {
+          "id": "d",
+          "text": "The archive and generated claim are independent token samples, so their disagreement does not reveal a limitation of conditional language modeling.",
+          "correct": false,
+          "misconception_id": "m_ar_parallel_independence",
+          "rationale": "The generated claim is context-conditioned, and the disagreement directly exposes that text likelihood is not factual verification."
+        }
+      ],
+      "source_ids": [
+        "src_brown_gpt3_2020",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-21",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "llm",
+        "likelihood",
+        "factuality",
+        "transfer"
+      ]
+    },
+    {
+      "id": "q_ar_fixed_weight_demonstrations_001",
+      "version": 1,
+      "family_id": "f_ar_fixed_weight_demonstrations",
+      "status": "approved",
+      "stem": "A deployed autoregressive model receives five worked examples in its prompt. Its parameter checksum is unchanged, yet its next-token predictions on a related query improve. Which explanation fits this observation?",
+      "kind": "application",
+      "difficulty": 0.5,
+      "discrimination": 1.55,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_autoregressive_language_modeling",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_generative_models",
+          "weight": 0.2,
+          "role": "context"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The examples changed the conditional context processed by fixed parameters; they did not perform an optimizer update.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "In-context examples alter the prefix and resulting activations while the deployed parameter values remain fixed."
+        },
+        {
+          "id": "b",
+          "text": "The examples triggered a temporary gradient step, so the model used prompt-specific weights despite the unchanged checksum.",
+          "correct": false,
+          "misconception_id": "m_ar_prompt_retrains_weights",
+          "rationale": "Ordinary prompting performs conditional inference, and an unchanged parameter checksum contradicts a weight update."
+        },
+        {
+          "id": "c",
+          "text": "The model predicted context-free token marginals, then selected a better independent distribution after reading the examples.",
+          "correct": false,
+          "misconception_id": "m_ar_parallel_independence",
+          "rationale": "Autoregressive logits are conditioned on the preceding context rather than chosen from independent token marginals."
+        },
+        {
+          "id": "d",
+          "text": "The improved continuation score established that factual claims in the response gained external evidential support.",
+          "correct": false,
+          "misconception_id": "m_ar_likelihood_guarantees_factuality",
+          "rationale": "Improved conditional prediction does not independently verify claims against evidence about the world."
+        }
+      ],
+      "source_ids": [
+        "src_brown_gpt3_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-21",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "llm",
+        "autoregressive",
+        "in_context_learning",
+        "fixed_parameters"
+      ]
+    },
+    {
+      "id": "q_ar_conditional_likelihood_product_001",
+      "version": 1,
+      "family_id": "f_ar_conditional_likelihood_product",
+      "status": "approved",
+      "stem": "For a three-token sequence, a fixed autoregressive model assigns probabilities 0.50, 0.25, and 0.10 to each observed token conditioned on its preceding prefix. Which computation and interpretation are valid?",
+      "kind": "calculation",
+      "difficulty": 0.75,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_autoregressive_language_modeling",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Multiply to obtain 0.0125, then interpret the factors as context-free marginals because their logits were computed in parallel.",
+          "correct": false,
+          "misconception_id": "m_ar_parallel_independence",
+          "rationale": "The numerical product is right, but each factor is explicitly conditional on its prefix rather than a context-free marginal."
+        },
+        {
+          "id": "b",
+          "text": "Multiply to obtain 0.0125, interpreting the result as the product of successive prefix-conditioned token probabilities.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The autoregressive chain rule assigns the sequence probability by multiplying the stated conditional factors."
+        },
+        {
+          "id": "c",
+          "text": "Recompute the factors after a prompt-specific parameter update because conditioning each token retrains the model weights.",
+          "correct": false,
+          "misconception_id": "m_ar_prompt_retrains_weights",
+          "rationale": "Prefix conditioning changes model inputs and activations without implying an optimizer step or new parameters."
+        },
+        {
+          "id": "d",
+          "text": "Use the largest factor, 0.50, as the sequence's factual confidence because likelihood certifies external correctness.",
+          "correct": false,
+          "misconception_id": "m_ar_likelihood_guarantees_factuality",
+          "rationale": "Neither a token probability nor their product independently verifies the sequence's claims against external evidence."
+        }
+      ],
+      "source_ids": [
+        "src_brown_gpt3_2020",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_original_scenario",
+        "created_on": "2026-07-21",
+        "review_status": "deterministic_quality_reviewed",
+        "psychometrics": "expert_prior_needs_empirical_calibration"
+      },
+      "tags": [
+        "llm",
+        "autoregressive",
+        "chain_rule",
+        "likelihood",
+        "calculation"
+      ]
+    }
+  ]
+}

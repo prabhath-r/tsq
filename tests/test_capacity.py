@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import tsq.capacity as capacity_module
+from tsq.corpus import corpus_source_digest, load_bundle
 from tsq.capacity import (
     CapacityAnalysisLimitError,
     CapacityTarget,
@@ -40,7 +41,7 @@ from tsq.models import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CORPUS = ROOT / "corpus" / "ai_curriculum.json"
+CORPUS = ROOT / "corpus"
 
 
 def make_question(
@@ -887,7 +888,7 @@ class CapacityCliTestCase(unittest.TestCase):
     def test_quarantined_transformer_candidates_do_not_inflate_live_capacity(
         self,
     ) -> None:
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         topic = next(
             item for item in bundle["topics"] if item["id"] == "t_transformers"
         )
@@ -940,7 +941,7 @@ class CapacityCliTestCase(unittest.TestCase):
         )
 
         payload = json.loads(output)
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         self.assertEqual(code, 0, errors)
         self.assertEqual(payload["summary"]["target_count"], len(bundle["topics"]))
         self.assertTrue(
@@ -972,7 +973,7 @@ class CapacityCliTestCase(unittest.TestCase):
     def test_strict_fails_for_blocked_target_but_regular_mode_is_informational(
         self,
     ) -> None:
-        bundle = json.loads(CORPUS.read_text(encoding="utf-8"))
+        bundle = load_bundle(CORPUS)
         for question in bundle["questions"]:
             question["status"] = "retired"
         with tempfile.TemporaryDirectory() as directory:
@@ -1049,7 +1050,7 @@ class CapacityCliTestCase(unittest.TestCase):
     def test_quarantine_impact_finds_exact_agent_bridge_without_activation(
         self,
     ) -> None:
-        before = hashlib.sha256(CORPUS.read_bytes()).hexdigest()
+        before = corpus_source_digest(CORPUS)
         code, output, errors = self.run_cli(
             [
                 "capacity",
@@ -1064,7 +1065,7 @@ class CapacityCliTestCase(unittest.TestCase):
         payload = json.loads(output)
         self.assertEqual(code, 0, errors)
         self.assertEqual(
-            hashlib.sha256(CORPUS.read_bytes()).hexdigest(), before
+            corpus_source_digest(CORPUS), before
         )
         self.assertTrue(
             payload["exact_within_declared_search_space"]
