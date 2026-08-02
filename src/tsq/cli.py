@@ -17,6 +17,7 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Iterator
 
+from . import __version__
 from .artifact_intake import (
     CheckpointFileKind,
     capture_productive_artifact,
@@ -3411,6 +3412,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tsq",
         description="Explainable, knowledge-graph adaptive learning engine",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
     )
     parser.add_argument("--db", type=Path, default=_default_database(), help="SQLite database path")
     subparsers = parser.add_subparsers(dest="command", required=True)

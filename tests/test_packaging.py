@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from scripts import sync_bundled_corpus
+from tsq import __version__
 from tsq.corpus import (
     corpus_source_digest,
     load_bundle,
@@ -43,6 +44,7 @@ class PackagingTestCase(unittest.TestCase):
     def test_public_release_license_and_attribution_are_consistent(self) -> None:
         metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
         self.assertEqual(metadata["project"]["license"], "MPL-2.0")
+        self.assertEqual(metadata["project"]["version"], __version__)
 
         license_text = (ROOT / "LICENSE").read_text()
         self.assertTrue(license_text.startswith("Mozilla Public License Version 2.0\n"))
@@ -68,6 +70,22 @@ class PackagingTestCase(unittest.TestCase):
                     "# SPDX-License-Identifier: MPL-2.0",
                     source_file.read_text().splitlines()[:3],
                 )
+
+    def test_cli_reports_the_package_version(self) -> None:
+        environment = os.environ.copy()
+        environment["PYTHONPATH"] = str(ROOT / "src")
+        result = subprocess.run(
+            [sys.executable, "-m", "tsq", "--version"],
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"tsq {__version__}\n")
 
     def test_bundled_seed_tree_is_byte_identical_to_canonical_corpus(self) -> None:
         source = {
