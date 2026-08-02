@@ -364,7 +364,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
             before_events = event_snapshot(database)
             before_schema = schema_contract(database)
 
-            self.assertEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(SCHEMA_VERSION, 22)
             self.assertEqual(
                 before_schema,
                 _expected_v16_schema_contract(),
@@ -400,7 +400,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "21")
+            self.assertEqual(version, str(SCHEMA_VERSION))
             upgraded_trigger = claim_trigger_sql(database)
             self.assertIn(
                 "NEW.claim_schema_version = 1",
@@ -701,7 +701,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                     """SELECT value FROM meta
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
-            self.assertEqual(version, "21")
+            self.assertEqual(version, str(SCHEMA_VERSION))
 
     def test_scoring_claim_fk_deferrability_is_part_of_schema_contract(
         self,
@@ -740,13 +740,13 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 "DEFERRABLE INITIALLY DEFERRED",
                 row["sql"].upper(),
             )
-            self.assertEqual(version, "21")
+            self.assertEqual(version, str(SCHEMA_VERSION))
 
-    def test_current_v21_fk_corruption_fails_before_safety_writes(
+    def test_current_schema_fk_corruption_fails_before_safety_writes(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "current-v21-fk-corrupt.db"
+            path = Path(directory) / "current-fk-corrupt.db"
             database = Database(path)
             database.initialize()
             with closing(sqlite3.connect(path)) as connection:
@@ -801,7 +801,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                        WHERE key='schema_version'"""
                 ).fetchone()["value"]
             self.assertEqual(after_violations, before_violations)
-            self.assertEqual(version, "21")
+            self.assertEqual(version, str(SCHEMA_VERSION))
 
 
 if __name__ == "__main__":

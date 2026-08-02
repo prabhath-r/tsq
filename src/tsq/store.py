@@ -108,7 +108,7 @@ from .versions import (
 )
 
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX = (
     "performance-score-claim:v1:"
 )
@@ -2862,8 +2862,9 @@ BEFORE INSERT ON performance_artifact_run_claims BEGIN
           AND substr(NEW.claimed_at, 12, 2) BETWEEN '00' AND '23'
           AND substr(NEW.claimed_at, 15, 2) BETWEEN '00' AND '59'
           AND substr(NEW.claimed_at, 18, 2) BETWEEN '00' AND '59'
-          AND julianday(NEW.claimed_at) IS NOT NULL
-          AND strftime('%Y-%m-%d', NEW.claimed_at) =
+          AND julianday(NEW.claimed_at, 'start of day') IS NOT NULL
+          AND strftime('%Y-%m-%d', NEW.claimed_at,
+                       'start of day', '+0 days') =
               substr(NEW.claimed_at, 1, 10)
           AND NEW.claimed_at >= artifact.occurred_at
     ) THEN RAISE(
@@ -3111,11 +3112,13 @@ BEFORE INSERT ON performance_artifact_run_receipts BEGIN
           AND substr(NEW.completed_at, 12, 2) BETWEEN '00' AND '23'
           AND substr(NEW.completed_at, 15, 2) BETWEEN '00' AND '59'
           AND substr(NEW.completed_at, 18, 2) BETWEEN '00' AND '59'
-          AND julianday(NEW.started_at) IS NOT NULL
-          AND julianday(NEW.completed_at) IS NOT NULL
-          AND strftime('%Y-%m-%d', NEW.started_at) =
+          AND julianday(NEW.started_at, 'start of day') IS NOT NULL
+          AND julianday(NEW.completed_at, 'start of day') IS NOT NULL
+          AND strftime('%Y-%m-%d', NEW.started_at,
+                       'start of day', '+0 days') =
               substr(NEW.started_at, 1, 10)
-          AND strftime('%Y-%m-%d', NEW.completed_at) =
+          AND strftime('%Y-%m-%d', NEW.completed_at,
+                       'start of day', '+0 days') =
               substr(NEW.completed_at, 1, 10)
           AND NEW.started_at >= claim.claimed_at
           AND NEW.completed_at >= NEW.started_at
@@ -3969,6 +3972,13 @@ _V21_EVENT_INDEX_NAMES = frozenset(
     }
 )
 
+_V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS = {
+    "performance_artifact_run_claims_validate_insert": 1,
+    "performance_artifact_run_receipts_validate_insert": 2,
+    "performance_scoring_claims_validate_insert": 1,
+    "performance_scoring_reconciliations_validate_insert": 3,
+}
+
 
 @lru_cache(maxsize=1)
 def _expected_current_schema_contract() -> _CurrentSchemaContract:
@@ -3991,6 +4001,34 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         reference._install_v8_learning_action_triggers(connection)
         reference._install_release_snapshot_triggers(connection)
         reference._install_corpus_registry_triggers(connection)
+        connection.commit()
+        return _capture_current_schema_contract(connection)
+    finally:
+        connection.close()
+
+
+@lru_cache(maxsize=1)
+def _expected_v21_schema_contract() -> _CurrentSchemaContract:
+    """Return the one exact v21 calendar-guard migration source."""
+
+    connection = sqlite3.connect(":memory:")
+    connection.row_factory = sqlite3.Row
+    reference = Database(":memory:")
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(DDL)
+        reference._migrate_v11_to_v12(connection)
+        reference._migrate_v12_to_v13(connection)
+        reference._migrate_v13_to_v14(connection)
+        reference._migrate_v14_to_v15(connection)
+        reference._install_current_performance_scoring_triggers(connection)
+        reference._install_v5_indexes(connection)
+        reference._install_v6_authoring_triggers(connection)
+        reference._install_v4_attempt_triggers(connection)
+        reference._install_v8_learning_action_triggers(connection)
+        reference._install_release_snapshot_triggers(connection)
+        reference._install_corpus_registry_triggers(connection)
+        reference._downgrade_v22_contract_to_v21(connection)
         connection.commit()
         return _capture_current_schema_contract(connection)
     finally:
@@ -4687,7 +4725,16 @@ class Database:
                             )
                             self._enforce_historical_generated_safety()
                             return
-                        if existing_version == 20:
+                        if existing_version == 21:
+                            actual_v21 = _capture_current_schema_contract(
+                                existing_connection
+                            )
+                            if actual_v21 != _expected_v21_schema_contract():
+                                raise ConflictError(
+                                    "Schema v21 structure is not the exact "
+                                    "supported v22 migration source."
+                                )
+                        elif existing_version == 20:
                             actual_v20 = _capture_current_schema_contract(
                                 existing_connection
                             )
@@ -4839,7 +4886,16 @@ class Database:
                 raise ConflictError(
                     f"Database schema is {current_version}; engine expects at most {SCHEMA_VERSION}."
                 )
-            if current_version == 20:
+            if current_version == 21:
+                if (
+                    _capture_current_schema_contract(connection)
+                    != _expected_v21_schema_contract()
+                ):
+                    raise ConflictError(
+                        "Schema v21 structure is not the exact supported "
+                        "v22 migration source."
+                    )
+            elif current_version == 20:
                 if (
                     _capture_current_schema_contract(connection)
                     != _expected_v20_schema_contract()
@@ -4994,6 +5050,12 @@ class Database:
             if current_version < 21:
                 self._migrate_v20_to_v21(connection)
                 current_version = 21
+            # v22 makes Gregorian calendar validation deterministic across
+            # SQLite versions. Existing immutable values are checked first;
+            # impossible dates abort rather than being normalized or hidden.
+            if current_version < 22:
+                self._migrate_v21_to_v22(connection)
+                current_version = 22
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -6850,7 +6912,101 @@ class Database:
         )
 
     @staticmethod
+    def _downgrade_v22_contract_to_v21(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Derive the exact v21 timestamp-guard contract for preflight.
+
+        This helper is used only against fresh reference schemas and migration
+        fixtures. Version 22 floors seven timestamp fields to their day before
+        an explicit no-op modifier makes SQLite 3.40 normalize impossible
+        calendar dates. Flooring also avoids version-specific rounding at the
+        upper timestamp boundary.
+        """
+
+        actual = {
+            name: sql
+            for name, _table, sql in (
+                _capture_current_schema_contract(connection).triggers
+            )
+            if name in _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS
+        }
+        current = {
+            name: sql
+            for name, _table, sql in (
+                _expected_current_schema_contract().triggers
+            )
+            if name in _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS
+        }
+        if set(current) != set(_V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS):
+            raise RuntimeError("Current schema lacks a calendar trigger.")
+        expected_floor_counts = {
+            name: count * 2
+            for name, count in (
+                _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS.items()
+            )
+        }
+        actual_counts = {
+            name: sql.count(", '+0 days'") for name, sql in current.items()
+        }
+        floor_counts = {
+            name: sql.count(", 'start of day'")
+            for name, sql in current.items()
+        }
+        if (
+            actual_counts != _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS
+            or floor_counts != expected_floor_counts
+        ):
+            raise RuntimeError(
+                "Current calendar triggers cannot derive the v21 contract."
+            )
+
+        legacy = {
+            name: sql.replace(", 'start of day'", "").replace(
+                ", '+0 days'", ""
+            )
+            for name, sql in current.items()
+        }
+        if actual == legacy:
+            return
+        if actual != current:
+            raise RuntimeError(
+                "Schema is not the exact current calendar-trigger contract."
+            )
+
+        raw = {
+            row["name"]: row["sql"]
+            for row in connection.execute(
+                """SELECT name, sql FROM sqlite_master
+                   WHERE type='trigger' ORDER BY name"""
+            )
+            if row["name"] in _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS
+        }
+        transformed = {
+            name: re.sub(
+                r",\s*'\+0 days'",
+                "",
+                re.sub(r",\s*'start of day'", "", sql),
+            )
+            for name, sql in raw.items()
+        }
+        if {
+            name: _normalize_schema_sql(sql)
+            for name, sql in transformed.items()
+        } != legacy:
+            raise RuntimeError(
+                "Current calendar triggers did not derive exact v21 SQL."
+            )
+
+        for trigger_name, sql in transformed.items():
+            connection.execute(
+                "DROP TRIGGER " + _quote_sqlite_identifier(trigger_name)
+            )
+            connection.execute(sql)
+
+    @classmethod
     def _downgrade_v21_contract_to_v20(
+        cls,
         connection: sqlite3.Connection,
     ) -> None:
         """Derive the exact v20 event-index contract for migration preflight.
@@ -6860,6 +7016,7 @@ class Database:
         the event lookup indexes.
         """
 
+        cls._downgrade_v22_contract_to_v21(connection)
         for index_name in sorted(_V21_EVENT_INDEX_NAMES):
             connection.execute(
                 "DROP INDEX IF EXISTS "
@@ -7637,6 +7794,155 @@ class Database:
             )
 
     @staticmethod
+    def _invalid_v21_calendar_timestamp(
+        connection: sqlite3.Connection,
+    ) -> tuple[str, str] | None:
+        """Return the first impossible calendar value admitted by old SQLite."""
+
+        checks = (
+            (
+                "artifact-run claim claimed_at",
+                """SELECT id, claimed_at AS value
+                   FROM performance_artifact_run_claims
+                   WHERE strftime(
+                       '%Y-%m-%d', claimed_at, 'start of day', '+0 days'
+                   ) IS NOT substr(claimed_at, 1, 10)
+                   ORDER BY id LIMIT 1""",
+            ),
+            (
+                "artifact-run receipt started_at",
+                """SELECT id, started_at AS value
+                   FROM performance_artifact_run_receipts
+                   WHERE strftime(
+                       '%Y-%m-%d', started_at, 'start of day', '+0 days'
+                   ) IS NOT substr(started_at, 1, 10)
+                   ORDER BY id LIMIT 1""",
+            ),
+            (
+                "artifact-run receipt completed_at",
+                """SELECT id, completed_at AS value
+                   FROM performance_artifact_run_receipts
+                   WHERE strftime(
+                       '%Y-%m-%d', completed_at, 'start of day', '+0 days'
+                   ) IS NOT substr(completed_at, 1, 10)
+                   ORDER BY id LIMIT 1""",
+            ),
+            (
+                "scoring claim claimed_at",
+                """SELECT id, claimed_at AS value
+                   FROM performance_scoring_claims
+                   WHERE claim_schema_version = 2
+                     AND strftime(
+                       '%Y-%m-%d', claimed_at, 'start of day', '+0 days'
+                   ) IS NOT substr(claimed_at, 1, 10)
+                   ORDER BY id LIMIT 1""",
+            ),
+            (
+                "scoring reconciliation reconciled_at",
+                """SELECT id, reconciled_at AS value
+                   FROM performance_scoring_reconciliations
+                   WHERE strftime(
+                       '%Y-%m-%d', reconciled_at, 'start of day', '+0 days'
+                   ) IS NOT substr(reconciled_at, 1, 10)
+                   ORDER BY id LIMIT 1""",
+            ),
+            (
+                "scoring receipt observed_at",
+                """SELECT id,
+                          json_extract(receipt_json, '$.observed_at') AS value
+                   FROM performance_scoring_reconciliations
+                   WHERE strftime(
+                       '%Y-%m-%d',
+                       json_extract(receipt_json, '$.observed_at'),
+                       'start of day', '+0 days'
+                   ) IS NOT substr(
+                       json_extract(receipt_json, '$.observed_at'), 1, 10
+                   )
+                   ORDER BY id LIMIT 1""",
+            ),
+            (
+                "scoring receipt completed_at",
+                """SELECT id,
+                          json_extract(receipt_json, '$.completed_at') AS value
+                   FROM performance_scoring_reconciliations
+                   WHERE json_type(receipt_json, '$.completed_at') = 'text'
+                     AND strftime(
+                         '%Y-%m-%d',
+                         json_extract(receipt_json, '$.completed_at'),
+                         'start of day', '+0 days'
+                     ) IS NOT substr(
+                         json_extract(receipt_json, '$.completed_at'), 1, 10
+                     )
+                   ORDER BY id LIMIT 1""",
+            ),
+        )
+        for label, sql in checks:
+            row = connection.execute(sql).fetchone()
+            if row is not None:
+                return label, f"{row['id']}={row['value']}"
+        return None
+
+    @staticmethod
+    def _install_current_performance_artifact_run_triggers(
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Install the exact current artifact-run guards."""
+
+        expected = {
+            name: sql
+            for name, _table, sql in (
+                _expected_current_schema_contract().triggers
+            )
+            if name in _ARTIFACT_RUN_TRIGGER_NAMES
+        }
+        if set(expected) != set(_ARTIFACT_RUN_TRIGGER_NAMES):
+            raise RuntimeError(
+                "Current schema lacks an artifact-run projection guard."
+            )
+        for trigger_name in sorted(_ARTIFACT_RUN_TRIGGER_NAMES):
+            connection.execute(
+                "DROP TRIGGER IF EXISTS "
+                + _quote_sqlite_identifier(trigger_name)
+            )
+            connection.execute(expected[trigger_name])
+
+    @classmethod
+    def _migrate_v21_to_v22(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Make calendar validation deterministic without rewriting history."""
+
+        invalid = cls._invalid_v21_calendar_timestamp(connection)
+        if invalid is not None:
+            label, detail = invalid
+            raise ConflictError(
+                "Schema v21 contains an impossible immutable calendar "
+                f"timestamp ({label}: {detail}); refusing to rewrite history."
+            )
+
+        cls._install_current_performance_artifact_run_triggers(connection)
+        cls._install_current_performance_scoring_triggers(connection)
+        expected = {
+            name: (table, sql)
+            for name, table, sql in (
+                _expected_current_schema_contract().triggers
+            )
+            if name in _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS
+        }
+        actual = {
+            name: (table, sql)
+            for name, table, sql in (
+                _capture_current_schema_contract(connection).triggers
+            )
+            if name in _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS
+        }
+        if actual != expected:
+            raise ConflictError(
+                "Schema v22 calendar guards were not installed exactly."
+            )
+
+    @staticmethod
     def _drop_policy_shadow_triggers(
         connection: sqlite3.Connection,
     ) -> None:
@@ -8227,9 +8533,11 @@ class Database:
                                   BETWEEN '00' AND '59'
                               AND substr(NEW.claimed_at, 18, 2)
                                   BETWEEN '00' AND '59'
-                              AND julianday(NEW.claimed_at) IS NOT NULL
+                              AND julianday(NEW.claimed_at,
+                                            'start of day') IS NOT NULL
                               AND strftime(
-                                  '%Y-%m-%d', NEW.claimed_at
+                                  '%Y-%m-%d', NEW.claimed_at,
+                                  'start of day', '+0 days'
                               ) = substr(NEW.claimed_at, 1, 10)
                               AND json_type(
                                   claim_event.payload_json,
@@ -8958,9 +9266,11 @@ class Database:
                           BETWEEN '00' AND '59'
                       AND substr(NEW.reconciled_at, 18, 2)
                           BETWEEN '00' AND '59'
-                      AND julianday(NEW.reconciled_at) IS NOT NULL
+                      AND julianday(NEW.reconciled_at,
+                                    'start of day') IS NOT NULL
                       AND strftime(
-                          '%Y-%m-%d', NEW.reconciled_at
+                          '%Y-%m-%d', NEW.reconciled_at,
+                          'start of day', '+0 days'
                       ) = substr(NEW.reconciled_at, 1, 10)
                       AND json_extract(
                           reconciliation_event.payload_json,
@@ -9314,12 +9624,12 @@ class Database:
                       ), 18, 2) BETWEEN '00' AND '59'
                       AND julianday(json_extract(
                           NEW.receipt_json, '$.observed_at'
-                      )) IS NOT NULL
+                      ), 'start of day') IS NOT NULL
                       AND strftime(
                           '%Y-%m-%d',
                           json_extract(
                               NEW.receipt_json, '$.observed_at'
-                          )
+                          ), 'start of day', '+0 days'
                       ) = substr(json_extract(
                           NEW.receipt_json, '$.observed_at'
                       ), 1, 10)
@@ -9444,12 +9754,12 @@ class Database:
                               ), 18, 2) BETWEEN '00' AND '59'
                               AND julianday(json_extract(
                                   NEW.receipt_json, '$.completed_at'
-                              )) IS NOT NULL
+                              ), 'start of day') IS NOT NULL
                               AND strftime(
                                   '%Y-%m-%d',
                                   json_extract(
                                       NEW.receipt_json, '$.completed_at'
-                                  )
+                                  ), 'start of day', '+0 days'
                               ) = substr(json_extract(
                                   NEW.receipt_json, '$.completed_at'
                               ), 1, 10)

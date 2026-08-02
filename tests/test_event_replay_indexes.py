@@ -122,10 +122,10 @@ class EventReplayIndexTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            database = Database(Path(directory) / "fresh-v21.db")
+            database = Database(Path(directory) / "fresh-current.db")
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(SCHEMA_VERSION, 22)
             self.assertEqual(
                 _schema_contract(database),
                 _expected_current_schema_contract(),
@@ -605,7 +605,7 @@ class EventReplayIndexTests(unittest.TestCase):
                         """SELECT value FROM meta
                            WHERE key='schema_version'"""
                     ).fetchone()["value"],
-                    "21",
+                    str(SCHEMA_VERSION),
                 )
                 self.assertEqual(
                     connection.execute(

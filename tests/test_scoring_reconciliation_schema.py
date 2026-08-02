@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -24,9 +25,11 @@ from tsq.reconciliation import (
 )
 from tsq.store import (
     Database,
+    SCHEMA_VERSION,
     _capture_current_schema_contract,
     _expected_current_schema_contract,
     _expected_v18_schema_contract,
+    _expected_v21_schema_contract,
     from_timestamp,
     performance_scoring_claim_payload,
     to_timestamp,
@@ -180,6 +183,18 @@ def _empty_v18(path: Path) -> Database:
     if _schema_contract(database) != _expected_v18_schema_contract():
         raise AssertionError("empty fixture is not exact schema v18")
     return database
+
+
+def _downgrade_to_exact_v21(database: Database) -> None:
+    """Restore the exact pre-normalization calendar-trigger contract."""
+
+    with database.transaction() as connection:
+        database._downgrade_v22_contract_to_v21(connection)
+        connection.execute(
+            "UPDATE meta SET value='21' WHERE key='schema_version'"
+        )
+    if _schema_contract(database) != _expected_v21_schema_contract():
+        raise AssertionError("fixture is not the exact supported v21 schema")
 
 
 def _request(row: sqlite3.Row) -> ScoringReconciliationRequest:
@@ -349,6 +364,165 @@ _RECONCILIATION_REINSERT = """
 
 
 class ScoringReconciliationUpgradeTests(unittest.TestCase):
+    def test_committed_calendar_guards_remain_migratable(self) -> None:
+        expected_digests = {
+            "performance_artifact_run_claims_validate_insert": (
+                "fce4bc2a066e81c65e1785b8d588b181f0b26075392b1e1a04e7216ffd1ee954"
+            ),
+            "performance_artifact_run_receipts_validate_insert": (
+                "d0423693a47292bb1690eb1a84724ca9f23620d0e69e64a7f32cac13d2a10e44"
+            ),
+            "performance_scoring_claims_validate_insert": (
+                "1995ddb5e5e7cfacd91d402b0910c8ec35c8e43fef6688a2f69c750fe86af874"
+            ),
+            "performance_scoring_reconciliations_validate_insert": (
+                "a425c4f94cc0501c9d61be3da5187fbaa50aefda24b19848ab908c77a78fba02"
+            ),
+        }
+        actual_digests = {
+            name: hashlib.sha256(sql.encode("utf-8")).hexdigest()
+            for name, _table, sql in _expected_v21_schema_contract().triggers
+            if name in expected_digests
+        }
+
+        self.assertEqual(actual_digests, expected_digests)
+
+    def test_exact_v21_upgrade_replaces_only_calendar_guards(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "calendar-guards-v21.db"
+            database, _fixture = _build_two_claim_database(path)
+            with database.read() as connection:
+                before_claims = tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        """SELECT * FROM performance_scoring_claims
+                           ORDER BY id"""
+                    )
+                )
+            before_events = _events(database)
+            _downgrade_to_exact_v21(database)
+
+            database.initialize()
+
+            self.assertEqual(_events(database), before_events)
+            self.assertEqual(
+                _schema_contract(database),
+                _expected_current_schema_contract(),
+            )
+            with database.read() as connection:
+                version = connection.execute(
+                    "SELECT value FROM meta WHERE key='schema_version'"
+                ).fetchone()["value"]
+                after_claims = tuple(
+                    tuple(row)
+                    for row in connection.execute(
+                        """SELECT * FROM performance_scoring_claims
+                           ORDER BY id"""
+                    )
+                )
+                trigger_sql = " ".join(
+                    row["sql"]
+                    for row in connection.execute(
+                        """SELECT sql FROM sqlite_master
+                           WHERE type='trigger' AND name IN (
+                               'performance_artifact_run_claims_validate_insert',
+                               'performance_artifact_run_receipts_validate_insert',
+                               'performance_scoring_claims_validate_insert',
+                               'performance_scoring_reconciliations_validate_insert'
+                           )
+                           ORDER BY name"""
+                    )
+                )
+            self.assertEqual(version, str(SCHEMA_VERSION))
+            self.assertEqual(after_claims, before_claims)
+            self.assertEqual(trigger_sql.count("'+0 days'"), 7)
+            self.assertEqual(trigger_sql.count("'start of day'"), 14)
+
+    def test_v21_impossible_calendar_history_is_not_rewritten(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "invalid-calendar-v21.db"
+            database, fixture = _build_two_claim_database(path)
+            _downgrade_to_exact_v21(database)
+            with database.transaction() as connection:
+                guard = connection.execute(
+                    """SELECT sql FROM sqlite_master
+                       WHERE type='trigger' AND name=
+                             'performance_scoring_claims_no_update'"""
+                ).fetchone()
+                if guard is None or not guard["sql"]:
+                    raise AssertionError("fixture lacks the immutable claim guard")
+                connection.execute(
+                    "DROP TRIGGER performance_scoring_claims_no_update"
+                )
+                connection.execute(
+                    """UPDATE performance_scoring_claims
+                       SET claimed_at='2117-02-30T12:00:00+00:00'
+                       WHERE attempt_id=?""",
+                    (fixture["unfinished_attempt_id"],),
+                )
+                connection.execute(guard["sql"])
+            before = durable_database_fingerprint(path)
+
+            with self.assertRaisesRegex(
+                ConflictError,
+                "impossible immutable calendar timestamp",
+            ):
+                database.initialize()
+
+            self.assertEqual(durable_database_fingerprint(path), before)
+            with database.read() as connection:
+                self.assertEqual(
+                    connection.execute(
+                        "SELECT value FROM meta WHERE key='schema_version'"
+                    ).fetchone()["value"],
+                    "21",
+                )
+                self.assertEqual(
+                    connection.execute(
+                        """SELECT claimed_at FROM performance_scoring_claims
+                           WHERE attempt_id=?""",
+                        (fixture["unfinished_attempt_id"],),
+                    ).fetchone()["claimed_at"],
+                    "2117-02-30T12:00:00+00:00",
+                )
+
+    def test_calendar_normalization_covers_gregorian_boundaries(self) -> None:
+        valid = (
+            "0001-01-01T00:00:00+00:00",
+            "2000-02-29T12:00:00+00:00",
+            "2116-02-29T12:00:00+00:00",
+            "9999-12-31T23:59:59+00:00",
+            "9999-12-31T23:59:59.999999+00:00",
+        )
+        invalid = (
+            "1900-02-29T12:00:00+00:00",
+            "2100-02-29T12:00:00+00:00",
+            "2117-02-29T12:00:00+00:00",
+            "2117-02-30T12:00:00+00:00",
+            "2116-04-31T12:00:00+00:00",
+        )
+        with closing(sqlite3.connect(":memory:")) as connection:
+            for value in valid:
+                with self.subTest(value=value):
+                    normalized = connection.execute(
+                        """SELECT strftime(
+                                   '%Y-%m-%d', ?,
+                                   'start of day', '+0 days'
+                               )""",
+                        (value,),
+                    ).fetchone()[0]
+                    self.assertEqual(normalized, value[:10])
+            for value in invalid:
+                with self.subTest(value=value):
+                    normalized = connection.execute(
+                        """SELECT strftime(
+                                   '%Y-%m-%d', ?,
+                                   'start of day', '+0 days'
+                               )""",
+                        (value,),
+                    ).fetchone()[0]
+                    self.assertNotEqual(normalized, value[:10])
+
     def test_exact_v18_claim_bytes_migrate_as_v1_without_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             database, _fixture = _build_two_claim_database(
@@ -391,7 +565,7 @@ class ScoringReconciliationUpgradeTests(unittest.TestCase):
                     """SELECT COUNT(*) AS n
                        FROM performance_scoring_reconciliations"""
                 ).fetchone()["n"]
-            self.assertEqual(version, "21")
+            self.assertEqual(version, str(SCHEMA_VERSION))
             self.assertEqual(
                 tuple(tuple(row)[:11] for row in rows),
                 before_claims,

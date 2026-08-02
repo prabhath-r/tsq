@@ -31,6 +31,7 @@ from tsq.store import (
     PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX,
     PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX,
     PERFORMANCE_SCORING_RECONCILIATION_EVENT_KEY_PREFIX,
+    SCHEMA_VERSION,
     _capture_current_schema_contract,
     _expected_current_schema_contract,
     _expected_v19_schema_contract,
@@ -721,7 +722,7 @@ class ArtifactRunUpgradeTests(unittest.TestCase):
                     connection.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()["value"],
-                    "21",
+                    str(SCHEMA_VERSION),
                 )
                 self.assertEqual(
                     tuple(

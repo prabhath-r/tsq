@@ -72,7 +72,7 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(SCHEMA_VERSION, 22)
             self.assertEqual(event_fingerprint(database), before_events)
             after_performance = performance_source_snapshot(database)
             self.assertEqual(
@@ -93,7 +93,7 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
                 evaluation_count = connection.execute(
                     "SELECT COUNT(*) AS n FROM task_evaluations"
                 ).fetchone()["n"]
-            self.assertEqual(version, "21")
+            self.assertEqual(version, str(SCHEMA_VERSION))
             self.assertEqual(claim_count, 0)
             self.assertEqual(evaluation_count, 1)
             database.validate_current_schema()

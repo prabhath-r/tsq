@@ -254,7 +254,7 @@ class PolicyShadowSchemaTests(unittest.TestCase):
             before_data = historical_data_snapshot(database)
             before_events = event_snapshot(database)
 
-            self.assertEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(SCHEMA_VERSION, 22)
             self.assertIsNotNone(decision_id)
             self.assertEqual(
                 schema_contract(database),
@@ -288,18 +288,18 @@ class PolicyShadowSchemaTests(unittest.TestCase):
                              AND tbl_name='policy_shadow_evaluations'"""
                     ).fetchall()
                 }
-            self.assertEqual(version, "21")
+            self.assertEqual(version, str(SCHEMA_VERSION))
             self.assertEqual(shadow_count, 0)
             self.assertEqual(trigger_names, POLICY_SHADOW_TRIGGERS)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
 
-    def test_reopening_current_v21_is_semantically_idempotent(
+    def test_reopening_current_schema_is_semantically_idempotent(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "reopen-v21.db"
+            path = Path(directory) / "reopen-current.db"
             database, _decision_id = build_exact_v17(path)
             database.initialize()
             before_data = historical_data_snapshot(database)

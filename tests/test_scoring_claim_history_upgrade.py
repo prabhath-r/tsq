@@ -401,7 +401,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 21)
+            self.assertEqual(SCHEMA_VERSION, 22)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])
@@ -410,7 +410,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
                     connection.execute(
                         "SELECT value FROM meta WHERE key='schema_version'"
                     ).fetchone()["value"],
-                    "21",
+                    str(SCHEMA_VERSION),
                 )
                 migrated = connection.execute(
                     """SELECT claim.*, event.event_type, event.stream_id,
@@ -610,6 +610,59 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
                             )
             self.assertEqual(complete_provider.calls, 0)
             self.assertEqual(unfinished_provider.calls, 0)
+
+    def test_v15_offset_claim_survives_calendar_guard_upgrade(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            database, fixture = _build_two_claim_database(
+                Path(directory) / "offset-v15.db"
+            )
+            _downgrade_exact_v15(database)
+            claimed_at = "2117-01-01T00:30:00+01:00"
+            with database.transaction() as connection:
+                connection.execute(
+                    """UPDATE performance_scoring_claims
+                       SET claimed_at=? WHERE attempt_id=?""",
+                    (claimed_at, fixture["unfinished_attempt_id"]),
+                )
+
+            database.initialize()
+
+            database.validate_current_schema()
+            integrity = database.verify_integrity()
+            self.assertTrue(integrity["ok"], integrity["errors"])
+            with database.read() as connection:
+                row = connection.execute(
+                    """SELECT claim.claimed_at,
+                              claim.claim_schema_version,
+                              event.event_type, event.occurred_at,
+                              event.payload_json, event.metadata_json
+                       FROM performance_scoring_claims claim
+                       JOIN events event ON event.event_id=claim.event_id
+                       WHERE claim.attempt_id=?""",
+                    (fixture["unfinished_attempt_id"],),
+                ).fetchone()
+            self.assertIsNotNone(row)
+            assert row is not None
+            self.assertEqual(row["claim_schema_version"], 1)
+            self.assertEqual(row["claimed_at"], claimed_at)
+            self.assertEqual(
+                row["event_type"], "PerformanceScoringClaimMigrated"
+            )
+            self.assertEqual(
+                row["occurred_at"], "2116-12-31T23:30:00+00:00"
+            )
+            self.assertEqual(
+                json.loads(row["payload_json"])["claimed_at"], claimed_at
+            )
+            self.assertEqual(
+                json.loads(row["metadata_json"]),
+                {
+                    "claim_schema_version": 1,
+                    "admission_mode": "legacy_projection_migration",
+                    "source_schema_version": 15,
+                    "shadow_only": True,
+                },
+            )
 
     def test_schema_v15_registered_evaluation_without_claim_fails_closed(
         self,
