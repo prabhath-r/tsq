@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: MPL-2.0
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      workflow-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: monthly
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
