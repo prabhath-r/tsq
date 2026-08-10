@@ -2465,7 +2465,7 @@
       "id": "q_bias_variance_repeated_datasets_batch_c_001",
       "version": 1,
       "family_id": "f_bias_variance_repeated_dataset_decomposition",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "At a fixed input, the true regression mean is 8. Across many independently sampled training sets, a fitted model predicts a mean of 2 with standard deviation 0.2. Outcomes around the true mean have standard deviation 3. Which diagnosis fits?",
       "kind": "calculation",
       "difficulty": 0.75,
@@ -2559,7 +2559,7 @@
       "id": "q_leakage_centered_window_batch_c_001",
       "version": 1,
       "family_id": "f_leakage_centered_window",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "At the end of day t, a pipeline issues a forecast for demand on day t plus 1. Before making a chronological train/test split, it gives the row for forecast origin t a centered seven-day mean of observed demand from days t minus 3 through t plus 3. Training rows near the cutoff can therefore also share underlying demand observations with held-out feature windows. Why is this evaluation invalid?",
       "kind": "debugging",
       "difficulty": 0.4,
@@ -2661,7 +2661,7 @@
       "id": "q_partition_rolling_origin_batch_c_001",
       "version": 1,
       "family_id": "f_partition_rolling_origin",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "Monthly data span January 2021 through December 2025. The deployed workflow will retrain on available history and forecast the next month. Hyperparameters must be chosen without using any 2025 outcome, and the team requires one final 2025 performance report. Which partition plan matches those requirements?",
       "kind": "comparison",
       "difficulty": 0.55,
@@ -2762,7 +2762,7 @@
       "id": "q_generalization_finite_target_audit_batch_c_001",
       "version": 1,
       "family_id": "f_generalization_finite_target_uncertainty",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A model has zero training error on 200,000 source cases. A locked model is then audited on 50 independently sampled, representative target-distribution cases and makes zero errors: 45 cases are from a common subgroup and five are from a prespecified rare subgroup. Which report is defensible?",
       "kind": "calculation",
       "difficulty": 0.65,
@@ -2865,7 +2865,7 @@
       "id": "q_generalization_target_mix_batch_c_001",
       "version": 1,
       "family_id": "f_generalization_target_mix_reweighting",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fitted model's training error is 3%. On an untouched source-population test, its error is 5% for younger users and 20% for older users; that source test is 90% younger. Deployment is expected to be 40% younger. Assuming the stratum-specific errors remain stable, what deployment error is implied?",
       "kind": "calculation",
       "difficulty": 0.5,
@@ -2967,7 +2967,7 @@
       "id": "q_regularization_shear_penalty_batch_c_001",
       "version": 1,
       "family_id": "f_regularization_shear_metric",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A linear model predicts w transpose x and uses the penalty lambda times (w1 squared plus w2 squared). Features are reparameterized as x prime = D x, where D = [[2, 1], [0, 1]], and w prime is chosen so w prime transpose x prime = w transpose x for every x. Which penalty in w prime preserves the original objective exactly for the same lambda?",
       "kind": "calculation",
       "difficulty": 0.9,
@@ -3071,7 +3071,7 @@
       "version": 1,
       "family_id": "f_label_shift_prior_odds",
       "learning_objective_id": null,
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A calibrated classifier was trained where the positive-class prevalence was 0.50. For one case it outputs 0.80. At deployment the prevalence is 0.20, and an audit supports label shift: p(x|y) is unchanged. What is the corrected deployment posterior for this case?",
       "kind": "calculation",
       "difficulty": 0.85,
@@ -3142,6 +3142,81 @@
         "label_shift",
         "prior_odds",
         "calculation"
+      ]
+    },
+    {
+      "id": "q_partition_rolling_origin_batch_c_002",
+      "version": 2,
+      "revision_of": "q_partition_rolling_origin_batch_c_001",
+      "family_id": "f_partition_rolling_origin",
+      "status": "approved",
+      "stem": "Monthly data span January 2021 through December 2025. The deployed workflow will retrain on available history and forecast the next month. Hyperparameters must be chosen without using any 2025 outcome, and the team requires one final aggregate 2025 performance report. Which partition plan matches those requirements?",
+      "kind": "comparison",
+      "difficulty": 0.6,
+      "discrimination": 1.5,
+      "guess_rate": 0.25,
+      "slip_rate": 0.06,
+      "concepts": [
+        {
+          "concept_id": "c_data_partitioning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Use rolling-origin folds within 2021-2024 to tune, lock the workflow, then run that fixed workflow sequentially through 2025, training each monthly forecast on the history then available, and aggregate the 2025 forecasts once.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "All tuning feedback precedes 2025; within the final year each forecast uses only information available at that origin, and the sequence is aggregated as one untouched final evaluation."
+        },
+        {
+          "id": "b",
+          "text": "Randomly mix all monthly observations from 2021-2024 into many folds, since repeated random cross-validation with enough folds repairs the mismatch between shuffled partitions and future deployment months.",
+          "correct": false,
+          "misconception_id": "m_cross_validation_repairs_bad_split_units",
+          "rationale": "More random folds still let later observations inform models evaluated on earlier observations and do not reproduce forecasting origins."
+        },
+        {
+          "id": "c",
+          "text": "Evaluate several 2021-2024 temporal splits, select the one with the highest score, and report that favorable validation split as the final 2025 performance estimate for the workflow.",
+          "correct": false,
+          "misconception_id": "m_single_split_is_stable_evidence",
+          "rationale": "Choosing the most favorable split creates optimism and replaces repeated temporal evidence with a selected result."
+        },
+        {
+          "id": "d",
+          "text": "Inspect and compare the accumulating 2025 score after each hyperparameter change, since preserving chronological order lets the final test period guide model and workflow selection.",
+          "correct": false,
+          "misconception_id": "m_test_set_is_a_validation_set",
+          "rationale": "Repeated feedback makes development adaptive to 2025 outcomes, so 2025 no longer provides untouched final evidence."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_hyndman_athanasopoulos_fpp3_2021",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_reviewed_revision",
+        "generated": true,
+        "batch_id": "batch_corpus_release_20260809_a",
+        "created_on": "2026-08-09",
+        "human_review": false,
+        "review_status": "independent_model_review_passed",
+        "review_statement": "The rolling-origin chronology, final-year aggregation, answer key, misconception routes, source scope, and family dependence were independently checked before release.",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Hastie et al. support separating model selection from final assessment. Hyndman and Athanasopoulos support rolling forecasting origins in which training observations precede each forecasted observation. The dates and final-year reporting protocol are original synthesis.",
+        "revision_reason": "Clarifies how the locked workflow may retrain sequentially through the untouched 2025 evaluation while producing one aggregate final report.",
+        "independence_note": "This revision retains f_partition_rolling_origin and cannot count independently from its retired parent. Both test chronology-respecting tuning and untouched final temporal evaluation."
+      },
+      "tags": [
+        "data_partitioning",
+        "rolling_origin",
+        "time_series",
+        "untouched_test",
+        "revision"
       ]
     }
   ]

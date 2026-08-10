@@ -515,7 +515,7 @@
       "id": "q_conditional_independence_common_cause_001",
       "version": 1,
       "family_id": "f_conditional_dependence_structure",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "Two laboratory tests are independent conditional on a patient's disease status. Each test is more likely positive when disease is present. Before disease status is observed, how are the two test results generally related?",
       "kind": "conceptual",
       "difficulty": 0.25,
@@ -1983,7 +1983,7 @@
       "version": 1,
       "family_id": "f_unsupervised_nmf_scaling_invariance",
       "learning_objective_id": null,
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A non-negative matrix factorization uses X approximately equal to WH for soft customer segmentation. One row of W is (0.60, 0.40). With D = diag(0.5, 2), the author replaces W by WD and H by D^-1 H. The reconstruction is unchanged, but that row becomes (0.30, 0.80), reversing its largest component. What follows?",
       "kind": "counterfactual",
       "difficulty": 1.05,
@@ -2061,7 +2061,7 @@
       "version": 1,
       "family_id": "f_unsupervised_dbscan_noise_semantics",
       "learning_objective_id": null,
-      "status": "quarantined",
+      "status": "approved",
       "stem": "DBSCAN is run with minPts = 5, counting the point itself. A transaction p has only four points including itself within epsilon and is not density-reachable from any other core point, so the fit labels p as noise. Which conclusion is justified?",
       "kind": "application",
       "difficulty": 0.75,
@@ -2144,7 +2144,7 @@
       "version": 1,
       "family_id": "f_penalty_observation_provenance",
       "learning_objective_id": null,
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A scalar model predicts w. The only observed training target is 4. Procedure P minimizes J_P(w) = (w - 4)^2 + w^2, where the second term is a declared ridge penalty and no row was added. Procedure D instead observes a second genuine training target 0 and minimizes J_D(w) = one half times [(w - 4)^2 + (w - 0)^2]. Which comparison is correct?",
       "kind": "calculation",
       "difficulty": 0.55,
@@ -2221,6 +2221,82 @@
         "empirical_evidence",
         "objective_equivalence",
         "calculation"
+      ]
+    },
+    {
+      "id": "q_conditional_independence_common_cause_002",
+      "version": 2,
+      "revision_of": "q_conditional_independence_common_cause_001",
+      "family_id": "f_conditional_dependence_structure",
+      "status": "approved",
+      "stem": "A latent condition C has prevalence 0.5. Conditional on C, tests A and B are independent. Their positive rates are P(A+ | C)=0.8, P(A+ | not C)=0.2, P(B+ | C)=0.7, and P(B+ | not C)=0.1. What follows after C is marginalized out?",
+      "kind": "calculation",
+      "difficulty": 0.75,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "P(A+,B+)=0.20, so the conditional independence survives marginalization over C.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_implies_marginal_independence",
+          "rationale": "The product 0.20 uses the marginal positive rates, but mixing the two condition-specific products gives a different joint probability."
+        },
+        {
+          "id": "b",
+          "text": "P(A+,B+)=0.29, but A and B must still be marginally independent because a shared cause cannot induce dependence.",
+          "correct": false,
+          "misconception_id": "m_shared_cause_does_not_induce_dependence",
+          "rationale": "The joint value 0.29 differs from P(A+)P(B+)=0.5 times 0.4=0.20, which is direct evidence of marginal dependence induced by C."
+        },
+        {
+          "id": "c",
+          "text": "The marginal joint cannot be calculated unless A and B have identical positive rates within each value of C.",
+          "correct": false,
+          "misconception_id": "m_conditional_independence_means_identical_tests",
+          "rationale": "Conditional independence requires factorization within each C stratum, not equality of the two tests' conditional rates."
+        },
+        {
+          "id": "d",
+          "text": "P(A+,B+)=0.29 while P(A+)P(B+)=0.20, so A and B are marginally dependent despite being conditionally independent given C.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Marginalizing gives 0.5(0.8)(0.7)+0.5(0.2)(0.1)=0.29; the marginal rates are 0.5 and 0.4, whose product is 0.20."
+        }
+      ],
+      "source_ids": [
+        "src_bishop_prml_2006",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_reviewed_revision",
+        "generated": true,
+        "batch_id": "batch_corpus_release_20260809_a",
+        "created_on": "2026-08-09",
+        "human_review": false,
+        "review_status": "independent_model_review_passed",
+        "review_statement": "The probability table, keyed arithmetic, distractor routes, source scope, and family dependence were independently checked before release.",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Bishop and Murphy support conditional independence, marginalization, and dependence induced by a shared latent cause. The numerical test scenario and arithmetic distractors are original synthesis.",
+        "revision_reason": "Replaces a dependent verbal form with an explicit common-cause marginalization calculation while preserving the published family.",
+        "independence_note": "This revision retains f_conditional_dependence_structure and cannot count independently from its retired parent. It computes the marginal joint and product of marginals under a shared cause rather than merely naming the graph pattern."
+      },
+      "tags": [
+        "probability_reasoning",
+        "conditional_independence",
+        "marginal_dependence",
+        "common_cause",
+        "calculation",
+        "revision"
       ]
     }
   ]

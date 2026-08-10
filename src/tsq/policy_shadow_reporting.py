@@ -55,6 +55,7 @@ UNIFORM_SAFE_FRONTIER_POLICY_VERSION = "uniform-safe-frontier-v1"
 SUPPORTED_LOGGING_POLICY_VERSIONS = (
     "recursive-evidence-graph-v17",
     "recursive-evidence-graph-v18",
+    "recursive-evidence-graph-v19",
 )
 CALIBRATION_BIN_COUNT = 10
 LOG_LOSS_CLIP = 1e-9

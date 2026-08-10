@@ -364,7 +364,7 @@ class MigrationEventLifecycleTests(unittest.TestCase):
             before_events = event_snapshot(database)
             before_schema = schema_contract(database)
 
-            self.assertEqual(SCHEMA_VERSION, 22)
+            self.assertEqual(SCHEMA_VERSION, 23)
             self.assertEqual(
                 before_schema,
                 _expected_v16_schema_contract(),
@@ -631,68 +631,36 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 ).fetchone()["value"]
             self.assertEqual(version, "16")
 
-    def test_v18_schema_change_before_safety_writer_is_rejected(self) -> None:
+    def test_current_schema_reopen_needs_no_writable_safety_writer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "v17-safety-writer-race.db"
+            path = Path(directory) / "current-read-only-reopen.db"
             database = build_exact_v16(path)
             database.initialize()
             before_data = data_snapshot(database)
             before_events = event_snapshot(database)
             original_connect = Database.connect
-            raced = False
-            tampered_sql: str | None = None
+            writable_opened = False
 
-            def connect_after_validation(instance: Database):
-                nonlocal raced, tampered_sql
-                if instance is database and not instance.read_only and not raced:
-                    # A current-schema reopen reaches this writable connection
-                    # only after its independent read-only structural
-                    # validation, when generated-content safety enforcement is
-                    # about to begin.
-                    with closing(sqlite3.connect(path)) as competing:
-                        row = competing.execute(
-                            """SELECT sql FROM sqlite_master
-                               WHERE type='trigger' AND name=?""",
-                            (CLAIM_TRIGGER,),
-                        ).fetchone()
-                        if row is None or not row[0]:
-                            raise AssertionError(
-                                "Race fixture lacks the scoring-claim trigger."
-                            )
-                        tampered_sql = row[0].replace(
-                            "WHERE claim_event.event_id = NEW.event_id",
-                            (
-                                "WHERE 1 = 1 "
-                                "AND claim_event.event_id = NEW.event_id"
-                            ),
-                            1,
-                        )
-                        if tampered_sql == row[0]:
-                            raise AssertionError(
-                                "Race fixture did not alter the current trigger."
-                            )
-                        competing.execute(
-                            f'DROP TRIGGER "{CLAIM_TRIGGER}"'
-                        )
-                        competing.execute(tampered_sql)
-                        competing.commit()
-                    raced = True
+            def reject_writable_reopen(instance: Database):
+                nonlocal writable_opened
+                if instance is database and not instance.read_only:
+                    writable_opened = True
+                    raise AssertionError(
+                        "current schema reopened a writable safety path"
+                    )
                 return original_connect(instance)
 
             with patch.object(
                 Database,
                 "connect",
-                new=connect_after_validation,
+                new=reject_writable_reopen,
             ):
-                with self.assertRaises(ConflictError):
-                    database.initialize()
+                database.initialize()
 
-            self.assertTrue(raced)
-            self.assertIsNotNone(tampered_sql)
+            self.assertFalse(writable_opened)
             self.assertEqual(data_snapshot(database), before_data)
             self.assertEqual(event_snapshot(database), before_events)
-            self.assertEqual(claim_trigger_sql(database), tampered_sql)
-            self.assertNotEqual(
+            self.assertEqual(
                 schema_contract(database),
                 _expected_current_schema_contract(),
             )
@@ -775,15 +743,8 @@ class MigrationEventLifecycleTests(unittest.TestCase):
                 )
             self.assertEqual(len(before_violations), 2)
 
-            with patch.object(
-                Database,
-                "_revoke_historically_active_unreviewed_generated_questions",
-                side_effect=AssertionError(
-                    "safety writer ran before foreign-key rejection"
-                ),
-            ):
-                with self.assertRaises(ConflictError):
-                    database.initialize()
+            with self.assertRaises(ConflictError):
+                database.initialize()
 
             self.assertEqual(durable_database_fingerprint(path), before_files)
             self.assertEqual(data_snapshot(database), before_data)

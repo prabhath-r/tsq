@@ -6,4 +6,4 @@ from .engine import AdaptiveEngine
 from .store import Database
 
 __all__ = ["AdaptiveEngine", "Database"]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

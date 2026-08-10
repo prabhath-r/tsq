@@ -1960,11 +1960,12 @@ def parse_bundle(bundle: dict[str, Any]) -> tuple[
                 path="questions[].version",
                 question_id=question.id,
             )
-        if question.family_id != parent.family_id:
+        if question.published_family_id != parent.published_family_id:
             add(
                 "revision_family_mismatch",
                 f"Revision must preserve parent {parent.id} family_id "
-                f"{parent.family_id}; received {question.family_id}.",
+                f"{parent.published_family_id}; received "
+                f"{question.published_family_id}.",
                 path="questions[].family_id",
                 question_id=question.id,
             )

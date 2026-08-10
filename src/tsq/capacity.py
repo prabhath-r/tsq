@@ -22,6 +22,7 @@ from .models import Concept, Misconception, Question, QuestionKind, Topic
 
 ALGORITHM_VERSION = "sustained-serviceability-v2"
 DEFAULT_STATE_LIMIT = 2_000_000
+_CLOSURE_SOLVER_MIN_COMPONENT_SIZE = 18
 VERIFICATION_KINDS = frozenset(
     {
         QuestionKind.APPLICATION,
@@ -1097,6 +1098,488 @@ def _maximum_quota_packing(
     return total
 
 
+def _minimal_masks(values: Iterable[int]) -> tuple[int, ...]:
+    """Return the inclusion-minimal masks in deterministic order."""
+
+    kept: list[int] = []
+    for value in sorted(set(values), key=lambda mask: (mask.bit_count(), mask)):
+        if any((prior & value) == prior for prior in kept):
+            continue
+        kept.append(value)
+    return tuple(kept)
+
+
+def _large_component_bounds(
+    component: tuple[str, ...],
+    *,
+    all_mask: int,
+    family_index: dict[str, int],
+    compiled_by_family: dict[str, list[_CompiledQuestion]],
+    question_safe,
+    budget: _StateBudget,
+) -> _Bounds:
+    """Solve a large monotone component through exact closure certificates.
+
+    Forward-safe removals form a hereditary system.  In reverse, begin with
+    the terminal families that remain and repeatedly restore any family that
+    would have been safe immediately before its removal.  This is a monotone
+    closure operator, and the reverse order of its additions is a valid
+    forward witness.
+
+    The maximum is the initially safe universe size minus the smallest seed
+    that spans this closure.  A seed spans exactly when it intersects the
+    complement of every proper closed set.  The cutting loop below solves the
+    exact transversal of the closed-set complements seen so far, then either
+    obtains a spanning seed or adds the complement of a maximal proper closed
+    set as a violated cut.  The candidate is a lower bound until it spans, at
+    which point the bound and concrete witness meet.
+
+    For the minimum, a terminal consumed set must either contain each family
+    or contain one exact disable mask for every variant of that family.  The
+    branch-and-bound search adds those masks in batches and rejects a batch
+    unless its complementary remaining set reverse-spans the universe.  That
+    reachability test is exact, and infeasibility is hereditary, so pruning an
+    unshellable batch also prunes all of its supersets.  Every cached closure,
+    transversal, and terminal-search state consumes the same fail-closed
+    state budget as the historical recurrence.
+    """
+
+    global_bits = tuple(1 << family_index[family_id] for family_id in component)
+    def localize(mask: int) -> int:
+        return sum(
+            1 << index
+            for index, bit in enumerate(global_bits)
+            if mask & bit
+        )
+
+    initial_safe = tuple(
+        index
+        for index, family_id in enumerate(component)
+        if any(
+            question_safe(question, all_mask)
+            for question in compiled_by_family[family_id]
+        )
+    )
+    universe = sum(1 << index for index in initial_safe)
+    if not universe:
+        budget.consume(len(component))
+        return _Bounds(0, 0, (), ())
+    universe_global_mask = sum(global_bits[index] for index in initial_safe)
+
+    def requirement_failure_masks(
+        question: _CompiledQuestion, requirement: _Requirement
+    ) -> tuple[int, ...]:
+        failures: list[int] = []
+        question_bit = question.family_bit
+        for reserve_mask in (
+            requirement.repair_mask,
+            requirement.verification_mask,
+        ):
+            without_question = reserve_mask & ~question_bit
+            if not without_question & ~universe_global_mask:
+                failures.append(localize(without_question) & universe)
+        union = (
+            requirement.repair_mask | requirement.verification_mask
+        ) & ~question_bit
+        fixed_union = (union & ~universe_global_mask).bit_count()
+        dynamic_union = localize(union) & universe
+        if fixed_union == 0:
+            pending = dynamic_union
+            if not pending:
+                failures.append(0)
+            while pending:
+                bit = pending & -pending
+                pending ^= bit
+                failures.append(dynamic_union ^ bit)
+        elif fixed_union == 1:
+            failures.append(dynamic_union)
+        return _minimal_masks(failures)
+
+    disable_masks: dict[int, tuple[int, ...]] = {}
+    for index in initial_safe:
+        family_id = component[index]
+        combined: tuple[int, ...] = (0,)
+        seen_variants: set[tuple[tuple[int, int], ...]] = set()
+        for question in compiled_by_family[family_id]:
+            signature = tuple(
+                sorted(
+                    (
+                        requirement.repair_mask,
+                        requirement.verification_mask,
+                    )
+                    for requirement in question.requirements
+                )
+            )
+            if signature in seen_variants:
+                continue
+            seen_variants.add(signature)
+            question_failures = _minimal_masks(
+                failure
+                for requirement in question.requirements
+                for failure in requirement_failure_masks(question, requirement)
+            )
+            if not question_failures:
+                combined = ()
+                break
+            combined = _minimal_masks(
+                prior | failure
+                for prior in combined
+                for failure in question_failures
+            )
+        disable_masks[index] = combined
+
+    dependency_masks = tuple(
+        sorted(
+            {
+                mask
+                for family_id in component
+                for question in compiled_by_family[family_id]
+                for requirement in question.requirements
+                for mask in (
+                    requirement.repair_mask,
+                    requirement.verification_mask,
+                )
+            }
+        )
+    )
+    equivalence: dict[tuple[object, ...], list[int]] = {}
+    for index in initial_safe:
+        family_id = component[index]
+        bit = global_bits[index]
+        templates = tuple(
+            sorted(
+                {
+                    tuple(
+                        (
+                            requirement.path_kind,
+                            requirement.misconception_id or "",
+                            requirement.owner_concept_id,
+                            requirement.objective_id or "",
+                            requirement.repair_mask,
+                            requirement.verification_mask,
+                        )
+                        for requirement in question.requirements
+                    )
+                    for question in compiled_by_family[family_id]
+                }
+            )
+        )
+        signature: tuple[object, ...] = (
+            tuple(bool(mask & bit) for mask in dependency_masks),
+            templates,
+        )
+        equivalence.setdefault(signature, []).append(index)
+    equivalent_groups = tuple(tuple(indices) for indices in equivalence.values())
+    group_masks = tuple(
+        sum(1 << index for index in group) for group in equivalent_groups
+    )
+    group_prefixes = tuple(
+        tuple(
+            sum(1 << index for index in group[:count])
+            for count in range(len(group) + 1)
+        )
+        for group in equivalent_groups
+    )
+
+    def canonicalize(consumed: int) -> int:
+        return sum(
+            prefixes[(consumed & group_mask).bit_count()]
+            for group_mask, prefixes in zip(
+                group_masks, group_prefixes, strict=True
+            )
+        )
+
+    def family_safe(index: int, consumed: int) -> bool:
+        return all(
+            (failure & consumed) != failure
+            for failure in disable_masks[index]
+        )
+
+    evaluated_safe_states: set[int] = set()
+
+    @lru_cache(maxsize=None)
+    def safe_mask(consumed: int) -> int:
+        if consumed not in evaluated_safe_states:
+            budget.consume(len(component))
+            evaluated_safe_states.add(consumed)
+        safe = 0
+        pending = universe & ~consumed
+        while pending:
+            bit = pending & -pending
+            pending ^= bit
+            index = bit.bit_length() - 1
+            if family_safe(index, consumed):
+                safe |= bit
+        return safe
+
+    evaluated_closures: set[int] = set()
+
+    @lru_cache(maxsize=None)
+    def reverse_closure(seed: int) -> int:
+        if seed not in evaluated_closures:
+            budget.consume(len(component))
+            evaluated_closures.add(seed)
+        available = seed & universe
+        while True:
+            prior = available
+            pending = universe & ~available
+            while pending:
+                bit = pending & -pending
+                pending ^= bit
+                index = bit.bit_length() - 1
+                consumed = universe & ~(available | bit)
+                if family_safe(index, consumed):
+                    available |= bit
+            if available == prior:
+                return available
+
+    def maximal_proper_closed(seed: int) -> int:
+        closed = reverse_closure(seed)
+        if closed == universe:
+            raise AssertionError("A spanning seed has no proper closure cut.")
+        pending = universe & ~closed
+        while pending:
+            bit = pending & -pending
+            pending ^= bit
+            extended = reverse_closure(closed | bit)
+            if extended != universe:
+                closed = extended
+                pending &= ~closed
+        return closed
+
+    def normalize_cuts(values: Iterable[int]) -> tuple[int, ...]:
+        return _minimal_masks(
+            value & universe for value in values if value & universe
+        )
+
+    def lexicographic_mask(mask: int) -> tuple[str, ...]:
+        return tuple(
+            component[index]
+            for index in range(len(component))
+            if mask & (1 << index)
+        )
+
+    def minimum_transversal(cuts: tuple[int, ...]) -> int:
+        rows = normalize_cuts(cuts)
+        if not rows:
+            budget.consume(len(component))
+            return 0
+
+        chosen = 0
+        pending_rows = rows
+        while pending_rows:
+            bit = max(
+                (1 << index for index in initial_safe),
+                key=lambda candidate: (
+                    sum(bool(row & candidate) for row in pending_rows),
+                    -candidate.bit_length(),
+                ),
+            )
+            chosen |= bit
+            pending_rows = tuple(
+                row for row in pending_rows if not row & bit
+            )
+        best = (chosen.bit_count(), lexicographic_mask(chosen), chosen)
+        evaluated: dict[tuple[int, ...], tuple[int, tuple[str, ...]]] = {}
+
+        def search(selected: int, remaining: tuple[int, ...]) -> None:
+            nonlocal best
+            remaining = normalize_cuts(remaining)
+            prior = evaluated.get(remaining)
+            selected_count = selected.bit_count()
+            selected_key = (selected_count, lexicographic_mask(selected))
+            if prior is not None and prior <= selected_key:
+                return
+            budget.consume(len(component))
+            evaluated[remaining] = selected_key
+            if selected_count > best[0]:
+                return
+            if not remaining:
+                candidate = (
+                    selected_count,
+                    lexicographic_mask(selected),
+                    selected,
+                )
+                if candidate < best:
+                    best = candidate
+                return
+            disjoint: list[int] = []
+            for row in sorted(
+                remaining, key=lambda value: (value.bit_count(), value)
+            ):
+                if all(not row & prior_row for prior_row in disjoint):
+                    disjoint.append(row)
+            if selected_count + len(disjoint) > best[0]:
+                return
+            row = min(
+                remaining,
+                key=lambda value: (
+                    value.bit_count(),
+                    -sum(bool(value & other) for other in remaining),
+                    value,
+                ),
+            )
+            branches: list[tuple[int, str, int]] = []
+            pending = row
+            while pending:
+                bit = pending & -pending
+                pending ^= bit
+                index = bit.bit_length() - 1
+                branches.append(
+                    (
+                        -sum(bool(bit & other) for other in remaining),
+                        component[index],
+                        bit,
+                    )
+                )
+            for _, _, bit in sorted(branches):
+                search(
+                    selected | bit,
+                    tuple(other for other in remaining if not other & bit),
+                )
+
+        search(0, rows)
+        return best[2]
+
+    high_cuts: tuple[int, ...] = ()
+    while True:
+        terminal_seed = minimum_transversal(high_cuts)
+        closed = reverse_closure(terminal_seed)
+        if closed == universe:
+            break
+        maximal = maximal_proper_closed(closed)
+        high_cuts = normalize_cuts((*high_cuts, universe & ~maximal))
+
+    high = universe.bit_count() - terminal_seed.bit_count()
+
+    def reverse_addition_order(seed: int) -> tuple[str, ...]:
+        available = seed & universe
+        additions: list[str] = []
+        while available != universe:
+            selected: int | None = None
+            pending = universe & ~available
+            while pending:
+                bit = pending & -pending
+                pending ^= bit
+                index = bit.bit_length() - 1
+                consumed = universe & ~(available | bit)
+                if family_safe(index, consumed):
+                    selected = index
+                    break
+            if selected is None:
+                raise AssertionError("A spanning capacity seed lost its witness.")
+            available |= 1 << selected
+            additions.append(component[selected])
+        additions.reverse()
+        return tuple(additions)
+
+    high_sequence = reverse_addition_order(terminal_seed)
+    if len(high_sequence) != high:
+        raise AssertionError("Maximum capacity witness length diverged from seed.")
+
+    def minimum_terminal() -> int:
+        consumed = 0
+        while safe := safe_mask(consumed):
+            candidates: list[tuple[int, str, int]] = []
+            pending = safe
+            while pending:
+                bit = pending & -pending
+                pending ^= bit
+                index = bit.bit_length() - 1
+                successor = canonicalize(consumed | bit)
+                candidates.append(
+                    (
+                        safe_mask(successor).bit_count(),
+                        component[index],
+                        successor,
+                    )
+                )
+            _, _, consumed = min(candidates)
+        best = (consumed.bit_count(), lexicographic_mask(consumed), consumed)
+        evaluated: set[int] = set()
+
+        def search(state: int) -> None:
+            nonlocal best
+            state = canonicalize(state)
+            if state in evaluated:
+                return
+            budget.consume(len(component))
+            evaluated.add(state)
+            depth = state.bit_count()
+            if depth >= best[0]:
+                return
+            # A consumed batch is reachable exactly when its complementary
+            # remaining seed reverse-spans the component.  Reachability is
+            # hereditary, so an unshellable state has no shellable superset.
+            if reverse_closure(universe & ~state) != universe:
+                return
+            safe = safe_mask(state)
+            if not safe:
+                candidate = (depth, lexicographic_mask(state), state)
+                if candidate < best:
+                    best = candidate
+                return
+            choices: list[tuple[int, int, str, tuple[int, ...]]] = []
+            pending = safe
+            while pending:
+                bit = pending & -pending
+                pending ^= bit
+                index = bit.bit_length() - 1
+                successor_values: set[int] = set()
+                for failure in (bit, *disable_masks[index]):
+                    successor = canonicalize(state | failure)
+                    if (
+                        successor != state
+                        and successor.bit_count() < best[0]
+                    ):
+                        successor_values.add(successor)
+                successors = tuple(
+                    sorted(
+                        successor_values,
+                        key=lambda value: (
+                            value.bit_count(),
+                            value,
+                        ),
+                    )
+                )
+                if not successors:
+                    return
+                choices.append(
+                    (
+                        len(successors),
+                        min(value.bit_count() - depth for value in successors),
+                        component[index],
+                        successors,
+                    )
+                )
+            _, _, _, successors = min(choices)
+            for successor in successors:
+                search(successor)
+
+        search(0)
+        return best[2]
+
+    low_terminal = minimum_terminal()
+    remaining_seed = universe & ~low_terminal
+    if reverse_closure(remaining_seed) != universe:
+        raise AssertionError("Minimum terminal lost its reachability proof.")
+
+    low = low_terminal.bit_count()
+    # The reverse closure records a valid removal order for the terminal set.
+    low_sequence = reverse_addition_order(remaining_seed)
+    expected_low_families = {
+        component[index]
+        for index in range(len(component))
+        if low_terminal & (1 << index)
+    }
+    if (
+        len(low_sequence) != low
+        or set(low_sequence) != expected_low_families
+    ):
+        raise AssertionError("Minimum capacity witness length diverged from terminal.")
+    return _Bounds(low, high, low_sequence, high_sequence)
+
+
 def _component_bounds(
     component: tuple[str, ...],
     *,
@@ -1107,6 +1590,20 @@ def _component_bounds(
     budget: _StateBudget,
 ) -> _Bounds:
     global_bits = tuple(1 << family_index[family_id] for family_id in component)
+
+    # The historical sequence recurrence is ideal for small components and
+    # preserves its stable lexicographic witnesses.  Large strongly connected
+    # banks are solved by closure certificates, which quotient the otherwise
+    # exponential enumeration of removal-order permutations.
+    if len(component) >= _CLOSURE_SOLVER_MIN_COMPONENT_SIZE:
+        return _large_component_bounds(
+            component,
+            all_mask=all_mask,
+            family_index=family_index,
+            compiled_by_family=compiled_by_family,
+            question_safe=question_safe,
+            budget=budget,
+        )
     dependency_masks = tuple(
         sorted(
             {
@@ -1340,6 +1837,10 @@ def _component_bounds(
         def best_partition(
             remaining: int,
         ) -> tuple[int, tuple[int, ...]] | None:
+            # This exact-cover oracle is exponential too.  Charge each cached
+            # subproblem just like the sequence and quota recurrences so a
+            # low --state-limit always fails closed in bounded work.
+            budget.consume(len(component))
             if not remaining:
                 return 0, ()
             first = (remaining & -remaining).bit_length() - 1

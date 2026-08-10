@@ -475,7 +475,7 @@ class ReleaseScopedEvidenceTestCase(unittest.TestCase):
                     QuestionStatus.APPROVED
                     if index == 0
                     else (
-                        QuestionStatus.QUARANTINED
+                        QuestionStatus.DRAFT
                         if index == 1
                         else QuestionStatus.CALIBRATED
                     )
@@ -574,7 +574,7 @@ class ReleaseScopedEvidenceTestCase(unittest.TestCase):
                 status=(
                     QuestionStatus.CALIBRATED
                     if question.id in live_question_ids
-                    else QuestionStatus.QUARANTINED
+                    else QuestionStatus.DRAFT
                 ),
             )
             for question in self.corpus[4]
@@ -636,7 +636,7 @@ class ReleaseScopedEvidenceTestCase(unittest.TestCase):
         )
         self.assertEqual(
             sum(
-                row["status"] == QuestionStatus.QUARANTINED.value
+                row["status"] == QuestionStatus.DRAFT.value
                 for row in mapping_rows
             ),
             len(mixed_questions) - len(live_question_ids),

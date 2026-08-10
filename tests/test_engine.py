@@ -19,7 +19,10 @@ from tsq.errors import ConflictError, ExhaustedError, ValidationError
 from tsq.models import SessionPhase
 from tsq.store import SCHEMA_VERSION, Database
 
-from tests.schema_upgrade_helpers import restore_pre_shadow_schema
+from tests.schema_upgrade_helpers import (
+    durable_database_fingerprint,
+    restore_pre_shadow_schema,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -279,7 +282,7 @@ class EngineTestCase(unittest.TestCase):
             value = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(SCHEMA_VERSION, 22)
+        self.assertEqual(SCHEMA_VERSION, 23)
         self.assertEqual(value, str(SCHEMA_VERSION))
 
     def test_topic_session_preserves_continuity_then_explores_explicitly(self) -> None:
@@ -528,7 +531,7 @@ class EngineTestCase(unittest.TestCase):
         self.assertIn("kind", family_columns)
         self.assertEqual(missing_hashes, 0)
 
-    def test_populated_v3_database_is_migrated_to_v4(self) -> None:
+    def test_populated_v3_database_requires_v22_intermediate(self) -> None:
         session = self.start(seed=29)
         presentation = self.next_at(session["id"])
         self.submit_at(
@@ -539,59 +542,29 @@ class EngineTestCase(unittest.TestCase):
             idempotency_key="migration-v3-answer",
         )
         self.downgrade_current_database_to_v3()
+        before = durable_database_fingerprint(self.database.path)
 
-        self.database.initialize()
+        with self.assertRaisesRegex(
+            ConflictError,
+            (
+                "Schema v3 contains learner response history from before "
+                "the durable evidence-integrity boundary.*schema v22.*"
+                "TSQ v0.1.0"
+            ),
+        ):
+            self.database.initialize()
 
+        self.assertEqual(durable_database_fingerprint(self.database.path), before)
         with self.database.read() as connection:
             version = connection.execute(
                 "SELECT value FROM meta WHERE key = 'schema_version'"
             ).fetchone()["value"]
-            active_release = connection.execute(
-                "SELECT value FROM meta WHERE key = 'active_corpus_release'"
-            ).fetchone()["value"]
-            self.assertEqual(version, str(SCHEMA_VERSION))
-            self.assertTrue(active_release.startswith("rel_"))
-            for table in ("concepts", "misconceptions", "sources"):
-                missing = connection.execute(
-                    f"SELECT COUNT(*) AS n FROM {table} WHERE content_hash IS NULL"
-                ).fetchone()["n"]
-                self.assertEqual(missing, 0, table)
-            migrated_session = connection.execute(
-                "SELECT corpus_release_id, revision FROM sessions WHERE id = ?",
-                (session["id"],),
-            ).fetchone()
-            self.assertEqual(migrated_session["corpus_release_id"], active_release)
-            self.assertEqual(migrated_session["revision"], 0)
-            migrated_decision = connection.execute(
-                """SELECT question_version, question_content_hash, question_status,
-                          evidence_weight, corpus_release_id, session_revision,
-                          learner_revision, pedagogical_role, focus_valid
-                   FROM decisions WHERE id = ?""",
+            attempt = connection.execute(
+                "SELECT id FROM attempts WHERE decision_id = ?",
                 (presentation.decision_id,),
             ).fetchone()
-            self.assertTrue(all(value is not None for value in migrated_decision))
-            self.assertEqual(migrated_decision["corpus_release_id"], active_release)
-            migrated_attempt = connection.execute(
-                "SELECT command_hash FROM attempts WHERE decision_id = ?",
-                (presentation.decision_id,),
-            ).fetchone()
-            self.assertRegex(migrated_attempt["command_hash"], r"^[0-9a-f]{64}$")
-            trigger_names = {
-                row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'trigger'"
-                )
-            }
-        self.assertTrue(
-            {
-                "events_no_update",
-                "events_no_delete",
-                "attempts_validate_insert",
-                "attempts_no_update",
-                "attempts_no_delete",
-            }.issubset(trigger_names)
-        )
-        self.assertTrue(self.database.verify_integrity()["ok"])
+        self.assertEqual(version, "3")
+        self.assertIsNotNone(attempt)
 
     def test_incomplete_v4_release_history_fails_closed(self) -> None:
         with self.database.transaction() as connection:
@@ -1176,12 +1149,12 @@ class EngineTestCase(unittest.TestCase):
             row["id"], "Pinned primary-source context for the exact live gap."
         )
         self.assertEqual(generated["status"], "reviewed")
-        self.assertEqual(generated["item"]["status"], "quarantined")
+        self.assertEqual(generated["item"]["status"], "approved")
         self.assertEqual(
             generated["item"]["learning_objective_id"], objective.id
         )
 
-    def test_live_gap_sources_exclude_quarantined_and_revoked_evidence(
+    def test_live_gap_sources_exclude_revoked_evidence(
         self,
     ) -> None:
         objective = next(
@@ -1189,10 +1162,36 @@ class EngineTestCase(unittest.TestCase):
             for objective in self.database.get_learning_objectives()
             if objective.id == "lo_attention_resource_scaling"
         )
-        self.database.revoke_question(
-            "q_attention_sequence_scaling_001",
-            "Live-gap regression: source is no longer backed by live evidence.",
-        )
+        with self.database.read() as connection:
+            source_question_ids = tuple(
+                row["question_id"]
+                for row in connection.execute(
+                    """SELECT DISTINCT direct.question_id
+                       FROM release_question_objectives direct
+                       JOIN question_sources source
+                         ON source.question_id = direct.question_id
+                       JOIN release_questions membership
+                         ON membership.release_id = direct.release_id
+                        AND membership.question_id = direct.question_id
+                       WHERE direct.release_id = ?
+                         AND direct.objective_id = ?
+                         AND source.source_id = ?
+                         AND membership.status
+                             IN ('approved', 'calibrated')
+                       ORDER BY direct.question_id""",
+                    (
+                        self.database.get_active_release_id(connection),
+                        objective.id,
+                        "src_goodfellow_dl_2016",
+                    ),
+                )
+            )
+        self.assertTrue(source_question_ids)
+        for question_id in source_question_ids:
+            self.database.revoke_question(
+                question_id,
+                "Live-gap regression: source is no longer backed by live evidence.",
+            )
         session = self.engine.start_session(
             "learner-1", "Transformers", mode="learn", seed=193
         )
@@ -1212,7 +1211,7 @@ class EngineTestCase(unittest.TestCase):
 
         self.engine._record_corpus_gap(
             session["id"],
-            message="Corpus gap: quarantine source-boundary regression.",
+            message="Corpus gap: revoked source-boundary regression.",
             now=datetime.now(timezone.utc),
         )
 
@@ -1260,6 +1259,39 @@ class EngineTestCase(unittest.TestCase):
                 "Live-gap regression: exhaust direct objective evidence.",
             )
 
+        with self.database.read() as connection:
+            expected_fallback_sources = [
+                row["source_id"]
+                for row in connection.execute(
+                    """SELECT DISTINCT source.source_id
+                       FROM question_sources source
+                       JOIN question_concepts mapping
+                         ON mapping.question_id = source.question_id
+                       JOIN release_questions membership
+                         ON membership.question_id = source.question_id
+                       WHERE membership.release_id = ?
+                         AND mapping.concept_id = ?
+                         AND mapping.role = 'primary'
+                         AND membership.status
+                             IN ('approved', 'calibrated')
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM question_revocations revoked
+                             WHERE revoked.question_id = source.question_id
+                         )
+                       ORDER BY source.source_id LIMIT 8""",
+                    (
+                        self.database.get_active_release_id(connection),
+                        objective.primary_concept_id,
+                    ),
+                )
+            ]
+        self.assertTrue(expected_fallback_sources)
+        self.assertIn(
+            "src_vaswani_attention_2017",
+            expected_fallback_sources,
+        )
+
         session = self.engine.start_session(
             "learner-1", "Transformers", mode="learn", seed=197
         )
@@ -1291,7 +1323,7 @@ class EngineTestCase(unittest.TestCase):
         self.assertEqual(blueprint["learning_objective_id"], objective.id)
         self.assertEqual(
             blueprint["source_ids"],
-            ["src_expert_synthesis_2026", "src_vaswani_attention_2017"],
+            expected_fallback_sources,
         )
 
     def test_session_end_is_durable_idempotent_and_blocks_pending_work(self) -> None:
@@ -1704,14 +1736,10 @@ class EngineTestCase(unittest.TestCase):
                 presentation = self.engine.next_question(
                     session["id"], now=START
                 )
-                self.assertEqual(
-                    presentation.question.id,
-                    "q_transformer_mask_direction_001",
-                )
                 wrong = next(
                     option
                     for option in presentation.question.options
-                    if option.id == "b"
+                    if not option.correct
                 )
                 result = self.engine.submit_answer(
                     presentation.decision_id,
@@ -1728,7 +1756,8 @@ class EngineTestCase(unittest.TestCase):
                     "uncertain_main_requires_independent_diagnostic",
                 )
                 self.assertEqual(
-                    result.focus_objective_id, "lo_causal_visibility"
+                    result.focus_objective_id,
+                    presentation.question.objective_id,
                 )
                 self.assertIsNone(result.focus_misconception_id)
                 self.assertEqual(
@@ -1740,31 +1769,10 @@ class EngineTestCase(unittest.TestCase):
 
     def test_only_named_error_can_cross_objective_diagnose(self) -> None:
         scenarios = (
-            (
-                "named",
-                0.80,
-                "lo_transformer_information_paths",
-                "m_feedforward_layers_mix_token_positions",
-                "cross_objective_diagnostic_focus",
-                1,
-            ),
-            (
-                "generic",
-                0.79,
-                "lo_causal_visibility",
-                None,
-                "credible_generic_error_focus",
-                0,
-            ),
+            ("named", 0.80, True),
+            ("generic", 0.79, False),
         )
-        for index, (
-            label,
-            confidence,
-            objective_id,
-            misconception_id,
-            reason,
-            path_depth,
-        ) in enumerate(scenarios):
+        for index, (label, confidence, named_error) in enumerate(scenarios):
             with self.subTest(label=label):
                 learner_id = f"{label}-diagnostic-error"
                 self.engine.create_learner(learner_id)
@@ -1780,7 +1788,9 @@ class EngineTestCase(unittest.TestCase):
                 wrong = next(
                     option
                     for option in presentation.question.options
-                    if option.id == "b"
+                    if not option.correct
+                    and option.diagnostic_objective_id
+                    != presentation.question.objective_id
                 )
                 result = self.engine.submit_answer(
                     presentation.decision_id,
@@ -1792,18 +1802,39 @@ class EngineTestCase(unittest.TestCase):
                 )
 
                 self.assertEqual(result.next_phase, SessionPhase.REMEDIATE)
-                self.assertEqual(result.focus_objective_id, objective_id)
-                self.assertEqual(
-                    result.focus_misconception_id, misconception_id
+                expected_objective_id = (
+                    wrong.diagnostic_objective_id
+                    if named_error
+                    else presentation.question.objective_id
                 )
-                self.assertEqual(result.transition_reason, reason)
+                expected_misconception_id = (
+                    wrong.misconception_id if named_error else None
+                )
+                expected_reason = (
+                    "cross_objective_diagnostic_focus"
+                    if named_error
+                    else "credible_generic_error_focus"
+                )
+                expected_path_depth = 1 if named_error else 0
+                self.assertEqual(
+                    result.focus_objective_id,
+                    expected_objective_id,
+                )
+                self.assertEqual(
+                    result.focus_misconception_id,
+                    expected_misconception_id,
+                )
+                self.assertEqual(
+                    result.transition_reason,
+                    expected_reason,
+                )
                 self.assertEqual(
                     len(
                         self.database.get_session(session["id"])[
                             "remediation_path"
                         ]
                     ),
-                    path_depth,
+                    expected_path_depth,
                 )
 
     def test_repeated_uncertainty_escalates_once_then_exits_boundedly(self) -> None:
@@ -1893,6 +1924,8 @@ class EngineTestCase(unittest.TestCase):
             option
             for option in verification.question.options
             if not option.correct
+            and option.diagnostic_objective_id
+            == "lo_causal_visibility"
         )
         credible_failure = self.engine.submit_answer(
             verification.decision_id,
@@ -1918,14 +1951,15 @@ class EngineTestCase(unittest.TestCase):
             )
         self.assertIsNotNone(boundary)
         self.assertIsNotNone(boundary["boundary_decision"])
-        causal = next(
+        failed_objective = next(
             candidate
             for candidate in boundary["boundary_decision"]["candidates"]
-            if candidate["objective_id"] == "lo_causal_visibility"
+            if candidate["objective_id"]
+            == verification.question.objective_id
         )
         # One low-confidence abstention plus one credible error must exert the
         # pressure of exactly one error, not a diluted 1/2 raw-attempt rate.
-        self.assertEqual(causal["recent_failure_rate"], 1.0)
+        self.assertEqual(failed_objective["recent_failure_rate"], 1.0)
 
     def test_exploration_gate_rejects_uncertain_successes(self) -> None:
         session = {

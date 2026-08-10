@@ -45,7 +45,6 @@ from .corpus import (
 from .authoring import (
     AuthoringJobs,
     CoveragePlanner,
-    QuarantineReviewQueue,
     deterministic_test_pipeline,
 )
 from .engine import AdaptiveEngine
@@ -89,13 +88,6 @@ from .policy_shadow_reporting import (
     UNIFORM_SAFE_FRONTIER_POLICY_VERSION,
     build_policy_shadow_report,
 )
-from .quarantine_impact import (
-    MAX_CANDIDATE_LIMIT,
-    MAX_COMBINATION_SIZE,
-    MAX_EVALUATION_LIMIT,
-    MAX_RESULT_LIMIT,
-    analyze_quarantine_capacity_impact,
-)
 from .reconciliation import (
     ReconciliationObservation,
     ReconciliationOutcome,
@@ -135,7 +127,6 @@ class StarterCorpusStatus:
     installed: bool
     retained_release_id: str | None = None
     conflict: str | None = None
-    legacy_generated_revocations: int = 0
 
     def __bool__(self) -> bool:
         return self.installed
@@ -234,12 +225,6 @@ def command_init(args: argparse.Namespace) -> None:
             f"Imported {counts['questions']} questions, {counts['concepts']} concepts, "
             f"and {counts['misconceptions']} misconception hypotheses."
         )
-        if counts["legacy_generated_revocations"]:
-            print(
-                "Emergency-quarantined "
-                f"{counts['legacy_generated_revocations']} unreviewed generated "
-                "question(s) that were active in older releases."
-            )
 
 
 def _ensure_starter_corpus(database: Database) -> StarterCorpusStatus:
@@ -318,12 +303,7 @@ def _ensure_starter_corpus(database: Database) -> StarterCorpusStatus:
                 ),
             ),
         )
-    return StarterCorpusStatus(
-        installed_release_id != active_release_id,
-        legacy_generated_revocations=int(
-            imported["legacy_generated_revocations"]
-        ),
-    )
+    return StarterCorpusStatus(installed_release_id != active_release_id)
 
 
 def _starter_topic(database: Database, requested: str | None) -> str:
@@ -376,12 +356,6 @@ def command_start(args: argparse.Namespace) -> None:
     topic = _starter_topic(database, args.topic)
     if starter_status:
         print("Installed the bundled reviewed curriculum catalog.")
-    if starter_status.legacy_generated_revocations:
-        print(
-            "Emergency-quarantined "
-            f"{starter_status.legacy_generated_revocations} unreviewed generated "
-            "question(s) that were active in older releases."
-        )
     if starter_status.conflict is not None:
         print(
             "Bundled curriculum update was withheld to preserve immutable "
@@ -481,38 +455,7 @@ def command_capacity(args: argparse.Namespace) -> int:
             _,
             topics,
         ) = read_and_parse(corpus_path, include_catalog=True)
-        corpus_sha256 = (
-            corpus_source_digest(corpus_path)
-            if args.quarantine_impact
-            else None
-        )
     try:
-        if args.quarantine_impact:
-            if args.strict:
-                raise ValueError(
-                    "--strict cannot be combined with --quarantine-impact; "
-                    "counterfactual review analysis is not a live corpus gate."
-                )
-            if args.all or not (args.concept or args.topic):
-                raise ValueError(
-                    "--quarantine-impact requires exactly one --concept or "
-                    "--topic target."
-                )
-        elif any(
-            value is not None
-            for value in (
-                args.maximum_combination_size,
-                args.candidate_limit,
-                args.evaluation_limit,
-                args.result_limit,
-                args.candidate_question_id,
-                args.candidate_batch_id,
-            )
-        ):
-            raise ValueError(
-                "Combination, candidate, evaluation, result, and candidate "
-                "filters require --quarantine-impact."
-            )
         if args.concept:
             targets = (
                 concept_target(
@@ -541,118 +484,6 @@ def command_capacity(args: argparse.Namespace) -> int:
                 )
                 for topic in sorted(topics, key=lambda value: value.id)
             )
-        if args.quarantine_impact:
-            impact = analyze_quarantine_capacity_impact(
-                questions,
-                KnowledgeGraph(concepts, edges),
-                misconceptions,
-                targets[0],
-                maximum_combination_size=(
-                    2
-                    if args.maximum_combination_size is None
-                    else args.maximum_combination_size
-                ),
-                candidate_limit=(
-                    16
-                    if args.candidate_limit is None
-                    else args.candidate_limit
-                ),
-                result_limit=(
-                    20
-                    if args.result_limit is None
-                    else args.result_limit
-                ),
-                evaluation_limit=(
-                    500
-                    if args.evaluation_limit is None
-                    else args.evaluation_limit
-                ),
-                state_limit=args.state_limit,
-                candidate_question_ids=args.candidate_question_id,
-                candidate_batch_ids=args.candidate_batch_id,
-            )
-            payload = {
-                "path": corpus_label,
-                "corpus_sha256": corpus_sha256,
-                "exact_within_declared_search_space": True,
-                "non_activating": True,
-                **impact,
-            }
-            if args.json:
-                _emit(payload, as_json=True)
-                return 0
-
-            baseline = impact["baseline"]
-            print(
-                "Exact target-owned quarantine capacity impact "
-                f"(counterfactual only): {corpus_label}"
-            )
-            print(
-                "  NO ACTIVATION: source questions remain quarantined; "
-                "no database or learner evidence is used."
-            )
-            print(
-                f"  target={targets[0].target_id}  "
-                f"baseline={baseline['status']}  "
-                f"robust={baseline['order_robust_main_capacity']}  "
-                f"achievable={baseline['achievable_main_capacity']}  "
-                f"concept-floor="
-                f"{baseline['owned_concept_order_robust_floor']}/"
-                f"{baseline['owned_concept_achievable_floor']}"
-            )
-            print(
-                f"  quarantined target-owned candidates="
-                f"{impact['candidate_count']}  "
-                f"evaluated combinations="
-                f"{impact['evaluated_combination_count']}  "
-                f"search bound={impact['maximum_combination_size']}  "
-                "preflight maximum="
-                f"{impact['preflight_admissible_combination_count']}"
-            )
-            if impact["candidate_filter"]["mode"] != "all_target_owned":
-                print(
-                    "  exact candidate filter="
-                    f"{impact['candidate_filter']['mode']}: "
-                    + ", ".join(impact["candidate_filter"]["values"])
-                    + "  eligible before filter="
-                    f"{impact['eligible_candidate_count_before_filter']}"
-                )
-            minimum = impact["minimal_closing_combination_size"]
-            if minimum is None:
-                print(
-                    "  no closing combination found within the declared "
-                    "combination-size bound"
-                )
-            elif minimum == 0:
-                print(
-                    "  live baseline already meets the configured target; "
-                    "no quarantined review set is required for closure"
-                )
-            else:
-                print(
-                    "  exact minimum within the declared target-owned, "
-                    f"one-question-per-family search={minimum}; "
-                    f"{impact['closing_combination_count_at_minimum']} "
-                    "combination(s)"
-                    + (
-                        f" (showing {len(impact['closing_combinations'])})"
-                        if impact["closing_combinations_truncated"]
-                        else ""
-                    )
-                )
-                for row in impact["closing_combinations"]:
-                    print(
-                        "    "
-                        + ", ".join(row["question_ids"])
-                        + "  -> "
-                        + row["impact"]["capacity"]["status"]
-                    )
-            print(
-                "  Human source, correctness, misconception, semantic-family, "
-                "and release review remain required before activation."
-            )
-            print(f"  report digest: {impact['report_digest']}")
-            return 0
         report = analyze_sustained_capacity(
             questions,
             KnowledgeGraph(concepts, edges),
@@ -1882,7 +1713,7 @@ def command_coverage(args: argparse.Namespace) -> None:
             f"{gap.current_count}/{gap.target_count}  difficulty={blueprint.target_difficulty:+.2f}"
         )
     if job_ids:
-        print(f"Enqueued {len(job_ids)} quarantined authoring jobs.")
+        print(f"Enqueued {len(job_ids)} offline authoring jobs.")
 
 
 def command_jobs_list(args: argparse.Namespace) -> None:
@@ -1973,7 +1804,7 @@ def command_jobs_show(args: argparse.Namespace) -> None:
             f"  artifact: {job['raw_output'].get('id', '<unknown>')} "
             f"[{job['raw_output'].get('status', '<missing>')}]"
         )
-        print("  activation: none (reviewed artifacts remain quarantined)")
+        print("  corpus inclusion: none (the artifact remains outside releases)")
 def _read_source_context(path: Path) -> str:
     try:
         raw = path.read_bytes()
@@ -2005,8 +1836,9 @@ def command_jobs_run(args: argparse.Namespace) -> None:
         f"{result['status']}."
     )
     print(
-        f"Artifact {result['item'].get('id', '<unknown>')} remains quarantined; "
-        "no live question or corpus release was changed."
+        f"Artifact {result['item'].get('id', '<unknown>')} is "
+        f"{result['item'].get('status', 'draft')}; no corpus question or "
+        "release was changed."
     )
 
 
@@ -2042,104 +1874,6 @@ def command_reviews_show(args: argparse.Namespace) -> None:
                 f"{reviewer.get('reviewer_name', '<unknown>')} -> "
                 f"{output.get('verdict', '<invalid>')}"
             )
-
-
-def command_quarantine_list(args: argparse.Namespace) -> None:
-    rows = QuarantineReviewQueue(_inspection_database(args)).list(
-        topic=args.topic,
-        concept_id=args.concept,
-        learning_objective_id=args.objective,
-        limit=args.limit,
-    )
-    if args.json:
-        _emit(rows, as_json=True)
-        return
-    if not rows:
-        print("No quarantined questions matched.")
-        return
-    for row in rows:
-        target = (
-            row["learning_objective_id"]
-            or row["primary_concept_id"]
-        )
-        review_claim = row["provenance_claims"].get(
-            "human_review_status"
-        )
-        print(
-            f"{row['question_id']} "
-            f"[{row['activation_ceiling']}/{row['kind']}] "
-            f"difficulty={row['difficulty']:+.2f}  {target}"
-        )
-        print(
-            f"  sources={row['source_count']} "
-            f"recorded-reviews={row['recorded_item_review_count']} "
-            f"human-review-claim={review_claim or 'unspecified'}"
-        )
-        if row["revoked"]:
-            print(
-                "  permanently revoked: "
-                f"{row['revocation_reason']}"
-            )
-    print("All listed questions remain quarantined and runtime-ineligible.")
-
-
-def command_quarantine_show(args: argparse.Namespace) -> None:
-    detail = QuarantineReviewQueue(
-        _inspection_database(args)
-    ).show(args.question)
-    if args.json:
-        _emit(detail, as_json=True)
-        return
-    question = detail["question"]
-    print(
-        f"Question {question['id']} [{detail['activation_ceiling']}] "
-        f"{question['kind']} difficulty={question['difficulty']:+.2f}"
-    )
-    if question["learning_objective_id"]:
-        print(f"  objective: {question['learning_objective_id']}")
-    print(f"  family: {question['family_id']}")
-    print(f"  content: {detail['question_content_sha256']}")
-    print(f"\n{question['stem']}")
-    for option in question["options"]:
-        marker = "best" if option["correct"] else "distractor"
-        print(f"  {option['id']}. [{marker}] {option['text']}")
-        if option["misconception_id"]:
-            print(
-                f"     misconception: {option['misconception_id']}"
-            )
-        print(f"     rationale: {option['rationale']}")
-    print("Sources:")
-    for source in detail["sources"]:
-        locator = f" · {source['uri']}" if source["uri"] else ""
-        print(f"  {source['id']}: {source['title']}{locator}")
-    if detail["revocation"] is not None:
-        print(
-            "Revocation: this immutable question ID must not be promoted; "
-            f"{detail['revocation']['reason']}"
-        )
-    print(
-        "Activation: none; provenance review labels are inspection claims, "
-        "not human authority."
-    )
-
-
-def command_quarantine_packet(args: argparse.Namespace) -> None:
-    packet = QuarantineReviewQueue(
-        _inspection_database(args)
-    ).packet(args.question, stage=args.stage)
-    if args.json:
-        _emit(packet, as_json=True)
-        return
-    print(
-        f"Review packet {packet['schema']} for "
-        f"{packet['question_id']}"
-    )
-    print(f"  packet sha256: {packet['packet_sha256']}")
-    print(f"  stage: {args.stage}")
-    print(
-        "  activation: none; use --json to export the content-bound "
-        f"{args.stage} inspection packet"
-    )
 
 
 def command_task_import(args: argparse.Namespace) -> None:
@@ -3492,7 +3226,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     revoke = subparsers.add_parser(
         "revoke",
-        help="Emergency-quarantine a question across all pinned releases",
+        help="Revoke a question across all pinned releases",
     )
     revoke.add_argument("question")
     revoke.add_argument("--reason", required=True)
@@ -3551,71 +3285,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=DEFAULT_STATE_LIMIT,
         help="Maximum exact search states per target (never falls back to a heuristic)",
-    )
-    capacity.add_argument(
-        "--quarantine-impact",
-        action="store_true",
-        help=(
-            "Counterfactually rank target-owned quarantined review sets without "
-            "activating content or opening a database"
-        ),
-    )
-    capacity.add_argument(
-        "--maximum-combination-size",
-        "--max-combination-size",
-        dest="maximum_combination_size",
-        type=int,
-        default=None,
-        help=(
-            "Largest exact quarantined subset to exhaust "
-            f"(1-{MAX_COMBINATION_SIZE}; requires --quarantine-impact)"
-        ),
-    )
-    capacity.add_argument(
-        "--candidate-limit",
-        type=int,
-        default=None,
-        help=(
-            "Fail rather than truncate above this many candidates "
-            f"(1-{MAX_CANDIDATE_LIMIT}; requires --quarantine-impact)"
-        ),
-    )
-    capacity.add_argument(
-        "--result-limit",
-        type=int,
-        default=None,
-        help=(
-            "Maximum ranked combinations to render "
-            f"(1-{MAX_RESULT_LIMIT}; requires --quarantine-impact)"
-        ),
-    )
-    capacity.add_argument(
-        "--evaluation-limit",
-        type=int,
-        default=None,
-        help=(
-            "Fail before subset analysis above this exact evaluation budget "
-            f"(1-{MAX_EVALUATION_LIMIT}; requires --quarantine-impact)"
-        ),
-    )
-    quarantine_candidate_scope = capacity.add_mutually_exclusive_group()
-    quarantine_candidate_scope.add_argument(
-        "--candidate-question-id",
-        action="append",
-        default=None,
-        help=(
-            "Restrict exact quarantine impact to this target-owned "
-            "quarantined question ID; repeat for an explicit review set"
-        ),
-    )
-    quarantine_candidate_scope.add_argument(
-        "--candidate-batch-id",
-        action="append",
-        default=None,
-        help=(
-            "Restrict exact quarantine impact to target-owned quarantined "
-            "questions from this provenance batch; repeat for more batches"
-        ),
     )
     capacity.add_argument("--json", action="store_true")
     capacity.set_defaults(func=command_capacity)
@@ -3844,7 +3513,7 @@ def build_parser() -> argparse.ArgumentParser:
     coverage.set_defaults(func=command_coverage)
 
     jobs = subparsers.add_parser(
-        "jobs", help="Operate quarantined offline generation jobs"
+        "jobs", help="Operate offline generation jobs"
     )
     jobs_sub = jobs.add_subparsers(dest="jobs_command", required=True)
 
@@ -3904,59 +3573,6 @@ def build_parser() -> argparse.ArgumentParser:
     reviews_show.add_argument("job")
     reviews_show.add_argument("--json", action="store_true")
     reviews_show.set_defaults(func=command_reviews_show)
-
-    quarantine = subparsers.add_parser(
-        "quarantine",
-        help="Inspect release-pinned questions awaiting human review",
-    )
-    quarantine_sub = quarantine.add_subparsers(
-        dest="quarantine_command",
-        required=True,
-    )
-    quarantine_list = quarantine_sub.add_parser(
-        "list",
-        help="List quarantined review candidates",
-    )
-    quarantine_scope = quarantine_list.add_mutually_exclusive_group()
-    quarantine_scope.add_argument(
-        "--topic",
-        help="restrict to a curriculum topic ID or exact topic name",
-    )
-    quarantine_scope.add_argument(
-        "--concept",
-        help="restrict to one stable concept ID",
-    )
-    quarantine_list.add_argument(
-        "--objective",
-        help="restrict to one stable learning-objective ID",
-    )
-    quarantine_list.add_argument("--limit", type=int, default=50)
-    quarantine_list.add_argument("--json", action="store_true")
-    quarantine_list.set_defaults(func=command_quarantine_list)
-
-    quarantine_show = quarantine_sub.add_parser(
-        "show",
-        help="Show a full quarantined item, rationales, and sources",
-    )
-    quarantine_show.add_argument("question")
-    quarantine_show.add_argument("--json", action="store_true")
-    quarantine_show.set_defaults(func=command_quarantine_show)
-
-    quarantine_packet = quarantine_sub.add_parser(
-        "packet",
-        help="Build a content-bound, non-activating review packet",
-    )
-    quarantine_packet.add_argument("question")
-    quarantine_packet.add_argument(
-        "--stage",
-        choices=("combined", "blind", "family", "critic"),
-        default="combined",
-        help=(
-            "export coordinator-combined material or one isolated review stage"
-        ),
-    )
-    quarantine_packet.add_argument("--json", action="store_true")
-    quarantine_packet.set_defaults(func=command_quarantine_packet)
 
     task = subparsers.add_parser(
         "task",

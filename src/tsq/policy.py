@@ -16,6 +16,7 @@ from typing import Iterable, Mapping
 from .adaptive import RecursiveEvidenceBoundary
 from .capacity import VERIFICATION_KINDS
 from .errors import ConflictError, ExhaustedError, ValidationError
+from .families import canonical_family_label
 from .inference import classify_response_for_model
 from .learner import (
     OBJECTIVE_MODEL_VERSIONS,
@@ -36,7 +37,7 @@ from .policy_shadow import (
     POLICY_SHADOW_PROJECTION_COLUMNS,
     build_policy_shadow_evaluation,
 )
-from .store import Database, new_id, question_runtime_activation_safe
+from .store import Database, new_id
 from .versions import (
     SUPPORTED_MODEL_VERSIONS,
     question_selected_schema_for,
@@ -49,7 +50,11 @@ EXACT_OBJECTIVE_READINESS_POLICY_VERSION = "recursive-evidence-graph-v15"
 EXPLORATION_FALLBACK_POLICY_VERSION = "recursive-evidence-graph-v16"
 HYBRID_COVERAGE_POLICY_VERSION = "recursive-evidence-graph-v17"
 SHADOW_EVALUATION_POLICY_VERSION = "recursive-evidence-graph-v18"
-POLICY_VERSION = SHADOW_EVALUATION_POLICY_VERSION
+CANONICAL_FAMILY_POLICY_VERSION = "recursive-evidence-graph-v19"
+POLICY_VERSION = CANONICAL_FAMILY_POLICY_VERSION
+CANONICAL_FAMILY_POLICY_VERSIONS = frozenset(
+    {CANONICAL_FAMILY_POLICY_VERSION}
+)
 PERSISTENT_GAP_EPISODE_POLICY_VERSIONS = frozenset(
     {
         PERSISTENT_GAP_EPISODE_POLICY_VERSION,
@@ -58,6 +63,7 @@ PERSISTENT_GAP_EPISODE_POLICY_VERSIONS = frozenset(
         EXPLORATION_FALLBACK_POLICY_VERSION,
         HYBRID_COVERAGE_POLICY_VERSION,
         SHADOW_EVALUATION_POLICY_VERSION,
+        CANONICAL_FAMILY_POLICY_VERSION,
     }
 )
 PERSISTENT_GAP_MIN_OBSERVED_FAMILIES = 2
@@ -450,7 +456,9 @@ class AdaptivePolicy:
         with self.database.read() as connection:
             rows = connection.execute(
                 f"""SELECT decision.question_objective_id AS objective_id,
-                           COUNT(DISTINCT attempt.family_id) AS families
+                           COUNT(DISTINCT
+                               tsq_canonical_family(attempt.family_id)
+                           ) AS families
                     FROM attempts attempt
                     JOIN decisions decision ON decision.id = attempt.decision_id
                     WHERE attempt.learner_id = ?
@@ -612,7 +620,8 @@ class AdaptivePolicy:
             rows = connection.execute(
                 """SELECT decision.question_objective_id,
                           decision.rationale, decision.policy_version,
-                          attempt.family_id, event.stream_id,
+                          attempt.family_id,
+                          event.stream_id,
                           event.stream_version
                    FROM attempts attempt
                    JOIN decisions decision
@@ -662,7 +671,15 @@ class AdaptivePolicy:
                         "Persistent-gap episode spend sequence is malformed."
                     )
                 family_ids = history["family_ids"]
-                if row["family_id"] in family_ids:
+                family_id = row["family_id"]
+                if row["policy_version"] in CANONICAL_FAMILY_POLICY_VERSIONS:
+                    family_ids = {
+                        canonical_family_label(prior_family_id)
+                        for prior_family_id in family_ids
+                    }
+                    history["family_ids"] = family_ids
+                    family_id = canonical_family_label(family_id)
+                if family_id in family_ids:
                     raise ValidationError(
                         "Persistent-gap episode reused a response family."
                     )
@@ -678,7 +695,7 @@ class AdaptivePolicy:
                         raise ValidationError(
                             "Persistent-gap episode spends were not interleaved."
                         )
-                family_ids.add(row["family_id"])
+                family_ids.add(family_id)
                 history["spends"] = spend
                 history["last_spend_stream_version"] = row[
                     "stream_version"
@@ -762,7 +779,7 @@ class AdaptivePolicy:
     ) -> dict[tuple[str, str], int]:
         """Read positive families accepted by the pinned release.
 
-        Removed, quarantined, or emergency-revoked item families cannot
+        Draft, retired, or emergency-revoked item families cannot
         contribute current internal retrieval coverage.
         """
 
@@ -790,7 +807,8 @@ class AdaptivePolicy:
             rows = connection.execute(
                 """SELECT 'objective' AS target_kind,
                           evidence.objective_id AS target_id,
-                          evidence.family_id
+                          tsq_canonical_family(evidence.family_id)
+                              AS family_id
                    FROM learner_objective_families evidence
                    WHERE evidence.learner_id = ?
                      AND EXISTS (
@@ -803,7 +821,8 @@ class AdaptivePolicy:
                           AND released.question_id = direct.question_id
                          WHERE direct.release_id = ?
                            AND direct.objective_id = evidence.objective_id
-                           AND question.family_id = evidence.family_id
+                           AND tsq_canonical_family(question.family_id)
+                               = tsq_canonical_family(evidence.family_id)
                            AND released.status IN ('approved', 'calibrated')
                            AND NOT EXISTS (
                                SELECT 1
@@ -811,10 +830,11 @@ class AdaptivePolicy:
                                WHERE revoked.question_id = question.id
                            )
                      )
-                   UNION ALL
+                   UNION
                    SELECT 'concept' AS target_kind,
                           evidence.concept_id AS target_id,
-                          evidence.family_id
+                          tsq_canonical_family(evidence.family_id)
+                              AS family_id
                    FROM learner_skill_families evidence
                    WHERE evidence.learner_id = ?
                      AND EXISTS (
@@ -828,7 +848,8 @@ class AdaptivePolicy:
                          WHERE released.release_id = ?
                            AND released.status IN ('approved', 'calibrated')
                            AND mapping.concept_id = evidence.concept_id
-                           AND question.family_id = evidence.family_id
+                           AND tsq_canonical_family(question.family_id)
+                               = tsq_canonical_family(evidence.family_id)
                            AND NOT EXISTS (
                                SELECT 1
                                FROM question_revocations revoked
@@ -853,10 +874,6 @@ class AdaptivePolicy:
                 )
             if target not in families:
                 continue
-            if family_id in families[target]:
-                raise ValidationError(
-                    "Hybrid coverage found a duplicate retrieval family."
-                )
             families[target].add(family_id)
         for target, target_families in families.items():
             counts[target] = len(target_families)
@@ -1073,7 +1090,7 @@ class AdaptivePolicy:
                 or not learner_row
             ):
                 raise _RetrySelection()
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 session["learner_id"],
                 connection,
             )
@@ -1122,17 +1139,6 @@ class AdaptivePolicy:
             selection_policy_version = (
                 selection_boundary[1] if selection_boundary else None
             )
-            pending_activation_safe = True
-            if pending_row is not None:
-                pending_question = self.database.get_question(
-                    pending_row["question_id"],
-                    connection,
-                    release_id=pending_row["corpus_release_id"],
-                )
-                pending_activation_safe = question_runtime_activation_safe(
-                    pending_question,
-                    status=pending_row["question_status"],
-                )
             if (
                 pending_row
                 and selection_policy_version
@@ -1145,7 +1151,6 @@ class AdaptivePolicy:
             if (
                 pending_row
                 and pending_row["emergency_revoked_at"] is None
-                and pending_activation_safe
                 and pending_row["learner_revision"] == learner_revision
                 and selection_model_version == self.learner_model.model_version
                 and selection_policy_version == POLICY_VERSION
@@ -1156,17 +1161,13 @@ class AdaptivePolicy:
                     "question_emergency_revoked"
                     if pending_row["emergency_revoked_at"] is not None
                     else (
-                        "question_activation_provenance_invalid"
-                        if not pending_activation_safe
+                        "learner_model_changed"
+                        if selection_model_version
+                        != self.learner_model.model_version
                         else (
-                            "learner_model_changed"
-                            if selection_model_version
-                            != self.learner_model.model_version
-                            else (
-                                "policy_changed"
-                                if selection_policy_version != POLICY_VERSION
-                                else "learner_projection_advanced"
-                            )
+                            "policy_changed"
+                            if selection_policy_version != POLICY_VERSION
+                            else "learner_projection_advanced"
                         )
                     )
                 )
@@ -2132,7 +2133,8 @@ class AdaptivePolicy:
                         connection,
                         learner_id=session["learner_id"],
                         family_ids={
-                            question.family_id for question in eligible
+                            self.learner_model.response_family_id(question)
+                            for question in eligible
                         },
                         now=now,
                     )
@@ -2225,18 +2227,17 @@ class AdaptivePolicy:
                 "SELECT revision FROM learners WHERE id = ?", (session["learner_id"],)
             ).fetchone()
             # Candidate scoring and randomized top-k sampling happen outside
-            # the writer lock. A safety migration can quarantine historical
-            # evidence without changing learner/session revisions, so close
-            # that race before any decision or event is written.
-            self.database.require_learner_evidence_safe(
+            # the writer lock. A schema-v22 migration can reveal an invalidated
+            # response without changing learner/session revisions, so close
+            # that race before writing a decision or event.
+            self.database.require_learner_evidence_integrity(
                 session["learner_id"],
                 connection,
             )
-            # Scoring runs outside the writer transaction. A performance task
-            # can therefore start after the early reconciliation check without
-            # changing either session or learner revision. Recheck under this
-            # final serialized write boundary so a session can never expose a
-            # pending question and an open productive task at the same time.
+            # A performance task can likewise start after the early
+            # reconciliation check without advancing either revision. Recheck
+            # under this final serialized write boundary so a session cannot
+            # expose both a pending question and an open productive task.
             open_performance_attempt = connection.execute(
                 """SELECT attempt.id
                    FROM performance_attempts attempt
@@ -2590,8 +2591,11 @@ class AdaptivePolicy:
                     )
                 )
             else:
+                response_family_id = self.learner_model.response_family_id(
+                    question
+                )
                 potential_family_power = potential_family_powers.get(
-                    question.family_id
+                    response_family_id
                 )
                 if (
                     isinstance(potential_family_power, bool)
@@ -2602,7 +2606,7 @@ class AdaptivePolicy:
                 ):
                     raise ValidationError(
                         "Planned family evidence power is missing or invalid "
-                        f"for {question.family_id}."
+                        f"for {response_family_id}."
                     )
             anticipated_evidence_power = (
                 question.status.evidence_weight

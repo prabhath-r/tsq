@@ -395,7 +395,7 @@
       "id": "q_ar_teacher_forced_conditional_001",
       "version": 1,
       "family_id": "f_ar_teacher_forcing_factorization",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed autoregressive decoder uses teacher forcing on tokens x1, x2, x3 and computes all training logits in one parallel pass. What probability does the logit used to score x3 represent?",
       "kind": "conceptual",
       "difficulty": -0.9,
@@ -410,14 +410,14 @@
         {"id": "d", "text": "It represents the external truth probability of the claim containing x3, because likelihood scores factual support.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A token conditional under a text model is not an independent factual-verification probability."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. describes autoregressive language modeling and Murphy supports the probability chain rule. The three-token teacher-forcing presentation is original instructional synthesis.", "independence_note": "This intentionally reuses f_ar_teacher_forcing_factorization because it asks for one factor of the same prefix-conditioned product as the released teacher-forcing item; the scalar warm-up is dependent evidence."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. describes autoregressive language modeling and Murphy supports the probability chain rule. The three-token teacher-forcing presentation is original instructional synthesis.", "independence_note": "This intentionally reuses f_ar_teacher_forcing_factorization because it asks for one factor of the same prefix-conditioned product as the released teacher-forcing item; the scalar warm-up is dependent evidence."},
       "tags": ["llm", "language_modeling", "autoregressive", "teacher_forcing", "introductory"]
     },
     {
       "id": "q_ar_parallel_schedule_factorization_001",
       "version": 1,
       "family_id": "f_ar_teacher_forcing_factorization",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Two training programs use the same fixed decoder and shifted examples. Program S evaluates prefix-conditioned token losses in a serial loop; program P evaluates the same conditionals in parallel. Ignoring arithmetic roundoff, what changes in the modeled sequence factorization?",
       "kind": "comparison",
       "difficulty": -0.25,
@@ -432,14 +432,14 @@
         {"id": "d", "text": "Program P turns sequence likelihood into factual confidence because evaluating more positions together adds evidential support.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Scheduling token losses does not transform text likelihood into external verification."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports autoregressive conditional prediction and Murphy supports the factorization. Serial and parallel programs are stipulated to compute identical conditionals.", "independence_note": "This shares f_ar_teacher_forcing_factorization because it restates the same distinction between dependency semantics and parallel scheduling in a two-program audit."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports autoregressive conditional prediction and Murphy supports the factorization. Serial and parallel programs are stipulated to compute identical conditionals.", "independence_note": "This shares f_ar_teacher_forcing_factorization because it restates the same distinction between dependency semantics and parallel scheduling in a two-program audit."},
       "tags": ["llm", "language_modeling", "autoregressive", "teacher_forcing", "comparison"]
     },
     {
       "id": "q_ar_parallel_prefix_intervention_001",
       "version": 1,
       "family_id": "f_ar_teacher_forcing_factorization",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "During a teacher-forced forward pass with fixed parameters, the loss for target token xt is computed from its permitted prefix. A prefix input xk with k less than t is perturbed while later inputs remain hidden from position t. Which trace is consistent with autoregressive factorization?",
       "kind": "counterfactual",
       "difficulty": 0.7,
@@ -454,14 +454,14 @@
         {"id": "d", "text": "The loss change would certify that the perturbed prefix makes the target's factual claim more or less true.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A changed conditional loss is not a factuality judgment about the target content."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports prefix-conditioned autoregressive prediction and Murphy supports conditional dependence. The fixed-parameter prefix intervention is original synthesis.", "independence_note": "This remains f_ar_teacher_forcing_factorization because the intervention tests the same prefix dependence that defines the existing factorization family; counterfactual wording does not create independence."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports prefix-conditioned autoregressive prediction and Murphy supports conditional dependence. The fixed-parameter prefix intervention is original synthesis.", "independence_note": "This remains f_ar_teacher_forcing_factorization because the intervention tests the same prefix dependence that defines the existing factorization family; counterfactual wording does not create independence."},
       "tags": ["llm", "language_modeling", "autoregressive", "prefix_conditioning", "counterfactual"]
     },
     {
       "id": "q_ar_demonstration_checksum_001",
       "version": 1,
       "family_id": "f_ar_fixed_weight_demonstrations",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A deployed model answers a query once without examples and once after three worked examples are prepended. The parameter checksum and optimizer-step count are unchanged, but the next-token distribution differs. Which explanation fits?",
       "kind": "diagnostic",
       "difficulty": -0.65,
@@ -476,14 +476,14 @@
         {"id": "d", "text": "The examples changed the conditioning prefix and resulting activations while the learned parameters stayed fixed.", "correct": true, "misconception_id": null, "rationale": "In-context demonstrations can alter conditional predictions through input context without gradient-based learning."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. evaluates in-context demonstrations without gradient updates. The checksum and optimizer-count controls are stipulated diagnostic evidence.", "independence_note": "This intentionally reuses f_ar_fixed_weight_demonstrations because it repeats the same checksum-controlled inference as the released demonstrations item; the simpler contrast is dependent."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. evaluates in-context demonstrations without gradient updates. The checksum and optimizer-count controls are stipulated diagnostic evidence.", "independence_note": "This intentionally reuses f_ar_fixed_weight_demonstrations because it repeats the same checksum-controlled inference as the released demonstrations item; the simpler contrast is dependent."},
       "tags": ["llm", "language_modeling", "prompting", "demonstrations", "fixed_parameters"]
     },
     {
       "id": "q_ar_label_mapping_demonstrations_001",
       "version": 1,
       "family_id": "f_ar_fixed_weight_demonstrations",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A prompt defines an unfamiliar label mapping with worked examples, then asks the fixed deployed model to label a new case. Removing the examples changes its output; no training API is called. What is the supported interpretation?",
       "kind": "application",
       "difficulty": 0.0,
@@ -498,14 +498,14 @@
         {"id": "d", "text": "The examples make the selected label factually verified because higher conditional likelihood supplies external evidence.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Following an in-prompt mapping is not factual verification against the world."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports task conditioning through in-context demonstrations without parameter updates. The unfamiliar labels and removal control are stipulated.", "independence_note": "This shares f_ar_fixed_weight_demonstrations because the solution is the same fixed-weights-versus-example-conditioned-prefix distinction; changing the label task is not independent evidence."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports task conditioning through in-context demonstrations without parameter updates. The unfamiliar labels and removal control are stipulated.", "independence_note": "This shares f_ar_fixed_weight_demonstrations because the solution is the same fixed-weights-versus-example-conditioned-prefix distinction; changing the label task is not independent evidence."},
       "tags": ["llm", "language_modeling", "in_context_learning", "label_mapping", "fixed_parameters"]
     },
     {
       "id": "q_ar_prompt_finetune_control_001",
       "version": 1,
       "family_id": "f_ar_fixed_weight_demonstrations",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Run P prepends demonstrations and performs a forward pass. Run F keeps the original prompt but executes an optimizer update on training examples before inference. Which audit distinguishes the two mechanisms most directly?",
       "kind": "comparison",
       "difficulty": 0.8,
@@ -520,14 +520,14 @@
         {"id": "d", "text": "The run with higher continuation probability has stronger factual evidence under either mechanism.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Conditional likelihood does not identify external evidential support."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. distinguishes in-context task conditioning from gradient-based parameter updates. The P/F controlled comparison is original synthesis.", "independence_note": "This stays in f_ar_fixed_weight_demonstrations because the keyed audit is the same fixed-checkpoint demonstration mechanism viewed against an explicit optimizer control."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. distinguishes in-context task conditioning from gradient-based parameter updates. The P/F controlled comparison is original synthesis.", "independence_note": "This stays in f_ar_fixed_weight_demonstrations because the keyed audit is the same fixed-checkpoint demonstration mechanism viewed against an explicit optimizer control."},
       "tags": ["llm", "language_modeling", "prompting", "fine_tuning", "controlled_comparison"]
     },
     {
       "id": "q_ar_two_factor_likelihood_001",
       "version": 1,
       "family_id": "f_ar_conditional_likelihood_product",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed autoregressive model assigns p(x1)=0.50 and p(x2 given x1)=0.40. Which sequence probability and interpretation are valid for x1, x2?",
       "kind": "calculation",
       "difficulty": -0.75,
@@ -542,14 +542,14 @@
         {"id": "d", "text": "Use 0.50 as factual confidence for the sequence because the larger token likelihood certifies its claims.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A token factor is neither the sequence probability nor an external truth score."}
       ],
       "source_ids": ["src_murphy_pml_2022", "src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports the probability chain rule and Brown et al. supports autoregressive language modeling. The two conditional values are original arithmetic synthesis.", "independence_note": "This intentionally reuses f_ar_conditional_likelihood_product because it performs the same multiplication of stated prefix-conditioned factors as the released three-token item."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports the probability chain rule and Brown et al. supports autoregressive language modeling. The two conditional values are original arithmetic synthesis.", "independence_note": "This intentionally reuses f_ar_conditional_likelihood_product because it performs the same multiplication of stated prefix-conditioned factors as the released three-token item."},
       "tags": ["llm", "language_modeling", "autoregressive", "chain_rule", "introductory"]
     },
     {
       "id": "q_ar_sequence_likelihood_comparison_001",
       "version": 1,
       "family_id": "f_ar_conditional_likelihood_product",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Under one fixed model, sequence A has conditional factors 0.80 and 0.50, while sequence B has factors 0.60 and 0.60. Which likelihood comparison follows?",
       "kind": "comparison",
       "difficulty": -0.05,
@@ -564,14 +564,14 @@
         {"id": "d", "text": "Sequence A has likelihood 0.40 and sequence B has 0.36, so A has the higher model likelihood.", "correct": true, "misconception_id": null, "rationale": "Multiplying each pair gives 0.80 times 0.50 equals 0.40 and 0.60 times 0.60 equals 0.36."}
       ],
       "source_ids": ["src_murphy_pml_2022", "src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports multiplying conditional factors and Brown et al. supports autoregressive likelihood. The paired factors are original synthesis.", "independence_note": "This shares f_ar_conditional_likelihood_product because ranking the two sequences repeats the same product calculation twice; comparison does not create a new independent operation."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports multiplying conditional factors and Brown et al. supports autoregressive likelihood. The paired factors are original synthesis.", "independence_note": "This shares f_ar_conditional_likelihood_product because ranking the two sequences repeats the same product calculation twice; comparison does not create a new independent operation."},
       "tags": ["llm", "language_modeling", "autoregressive", "likelihood", "comparison"]
     },
     {
       "id": "q_ar_negative_log_likelihood_001",
       "version": 1,
       "family_id": "f_ar_conditional_likelihood_product",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Three observed tokens have prefix-conditioned probabilities 0.50, 0.25, and 0.50 under a fixed model. Using natural logarithms, what is their summed negative log-likelihood?",
       "kind": "calculation",
       "difficulty": 0.85,
@@ -586,14 +586,14 @@
         {"id": "d", "text": "It is log(16) units of factual error, because negative log-likelihood measures external falsehood.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Negative log-likelihood measures predictive fit to the token sequence, not factual error against the world."}
       ],
       "source_ids": ["src_murphy_pml_2022", "src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports chain-rule products and log-likelihood aggregation; Brown et al. supplies the autoregressive setting. Numeric factors are original synthesis.", "independence_note": "This remains f_ar_conditional_likelihood_product because log aggregation is a monotone algebraic rewrite of the same stated conditional product and should not count independently."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports chain-rule products and log-likelihood aggregation; Brown et al. supplies the autoregressive setting. Numeric factors are original synthesis.", "independence_note": "This remains f_ar_conditional_likelihood_product because log aggregation is a monotone algebraic rewrite of the same stated conditional product and should not count independently."},
       "tags": ["llm", "language_modeling", "autoregressive", "negative_log_likelihood", "calculation"]
     },
     {
       "id": "q_ar_probable_false_claim_001",
       "version": 1,
       "family_id": "f_ar_likelihood_factuality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed language model assigns high probability to a common claim that a controlled measurement directly contradicts. What does the high model probability establish?",
       "kind": "conceptual",
       "difficulty": -0.8,
@@ -608,14 +608,14 @@
         {"id": "d", "text": "It establishes that the claim is factually supported more strongly than the contradictory measurement.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Text probability does not override direct external evidence."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports next-token likelihood as a language-model quantity and Murphy distinguishes modeled probability from external measurement evidence. The controlled conflict is stipulated.", "independence_note": "This intentionally reuses f_ar_likelihood_factuality because it makes the same likelihood-versus-external-truth distinction as the released archive example."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports next-token likelihood as a language-model quantity and Murphy distinguishes modeled probability from external measurement evidence. The controlled conflict is stipulated.", "independence_note": "This intentionally reuses f_ar_likelihood_factuality because it makes the same likelihood-versus-external-truth distinction as the released archive example."},
       "tags": ["llm", "language_modeling", "likelihood", "factuality", "introductory"]
     },
     {
       "id": "q_ar_external_evidence_counterfactual_001",
       "version": 1,
       "family_id": "f_ar_likelihood_factuality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A model's probability for sequence S is recorded under prompt P and fixed parameters. Later, a trusted experiment refutes S, but its result is not added to P and no parameter update occurs. Which quantities change from this event alone?",
       "kind": "counterfactual",
       "difficulty": 0.35,
@@ -630,14 +630,14 @@
         {"id": "d", "text": "The experiment has no bearing on S because parallel token probabilities make the sequence independent of external facts.", "correct": false, "misconception_id": "m_ar_parallel_independence", "rationale": "Token-factor dependence and external factual evaluation are different questions; the experiment directly bears on the latter."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports fixed-parameter conditional scoring and Murphy supports separating model probability from evidence. The experiment not entering the prompt is an explicit stipulation.", "independence_note": "This shares f_ar_likelihood_factuality because it counterfactually holds model context fixed while changing external evidence, the inverse presentation of the same likelihood-versus-truth boundary."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports fixed-parameter conditional scoring and Murphy supports separating model probability from evidence. The experiment not entering the prompt is an explicit stipulation.", "independence_note": "This shares f_ar_likelihood_factuality because it counterfactually holds model context fixed while changing external evidence, the inverse presentation of the same likelihood-versus-truth boundary."},
       "tags": ["llm", "language_modeling", "likelihood", "external_evidence", "counterfactual"]
     },
     {
       "id": "q_ar_predictive_factual_metrics_001",
       "version": 1,
       "family_id": "f_ar_likelihood_factuality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "On held-out text, model A has lower next-token negative log-likelihood than model B. On a separately sourced claim-verification set, A has lower factual accuracy than B. Which report is justified?",
       "kind": "transfer",
       "difficulty": 0.9,
@@ -652,14 +652,14 @@
         {"id": "d", "text": "A has better predictive likelihood and worse measured factual accuracy; report the two axes separately.", "correct": true, "misconception_id": null, "rationale": "The two evaluations measure different properties and the observed rankings need not agree."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports next-token likelihood evaluation and Murphy supports probabilistic predictive metrics. The separate sourced factual benchmark and opposing rankings are stipulated.", "independence_note": "This remains f_ar_likelihood_factuality because the two-metric report operationalizes the same boundary between model text likelihood and externally verified factual correctness."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_foundations_20260809_a", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports next-token likelihood evaluation and Murphy supports probabilistic predictive metrics. The separate sourced factual benchmark and opposing rankings are stipulated.", "independence_note": "This remains f_ar_likelihood_factuality because the two-metric report operationalizes the same boundary between model text likelihood and externally verified factual correctness."},
       "tags": ["llm", "language_modeling", "evaluation", "negative_log_likelihood", "factuality"]
     },
     {
       "id": "q_ar_shared_prefix_factors_001",
       "version": 1,
       "family_id": "f_ar_teacher_forcing_factorization",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed autoregressive model teacher-forces two sequences, [x1, x2, A] and [x1, x2, B], in the same parallel batch. Which factor comparison follows from their shared prefix?",
       "kind": "comparison",
       "difficulty": -0.35,
@@ -674,14 +674,14 @@
         {"id": "d", "text": "Their matching prefix likelihood proves that claims expressed by x1 and x2 are externally true.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Agreement in model likelihood is not independent evidence about the world."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports autoregressive prefix conditioning and Murphy supports factorizing a joint distribution. The paired shared-prefix sequences are original synthesis.", "independence_note": "This intentionally reuses f_ar_teacher_forcing_factorization because comparing shared prefix factors applies the same conditional-product semantics as the released teacher-forcing item; batching two sequences does not create independence."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports autoregressive prefix conditioning and Murphy supports factorizing a joint distribution. The paired shared-prefix sequences are original synthesis.", "independence_note": "This intentionally reuses f_ar_teacher_forcing_factorization because comparing shared prefix factors applies the same conditional-product semantics as the released teacher-forcing item; batching two sequences does not create independence."},
       "tags": ["llm", "language_modeling", "autoregressive", "teacher_forcing", "shared_prefix"]
     },
     {
       "id": "q_ar_teacher_forced_prefix_source_001",
       "version": 1,
       "family_id": "f_ar_teacher_forcing_factorization",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "During teacher-forced training, the loss for target xt is evaluated using the observed earlier tokens from the training example rather than sampled earlier predictions. Which probability interpretation remains correct?",
       "kind": "diagnostic",
       "difficulty": 0.25,
@@ -696,14 +696,14 @@
         {"id": "d", "text": "The target score measures whether xt states a fact supported by external evidence in the example.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A conditional token score does not perform factual verification."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supplies the autoregressive training objective and Murphy supplies conditional factor semantics. The observed-prefix-versus-sampled-prefix contrast is instructional synthesis.", "independence_note": "This remains f_ar_teacher_forcing_factorization because identifying p(xt given x-before-t) is the same keyed operation as the existing family, expressed through the source of the training prefix."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supplies the autoregressive training objective and Murphy supplies conditional factor semantics. The observed-prefix-versus-sampled-prefix contrast is instructional synthesis.", "independence_note": "This remains f_ar_teacher_forcing_factorization because identifying p(xt given x-before-t) is the same keyed operation as the existing family, expressed through the source of the training prefix."},
       "tags": ["llm", "language_modeling", "autoregressive", "teacher_forcing", "conditional_probability"]
     },
     {
       "id": "q_ar_prefix_extension_conditioning_001",
       "version": 1,
       "family_id": "f_ar_prompt_conditioning",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed deployed model first receives prefix P and then receives the extended prefix [P, z]. No training call occurs. Why may the next-token distribution after [P, z] differ from the one after P?",
       "kind": "conceptual",
       "difficulty": -0.75,
@@ -718,14 +718,14 @@
         {"id": "d", "text": "Adding z supplies external factual evidence, so the new distribution becomes a truth probability.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A context extension does not convert model likelihood into factual verification."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports next-token conditioning on a prompt under fixed deployed parameters. P and its one-token extension are original synthesis.", "independence_note": "This intentionally reuses f_ar_prompt_conditioning because extending a prefix and comparing its next-token distribution repeats the same fixed-weights conditioning operation as the released two-prompt item."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports next-token conditioning on a prompt under fixed deployed parameters. P and its one-token extension are original synthesis.", "independence_note": "This intentionally reuses f_ar_prompt_conditioning because extending a prefix and comparing its next-token distribution repeats the same fixed-weights conditioning operation as the released two-prompt item."},
       "tags": ["llm", "language_modeling", "prompting", "prefix_extension", "introductory"]
     },
     {
       "id": "q_ar_batched_prompt_conditioning_001",
       "version": 1,
       "family_id": "f_ar_prompt_conditioning",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Two different prompts occupy separate rows of one inference batch. They use one checkpoint, sampling is disabled, and there is no cross-example state. The rows produce different next-token logits. Which explanation is valid?",
       "kind": "application",
       "difficulty": -0.1,
@@ -740,14 +740,14 @@
         {"id": "d", "text": "One fixed checkpoint maps each row's different prefix to a different conditional distribution.", "correct": true, "misconception_id": null, "rationale": "Shared parameters can produce different activations and logits from different input contexts."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports prompt-conditioned inference with shared model parameters. Separate batch rows and absent cross-example state are stipulated implementation conditions.", "independence_note": "This shares f_ar_prompt_conditioning because batch parallelism changes execution layout but not the same fixed-model, different-prefix conditional explanation."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports prompt-conditioned inference with shared model parameters. Separate batch rows and absent cross-example state are stipulated implementation conditions.", "independence_note": "This shares f_ar_prompt_conditioning because batch parallelism changes execution layout but not the same fixed-model, different-prefix conditional explanation."},
       "tags": ["llm", "language_modeling", "prompting", "batching", "fixed_parameters"]
     },
     {
       "id": "q_ar_context_ablation_fixed_weights_001",
       "version": 1,
       "family_id": "f_ar_prompt_conditioning",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "An audit removes a policy paragraph from a prompt while holding the checkpoint, decoding settings, and remaining text fixed. The continuation logits change. What does this intervention directly support?",
       "kind": "counterfactual",
       "difficulty": 0.65,
@@ -762,14 +762,14 @@
         {"id": "d", "text": "The changed logits reveal which prompt version is factually true because likelihood measures policy validity.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A logit intervention does not evaluate either paragraph against an authoritative policy source."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports context-conditioned fixed-parameter inference. The paragraph ablation, fixed decoding settings, and observed logit change are stipulated controls.", "independence_note": "This remains f_ar_prompt_conditioning because it causally ablates part of a prompt but solves with the same context-change-versus-weight-change distinction; the intervention is dependent verification."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports context-conditioned fixed-parameter inference. The paragraph ablation, fixed decoding settings, and observed logit change are stipulated controls.", "independence_note": "This remains f_ar_prompt_conditioning because it causally ablates part of a prompt but solves with the same context-change-versus-weight-change distinction; the intervention is dependent verification."},
       "tags": ["llm", "language_modeling", "prompting", "context_ablation", "counterfactual"]
     },
     {
       "id": "q_ar_demonstration_persistence_probe_001",
       "version": 1,
       "family_id": "f_ar_fixed_weight_demonstrations",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Request 1 includes worked demonstrations and produces an improved task response. Request 2 is a fresh stateless call to the same checkpoint with the demonstrations omitted, and its behavior returns to baseline. No training or optimizer step runs, and a checksum confirms that the weights remain unchanged across both requests. What mechanism fits the pattern?",
       "kind": "debugging",
       "difficulty": 0.15,
@@ -784,14 +784,14 @@
         {"id": "d", "text": "The improved first response is more factually supported because demonstration-conditioned likelihood certifies truth.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Task behavior under examples does not supply external factual evidence."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports in-context learning without gradient updates. Fresh stateless request behavior and return to baseline are stipulated persistence controls.", "independence_note": "This intentionally reuses f_ar_fixed_weight_demonstrations because fresh-request loss of the effect tests the same transient context mechanism as the existing unchanged-checksum demonstration family."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports in-context learning without gradient updates. Fresh stateless request behavior and return to baseline are stipulated persistence controls.", "independence_note": "This intentionally reuses f_ar_fixed_weight_demonstrations because fresh-request loss of the effect tests the same transient context mechanism as the existing unchanged-checksum demonstration family."},
       "tags": ["llm", "language_modeling", "demonstrations", "stateless_request", "persistence"]
     },
     {
       "id": "q_ar_demonstration_mapping_swap_001",
       "version": 1,
       "family_id": "f_ar_fixed_weight_demonstrations",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Two prompts use the same worked inputs but swap the arbitrary output labels `mip` and `zog`. A fixed model tends to follow the mapping shown in each prompt. Which explanation is supported?",
       "kind": "transfer",
       "difficulty": 0.75,
@@ -806,14 +806,14 @@
         {"id": "d", "text": "The mapping followed with higher likelihood is the externally correct meaning of the arbitrary labels.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "The labels are stipulated within each prompt, and likelihood does not establish an external true mapping."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports learning task behavior from in-context examples under fixed parameters. The arbitrary labels and mapping-swap intervention are original synthesis.", "independence_note": "This shares f_ar_fixed_weight_demonstrations because swapping an arbitrary demonstration mapping tests the same example-conditioned fixed-weight mechanism as other family members; the label names do not create independence."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports learning task behavior from in-context examples under fixed parameters. The arbitrary labels and mapping-swap intervention are original synthesis.", "independence_note": "This shares f_ar_fixed_weight_demonstrations because swapping an arbitrary demonstration mapping tests the same example-conditioned fixed-weight mechanism as other family members; the label names do not create independence."},
       "tags": ["llm", "language_modeling", "demonstrations", "mapping_swap", "transfer"]
     },
     {
       "id": "q_ar_shared_prefix_likelihood_ratio_001",
       "version": 1,
       "family_id": "f_ar_conditional_likelihood_product",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed model assigns prefix probability p(P)=0.20, with p(a given P)=0.50 and p(b given P)=0.25. For the one-token continuations Pa and Pb, which likelihood comparison follows?",
       "kind": "calculation",
       "difficulty": -0.15,
@@ -828,14 +828,14 @@
         {"id": "d", "text": "p(Pa)=0.10 and p(Pb)=0.05, so Pa has twice the model likelihood of Pb.", "correct": true, "misconception_id": null, "rationale": "Multiplying the common 0.20 prefix factor by 0.50 and 0.25 gives the two joint probabilities."}
       ],
       "source_ids": ["src_murphy_pml_2022", "src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports the chain rule and Brown et al. supplies the autoregressive context. The shared prefix and continuation probabilities are original arithmetic synthesis.", "independence_note": "This reuses f_ar_conditional_likelihood_product because the keyed comparison multiplies the same shared prefix factor into two conditionals; repeating the family calculation for a ratio is dependent."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports the chain rule and Brown et al. supplies the autoregressive context. The shared prefix and continuation probabilities are original arithmetic synthesis.", "independence_note": "This reuses f_ar_conditional_likelihood_product because the keyed comparison multiplies the same shared prefix factor into two conditionals; repeating the family calculation for a ratio is dependent."},
       "tags": ["llm", "language_modeling", "autoregressive", "likelihood_ratio", "shared_prefix"]
     },
     {
       "id": "q_ar_recover_conditional_probability_001",
       "version": 1,
       "family_id": "f_ar_conditional_likelihood_product",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "For a fixed autoregressive model, p(x1)=0.30 and p(x1,x2)=0.12. Assuming p(x1) is positive, what conditional probability follows?",
       "kind": "calculation",
       "difficulty": 0.4,
@@ -850,14 +850,14 @@
         {"id": "d", "text": "p(x2 given x1)=0.40 means the content of x2 is 40 percent factually supported.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A conditional token probability is not a factual-support percentage."}
       ],
       "source_ids": ["src_murphy_pml_2022", "src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports recovering a conditional from joint and marginal probabilities; Brown et al. supplies the language-model context. Values are original synthesis.", "independence_note": "This shares f_ar_conditional_likelihood_product because division simply reverses the same chain-rule multiplication. Reverse wording and arithmetic do not establish independent evidence."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports recovering a conditional from joint and marginal probabilities; Brown et al. supplies the language-model context. Values are original synthesis.", "independence_note": "This shares f_ar_conditional_likelihood_product because division simply reverses the same chain-rule multiplication. Reverse wording and arithmetic do not establish independent evidence."},
       "tags": ["llm", "language_modeling", "autoregressive", "conditional_probability", "calculation"]
     },
     {
       "id": "q_ar_total_nll_likelihood_001",
       "version": 1,
       "family_id": "f_ar_conditional_likelihood_product",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A sequence's prefix-conditioned token negative log-likelihoods sum to 2.0 under a fixed autoregressive model. Using natural logarithms, what sequence likelihood follows?",
       "kind": "calculation",
       "difficulty": 0.95,
@@ -872,14 +872,14 @@
         {"id": "d", "text": "It is exp(-2) factual confidence, so the value directly measures external truth.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "A sequence likelihood is a predictive text-model quantity, not factual confidence."}
       ],
       "source_ids": ["src_murphy_pml_2022", "src_brown_gpt3_2020", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports log-likelihood aggregation and inversion; Brown et al. supplies the autoregressive model context. The total loss value is original synthesis.", "independence_note": "This remains f_ar_conditional_likelihood_product because exponentiating a summed log loss is algebraically equivalent to multiplying the same conditional factors and therefore dependent."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Murphy supports log-likelihood aggregation and inversion; Brown et al. supplies the autoregressive model context. The total loss value is original synthesis.", "independence_note": "This remains f_ar_conditional_likelihood_product because exponentiating a summed log loss is algebraically equivalent to multiplying the same conditional factors and therefore dependent."},
       "tags": ["llm", "language_modeling", "autoregressive", "negative_log_likelihood", "calculation"]
     },
     {
       "id": "q_ar_sampling_consensus_factuality_001",
       "version": 1,
       "family_id": "f_ar_likelihood_factuality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Nine of ten sampled continuations from one model repeat the same historical claim, but an authoritative archive contradicts it. What is the strongest supported conclusion?",
       "kind": "application",
       "difficulty": 0.2,
@@ -894,14 +894,14 @@
         {"id": "d", "text": "The nine-to-one sample majority certifies the claim as more factual than the archive record.", "correct": false, "misconception_id": "m_ar_likelihood_guarantees_factuality", "rationale": "Repeated generation is not independent source verification."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports sampling from autoregressive language models and Murphy supports interpreting model probabilities. The sample count and archive conflict are stipulated.", "independence_note": "This intentionally reuses f_ar_likelihood_factuality because repeated sampling changes the observation of model preference but not the core likelihood-versus-external-evidence distinction."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports sampling from autoregressive language models and Murphy supports interpreting model probabilities. The sample count and archive conflict are stipulated.", "independence_note": "This intentionally reuses f_ar_likelihood_factuality because repeated sampling changes the observation of model preference but not the core likelihood-versus-external-evidence distinction."},
       "tags": ["llm", "language_modeling", "sampling", "model_consensus", "factuality"]
     },
     {
       "id": "q_ar_rare_true_continuation_001",
       "version": 1,
       "family_id": "f_ar_likelihood_factuality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Under one prompt, a fixed model gives a common but false technical statement higher continuation likelihood than a rare statement that a trusted reference verifies. Which interpretation follows?",
       "kind": "transfer",
       "difficulty": 0.85,
@@ -916,7 +916,7 @@
         {"id": "d", "text": "The model prefers the common text, while external verification favors the rare statement.", "correct": true, "misconception_id": null, "rationale": "Distributional typicality under a language model and warranted factual belief need not share an ordering."}
       ],
       "source_ids": ["src_brown_gpt3_2020", "src_murphy_pml_2022", "src_expert_synthesis_2026"],
-      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "human_review_status": "required_before_activation", "activation": "manual_only_after_human_review_and_new_immutable_release", "review_status": "candidate_pending_independent_review", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports continuation likelihood under an autoregressive model and Murphy supports distinguishing modeled probability from evidence. The common-false and rare-verified contrast is stipulated.", "independence_note": "This shares f_ar_likelihood_factuality because reversing the likelihood and truth rankings directly exercises the same boundary as the existing archive and metric-axis items."},
+      "provenance": {"method": "ai_assisted_source_scoped", "generated": true, "batch_id": "batch_language_modeling_diagnostics_20260809_b", "created_on": "2026-08-09", "human_review": false, "review_status": "independent_model_review_passed", "psychometrics": "uncalibrated_author_prior", "source_scope": "Brown et al. supports continuation likelihood under an autoregressive model and Murphy supports distinguishing modeled probability from evidence. The common-false and rare-verified contrast is stipulated.", "independence_note": "This shares f_ar_likelihood_factuality because reversing the likelihood and truth rankings directly exercises the same boundary as the existing archive and metric-axis items."},
       "tags": ["llm", "language_modeling", "likelihood", "rare_facts", "transfer"]
     }
   ]

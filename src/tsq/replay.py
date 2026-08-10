@@ -36,6 +36,7 @@ from .event_contracts import (
     same_json_value,
 )
 from .errors import ConflictError, NotFoundError, TSQError, ValidationError
+from .families import canonical_family_label
 from .inference import (
     LEGACY_MISCONCEPTION_ALGORITHM,
     MISCONCEPTION_ALGORITHM_METADATA_KEY,
@@ -45,7 +46,12 @@ from .inference import (
 from .learner import (
     LearnerModel,
 )
-from .models import MAX_REMEDIATION_DEPTH, QuestionStatus, SessionPhase
+from .models import (
+    MAX_REMEDIATION_DEPTH,
+    QuestionStatus,
+    SessionPhase,
+    question_status_from_storage,
+)
 from .performance_ledger import (
     performance_projection_snapshot,
     rebuild_performance_projections,
@@ -58,6 +64,7 @@ from .store import SCHEMA_VERSION, Database, question_content_hash
 from .versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
     BOUND_QUESTION_SELECTED_EVENT_SCHEMA_VERSION,
+    CANONICAL_FAMILY_MODEL_VERSIONS,
     COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS,
     DEFAULT_LEARNER_MODEL_VERSION,
     PROJECTION_HASH_VERSION_BY_EVENT_SCHEMA,
@@ -1602,7 +1609,7 @@ class ProjectionReplay:
     ) -> dict[str, Any]:
         checkpoints: list[dict[str, Any]] = []
         replay_errors: list[str] = []
-        family_attempts: dict[str, int] = {}
+        prior_attempt_families: list[str] = []
         explicit_misconception_algorithm_seen = False
         with work_database.transaction() as connection:
             learner = connection.execute(
@@ -1790,11 +1797,21 @@ class ProjectionReplay:
                 if response_metadata["question_status"] != decision["question_status"]:
                     raise ValidationError(f"{label} question status snapshot mismatch.")
                 try:
-                    pinned_status = QuestionStatus(decision["question_status"])
+                    pinned_status = question_status_from_storage(
+                        decision["question_status"]
+                    )
                 except ValueError as exc:
                     raise ValidationError(f"{label} has an invalid pinned question status.") from exc
                 question = replace(question, status=pinned_status)
-                if attempt["family_id"] != question.family_id:
+                event_model = LearnerModel(
+                    response_metadata["learner_model_version"]
+                )
+                response_family_id = attempt["family_id"]
+                if (
+                    type(response_family_id) is not str
+                    or response_family_id
+                    != event_model.response_family_id(question)
+                ):
                     raise ValidationError(f"{label} question family mismatch.")
 
                 presented_order = response_payload["presented_order"]
@@ -1983,10 +2000,22 @@ class ProjectionReplay:
                                 "its finalized attempt outcome."
                             )
 
-                prior_family_attempts = family_attempts.get(question.family_id, 0)
-                event_model = LearnerModel(
-                    response_metadata["learner_model_version"]
-                )
+                if (
+                    event_model.model_version
+                    in CANONICAL_FAMILY_MODEL_VERSIONS
+                ):
+                    semantic_family_id = canonical_family_label(
+                        response_family_id
+                    )
+                    prior_family_attempts = sum(
+                        canonical_family_label(prior_family_id)
+                        == semantic_family_id
+                        for prior_family_id in prior_attempt_families
+                    )
+                else:
+                    prior_family_attempts = prior_attempt_families.count(
+                        response_family_id
+                    )
                 _, changes = event_model.update_from_response(
                     connection,
                     learner_id=learner_id,
@@ -2000,9 +2029,10 @@ class ProjectionReplay:
                     now=occurred_at,
                     response_ms=response_ms,
                     prior_family_attempts_override=prior_family_attempts,
+                    family_id_override=response_family_id,
                     misconception_algorithm=misconception_algorithm,
                 )
-                family_attempts[question.family_id] = prior_family_attempts + 1
+                prior_attempt_families.append(response_family_id)
                 connection.execute(
                     "UPDATE learners SET revision=? WHERE id=?",
                     (expected_revision, learner_id),
@@ -2037,7 +2067,7 @@ class ProjectionReplay:
                         "response_event_id": response["event_id"],
                         "projection_event_id": projection["event_id"],
                         "question_id": question.id,
-                        "family_id": question.family_id,
+                        "family_id": response_family_id,
                         "state_changes": changes,
                         "state_changes_match": state_changes_match,
                         "expected_projection_hash": expected_hash,

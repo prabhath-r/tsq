@@ -125,29 +125,29 @@ class CliJourneyTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         return json.loads(output.getvalue())
 
-    def test_strict_audit_keeps_quarantined_only_mapping_gaps_visible(
+    def test_strict_audit_keeps_retired_only_mapping_gaps_visible(
         self,
     ) -> None:
         bundle = load_bundle(CORPUS)
         question = next(
             item
             for item in bundle["questions"]
-            if item["status"] == "quarantined"
-            and item.get("provenance", {}).get("generated") is True
+            if item["id"] == "q_bellman_potential_cycle_sum_001"
+            and item["status"] == "retired"
         )
         primary_concept_id = next(
             mapping["concept_id"]
             for mapping in question["concepts"]
             if mapping["role"] == "primary"
         )
-        new_concept_id = "c_quarantined_support_only"
+        new_concept_id = "c_retired_support_only"
         bundle["concepts"].append(
             {
                 "id": new_concept_id,
-                "name": "Quarantined support only",
+                "name": "Retired support only",
                 "description": (
-                    "A test-only concept mapped by quarantined evidence but "
-                    "never by an active primary item."
+                    "A test-only concept mapped by retired evidence but never "
+                    "by an active primary item."
                 ),
                 "prior_mastery": 0.2,
             }

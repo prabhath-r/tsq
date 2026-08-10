@@ -117,9 +117,9 @@ class PackagingTestCase(unittest.TestCase):
 
         self.assertEqual(
             result["release_id"],
-            "rel_7fa8d12e03dff0e08bcc739e",
+            "rel_8202cdcb71395e30d315bfa8",
         )
-        self.assertEqual(result["questions"], 480)
+        self.assertEqual(result["questions"], 532)
         self.assertEqual(result["topics"], 16)
 
     def test_sync_refuses_invalid_source_before_touching_packaged_tree(self) -> None:
@@ -288,9 +288,8 @@ class PackagingTestCase(unittest.TestCase):
 
     def test_starter_tracks_its_lineage_without_overriding_custom_corpus(self) -> None:
         bundle = load_bundle(SOURCE_CORPUS)
-        # Remove one explicitly marked generated/quarantined item so the
-        # immutable legacy-unattested cohort remains complete and byte-stable.
-        removed_id = "q_attention_runtime_workspace_boundary_001"
+        # Remove one generated item so the custom corpus has distinct lineage.
+        removed_id = "q_attention_permutation_jacobian_001"
         bundle["questions"] = [
             question
             for question in bundle["questions"]
@@ -339,7 +338,7 @@ class PackagingTestCase(unittest.TestCase):
         bundle = load_bundle(SOURCE_CORPUS)
         bundle.pop("domains")
         bundle.pop("topics")
-        removed_id = "q_attention_runtime_workspace_boundary_001"
+        removed_id = "q_attention_permutation_jacobian_001"
         bundle["questions"] = [
             question
             for question in bundle["questions"]

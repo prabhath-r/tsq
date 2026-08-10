@@ -45,6 +45,12 @@ from .event_contracts import (
     RESPONSE_METADATA_FIELDS_WITH_MISCONCEPTION_ALGORITHM,
     same_json_value,
 )
+from .families import (
+    canonical_family_label,
+    evidence_family_id,
+    family_assignment,
+    register_family_sql_functions,
+)
 from .graph import KnowledgeGraph
 from .inference import (
     MISCONCEPTION_ALGORITHM_METADATA_KEY,
@@ -76,6 +82,7 @@ from .models import (
     SkillState,
     Source,
     Topic,
+    question_status_from_storage,
 )
 from .objective_posterior import (
     OBJECTIVE_POSTERIOR_V1_IDENTITY,
@@ -86,7 +93,6 @@ from .objective_posterior import (
 )
 from .quality import audit_corpus
 from .provenance import (
-    generated_question_runtime_safe,
     legacy_question_identity_payload,
     legacy_unattested_member_compatible,
     question_provenance_issues,
@@ -94,6 +100,8 @@ from .provenance import (
 from .versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
     BOUND_QUESTION_SELECTED_EVENT_SCHEMA_VERSION,
+    CANONICAL_FAMILY_MODEL_VERSIONS,
+    CANONICAL_FAMILY_V9_MODEL_VERSION,
     COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS,
     OBJECTIVE_GAUSSIAN_MODEL_VERSION,
     OBJECTIVE_GRID_MODEL_VERSIONS,
@@ -108,7 +116,7 @@ from .versions import (
 )
 
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 PERFORMANCE_SCORING_CLAIM_EVENT_KEY_PREFIX = (
     "performance-score-claim:v1:"
 )
@@ -121,16 +129,20 @@ PERFORMANCE_ARTIFACT_RUN_CLAIM_EVENT_KEY_PREFIX = (
 PERFORMANCE_ARTIFACT_RUN_RECEIPT_EVENT_KEY_PREFIX = (
     "performance-artifact-run-receipt:v1:"
 )
-LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON = (
+# Schema v22 could persist this immutable event after detecting that a
+# selected-response projection had already incorporated evidence which its
+# safety migration subsequently invalidated.  The historical event name and
+# payload vocabulary are retained only as a wire-format compatibility
+# contract.  In v23 the event is interpreted as a learner-projection integrity
+# failure; it is not a curriculum-question status or activation mechanism.
+LEGACY_INVALID_RESPONSE_EVIDENCE_EVENT_TYPE = "ResponseEvidenceQuarantined"
+LEGACY_INVALID_RESPONSE_EVIDENCE_REASON = (
     "Unreviewed generated question was active in a historical corpus release."
 )
-LEGACY_UNREVIEWED_GENERATED_REVOCATION_KEY_PREFIX = (
-    "corpus-safety:legacy-unreviewed-generated:v1:"
-)
-HISTORICAL_GENERATED_EVIDENCE_POLICY = (
+LEGACY_INVALID_RESPONSE_EVIDENCE_POLICY = (
     "historical-generated-evidence-v1"
 )
-HISTORICAL_GENERATED_EVIDENCE_KEY_PREFIX = (
+LEGACY_INVALID_RESPONSE_EVIDENCE_KEY_PREFIX = (
     "learner-safety:historical-generated-evidence:v1:"
 )
 CURRENT_SCHEMA_TABLES = frozenset(
@@ -195,7 +207,7 @@ CURRENT_SCHEMA_TABLES = frozenset(
 )
 # Compatibility name retained for code that previously imported store's
 # singular current-grid identifier. Immutable dispatch uses explicit versions.
-OBJECTIVE_GRID_MODEL_VERSION = OBJECTIVE_GRID_V8_MODEL_VERSION
+OBJECTIVE_GRID_MODEL_VERSION = CANONICAL_FAMILY_V9_MODEL_VERSION
 
 
 def _artifact_run_event_key(prefix: str, digest: str, label: str) -> str:
@@ -465,18 +477,6 @@ def performance_scoring_reconciliation_payload(
     }
 
 
-def question_runtime_activation_safe(
-    question: Question,
-    *,
-    status: str | None = None,
-) -> bool:
-    """Return whether a stored question may contribute new learner evidence."""
-
-    return generated_question_runtime_safe(
-        question.provenance,
-        status=status or question.status.value,
-    )
-
 OBJECTIVE_STATE_WITH_GRID_SELECT = """SELECT
     state.learner_id,
     state.objective_id,
@@ -517,7 +517,7 @@ LEFT JOIN objective_grid_states grid
 # it module-level lets the large-bank benchmark inspect the exact production
 # query instead of maintaining a subtly different copy.
 CANDIDATE_POOL_SQL = """SELECT q.id,
-       q.family_id,
+       tsq_canonical_family(q.family_id) AS family_id,
        CASE
            WHEN qc.concept_id = ? OR q.id IN (
                SELECT focused.question_id
@@ -533,12 +533,13 @@ JOIN release_questions rq
   ON rq.question_id = qc.question_id AND rq.release_id = ?
 JOIN questions q ON q.id = qc.question_id
 LEFT JOIN (
-    SELECT presented_question.family_id, COUNT(*) AS exposures
+    SELECT tsq_canonical_family(presented_question.family_id) AS family_id,
+           COUNT(*) AS exposures
     FROM decisions presented INDEXED BY idx_decisions_learner_question
     JOIN questions presented_question ON presented_question.id = presented.question_id
     WHERE presented.learner_id = ?
-    GROUP BY presented_question.family_id
-) personal ON personal.family_id = q.family_id
+    GROUP BY tsq_canonical_family(presented_question.family_id)
+) personal ON personal.family_id = tsq_canonical_family(q.family_id)
 WHERE qc.concept_id = scope.id
   AND qc.role = 'primary'
   AND rq.status IN (?, ?)
@@ -557,7 +558,7 @@ LIMIT ?"""
 # families cannot hide independent evidence paths beyond the cutoff.
 FAMILY_DIVERSE_CANDIDATE_POOL_SQL = """WITH base_candidates AS (
     SELECT q.id,
-           q.family_id,
+           tsq_canonical_family(q.family_id) AS family_id,
            q.discrimination,
            CASE
                WHEN qc.concept_id = ? OR q.id IN (
@@ -574,13 +575,14 @@ FAMILY_DIVERSE_CANDIDATE_POOL_SQL = """WITH base_candidates AS (
       ON rq.question_id = qc.question_id AND rq.release_id = ?
     JOIN questions q ON q.id = qc.question_id
     LEFT JOIN (
-        SELECT presented_question.family_id, COUNT(*) AS exposures
+        SELECT tsq_canonical_family(presented_question.family_id) AS family_id,
+               COUNT(*) AS exposures
         FROM decisions presented INDEXED BY idx_decisions_learner_question
         JOIN questions presented_question
           ON presented_question.id = presented.question_id
         WHERE presented.learner_id = ?
-        GROUP BY presented_question.family_id
-    ) personal ON personal.family_id = q.family_id
+        GROUP BY tsq_canonical_family(presented_question.family_id)
+    ) personal ON personal.family_id = tsq_canonical_family(q.family_id)
     WHERE qc.concept_id = scope.id
       AND qc.role = 'primary'
       AND rq.status IN (?, ?)
@@ -610,7 +612,7 @@ LIMIT ?"""
 # never hide an exact repair or verification family.
 OBJECTIVE_CANDIDATE_POOL_SQL = """WITH base_candidates AS (
     SELECT q.id,
-           q.family_id,
+           tsq_canonical_family(q.family_id) AS family_id,
            q.discrimination,
            CASE WHEN EXISTS (
                SELECT 1
@@ -631,13 +633,14 @@ OBJECTIVE_CANDIDATE_POOL_SQL = """WITH base_candidates AS (
      AND release_question.question_id = mapping.question_id
     JOIN questions q ON q.id = mapping.question_id
     LEFT JOIN (
-        SELECT presented_question.family_id, COUNT(*) AS exposures
+        SELECT tsq_canonical_family(presented_question.family_id) AS family_id,
+               COUNT(*) AS exposures
         FROM decisions presented INDEXED BY idx_decisions_learner_question
         JOIN questions presented_question
           ON presented_question.id = presented.question_id
         WHERE presented.learner_id = ?
-        GROUP BY presented_question.family_id
-    ) personal ON personal.family_id = q.family_id
+        GROUP BY tsq_canonical_family(presented_question.family_id)
+    ) personal ON personal.family_id = tsq_canonical_family(q.family_id)
     WHERE mapping.release_id = ?
       AND mapping.objective_id = ?
       AND release_question.status IN (?, ?)
@@ -683,7 +686,7 @@ def question_content_hash(question: Question) -> str:
     immutable = {
         "id": question.id,
         "version": question.version,
-        "family_id": question.family_id,
+        "family_id": question.published_family_id,
         "stem": question.stem,
         "kind": question.kind.value,
         "difficulty": float(question.difficulty),
@@ -723,7 +726,7 @@ def _legacy_question_identity(question: Question) -> dict[str, object]:
     return legacy_question_identity_payload(
         question_id=question.id,
         version=question.version,
-        family_id=question.family_id,
+        family_id=question.published_family_id,
         stem=question.stem,
         kind=question.kind.value,
         difficulty=question.difficulty,
@@ -753,14 +756,11 @@ def _legacy_question_identity(question: Question) -> dict[str, object]:
     )
 
 
-def _legacy_unreviewed_generated_revocation_key(question_id: str) -> str:
-    identity = hashlib.sha256(question_id.encode("utf-8")).hexdigest()
-    return LEGACY_UNREVIEWED_GENERATED_REVOCATION_KEY_PREFIX + identity
+def _legacy_invalid_response_evidence_key(attempt_id: str) -> str:
+    """Return the immutable schema-v22 marker key for one response."""
 
-
-def _historical_generated_evidence_key(attempt_id: str) -> str:
     identity = hashlib.sha256(attempt_id.encode("utf-8")).hexdigest()
-    return HISTORICAL_GENERATED_EVIDENCE_KEY_PREFIX + identity
+    return LEGACY_INVALID_RESPONSE_EVIDENCE_KEY_PREFIX + identity
 
 
 def _content_hash(payload: dict[str, Any]) -> str:
@@ -3980,6 +3980,21 @@ _V22_CALENDAR_TRIGGER_NORMALIZATION_COUNTS = {
 }
 
 
+# Exact SQL emitted by the annotated v0.1.0 release (schema v22).  Keep this
+# fixture independent of the current QuestionStatus enum and trigger installer:
+# it is the migration source contract, not a reconstruction of what an older
+# release probably looked like.
+_V0_1_0_QUESTIONS_VALID_STATUS_TRIGGER_SQL = (
+    "CREATE TRIGGER questions_valid_status\n"
+    "BEFORE UPDATE OF status ON questions\n"
+    "WHEN NEW.status NOT IN "
+    "('draft', 'quarantined', 'pilot', 'approved', 'calibrated', 'retired')\n"
+    "BEGIN\n"
+    "    SELECT RAISE(ABORT, 'invalid question lifecycle status');\n"
+    "END"
+)
+
+
 @lru_cache(maxsize=1)
 def _expected_current_schema_contract() -> _CurrentSchemaContract:
     """Build the authoritative contract once from a fresh in-memory schema."""
@@ -4005,6 +4020,36 @@ def _expected_current_schema_contract() -> _CurrentSchemaContract:
         return _capture_current_schema_contract(connection)
     finally:
         connection.close()
+
+
+@lru_cache(maxsize=1)
+def _expected_v22_schema_contract() -> _CurrentSchemaContract:
+    """Return the exact annotated-v0.1.0 schema-v22 migration source."""
+
+    current = _expected_current_schema_contract()
+    released_status_trigger = (
+        "questions_valid_status",
+        "questions",
+        _normalize_trigger_definition(
+            _V0_1_0_QUESTIONS_VALID_STATUS_TRIGGER_SQL
+        ),
+    )
+    triggers: list[tuple[str, str, str]] = []
+    replaced = False
+    for trigger in current.triggers:
+        if trigger[0] == "questions_valid_status":
+            triggers.append(released_status_trigger)
+            replaced = True
+        else:
+            triggers.append(trigger)
+    if not replaced:
+        raise RuntimeError(
+            "Current schema lacks the question lifecycle-status guard."
+        )
+    return _CurrentSchemaContract(
+        tables=current.tables,
+        triggers=tuple(triggers),
+    )
 
 
 @lru_cache(maxsize=1)
@@ -4400,6 +4445,31 @@ def _require_no_foreign_key_violations(
     )
 
 
+def _require_valid_question_family_registry(
+    connection: sqlite3.Connection,
+    *,
+    context: str,
+) -> None:
+    """Require exact published labels for explicitly manifested questions.
+
+    The manifest is intentionally partial: ordinary synthetic questions and
+    corpus subsets remain valid without appearing in it.  For an ID that does
+    appear, however, the raw registry label is immutable evidence and cannot
+    be replaced by its later canonical grouping label.
+    """
+
+    for row in connection.execute(
+        "SELECT id, family_id FROM questions ORDER BY id"
+    ):
+        try:
+            family_assignment(row["id"], row["family_id"])
+        except (TypeError, ValueError) as exc:
+            raise ConflictError(
+                f"{context} has an invalid question-family registry row "
+                f"for {row['id']}: {exc}"
+            ) from exc
+
+
 class Database:
     def __init__(self, path: str | Path, *, read_only: bool = False):
         self.path = Path(path)
@@ -4431,6 +4501,7 @@ class Database:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 20000")
+        register_family_sql_functions(connection)
         return connection
 
     @contextmanager
@@ -4625,6 +4696,10 @@ class Database:
                         "Current database schema structure is incompatible: "
                         + "; ".join(incompatibilities)
                     )
+                _require_valid_question_family_registry(
+                    connection,
+                    context="Current database",
+                )
                 return tuple(missing_triggers)
         except (ConflictError, NotFoundError, ValidationError):
             raise
@@ -4669,6 +4744,45 @@ class Database:
                     connection.execute(trigger_sql)
         self.validate_current_schema()
         return missing
+
+    @staticmethod
+    def _require_supported_evidence_integrity_source(
+        connection: sqlite3.Connection,
+        *,
+        starting_version: int,
+    ) -> None:
+        """Refuse a direct legacy upgrade that could lose safety meaning.
+
+        Schema v17 introduced the durable marker boundary needed to identify
+        response evidence invalidated after it had reached learner
+        projections.  Re-running the retired classification policy in v23
+        would invent current curriculum policy, while skipping it for an
+        older response-bearing database could silently trust contaminated
+        projections.  Such databases must therefore pass through the released
+        marker-capable migration.  Empty legacy databases remain safe to
+        upgrade directly.
+        """
+
+        if starting_version >= 17:
+            return
+        attempts_table = connection.execute(
+            """SELECT 1 FROM sqlite_master
+               WHERE type='table' AND name='attempts'"""
+        ).fetchone()
+        if attempts_table is None:
+            return
+        has_response_history = connection.execute(
+            "SELECT 1 FROM attempts LIMIT 1"
+        ).fetchone()
+        if has_response_history is None:
+            return
+        raise ConflictError(
+            f"Schema v{starting_version} contains learner response history "
+            "from before the durable evidence-integrity boundary. Direct "
+            "upgrade is refused; first migrate this database to schema v22 "
+            "with TSQ v0.1.0, run its integrity verification, and then retry "
+            "this upgrade."
+        )
 
     def initialize(self) -> None:
         if self.read_only:
@@ -4723,9 +4837,17 @@ class Database:
                                 existing_connection,
                                 context="Current database",
                             )
-                            self._enforce_historical_generated_safety()
                             return
-                        if existing_version == 21:
+                        if existing_version == 22:
+                            actual_v22 = _capture_current_schema_contract(
+                                existing_connection
+                            )
+                            if actual_v22 != _expected_v22_schema_contract():
+                                raise ConflictError(
+                                    "Schema v22 structure is not the exact "
+                                    "supported v23 migration source."
+                                )
+                        elif existing_version == 21:
                             actual_v21 = _capture_current_schema_contract(
                                 existing_connection
                             )
@@ -4782,6 +4904,17 @@ class Database:
                             self._validate_v16_migration_lifecycle(
                                 existing_connection
                             )
+                        self._require_supported_evidence_integrity_source(
+                            existing_connection,
+                            starting_version=existing_version,
+                        )
+                    elif "questions" in user_tables:
+                        # The original schema had no meta table and is
+                        # therefore identified as v1 by the writable path.
+                        self._require_supported_evidence_integrity_source(
+                            existing_connection,
+                            starting_version=1,
+                        )
                     elif user_tables and "questions" not in user_tables:
                         raise ConflictError(
                             "Existing database is not a recognized TSQ schema; "
@@ -4886,7 +5019,16 @@ class Database:
                 raise ConflictError(
                     f"Database schema is {current_version}; engine expects at most {SCHEMA_VERSION}."
                 )
-            if current_version == 21:
+            if current_version == 22:
+                if (
+                    _capture_current_schema_contract(connection)
+                    != _expected_v22_schema_contract()
+                ):
+                    raise ConflictError(
+                        "Schema v22 structure is not the exact supported "
+                        "v23 migration source."
+                    )
+            elif current_version == 21:
                 if (
                     _capture_current_schema_contract(connection)
                     != _expected_v21_schema_contract()
@@ -4941,6 +5083,10 @@ class Database:
                         "v17 migration source."
                     )
                 self._validate_v16_migration_lifecycle(connection)
+            self._require_supported_evidence_integrity_source(
+                connection,
+                starting_version=starting_version,
+            )
             if current_version < SCHEMA_VERSION:
                 # Defensive for databases that were manually downgraded or
                 # produced by a prerelease build which installed protections
@@ -5056,6 +5202,13 @@ class Database:
             if current_version < 22:
                 self._migrate_v21_to_v22(connection)
                 current_version = 22
+            # v23 removes the curriculum-question quarantine lifecycle. Old
+            # registry rows become ordinary zero-evidence drafts; immutable
+            # release memberships retain their original bytes and are decoded
+            # as drafts when an older pinned release is read.
+            if current_version < 23:
+                self._migrate_v22_to_v23(connection)
+                current_version = 23
             connection.execute(
                 "INSERT OR REPLACE INTO meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -5067,14 +5220,6 @@ class Database:
             self._install_release_snapshot_triggers(connection)
             self._install_corpus_registry_triggers(connection)
             self._install_current_performance_scoring_triggers(connection)
-            unsafe_generated_ids = (
-                self._historically_active_unsafe_generated_ids(connection)
-            )
-            self._revoke_historically_active_unreviewed_generated_questions(
-                connection,
-                unsafe_generated_ids,
-            )
-            self._quarantine_historical_generated_evidence(connection)
             if (
                 _capture_current_schema_contract(connection)
                 != _expected_current_schema_contract()
@@ -5084,6 +5229,10 @@ class Database:
                     "schema contract."
                 )
             _require_no_foreign_key_violations(
+                connection,
+                context="Migrated database",
+            )
+            _require_valid_question_family_registry(
                 connection,
                 context="Migrated database",
             )
@@ -5102,73 +5251,6 @@ class Database:
             raise
         finally:
             connection.close()
-
-    @staticmethod
-    def _historically_active_unsafe_generated_ids(
-        connection: sqlite3.Connection,
-    ) -> tuple[str, ...]:
-        """Find active historical members that fail today's generation gate."""
-
-        rows = connection.execute(
-            """SELECT DISTINCT question.id, question.provenance_json,
-                              membership.status
-               FROM release_questions membership
-               JOIN questions question ON question.id=membership.question_id
-               WHERE membership.status IN ('approved', 'calibrated')
-               ORDER BY question.id"""
-        ).fetchall()
-        unsafe: set[str] = set()
-        for row in rows:
-            try:
-                provenance = json.loads(row["provenance_json"])
-            except (TypeError, json.JSONDecodeError):
-                provenance = None
-            if not generated_question_runtime_safe(
-                provenance,
-                status=row["status"],
-            ):
-                unsafe.add(row["id"])
-        return tuple(sorted(unsafe))
-
-    def _enforce_historical_generated_safety(self) -> int:
-        """Append idempotent revocations after exact current-schema validation."""
-
-        with self.transaction() as connection:
-            version_row = connection.execute(
-                """SELECT value FROM meta WHERE key='schema_version'"""
-            ).fetchone()
-            if (
-                version_row is None
-                or version_row["value"] != str(SCHEMA_VERSION)
-                or _capture_current_schema_contract(connection)
-                != _expected_current_schema_contract()
-            ):
-                raise ConflictError(
-                    "Current database schema structure changed during "
-                    "safety enforcement."
-                )
-            _require_no_foreign_key_violations(
-                connection,
-                context="Current database",
-            )
-            revoked = self._revoke_historically_active_unreviewed_generated_questions(
-                connection,
-                self._historically_active_unsafe_generated_ids(connection),
-            )
-            self._quarantine_historical_generated_evidence(connection)
-            if (
-                _capture_current_schema_contract(connection)
-                != _expected_current_schema_contract()
-            ):
-                raise ConflictError(
-                    "Current database schema structure changed during "
-                    "safety enforcement."
-                )
-            _require_no_foreign_key_violations(
-                connection,
-                context="Current database",
-            )
-            return revoked
 
     def _install_v4_attempt_triggers(self, connection: sqlite3.Connection) -> None:
         """Make attempts immutable except for their atomic outcome finalization.
@@ -5613,7 +5695,7 @@ class Database:
         )
         connection.execute("DELETE FROM release_questions WHERE release_id = ?", (release_id,))
         for row in connection.execute("SELECT id, status FROM questions").fetchall():
-            status = QuestionStatus(row["status"])
+            status = question_status_from_storage(row["status"])
             connection.execute(
                 """INSERT OR IGNORE INTO release_questions(
                        release_id, question_id, status, evidence_weight
@@ -7940,6 +8022,185 @@ class Database:
         if actual != expected:
             raise ConflictError(
                 "Schema v22 calendar guards were not installed exactly."
+            )
+
+    @staticmethod
+    def _validate_legacy_invalid_response_evidence(
+        connection: sqlite3.Connection,
+        *,
+        context: str,
+    ) -> tuple[sqlite3.Row, ...]:
+        """Validate immutable v22 markers that invalidate learner projections.
+
+        These events are historical wire records, not a current question
+        lifecycle.  A marker is authoritative only when it binds exactly one
+        stored response, the response's learner/question identity, and an
+        existing emergency revocation.  Migration rejects ambiguous or
+        malformed markers instead of silently treating their projections as
+        usable.
+        """
+
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"non-finite JSON constant {value}")
+
+        def reject_duplicate_object(
+            pairs: list[tuple[str, Any]],
+        ) -> dict[str, Any]:
+            value: dict[str, Any] = {}
+            for key, item in pairs:
+                if key in value:
+                    raise ValueError(f"duplicate JSON object key {key!r}")
+                value[key] = item
+            return value
+
+        rows = tuple(
+            connection.execute(
+                """SELECT * FROM events
+                   WHERE event_type=?
+                   ORDER BY stream_id, stream_version""",
+                (LEGACY_INVALID_RESPONSE_EVIDENCE_EVENT_TYPE,),
+            ).fetchall()
+        )
+        seen_attempts: set[str] = set()
+        for event in rows:
+            label = f"{context} invalid-response marker {event['event_id']}"
+            try:
+                payload = json.loads(
+                    event["payload_json"],
+                    parse_constant=reject_constant,
+                    object_pairs_hook=reject_duplicate_object,
+                )
+                metadata = json.loads(
+                    event["metadata_json"],
+                    parse_constant=reject_constant,
+                    object_pairs_hook=reject_duplicate_object,
+                )
+            except (TypeError, ValueError) as exc:
+                raise ConflictError(f"{label} contains invalid JSON: {exc}") from exc
+            if type(payload) is not dict or type(metadata) is not dict:
+                raise ConflictError(f"{label} must contain JSON objects.")
+            if set(payload) != {
+                "attempt_id",
+                "response_event_id",
+                "learner_id",
+                "question_id",
+                "reason",
+                "projection_applied",
+            } or set(metadata) != {
+                "safety_policy",
+                "requires_explicit_rebuild",
+            }:
+                raise ConflictError(f"{label} has an invalid closed payload shape.")
+            attempt_id = payload.get("attempt_id")
+            if type(attempt_id) is not str or not attempt_id:
+                raise ConflictError(f"{label} has no valid response attempt ID.")
+            if attempt_id in seen_attempts:
+                raise ConflictError(
+                    f"{context} has multiple invalid-response markers for "
+                    f"attempt {attempt_id}."
+                )
+            seen_attempts.add(attempt_id)
+            attempt = connection.execute(
+                "SELECT * FROM attempts WHERE id=?",
+                (attempt_id,),
+            ).fetchone()
+            revoked = (
+                connection.execute(
+                    """SELECT 1 FROM question_revocations
+                       WHERE question_id=?""",
+                    (attempt["question_id"],),
+                ).fetchone()
+                if attempt is not None
+                else None
+            )
+            projection = (
+                connection.execute(
+                    """SELECT 1 FROM events
+                       WHERE event_type='LearnerProjectionAdvanced'
+                         AND causation_id=?
+                       LIMIT 1""",
+                    (attempt["event_id"],),
+                ).fetchone()
+                if attempt is not None
+                else None
+            )
+            if (
+                attempt is None
+                or event["schema_version"] != 1
+                or event["stream_id"] != f"learner:{attempt['learner_id']}"
+                or event["learner_id"] != attempt["learner_id"]
+                or event["session_id"] is not None
+                or event["correlation_id"] != attempt["id"]
+                or event["causation_id"] != attempt["event_id"]
+                or event["idempotency_key"]
+                != _legacy_invalid_response_evidence_key(attempt_id)
+                or payload.get("response_event_id") != attempt["event_id"]
+                or payload.get("learner_id") != attempt["learner_id"]
+                or payload.get("question_id") != attempt["question_id"]
+                or payload.get("reason")
+                != LEGACY_INVALID_RESPONSE_EVIDENCE_REASON
+                or payload.get("projection_applied") is not False
+                or metadata.get("safety_policy")
+                != LEGACY_INVALID_RESPONSE_EVIDENCE_POLICY
+                or metadata.get("requires_explicit_rebuild") is not True
+                or revoked is None
+                or projection is None
+            ):
+                raise ConflictError(f"{label} has an invalid evidence boundary.")
+        return rows
+
+    @classmethod
+    def _migrate_v22_to_v23(
+        cls,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Retire the curriculum-question quarantine lifecycle.
+
+        The mutable registry row tracks the newest lifecycle view and can be
+        normalized to ``draft`` without changing immutable question content.
+        Historical release memberships are deliberately untouched so old
+        sessions and release hashes remain replayable.  Reviewed family
+        equivalences are resolved at runtime: published question labels,
+        attempts, family projections, and their committed event hashes remain
+        byte-for-byte historical evidence.  Schema-v22 response invalidation
+        markers are validated and retained; they remain a fail-closed learner
+        projection boundary until an explicit audited rebuild exists.
+        """
+
+        cls._validate_legacy_invalid_response_evidence(
+            connection,
+            context="Schema v22",
+        )
+        connection.execute(
+            "UPDATE questions SET status='draft' WHERE status='quarantined'"
+        )
+
+    def require_learner_evidence_integrity(
+        self,
+        learner_id: str,
+        connection: sqlite3.Connection,
+    ) -> None:
+        """Fail closed when an immutable v22 marker invalidates a projection."""
+
+        try:
+            markers = self._validate_legacy_invalid_response_evidence(
+                connection,
+                context="Learner evidence",
+            )
+        except ConflictError as exc:
+            raise ConflictError(
+                "Learner evidence integrity cannot be established: "
+                f"{exc}"
+            ) from exc
+        invalidated = sum(
+            marker["learner_id"] == learner_id for marker in markers
+        )
+        if invalidated:
+            raise ConflictError(
+                f"Learner {learner_id} has {invalidated} response(s) whose "
+                "evidence was invalidated after projection; adaptive use, "
+                "scoring, and reporting require an explicit audited "
+                "projection rebuild."
             )
 
     @staticmethod
@@ -10543,15 +10804,6 @@ class Database:
             for topic in topics
             for concept_id in topic.concept_ids
         }
-        legacy_unreviewed_generated_ids = tuple(
-            sorted(
-                question.id
-                for question in questions
-                if question.provenance.get("generated") is True
-                and question.provenance.get("human_review") is not True
-                and not question.status.eligible_for_adaptation
-            )
-        )
         question_topic_rows: list[tuple[str, str, str]] = []
         for question in questions:
             relations: dict[str, str] = {}
@@ -10800,7 +11052,7 @@ class Database:
                         question.id,
                         question.version,
                         content_hash,
-                        question.family_id,
+                        question.published_family_id,
                         question.status.value,
                         question.stem,
                         question.kind.value,
@@ -11186,15 +11438,6 @@ class Database:
                 )
                 if sealed.rowcount != 1:
                     raise ConflictError("Corpus release could not be sealed atomically.")
-            legacy_generated_revocations = (
-                self._revoke_historically_active_unreviewed_generated_questions(
-                    connection,
-                    legacy_unreviewed_generated_ids,
-                )
-            )
-            legacy_generated_evidence_quarantines = (
-                self._quarantine_historical_generated_evidence(connection)
-            )
             active_release = connection.execute(
                 "SELECT value FROM meta WHERE key='active_corpus_release'"
             ).fetchone()
@@ -11240,208 +11483,7 @@ class Database:
             "learning_objectives": len(objectives),
             "objective_edges": len(objective_edges),
             "release_id": release_id,
-            "legacy_generated_revocations": legacy_generated_revocations,
-            "legacy_generated_evidence_quarantines": (
-                legacy_generated_evidence_quarantines
-            ),
         }
-
-    def _revoke_historically_active_unreviewed_generated_questions(
-        self,
-        connection: sqlite3.Connection,
-        question_ids: Sequence[str],
-    ) -> int:
-        """Globally revoke quarantined generated IDs that an old release served."""
-
-        created = 0
-        active = connection.execute(
-            "SELECT value FROM meta WHERE key = 'active_corpus_release'"
-        ).fetchone()
-        for question_id in question_ids:
-            historical_active = connection.execute(
-                """SELECT 1
-                   FROM release_questions
-                   WHERE question_id = ?
-                     AND status IN ('approved', 'calibrated')
-                   LIMIT 1""",
-                (question_id,),
-            ).fetchone()
-            if historical_active is None:
-                continue
-            existing = connection.execute(
-                "SELECT event_id FROM question_revocations WHERE question_id = ?",
-                (question_id,),
-            ).fetchone()
-            if existing is not None:
-                continue
-
-            reason = LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON
-            payload = {"question_id": question_id, "reason": reason}
-            idempotency_key = _legacy_unreviewed_generated_revocation_key(
-                question_id
-            )
-            prior_event = connection.execute(
-                "SELECT * FROM events WHERE idempotency_key = ?",
-                (idempotency_key,),
-            ).fetchone()
-            if prior_event is not None:
-                if (
-                    prior_event["event_type"] != "QuestionEmergencyRevoked"
-                    or json.loads(prior_event["payload_json"]) != payload
-                ):
-                    raise ConflictError(
-                        "Legacy generated-question revocation key was reused "
-                        "for a different safety event."
-                    )
-                raise ConflictError(
-                    "Legacy generated-question revocation event has no matching "
-                    "projection; database needs repair."
-                )
-
-            revoked_at = datetime.now(timezone.utc)
-            event = self.append_event(
-                connection,
-                stream_id="corpus:safety",
-                event_type="QuestionEmergencyRevoked",
-                payload=payload,
-                metadata={
-                    "schema_version": SCHEMA_VERSION,
-                    "active_corpus_release_id": (
-                        active["value"] if active is not None else None
-                    ),
-                    "migration": "legacy-unreviewed-generated-v1",
-                },
-                idempotency_key=idempotency_key,
-                occurred_at=revoked_at,
-            )
-            connection.execute(
-                """INSERT INTO question_revocations(
-                       question_id, reason, revoked_at, event_id
-                   ) VALUES (?, ?, ?, ?)""",
-                (
-                    question_id,
-                    reason,
-                    to_timestamp(revoked_at),
-                    event["event_id"],
-                ),
-            )
-            created += 1
-        return created
-
-    def _historically_contaminated_generated_attempts(
-        self,
-        connection: sqlite3.Connection,
-        learner_id: str | None = None,
-    ) -> tuple[sqlite3.Row, ...]:
-        """Return responses to independently classified unsafe generation."""
-
-        unsafe_question_ids = (
-            self._historically_active_unsafe_generated_ids(connection)
-        )
-        if not unsafe_question_ids:
-            return ()
-        placeholders = ", ".join("?" for _item in unsafe_question_ids)
-        parameters: list[object] = list(unsafe_question_ids)
-        learner_clause = ""
-        if learner_id is not None:
-            learner_clause = " AND attempt.learner_id = ?"
-            parameters.append(learner_id)
-        return tuple(
-            connection.execute(
-                f"""SELECT attempt.id AS attempt_id,
-                           attempt.event_id AS response_event_id,
-                           attempt.learner_id,
-                           attempt.question_id
-                    FROM attempts attempt
-                    WHERE attempt.question_id IN ({placeholders})
-                    {learner_clause}
-                    ORDER BY attempt.learner_id, attempt.id""",
-                tuple(parameters),
-            ).fetchall()
-        )
-
-    def _quarantine_historical_generated_evidence(
-        self,
-        connection: sqlite3.Connection,
-    ) -> int:
-        """Mark contaminated responses without rewriting immutable history."""
-
-        created = 0
-        reason = LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON
-        metadata = {
-            "safety_policy": HISTORICAL_GENERATED_EVIDENCE_POLICY,
-            "requires_explicit_rebuild": True,
-        }
-        for row in self._historically_contaminated_generated_attempts(
-            connection
-        ):
-            payload = {
-                "attempt_id": row["attempt_id"],
-                "response_event_id": row["response_event_id"],
-                "learner_id": row["learner_id"],
-                "question_id": row["question_id"],
-                "reason": reason,
-                "projection_applied": False,
-            }
-            idempotency_key = _historical_generated_evidence_key(
-                row["attempt_id"]
-            )
-            prior = connection.execute(
-                "SELECT * FROM events WHERE idempotency_key=?",
-                (idempotency_key,),
-            ).fetchone()
-            if prior is not None:
-                if (
-                    prior["event_type"] != "ResponseEvidenceQuarantined"
-                    or prior["schema_version"] != 1
-                    or prior["stream_id"]
-                    != f"learner:{row['learner_id']}"
-                    or prior["learner_id"] != row["learner_id"]
-                    or prior["session_id"] is not None
-                    or prior["correlation_id"] != row["attempt_id"]
-                    or prior["causation_id"] != row["response_event_id"]
-                    or json.loads(prior["payload_json"]) != payload
-                    or json.loads(prior["metadata_json"]) != metadata
-                ):
-                    raise ConflictError(
-                        "Historical generated-evidence quarantine key was "
-                        "reused for a different safety event."
-                    )
-                continue
-            self.append_event(
-                connection,
-                stream_id=f"learner:{row['learner_id']}",
-                event_type="ResponseEvidenceQuarantined",
-                schema_version=1,
-                payload=payload,
-                metadata=metadata,
-                learner_id=row["learner_id"],
-                session_id=None,
-                idempotency_key=idempotency_key,
-                correlation_id=row["attempt_id"],
-                causation_id=row["response_event_id"],
-                occurred_at=datetime.now(timezone.utc),
-            )
-            created += 1
-        return created
-
-    def require_learner_evidence_safe(
-        self,
-        learner_id: str,
-        connection: sqlite3.Connection,
-    ) -> None:
-        """Fail closed while revoked generated evidence remains projected."""
-
-        contaminated = self._historically_contaminated_generated_attempts(
-            connection,
-            learner_id,
-        )
-        if contaminated:
-            raise ConflictError(
-                f"Learner {learner_id} has {len(contaminated)} response(s) "
-                "with quarantined generated-question evidence; adaptive use "
-                "and reporting require an explicit audited projection rebuild."
-            )
 
     @staticmethod
     def _validate_corpus_activation(
@@ -11786,7 +11828,8 @@ class Database:
                     )
                 elif (
                     question.version <= parent.version
-                    or question.family_id != parent.family_id
+                    or question.published_family_id
+                    != parent.published_family_id
                 ):
                     violations.append(
                         f"question {question.id} violates revision version/family invariants"
@@ -11969,7 +12012,7 @@ class Database:
         *,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Globally quarantine a question across every pinned corpus release."""
+        """Globally disable a question across every pinned corpus release."""
         if not isinstance(question_id, str) or not question_id.strip():
             raise ValidationError("question_id must be a non-blank string.")
         if (
@@ -12564,7 +12607,7 @@ class Database:
             id=row["id"],
             version=row["version"],
             family_id=row["family_id"],
-            status=QuestionStatus(row["status"]),
+            status=question_status_from_storage(row["status"]),
             stem=row["stem"],
             kind=QuestionKind(row["kind"]),
             difficulty=row["difficulty"],
@@ -12691,11 +12734,7 @@ class Database:
                 questions = self._questions_by_ids(
                     connection, question_ids, release_id=release_id
                 )
-                return [
-                    question
-                    for question in questions
-                    if question_runtime_activation_safe(question)
-                ]
+                return questions
             connection.execute("CREATE TEMP TABLE requested_scope(id TEXT PRIMARY KEY)")
             connection.executemany(
                 "INSERT INTO requested_scope(id) VALUES (?)",
@@ -12722,11 +12761,7 @@ class Database:
             questions = self._questions_by_ids(
                 connection, question_ids, release_id=release_id
             )
-            return [
-                question
-                for question in questions
-                if question_runtime_activation_safe(question)
-            ]
+            return questions
 
     def _questions_by_ids(
         self,
@@ -12828,7 +12863,7 @@ class Database:
                 id=row["id"],
                 version=row["version"],
                 family_id=row["family_id"],
-                status=QuestionStatus(row["resolved_status"]),
+                status=question_status_from_storage(row["resolved_status"]),
                 stem=row["stem"],
                 kind=QuestionKind(row["kind"]),
                 difficulty=row["difficulty"],
@@ -13313,23 +13348,29 @@ class Database:
                 question_rows = []
             if family_ids is None:
                 family_rows = connection.execute(
-                    """SELECT question.family_id, COUNT(*) AS n,
+                    """SELECT tsq_canonical_family(question.family_id)
+                                  AS family_id,
+                              COUNT(*) AS n,
                               MAX(decision.created_at) AS last_at
                        FROM decisions decision
                        JOIN questions question ON question.id = decision.question_id
-                       WHERE decision.learner_id = ? GROUP BY question.family_id""",
+                       WHERE decision.learner_id = ?
+                       GROUP BY tsq_canonical_family(question.family_id)""",
                     (learner_id,),
                 ).fetchall()
             elif family_ids:
                 placeholders = ",".join("?" for _ in family_ids)
                 family_rows = connection.execute(
-                    f"""SELECT question.family_id, COUNT(*) AS n,
+                    f"""SELECT tsq_canonical_family(question.family_id)
+                                    AS family_id,
+                               COUNT(*) AS n,
                                MAX(decision.created_at) AS last_at
                         FROM decisions decision
                         JOIN questions question ON question.id = decision.question_id
                         WHERE decision.learner_id = ?
-                          AND question.family_id IN ({placeholders})
-                        GROUP BY question.family_id""",
+                          AND tsq_canonical_family(question.family_id)
+                              IN ({placeholders})
+                        GROUP BY tsq_canonical_family(question.family_id)""",
                     (learner_id, *sorted(family_ids)),
                 ).fetchall()
             else:
@@ -13342,7 +13383,8 @@ class Database:
     def session_exposure_summary(self, session_id: str) -> dict[str, set[str]]:
         with self.read() as connection:
             rows = connection.execute(
-                """SELECT decision.question_id, question.family_id
+                """SELECT decision.question_id,
+                          tsq_canonical_family(question.family_id) AS family_id
                    FROM decisions decision
                    JOIN questions question ON question.id = decision.question_id
                    WHERE decision.session_id = ?""",
@@ -13436,44 +13478,71 @@ class Database:
                 connection
             )
             rows = connection.execute(
-                """SELECT evidence.concept_id, COUNT(*) AS families,
-                          COUNT(DISTINCT CASE WHEN evidence.kind != 'unknown'
-                                              THEN evidence.kind END) AS operation_kinds,
-                          SUM(CASE WHEN evidence.delayed_unguided_correct_at IS NOT NULL
-                                   THEN 1 ELSE 0 END) AS delayed
-                   FROM learner_skill_families evidence
-                   JOIN json_each(?) scope
-                     ON scope.value = evidence.concept_id
-                   WHERE evidence.learner_id = ?
-                     AND EXISTS (
-                         SELECT 1
-                         FROM release_questions released
-                         JOIN questions question
-                           ON question.id = released.question_id
-                         JOIN question_concepts mapping
-                           ON mapping.question_id = question.id
-                          AND mapping.role = 'primary'
-                         WHERE released.release_id = ?
-                           AND released.status IN (?, ?)
-                           AND mapping.concept_id = evidence.concept_id
-                           AND question.family_id = evidence.family_id
-                           AND NOT EXISTS (
-                               SELECT 1
-                               FROM question_revocations revoked
-                               WHERE revoked.question_id = question.id
-                           )
-                     )
-                   GROUP BY evidence.concept_id""",
+                """WITH eligible AS (
+                       SELECT DISTINCT mapping.concept_id,
+                              tsq_canonical_family(question.family_id)
+                                  AS family_id
+                       FROM release_questions released
+                       JOIN questions question
+                         ON question.id = released.question_id
+                       JOIN question_concepts mapping
+                         ON mapping.question_id = question.id
+                        AND mapping.role = 'primary'
+                       WHERE released.release_id = ?
+                         AND released.status IN (?, ?)
+                         AND NOT EXISTS (
+                             SELECT 1
+                             FROM question_revocations revoked
+                             WHERE revoked.question_id = question.id
+                         )
+                   ), ranked AS (
+                       SELECT evidence.concept_id,
+                              tsq_canonical_family(evidence.family_id)
+                                  AS family_id,
+                              evidence.kind,
+                              ROW_NUMBER() OVER (
+                                  PARTITION BY evidence.concept_id,
+                                      tsq_canonical_family(evidence.family_id)
+                                  ORDER BY
+                                      evidence.last_unguided_correct_at DESC,
+                                      evidence.family_id
+                              ) AS family_rank,
+                              MAX(CASE WHEN
+                                  evidence.delayed_unguided_correct_at IS NOT NULL
+                                  THEN 1 ELSE 0 END) OVER (
+                                  PARTITION BY evidence.concept_id,
+                                      tsq_canonical_family(evidence.family_id)
+                              ) AS has_delayed
+                       FROM learner_skill_families evidence
+                       JOIN json_each(?) scope
+                         ON scope.value = evidence.concept_id
+                       WHERE evidence.learner_id = ?
+                   ), normalized AS (
+                       SELECT ranked.concept_id, ranked.family_id,
+                              ranked.kind, ranked.has_delayed
+                       FROM ranked
+                       JOIN eligible
+                         ON eligible.concept_id = ranked.concept_id
+                        AND eligible.family_id = ranked.family_id
+                       WHERE ranked.family_rank = 1
+                   )
+                   SELECT concept_id, COUNT(*) AS families,
+                          COUNT(DISTINCT CASE WHEN kind != 'unknown'
+                                              THEN kind END)
+                              AS operation_kinds,
+                          SUM(has_delayed) AS delayed
+                   FROM normalized
+                   GROUP BY concept_id""",
                 (
+                    resolved_release,
+                    QuestionStatus.APPROVED.value,
+                    QuestionStatus.CALIBRATED.value,
                     json.dumps(
                         sorted(concept_ids),
                         ensure_ascii=False,
                         separators=(",", ":"),
                     ),
                     learner_id,
-                    resolved_release,
-                    QuestionStatus.APPROVED.value,
-                    QuestionStatus.CALIBRATED.value,
                 ),
             ).fetchall()
         for row in rows:
@@ -13546,7 +13615,10 @@ class Database:
                 "SELECT 1 FROM learners WHERE id = ?", (learner_id,)
             ).fetchone():
                 raise NotFoundError(f"Unknown learner: {learner_id}")
-            self.require_learner_evidence_safe(learner_id, connection)
+            self.require_learner_evidence_integrity(
+                learner_id,
+                connection,
+            )
             release_id = self.get_active_release_id(connection)
             requested_root_concept_id = root_concept_id
             if topic_id is not None:
@@ -13934,7 +14006,12 @@ class Database:
             if not row:
                 raise NotFoundError(f"Unknown session: {session_id}")
             result = dict(row)
-            result["recent_families"] = json.loads(result.pop("recent_families_json"))
+            result["recent_families"] = [
+                canonical_family_label(family_id)
+                for family_id in json.loads(
+                    result.pop("recent_families_json")
+                )
+            ]
             result["remediation_path"] = json.loads(
                 result.pop("remediation_path_json")
             )
@@ -14150,8 +14227,6 @@ class Database:
                     f"Decision {row['id']} references a question outside its corpus release."
                 )
             question = questions[0]
-            if not question_runtime_activation_safe(question):
-                return None
             terms = json.loads(row["selected_score_json"])
             score = CandidateScore(question_id=question.id, **terms)
             return Presentation(
@@ -15150,8 +15225,14 @@ class Database:
                     if raw_output is None or validation is None or error_record is not None:
                         errors.append(f"{prefix}: reviewed attempt has invalid output shape")
                         continue
-                    if raw_output.get("status") != "quarantined":
-                        errors.append(f"{prefix}: generated artifact is not quarantined")
+                    expected_item_status = (
+                        "approved" if run["status"] == "reviewed" else "draft"
+                    )
+                    if raw_output.get("status") != expected_item_status:
+                        errors.append(
+                            f"{prefix}: generated artifact status does not "
+                            "match its review result"
+                        )
                     if validation.get("source_context_sha256") != context_hash:
                         errors.append(f"{prefix}: source-context attestation mismatch")
 
@@ -15529,34 +15610,6 @@ class Database:
                        ORDER BY membership.question_id""",
                     (release_id,),
                 ).fetchall()
-                for question_row in question_rows:
-                    if question_row["status"] not in {
-                        QuestionStatus.APPROVED.value,
-                        QuestionStatus.CALIBRATED.value,
-                    }:
-                        continue
-                    try:
-                        provenance = json.loads(
-                            question_row["provenance_json"]
-                        )
-                    except (TypeError, json.JSONDecodeError):
-                        provenance = None
-                    if generated_question_runtime_safe(
-                        provenance,
-                        status=question_row["status"],
-                    ):
-                        continue
-                    revoked = connection.execute(
-                        """SELECT 1 FROM question_revocations
-                           WHERE question_id=?""",
-                        (question_row["question_id"],),
-                    ).fetchone()
-                    if revoked is None:
-                        errors.append(
-                            f"{prefix}: active question "
-                            f"{question_row['question_id']} fails the generated-content "
-                            "activation gate and is not emergency-revoked"
-                        )
                 objective_rows = connection.execute(
                     """SELECT membership.objective_id, objective.content_hash,
                               objective.primary_concept_id,
@@ -15822,7 +15875,9 @@ class Database:
 
                 for question in question_rows:
                     try:
-                        status = QuestionStatus(question["status"])
+                        status = question_status_from_storage(
+                            question["status"]
+                        )
                     except ValueError:
                         errors.append(
                             f"{prefix}: question {question['question_id']} has invalid status"
@@ -16700,130 +16755,36 @@ class Database:
                             f"event {event['event_id']}: safety event has no revocation projection"
                         )
 
-            quarantine_events_by_attempt: dict[
-                str, list[sqlite3.Row]
-            ] = {}
-            for event in connection.execute(
-                """SELECT * FROM events
-                   WHERE event_type='ResponseEvidenceQuarantined'
-                   ORDER BY stream_id, stream_version"""
-            ).fetchall():
-                label = (
-                    "historical generated-evidence quarantine "
-                    f"{event['event_id']}"
+            # Schema v22 used an unfortunately named immutable event to mark
+            # responses whose evidence had already entered the mutable learner
+            # projection before a safety finding.  Preserve that wire record
+            # as a projection-integrity failure, independent of all current
+            # question statuses and provenance workflows.
+            try:
+                invalid_response_markers = (
+                    self._validate_legacy_invalid_response_evidence(
+                        connection,
+                        context="Database",
+                    )
                 )
+            except ConflictError as exc:
+                errors.append(str(exc))
+                invalid_response_markers = ()
+            for marker in invalid_response_markers:
+                if stream_id is not None and marker["stream_id"] != stream_id:
+                    continue
                 payload = event_object(
-                    event,
+                    marker,
                     "payload_json",
                     payload_cache,
                 )
-                metadata = event_object(
-                    event,
-                    "metadata_json",
-                    metadata_cache,
-                )
-                if payload is None or metadata is None:
+                if payload is None:
                     continue
-                require_exact_fields(
-                    payload,
-                    frozenset(
-                        {
-                            "attempt_id",
-                            "response_event_id",
-                            "learner_id",
-                            "question_id",
-                            "reason",
-                            "projection_applied",
-                        }
-                    ),
-                    f"{label} payload",
-                )
-                require_exact_fields(
-                    metadata,
-                    frozenset(
-                        {
-                            "safety_policy",
-                            "requires_explicit_rebuild",
-                        }
-                    ),
-                    f"{label} metadata",
-                )
-                attempt_id = payload.get("attempt_id")
-                if isinstance(attempt_id, str) and attempt_id:
-                    quarantine_events_by_attempt.setdefault(
-                        attempt_id,
-                        [],
-                    ).append(event)
-                attempt = (
-                    connection.execute(
-                        """SELECT * FROM attempts WHERE id=?""",
-                        (attempt_id,),
-                    ).fetchone()
-                    if isinstance(attempt_id, str)
-                    else None
-                )
-                if (
-                    attempt is None
-                    or event["schema_version"] != 1
-                    or event["stream_id"]
-                    != f"learner:{attempt['learner_id']}"
-                    or event["learner_id"] != attempt["learner_id"]
-                    or event["session_id"] is not None
-                    or event["correlation_id"] != attempt["id"]
-                    or event["causation_id"] != attempt["event_id"]
-                    or payload.get("response_event_id")
-                    != attempt["event_id"]
-                    or payload.get("learner_id")
-                    != attempt["learner_id"]
-                    or payload.get("question_id")
-                    != attempt["question_id"]
-                    or payload.get("reason")
-                    != LEGACY_UNREVIEWED_GENERATED_REVOCATION_REASON
-                    or payload.get("projection_applied") is not False
-                    or metadata.get("safety_policy")
-                    != HISTORICAL_GENERATED_EVIDENCE_POLICY
-                    or metadata.get("requires_explicit_rebuild")
-                    is not True
-                    or event["idempotency_key"]
-                    != _historical_generated_evidence_key(
-                        attempt["id"] if attempt is not None else ""
-                    )
-                ):
-                    errors.append(f"{label}: invalid safety boundary")
-
-            contaminated_attempts = (
-                self._historically_contaminated_generated_attempts(
-                    connection
-                )
-            )
-            contaminated_ids = {
-                row["attempt_id"] for row in contaminated_attempts
-            }
-            for row in contaminated_attempts:
-                matching = quarantine_events_by_attempt.get(
-                    row["attempt_id"],
-                    [],
-                )
-                if len(matching) != 1:
-                    errors.append(
-                        "historical generated-evidence attempt "
-                        f"{row['attempt_id']}: expected one quarantine event, "
-                        f"found {len(matching)}"
-                    )
                 errors.append(
-                    f"learner {row['learner_id']}: projection contains "
-                    "quarantined generated-question evidence from attempt "
-                    f"{row['attempt_id']}; explicit audited rebuild required"
+                    f"learner {payload['learner_id']}: projection contains "
+                    "invalidated response evidence from attempt "
+                    f"{payload['attempt_id']}; explicit audited rebuild required"
                 )
-            for attempt_id, matching in (
-                quarantine_events_by_attempt.items()
-            ):
-                if attempt_id not in contaminated_ids:
-                    for event in matching:
-                        errors.append(
-                            f"event {event['event_id']}: generated-evidence "
-                            "quarantine has no contaminated attempt"
-                        )
 
             # The latest projection event commits to all mutable learner-model
             # tables.  This catches out-of-band edits that a valid event chain
@@ -17709,7 +17670,13 @@ class Database:
                         )
                 if attempt["question_version"] != attempt["current_question_version"]:
                     errors.append(f"{prefix}: current question version mismatch")
-                if attempt["family_id"] != attempt["current_family_id"]:
+                if (
+                    evidence_family_id(
+                        attempt["question_id"],
+                        attempt["family_id"],
+                    )
+                    != canonical_family_label(attempt["current_family_id"])
+                ):
                     errors.append(f"{prefix}: question family mismatch")
 
                 presented_order = json_value(
@@ -17924,6 +17891,20 @@ class Database:
                     if response_metadata is not None
                     else None
                 )
+                if response_model in SUPPORTED_MODEL_VERSIONS:
+                    expected_attempt_family = (
+                        canonical_family_label(
+                            attempt["current_family_id"]
+                        )
+                        if response_model
+                        in CANONICAL_FAMILY_MODEL_VERSIONS
+                        else attempt["current_family_id"]
+                    )
+                    if attempt["family_id"] != expected_attempt_family:
+                        errors.append(
+                            f"{prefix}: family does not match its learner "
+                            "model contract"
+                        )
                 selection_model = selection_models.get(attempt["decision_id"])
                 if (
                     selection_model is not None

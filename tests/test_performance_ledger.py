@@ -1056,101 +1056,6 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         self.assertEqual(inspected["status"], "unreconciled")
         self.assertEqual(inspected["reconciliation_count"], 0)
 
-    def test_reconciliation_obeys_learner_quarantine_before_lookup_and_commit(
-        self,
-    ) -> None:
-        _attempt, _submitted, claim, _provider, _imported = (
-            self.failed_scoring_claim()
-        )
-        registry, adapter = self.reconciliation_registry(
-            claim,
-            outcome=ReconciliationOutcome.UNKNOWN,
-        )
-        with patch.object(
-            self.database,
-            "require_learner_evidence_safe",
-            side_effect=ConflictError("learner evidence is quarantined"),
-        ):
-            with self.assertRaisesRegex(ConflictError, "quarantined"):
-                self.ledger.reconcile_scoring_claim(
-                    claim["id"],
-                    registry,
-                    adapter.reconciler_id,
-                    adapter.reconciler_version,
-                    idempotency_key="unsafe-before-lookup",
-                    now=START + timedelta(minutes=8),
-                )
-        self.assertEqual(adapter.lookup_calls, 0)
-
-        with patch.object(
-            self.database,
-            "require_learner_evidence_safe",
-            side_effect=(
-                None,
-                ConflictError("learner evidence became quarantined"),
-            ),
-        ):
-            with self.assertRaisesRegex(ConflictError, "became quarantined"):
-                self.ledger.reconcile_scoring_claim(
-                    claim["id"],
-                    registry,
-                    adapter.reconciler_id,
-                    adapter.reconciler_version,
-                    idempotency_key="unsafe-during-lookup",
-                    now=START + timedelta(minutes=8),
-                )
-        self.assertEqual(adapter.lookup_calls, 1)
-        with self.database.read() as connection:
-            self.assertEqual(
-                connection.execute(
-                    """SELECT COUNT(*) AS n
-                       FROM performance_scoring_reconciliations
-                       WHERE claim_id=?""",
-                    (claim["id"],),
-                ).fetchone()["n"],
-                0,
-            )
-            self.assertEqual(
-                connection.execute(
-                    """SELECT COUNT(*) AS n FROM events
-                       WHERE event_type='PerformanceScoringReconciled'
-                         AND json_extract(payload_json, '$.claim_id')=?""",
-                    (claim["id"],),
-                ).fetchone()["n"],
-                0,
-            )
-
-        safe_registry, safe_adapter = self.reconciliation_registry(
-            claim,
-            outcome=ReconciliationOutcome.UNKNOWN,
-            reconciler_version="safe-replay-v1",
-        )
-        recorded = self.ledger.reconcile_scoring_claim(
-            claim["id"],
-            safe_registry,
-            safe_adapter.reconciler_id,
-            safe_adapter.reconciler_version,
-            idempotency_key="safe-then-quarantined",
-            now=START + timedelta(minutes=8),
-        )
-        self.assertEqual(recorded["status"], "unknown")
-        self.assertEqual(safe_adapter.lookup_calls, 1)
-        with patch.object(
-            self.database,
-            "require_learner_evidence_safe",
-            side_effect=ConflictError("learner evidence is quarantined"),
-        ):
-            with self.assertRaisesRegex(ConflictError, "quarantined"):
-                self.ledger.reconcile_scoring_claim(
-                    claim["id"],
-                    safe_registry,
-                    safe_adapter.reconciler_id,
-                    safe_adapter.reconciler_version,
-                    idempotency_key="safe-then-quarantined",
-                    now=START + timedelta(minutes=9),
-                )
-        self.assertEqual(safe_adapter.lookup_calls, 1)
-        self.assertTrue(self.database.verify_integrity()["ok"])
 
     def test_reconciliation_crash_before_commit_leaves_no_partial_state(
         self,
@@ -2529,7 +2434,7 @@ class PerformanceLedgerTestCase(unittest.TestCase):
                 now=START + timedelta(seconds=4),
             )
 
-    def test_release_rejects_quarantine_only_objective_misconception_binding(
+    def test_release_rejects_draft_only_objective_misconception_binding(
         self,
     ) -> None:
         objective_id = "lo_agent_state_reconciliation"
@@ -2561,7 +2466,7 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         self.assertGreater(len(rows), 0)
         mapping_question_ids = {row["question_id"] for row in rows}
         isolated_questions = tuple(
-            replace(question, status=QuestionStatus.QUARANTINED)
+            replace(question, status=QuestionStatus.DRAFT)
             if question.id in mapping_question_ids
             else question
             for question in parsed[4]
@@ -2600,14 +2505,14 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         )
         self.assertTrue(
             all(
-                row["status"] == QuestionStatus.QUARANTINED.value
+                row["status"] == QuestionStatus.DRAFT.value
                 and not row["revoked"]
                 for row in isolated_rows
             )
         )
 
         terms = self.task.terms()
-        terms["id"] = "task_quarantine_only_misconception"
+        terms["id"] = "task_draft_only_misconception"
         terms["criteria"][0]["concept_weights"] = [
             ["c_agent_observation_loop", 1.0]
         ]
@@ -2617,16 +2522,16 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         terms["criteria"][0]["misconception_ids"] = [misconception_id]
         task = LearningTask.from_terms(terms)
 
-        quarantined = self.ledger.publish_release(
+        task_draft = self.ledger.publish_release(
             PerformanceTaskRelease(
-                title="Quarantine-only misconception draft fixture",
+                title="Draft-only misconception task fixture",
                 corpus_release_id=isolated_release,
                 review=self.release.review,
                 tasks=(("quarantined", task),),
             ),
             now=START + timedelta(seconds=4),
         )
-        self.assertEqual(quarantined["status_counts"]["quarantined"], 1)
+        self.assertEqual(task_draft["status_counts"]["quarantined"], 1)
         self.assertTrue(self.database.verify_integrity()["ok"])
 
         with self.assertRaisesRegex(
@@ -2634,7 +2539,7 @@ class PerformanceLedgerTestCase(unittest.TestCase):
         ):
             self.ledger.publish_release(
                 PerformanceTaskRelease(
-                    title="Quarantine-only misconception fixture",
+                    title="Draft-only misconception fixture",
                     corpus_release_id=isolated_release,
                     review=self.release.review,
                     tasks=(("pilot", task),),

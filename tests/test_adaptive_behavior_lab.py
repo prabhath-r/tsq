@@ -10,6 +10,7 @@ from pathlib import Path
 
 from experiments.adaptive_behavior_lab import (
     SCENARIO_BY_ID,
+    _evidence_family_key,
     aggregate_audit_gaps,
     capacity_and_demand_snapshot,
     compact_session_report,
@@ -34,6 +35,47 @@ START = datetime(2102, 4, 5, 9, 0, tzinfo=timezone.utc)
 
 
 class AdaptiveBehaviorLabTests(unittest.TestCase):
+    def test_capacity_keys_collapse_reviewed_published_aliases(self) -> None:
+        canonical = _evidence_family_key(
+            objective_id="lo_ar_prompt_conditioning",
+            anchor_concept_id="c_autoregressive_language_modeling",
+            published_family_id="f_ar_prompt_conditioning",
+        )
+        alias = _evidence_family_key(
+            objective_id="lo_ar_prompt_conditioning",
+            anchor_concept_id="c_autoregressive_language_modeling",
+            published_family_id="f_ar_fixed_weight_demonstrations",
+        )
+
+        self.assertEqual(alias, canonical)
+        self.assertEqual(
+            canonical,
+            "objective:lo_ar_prompt_conditioning|"
+            "family:f_ar_prompt_conditioning",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            database = Database(Path(directory) / "capacity-alias.db")
+            database.initialize()
+            database.import_corpus(
+                *read_and_parse(CORPUS, include_catalog=True)
+            )
+            engine = AdaptiveEngine(database)
+            engine.create_learner("capacity-alias")
+            session = engine.start_session(
+                "capacity-alias",
+                "c_autoregressive_language_modeling",
+                seed=17,
+                now=START,
+            )
+            snapshot = capacity_and_demand_snapshot(database, session)
+
+        self.assertEqual(len(snapshot["owned_concepts"]), 1)
+        self.assertEqual(
+            snapshot["owned_concepts"][0]["independent_families"],
+            4,
+        )
+
     def test_real_engine_position_habit_crosses_shadow_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             result = run_position_habit_check(

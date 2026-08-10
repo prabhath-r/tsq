@@ -63,8 +63,6 @@ PYTHONPATH=src python3 -m tsq --db "$work_dir/tsq.db" topics --json
 PYTHONPATH=src python3 -m tsq --db "$work_dir/tsq.db" graph t_transformers --json
 PYTHONPATH=src python3 -m tsq --db "$work_dir/tsq.db" coverage \
   --topic t_transformers --json
-PYTHONPATH=src python3 -m tsq --db "$work_dir/tsq.db" quarantine list \
-  --topic t_transformers --json
 ```
 
 Then run the focused corpus, authoring, capacity, packaging, and behavioral
@@ -78,15 +76,26 @@ PYTHONPATH=src python3 -m unittest \
   tests.test_authoring \
   tests.test_capacity \
   tests.test_family_independence_lab \
-  tests.test_generated_activation \
-  tests.test_packaging
+  tests.test_packaging \
+  tests.test_store_integrity
 PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests
 ```
 
-Generated questions are candidates only. They stay quarantined, do not count
-toward live coverage or capacity, and cannot be selected for a learner. Use
-`capacity --quarantine-impact` only to prioritize review; never report its
-counterfactual result as live capacity. The current schema cannot quarantine
-topics, concepts, objectives, misconceptions, sources, or graph edges, so
-AI-proposed definitions must remain non-runtime prose outside `corpus/` until
-they receive independent human semantic and source review.
+Draft questions and taxonomy proposals stay outside `corpus/`, the manifest,
+and the packaged resource until the independent review sequence in `AGENTS.md`
+passes. Accepted questions use `approved`. Keep `generated` and `human_review`
+truthful descriptive provenance fields, omit all vendor/model identity from
+public question provenance, and use `calibrated` only after relevant empirical
+item evidence exists.
+
+Question status, release membership, and the current top-level review status
+are the authoritative lifecycle state. Nested attestations, repair notes,
+activation strings, and source-record notes describe review context recorded
+when an immutable identity was published; they never impose a runtime gate.
+Historical provenance can therefore mention an earlier authoring workflow
+without changing an approved question's eligibility.
+
+Emergency question revocation remains a separate runtime safety control for a
+released item. Productive-performance tasks also have their own review and
+lifecycle contract; neither mechanism changes the bundled curriculum authoring
+rules here.

@@ -23,6 +23,7 @@ from tsq.objective_posterior import (
 )
 from tsq.versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
+    CANONICAL_FAMILY_V9_MODEL_VERSION,
     CONCEPT_MODEL_VERSION,
     LEGACY_MODEL_VERSION,
     OBJECTIVE_GAUSSIAN_MODEL_VERSION,
@@ -45,6 +46,7 @@ KNOWN_MODELS = (
     OBJECTIVE_GRID_V6_MODEL_VERSION,
     OBJECTIVE_GRID_V7_MODEL_VERSION,
     OBJECTIVE_GRID_V8_MODEL_VERSION,
+    CANONICAL_FAMILY_V9_MODEL_VERSION,
 )
 
 
@@ -175,7 +177,7 @@ class ResponseVersionSemanticsTests(unittest.TestCase):
                 ResponseClass.NONCREDIBLE_SUCCESS,
             )
 
-    def test_v6_requires_time_and_v7_v8_require_both_observations(self) -> None:
+    def test_v6_requires_time_and_v7_v8_v9_require_both_observations(self) -> None:
         self.assertIs(
             self._classify(
                 OBJECTIVE_GRID_V6_MODEL_VERSION,
@@ -195,6 +197,7 @@ class ResponseVersionSemanticsTests(unittest.TestCase):
         for model_version in (
             OBJECTIVE_GRID_V7_MODEL_VERSION,
             OBJECTIVE_GRID_V8_MODEL_VERSION,
+            CANONICAL_FAMILY_V9_MODEL_VERSION,
         ):
             for confidence, response_ms in ((None, 500), (0.9, None)):
                 self.assertIs(
@@ -206,7 +209,7 @@ class ResponseVersionSemanticsTests(unittest.TestCase):
                     ResponseClass.NONCREDIBLE_SUCCESS,
                 )
 
-    def test_v7_and_v8_require_high_confidence_for_a_named_error(self) -> None:
+    def test_v7_v8_and_v9_require_high_confidence_for_a_named_error(self) -> None:
         for model_version in (
             *HISTORICAL_OPTIONAL_MODELS,
             OBJECTIVE_GRID_V6_MODEL_VERSION,
@@ -220,49 +223,42 @@ class ResponseVersionSemanticsTests(unittest.TestCase):
                 ),
                 ResponseClass.CREDIBLE_NAMED_ERROR,
             )
-        self.assertIs(
-            self._classify(
-                OBJECTIVE_GRID_V7_MODEL_VERSION,
-                correct=False,
-                selected_misconception_id="m_named",
-                confidence=0.79,
-            ),
-            ResponseClass.CREDIBLE_GENERIC_ERROR,
-        )
-        self.assertIs(
-            self._classify(
-                OBJECTIVE_GRID_V7_MODEL_VERSION,
-                correct=False,
-                selected_misconception_id="m_named",
-                confidence=0.80,
-            ),
-            ResponseClass.CREDIBLE_NAMED_ERROR,
-        )
-        self.assertIs(
-            self._classify(
-                OBJECTIVE_GRID_V8_MODEL_VERSION,
-                correct=False,
-                selected_misconception_id="m_named",
-                confidence=0.79,
-            ),
-            ResponseClass.CREDIBLE_GENERIC_ERROR,
-        )
-        self.assertIs(
-            self._classify(
-                OBJECTIVE_GRID_V8_MODEL_VERSION,
-                correct=False,
-                selected_misconception_id="m_named",
-                confidence=0.80,
-            ),
-            ResponseClass.CREDIBLE_NAMED_ERROR,
-        )
+        for model_version in (
+            OBJECTIVE_GRID_V7_MODEL_VERSION,
+            OBJECTIVE_GRID_V8_MODEL_VERSION,
+            CANONICAL_FAMILY_V9_MODEL_VERSION,
+        ):
+            with self.subTest(model_version=model_version):
+                self.assertIs(
+                    self._classify(
+                        model_version,
+                        correct=False,
+                        selected_misconception_id="m_named",
+                        confidence=0.79,
+                    ),
+                    ResponseClass.CREDIBLE_GENERIC_ERROR,
+                )
+                self.assertIs(
+                    self._classify(
+                        model_version,
+                        correct=False,
+                        selected_misconception_id="m_named",
+                        confidence=0.80,
+                    ),
+                    ResponseClass.CREDIBLE_NAMED_ERROR,
+                )
 
     def test_version_registry_and_posterior_v1_identity_are_explicit(self) -> None:
         self.assertEqual(set(RESPONSE_TELEMETRY_CONTRACTS), set(KNOWN_MODELS))
         self.assertEqual(set(SUPPORTED_MODEL_VERSIONS), set(KNOWN_MODELS))
         self.assertEqual(
             AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
-            frozenset({OBJECTIVE_GRID_V8_MODEL_VERSION}),
+            frozenset(
+                {
+                    OBJECTIVE_GRID_V8_MODEL_VERSION,
+                    CANONICAL_FAMILY_V9_MODEL_VERSION,
+                }
+            ),
         )
         self.assertEqual(
             (
@@ -271,6 +267,17 @@ class ResponseVersionSemanticsTests(unittest.TestCase):
                 ].event_schema_version,
                 OBJECTIVE_PROJECTION_FORMATS[
                     OBJECTIVE_GRID_V6_MODEL_VERSION
+                ].hash_version,
+            ),
+            (4, 3),
+        )
+        self.assertEqual(
+            (
+                OBJECTIVE_PROJECTION_FORMATS[
+                    CANONICAL_FAMILY_V9_MODEL_VERSION
+                ].event_schema_version,
+                OBJECTIVE_PROJECTION_FORMATS[
+                    CANONICAL_FAMILY_V9_MODEL_VERSION
                 ].hash_version,
             ),
             (4, 3),

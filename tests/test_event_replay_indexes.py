@@ -125,7 +125,7 @@ class EventReplayIndexTests(unittest.TestCase):
             database = Database(Path(directory) / "fresh-current.db")
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 22)
+            self.assertEqual(SCHEMA_VERSION, 23)
             self.assertEqual(
                 _schema_contract(database),
                 _expected_current_schema_contract(),

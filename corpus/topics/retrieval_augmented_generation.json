@@ -674,7 +674,7 @@
       "version": 1,
       "family_id": "f_rag_dual_axis_factuality_grounding",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "An authoritative astronomy catalog lists Planet K's orbital period as 12.4 days. A RAG answer gives 12.4 days but cites a retrieved passage that states only the host star's temperature. Evaluation records factual correctness against the catalog and citation support against the cited passage. Which pair is warranted?",
       "kind": "comparison",
       "difficulty": 0.7,
@@ -759,7 +759,7 @@
       "version": 1,
       "family_id": "f_rag_multihop_query_conditioning",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "A question asks which university employed the scientist who discovered compound Q at the time of discovery. One broad retrieval query returns five passages that identify the scientist and give the discovery year as 1987, but none gives the scientist's 1987 affiliation. Which next retrieval operation addresses the missing evidence most directly?",
       "kind": "application",
       "difficulty": 0.85,
@@ -843,7 +843,7 @@
       "version": 1,
       "family_id": "f_rag_causal_bridge_attribution",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "An incident report cites passage A, which says release R began on 4 June, and passage B, which says the error rate fell on 6 June. Its answer states, \"Release R caused the error-rate decline,\" with both citations. Neither passage compares alternatives or states a causal link. What is the correct grounding diagnosis?",
       "kind": "debugging",
       "difficulty": 0.95,
@@ -932,11 +932,106 @@
       ]
     },
     {
+      "id": "q_rag_causal_bridge_attribution_002",
+      "version": 2,
+      "family_id": "f_rag_causal_bridge_attribution",
+      "learning_objective_id": "lo_rag_claim_grounding",
+      "status": "approved",
+      "revision_of": "q_rag_causal_bridge_attribution_001",
+      "stem": "An incident report cites passage A, which says release R began on 4 June, and passage B, which says the error rate fell on 6 June. Its answer states, \"Release R caused the error-rate decline,\" with both citations. Neither passage compares alternatives or states a causal link. What is the correct grounding diagnosis?",
+      "kind": "debugging",
+      "difficulty": 0.95,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Treat the causal conclusion as supported because retrieving the complete incident sequence teaches the generator that release R produced the later decline.",
+          "correct": false,
+          "misconception_id": "m_rag_retrieval_updates_weights",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Inference-time retrieval does not update model parameters, and temporal sequence still does not supply evidence for the missing causal relation."
+        },
+        {
+          "id": "b",
+          "text": "Treat the full conclusion as supported because two citations attached to one sentence establish entailment for the relation between its facts.",
+          "correct": false,
+          "misconception_id": "m_rag_citation_proves_entailment",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "The citations support timing subclaims, but citation presence does not make temporal succession entail causation."
+        },
+        {
+          "id": "c",
+          "text": "Mark the dates as supported but the causal bridge as unsupported, because the passages establish sequence without attributing the decline to release R.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "Claim-level evaluation must preserve the supported observations while withholding support for the additional causal relation."
+        },
+        {
+          "id": "d",
+          "text": "Treat the causal conclusion as grounded because placing both relevant facts in context establishes that the generator used them faithfully.",
+          "correct": false,
+          "misconception_id": "m_rag_context_guarantees_use",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Relevant context can be combined into an inference that the evidence itself does not justify."
+        }
+      ],
+      "source_ids": [
+        "src_alce_2023",
+        "src_ragas_2024",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "batch_id": "batch_rag_agent_headroom_20260723_c",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "final_independent_ai_review_passed",
+        "human_review": false,
+        "psychometrics": "uncalibrated_expert_prior",
+        "source_scope": "ALCE and RAGAS support claim-level citation/faithfulness evaluation. The incident facts and the unsupported causal bridge are original stipulated scenario content.",
+        "independence_note": "The keyed operation decomposes a composite causal proposition into supported premises and an unsupported relation; it is not document-presence scoring, a population mismatch, context ablation, a claim-by-document matrix, or factuality-versus-citation classification.",
+        "reviewed_on": "2026-07-23",
+        "batch_sha256": "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+        "review_sha256": "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+        "review_payload_sha256": "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042",
+        "review_chain_sha256": [
+          "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+          "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+          "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"
+        ],
+        "review_statement": "An independent model reviewer first reviewed the answer-redacted stem, options, semantic target, family assignment, and source scope, then verified the keyed answer, distractor diagnoses, and rationales before this immutable revision was approved.",
+        "revision_review_batch_id": "batch_provenance_clean_revisions_20260810_a",
+        "revision_reviewed_on": "2026-08-10"
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "grounding",
+        "claim_decomposition",
+        "causal_attribution"
+      ]
+    },
+    {
       "id": "q_rag_derived_rate_entailment_001",
       "version": 1,
       "family_id": "f_rag_derived_rate_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "A retrieved audit table reports 80 inspected records and 20 records with violations. A generated answer cites that table and says, \"The violation rate was 20%.\" No other evidence is used. How should the derived claim be evaluated?",
       "kind": "application",
       "difficulty": 0.7,
@@ -1025,11 +1120,106 @@
       ]
     },
     {
+      "id": "q_rag_derived_rate_entailment_002",
+      "version": 2,
+      "family_id": "f_rag_derived_rate_entailment",
+      "learning_objective_id": "lo_rag_claim_grounding",
+      "status": "approved",
+      "revision_of": "q_rag_derived_rate_entailment_001",
+      "stem": "A retrieved audit table reports 80 inspected records and 20 records with violations. A generated answer cites that table and says, \"The violation rate was 20%.\" No other evidence is used. How should the derived claim be evaluated?",
+      "kind": "application",
+      "difficulty": 0.7,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Reject 20% because the cited counts imply 20 divided by 80, or 25%; the context supports a different rate.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The arithmetic is fully determined by the cited table, so the generated percentage is contradicted by its own evidence."
+        },
+        {
+          "id": "b",
+          "text": "Accept 20% because a citation to the exact audit table is sufficient support for any numerical summary derived from it.",
+          "correct": false,
+          "misconception_id": "m_rag_citation_proves_entailment",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Citation correctness still requires the cited values to entail the derived quantity."
+        },
+        {
+          "id": "c",
+          "text": "Accept 20% because retrieving the table updates the model parameters with the audit counts before the rate is generated.",
+          "correct": false,
+          "misconception_id": "m_rag_retrieval_updates_weights",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "The table conditions inference without changing model parameters, and a parameter claim cannot repair incorrect arithmetic."
+        },
+        {
+          "id": "d",
+          "text": "Accept 20% because the relevant table was present in context, which establishes faithful use even if the visible calculation differs.",
+          "correct": false,
+          "misconception_id": "m_rag_context_guarantees_use",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Context presence does not establish that the generator performed or followed the supported calculation."
+        }
+      ],
+      "source_ids": [
+        "src_alce_2023",
+        "src_ragas_2024",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "batch_id": "batch_rag_agent_headroom_20260723_c",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "final_independent_ai_review_passed",
+        "human_review": false,
+        "psychometrics": "uncalibrated_expert_prior",
+        "source_scope": "ALCE and RAGAS support evaluating whether cited evidence supports generated claims. The table, counts, and arithmetic are self-contained original scenario content.",
+        "independence_note": "The keyed operation verifies a deterministic derived quantity against cited source values; it does not test citation placement alone, swap context, classify multiple unrelated claims, or separate external truth from citation support.",
+        "reviewed_on": "2026-07-23",
+        "batch_sha256": "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+        "review_sha256": "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+        "review_payload_sha256": "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042",
+        "review_chain_sha256": [
+          "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+          "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+          "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"
+        ],
+        "review_statement": "An independent model reviewer first reviewed the answer-redacted stem, options, semantic target, family assignment, and source scope, then verified the keyed answer, distractor diagnoses, and rationales before this immutable revision was approved.",
+        "revision_review_batch_id": "batch_provenance_clean_revisions_20260810_a",
+        "revision_reviewed_on": "2026-08-10"
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "grounding",
+        "derived_claim",
+        "quantitative_entailment"
+      ]
+    },
+    {
       "id": "q_rag_candidate_reranker_funnel_001",
       "version": 1,
       "family_id": "f_rag_candidate_reranker_funnel",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "For 200 benchmark queries, an authoritative answer-bearing passage appears in the retriever's top 50 for 90% of all queries, but appears in the reranker's final top 5 for only 38% of all 200 queries. When that passage is inserted into the final context, the unchanged generator answers correctly 87% of the time. Which diagnosis and next measurement are best supported?",
       "kind": "debugging",
       "difficulty": 1.05,
@@ -1118,11 +1308,106 @@
       ]
     },
     {
+      "id": "q_rag_candidate_reranker_funnel_002",
+      "version": 2,
+      "family_id": "f_rag_candidate_reranker_funnel",
+      "learning_objective_id": "lo_rag_retrieval_evidence_quality",
+      "status": "approved",
+      "revision_of": "q_rag_candidate_reranker_funnel_001",
+      "stem": "For 200 benchmark queries, an authoritative answer-bearing passage appears in the retriever's top 50 for 90% of all queries, but appears in the reranker's final top 5 for only 38% of all 200 queries. When that passage is inserted into the final context, the unchanged generator answers correctly 87% of the time. Which diagnosis and next measurement are best supported?",
+      "kind": "debugging",
+      "difficulty": 1.05,
+      "discrimination": 1.75,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Declare retrieval healthy from the 90% candidate recall and use that number as the complete RAG quality score.",
+          "correct": false,
+          "misconception_id": "m_rag_recall_alone_sufficient",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Candidate recall hides the sharp loss between candidate generation and final context construction."
+        },
+        {
+          "id": "b",
+          "text": "Measure and repair authoritative-passage retention from top 50 to top 5, then remeasure generation with the resulting fixed context.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The funnel and insertion control localize the largest observed loss to reranking while preserving a separate downstream check."
+        },
+        {
+          "id": "c",
+          "text": "Trust the reranker's highest similarity score because its top passage determines which evidence is authoritative and correct.",
+          "correct": false,
+          "misconception_id": "m_rag_top_score_is_truth",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "A ranking score does not establish authority, and the measured retention failure contradicts this shortcut."
+        },
+        {
+          "id": "d",
+          "text": "Send the 50 candidates to the generator because adding the full candidate set should improve evidence use without a reranking tradeoff.",
+          "correct": false,
+          "misconception_id": "m_rag_more_context_monotonic",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Unfiltered context can add redundancy, conflicts, and distraction; it also avoids measuring the identified funnel defect."
+        }
+      ],
+      "source_ids": [
+        "src_lewis_rag_2020",
+        "src_ragas_2024",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_grounded_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "batch_id": "batch_rag_agent_headroom_20260723_c",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "final_independent_ai_review_passed",
+        "human_review": false,
+        "psychometrics": "uncalibrated_expert_prior",
+        "source_scope": "Lewis supports retrieval-conditioned generation, and RAGAS motivates evaluating context relevance separately from answer faithfulness. The candidate-to-top-5 funnel, reranker, insertion control, and rates are stipulated original data; neither paper validates this specific experiment.",
+        "independence_note": "The keyed operation localizes loss inside a candidate-to-reranker funnel using an evidence-insertion control; it is not aggregate retrieval-versus-generation reporting, source-conflict resolution, context-budget tuning, a freshness slice, or multihop query formation.",
+        "reviewed_on": "2026-07-23",
+        "batch_sha256": "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+        "review_sha256": "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+        "review_payload_sha256": "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042",
+        "review_chain_sha256": [
+          "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+          "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+          "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"
+        ],
+        "review_statement": "An independent model reviewer first reviewed the answer-redacted stem, options, semantic target, family assignment, and source scope, then verified the keyed answer, distractor diagnoses, and rationales before this immutable revision was approved.",
+        "revision_review_batch_id": "batch_provenance_clean_revisions_20260810_a",
+        "revision_reviewed_on": "2026-08-10"
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "retrieval",
+        "reranking",
+        "stage_ablation"
+      ]
+    },
+    {
       "id": "q_rag_temporal_scope_counterfactual_001",
       "version": 1,
       "family_id": "f_rag_temporal_scope_counterfactual",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "A regulator's current notice says filings are due within 15 days. Its superseded notice was the governing version on 1 March 2024 and says 30 days. An evaluator changes a query from \"What is the deadline today?\" to \"What was the deadline on 1 March 2024?\" The current notice remains top-ranked by similarity. What should change?",
       "kind": "counterfactual",
       "difficulty": 0.9,
@@ -1214,11 +1499,109 @@
       ]
     },
     {
+      "id": "q_rag_temporal_scope_counterfactual_002",
+      "version": 2,
+      "family_id": "f_rag_temporal_scope_counterfactual",
+      "learning_objective_id": "lo_rag_retrieval_evidence_quality",
+      "status": "approved",
+      "revision_of": "q_rag_temporal_scope_counterfactual_001",
+      "stem": "A regulator's current notice says filings are due within 15 days. Its superseded notice was the governing version on 1 March 2024 and says 30 days. An evaluator changes a query from \"What is the deadline today?\" to \"What was the deadline on 1 March 2024?\" The current notice remains top-ranked by similarity. What should change?",
+      "kind": "counterfactual",
+      "difficulty": 0.9,
+      "discrimination": 1.7,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Keep the same answer if both notices appear somewhere in the retrieved set, because set recall is the full quality criterion.",
+          "correct": false,
+          "misconception_id": "m_rag_recall_alone_sufficient",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Presence somewhere in the set does not show that retrieval selected evidence valid for the query's requested date."
+        },
+        {
+          "id": "b",
+          "text": "Answer 15 days because the highest-similarity authoritative notice determines truth even when the query asks about an earlier effective period.",
+          "correct": false,
+          "misconception_id": "m_rag_top_score_is_truth",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Authority and similarity do not remove the temporal scope in the question; the current notice was not effective then."
+        },
+        {
+          "id": "c",
+          "text": "Add both notices and more related policy text, then rely on the larger context to resolve the date conflict without temporal filtering.",
+          "correct": false,
+          "misconception_id": "m_rag_more_context_monotonic",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "More conflicting context does not identify which version governed the explicitly requested historical date."
+        },
+        {
+          "id": "d",
+          "text": "Retrieve and rank the authoritative version valid on 1 March 2024, preserving effective dates so the historical answer uses 30 days.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The counterfactual query changes the relevant validity interval, so temporal alignment must change the selected evidence."
+        }
+      ],
+      "source_ids": [
+        "src_lewis_rag_2020",
+        "src_ragas_2024",
+        "src_mrag_2025",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-23",
+        "generated": true,
+        "batch_id": "batch_rag_agent_headroom_20260723_c",
+        "review_status": "independent_model_review_passed",
+        "independent_review": "final_independent_ai_review_passed",
+        "human_review": false,
+        "psychometrics": "uncalibrated_expert_prior",
+        "source_scope": "MRAG directly supports decomposing a time-sensitive question into content and temporal constraints and hybrid-ranking semantic and temporal relevance. Lewis and RAGAS support general retrieval and evaluation boundaries. The notices, deadlines, and governing-date facts are original stipulated scenario content. The MRAG source was independently AI-reviewed and registered as supporting evidence.",
+        "source_gap_id": "gap_temporal_retrieval_primary",
+        "independence_note": "The keyed operation changes evidence selection when the query's target time changes; it is not choosing a newer source for a current-policy query, resolving authority between an unofficial and official source, expanding a missing relation, or tuning context volume.",
+        "source_gap_status": "supporting_sources_registered_after_independent_ai_review",
+        "reviewed_on": "2026-07-23",
+        "batch_sha256": "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+        "review_sha256": "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+        "review_payload_sha256": "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042",
+        "review_chain_sha256": [
+          "d9c50bd8c4b741706bb993e8f6e6914e0331619e265ed94d6d9a6d3693646a42",
+          "cc8fc6251310c7bfd76f52101810af0763ab89555dcdc57b9f8fdacfa487979b",
+          "ae158475766e58cebef8dc0efd2e41ad3624cfa142c80faec00bb35dea5c0042"
+        ],
+        "review_statement": "An independent model reviewer first reviewed the answer-redacted stem, options, semantic target, family assignment, and source scope, then verified the keyed answer, distractor diagnoses, and rationales before this immutable revision was approved.",
+        "revision_review_batch_id": "batch_provenance_clean_revisions_20260810_a",
+        "revision_reviewed_on": "2026-08-10"
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "retrieval",
+        "temporal_scope",
+        "counterfactual"
+      ]
+    },
+    {
       "id": "q_rag_claim_citation_alignment_revision_001",
       "version": 1,
       "family_id": "f_rag_claim_citation_alignment_revision",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "Retrieved passage A states, \"The public archive opens at 09:00,\" and provides no admission information. Passage B states, \"Admission is free on Sundays,\" and provides no opening-time information. A draft says, \"The archive opens at 09:00, and admission is free on Sundays [B].\" No other evidence may be used. Which handling is justified before publication?",
       "kind": "application",
       "difficulty": -0.75,
@@ -1294,11 +1677,93 @@
       ]
     },
     {
+      "id": "q_rag_claim_citation_alignment_revision_002",
+      "version": 2,
+      "family_id": "f_rag_claim_citation_alignment_revision",
+      "learning_objective_id": "lo_rag_claim_grounding",
+      "status": "approved",
+      "revision_of": "q_rag_claim_citation_alignment_revision_001",
+      "stem": "Retrieved passage A states, \"The public archive opens at 09:00,\" and provides no admission information. Passage B states, \"Admission is free on Sundays,\" and provides no opening-time information. A draft says, \"The archive opens at 09:00, and admission is free on Sundays [B].\" No other evidence may be used. Which handling is justified before publication?",
+      "kind": "application",
+      "difficulty": -0.75,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Move [B] to the start of the draft and publish both claims, because a visible citation makes the combined sentence supported.",
+          "correct": false,
+          "misconception_id": "m_rag_citation_proves_entailment",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Moving citation B cannot make a passage with no opening-time information support the opening-time claim."
+        },
+        {
+          "id": "b",
+          "text": "Remove [B] and publish both claims, because having A and B in retrieved context is sufficient evidence that the draft used them faithfully.",
+          "correct": false,
+          "misconception_id": "m_rag_context_guarantees_use",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Context availability does not establish faithful claim-level use or provide the missing attribution."
+        },
+        {
+          "id": "c",
+          "text": "Split and revise it to: \"The archive opens at 09:00 [A]. Admission is free on Sundays [B].\"",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The revision preserves both supported claims and pairs each one with the passage that directly entails it."
+        },
+        {
+          "id": "d",
+          "text": "Remove [B] and publish both claims, because retrieving A and B updated the generator weights with the two facts.",
+          "correct": false,
+          "misconception_id": "m_rag_retrieval_updates_weights",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Ordinary retrieval supplies inference context; it does not itself update model parameters or replace claim-to-passage attribution."
+        }
+      ],
+      "source_ids": [
+        "src_alce_2023",
+        "src_ragas_2024",
+        "src_lewis_rag_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_rag_intro_bridges_20260724_a",
+        "review_status": "independent_model_review_passed",
+        "human_review": false,
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "ALCE supports evaluating citation quality by whether cited passages entail generated statements; RAGAS supports treating faithful exploitation of retrieved context as a separate RAG evaluation dimension; Lewis distinguishes parametric memory from retrieved non-parametric memory. The archive statements, passage labels, draft, and required revision are stipulated original content. No source is claimed to establish real archive hours or empirical item quality.",
+        "independence_note": "The keyed operation rewrites a two-claim draft by splitting it and aligning each claim to a different entailing passage. It is not scoring a single scope mismatch, classifying several claims against one document, comparing external correctness with citation support, changing context in an ablation, checking derived arithmetic, or decomposing an unsupported causal bridge.",
+        "review_statement": "An independent model reviewer first reviewed the answer-redacted stem, options, semantic target, family assignment, and source scope, then verified the keyed answer, distractor diagnoses, and rationales before this immutable revision was approved.",
+        "revision_review_batch_id": "batch_provenance_clean_revisions_20260810_a",
+        "revision_reviewed_on": "2026-08-10"
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "grounding",
+        "answer_revision",
+        "citation_alignment",
+        "introductory"
+      ]
+    },
+    {
       "id": "q_rag_conjunctive_facet_coverage_001",
       "version": 1,
       "family_id": "f_rag_conjunctive_facet_coverage",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "A travel-policy question asks, \"Which meal limit applies to contractors on international trips?\" Retrieval returns a current contractor policy covering domestic trips and a current international-travel policy covering employees. Neither passage says its rule extends to international contractors, and no retrieved passage covers that combination. What is the most precise retrieval diagnosis and next step?",
       "kind": "diagnostic",
       "difficulty": -0.85,
@@ -1374,11 +1839,93 @@
       ]
     },
     {
+      "id": "q_rag_conjunctive_facet_coverage_002",
+      "version": 2,
+      "family_id": "f_rag_conjunctive_facet_coverage",
+      "learning_objective_id": "lo_rag_retrieval_evidence_quality",
+      "status": "approved",
+      "revision_of": "q_rag_conjunctive_facet_coverage_001",
+      "stem": "A travel-policy question asks, \"Which meal limit applies to contractors on international trips?\" Retrieval returns a current contractor policy covering domestic trips and a current international-travel policy covering employees. Neither passage says its rule extends to international contractors, and no retrieved passage covers that combination. What is the most precise retrieval diagnosis and next step?",
+      "kind": "diagnostic",
+      "difficulty": -0.85,
+      "discrimination": 1.45,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Treat retrieval as complete because contractor and international rules both appear somewhere in the set, then combine the two limits.",
+          "correct": false,
+          "misconception_id": "m_rag_recall_alone_sufficient",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Marginal presence of both facets does not establish coverage of the required contractor-and-international combination."
+        },
+        {
+          "id": "b",
+          "text": "Apply the highest-scoring passage's limit because similarity rank determines which policy governs the missing combination.",
+          "correct": false,
+          "misconception_id": "m_rag_top_score_is_truth",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Rank cannot create applicability or direct support for an uncovered case."
+        },
+        {
+          "id": "c",
+          "text": "Expand the context with more loosely related travel-policy passages and let the generator infer the combination without a targeted coverage check.",
+          "correct": false,
+          "misconception_id": "m_rag_more_context_monotonic",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Additional untargeted context does not repair the identified coverage hole and can add distraction or conflict."
+        },
+        {
+          "id": "d",
+          "text": "Mark the international-contractor case as uncovered, retrieve an authoritative passage addressing that combination, and withhold the limit until it is supported.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The operation diagnoses conjunctive facet coverage instead of treating separately covered marginals as evidence for their intersection."
+        }
+      ],
+      "source_ids": [
+        "src_lewis_rag_2020",
+        "src_ragas_2024",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "ai_assisted_source_scoped_original_scenario",
+        "created_on": "2026-07-24",
+        "generated": true,
+        "batch_id": "batch_rag_intro_bridges_20260724_a",
+        "review_status": "independent_model_review_passed",
+        "human_review": false,
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Lewis supports retrieval-conditioned generation over external passages, and RAGAS supports evaluating retrieved-context relevance separately from answer faithfulness. The travel policies, conjunctive facet-coverage diagnosis, missing intersection, and targeted follow-up are stipulated original scenario and diagnostic design; neither paper validates this exact policy example or procedure.",
+        "independence_note": "The keyed operation detects an uncovered conjunction when separate passages cover each marginal query facet but none covers their required intersection. It does not discover an intermediate entity for a second hop, choose between conflicting or temporal source versions, tune context volume, localize candidate-to-reranker loss, or score generated claims.",
+        "review_statement": "An independent model reviewer first reviewed the answer-redacted stem, options, semantic target, family assignment, and source scope, then verified the keyed answer, distractor diagnoses, and rationales before this immutable revision was approved.",
+        "revision_review_batch_id": "batch_provenance_clean_revisions_20260810_a",
+        "revision_reviewed_on": "2026-08-10"
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "retrieval",
+        "facet_coverage",
+        "conjunctive_query",
+        "introductory",
+        "diagnostic"
+      ]
+    },
+    {
       "id": "q_rag_claim_matrix_contract_001",
       "version": 1,
       "family_id": "f_rag_claim_support_matrix",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A contract answer makes three claims. Passage P states that cancellation requires 30 days' notice, explicitly says setup fees are nonrefundable, and says nothing about renewal pricing. The answer claims: (1) cancellation requires 30 days' notice, (2) setup fees are refundable, and (3) renewal pricing is capped. Under claim-level grounding, which classification is correct?",
       "kind": "application",
       "difficulty": -0.45,
@@ -1441,9 +1988,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE supports claim-level citation entailment, RAGAS separates context faithfulness from context presence, and Lewis describes retrieval-conditioned generation. The contract terms and three-way evidence labels are stipulated original scenario content.",
         "independence_note": "The keyed operation fills a claim-to-one-passage support matrix with entailment, contradiction, and absence. It intentionally shares f_rag_claim_support_matrix rather than claiming independence from the existing three-claim matrix."
@@ -1461,7 +2006,7 @@
       "version": 1,
       "family_id": "f_rag_claim_support_matrix",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A trial summary answer says: (1) 120 adults were enrolled, (2) treatment reduced mortality, and (3) pediatric safety was established. Retrieved passage A reports 120 adult participants; passage B reports no mortality difference; neither passage discusses children. What is the defensible grounding ledger?",
       "kind": "diagnostic",
       "difficulty": 0.25,
@@ -1524,9 +2069,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support evaluating whether retrieved evidence entails generated claims; Lewis supports the inference-time retrieval boundary. Enrollment, outcome, and population statements are synthetic stipulated facts.",
         "independence_note": "The learner must populate the same entailment/contradiction/unsupported matrix as f_rag_claim_support_matrix in a multi-passage clinical representation, so the item remains in that existing family."
@@ -1544,7 +2087,7 @@
       "version": 1,
       "family_id": "f_rag_claim_support_matrix",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "An evaluator defines grounded-claim coverage as the fraction of answer claims directly entailed by the retrieved passages. A release answer has four claims: two are directly entailed, one is explicitly contradicted, and one is not mentioned. What coverage and diagnostic accounting should be reported?",
       "kind": "calculation",
       "difficulty": 0.75,
@@ -1607,9 +2150,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE motivates citation entailment and RAGAS motivates faithfulness accounting; the four labels and 2/4 arithmetic are self-contained original synthesis, not reported empirical metrics from either paper.",
         "independence_note": "The keyed steps count entailed cells in a stipulated claim ledger and preserve contradiction versus absence. This is a quantitative variant of f_rag_claim_support_matrix, not a new independent family."
@@ -1627,7 +2168,7 @@
       "version": 1,
       "family_id": "f_rag_context_ablation",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "With sampling disabled, a fixed RAG generator answers that a permit lasts 14 days when the only retrieved rule says 14 days. An evaluator changes only that rule to an otherwise identical authoritative passage saying 19 days, but the answer remains 14 days. What is the strongest warranted diagnosis?",
       "kind": "counterfactual",
       "difficulty": 0.85,
@@ -1689,9 +2230,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS supports evaluating answer faithfulness to context and Lewis supports retrieval-conditioned generation. The paired permit passages, deterministic setup, and intervention outcome are stipulated original experimental content.",
         "independence_note": "The keyed operation predicts and interprets output under a value-changing context intervention. It shares f_rag_context_ablation with the existing replacement-passage test rather than presenting a numeric swap as independent evidence."
@@ -1709,7 +2248,7 @@
       "version": 1,
       "family_id": "f_rag_context_ablation",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed RAG system is asked where Lake V drains. In run 1, the sole retrieved passage says River N and the system answers River N. In run 2, the passage is replaced by a matched passage saying River P, yet the system again answers River N. Which audit conclusion is justified?",
       "kind": "debugging",
       "difficulty": 1,
@@ -1771,9 +2310,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS grounds faithfulness evaluation and Lewis grounds non-parametric retrieval conditioning. The lake, rivers, matched passages, and observed invariance are stipulated original audit data.",
         "independence_note": "The solution is the same context-intervention sensitivity test as f_rag_context_ablation, expressed as an entity substitution rather than a scalar; the shared family prevents duplicate independence credit."
@@ -1791,7 +2328,7 @@
       "version": 1,
       "family_id": "f_rag_context_ablation",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A support bot gives an unusual warranty limit of 37 months while citing the only retrieved paragraph that contains 37. A second deterministic run removes that paragraph and supplies no other warranty evidence; the bot still gives 37 months. What follows from this removal test?",
       "kind": "transfer",
       "difficulty": 1.25,
@@ -1853,9 +2390,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS motivates faithfulness to retrieved context and Lewis distinguishes retrieved memory from model parameters. The warranty value, unique passage, removal intervention, and deterministic behavior are original stipulated content.",
         "independence_note": "The keyed operation removes the sole candidate evidence and tests response sensitivity. It belongs to f_rag_context_ablation despite changing intervention type from replacement to deletion."
@@ -1873,7 +2408,7 @@
       "version": 1,
       "family_id": "f_rag_dual_axis_factuality_grounding",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A current official policy says expense claims are due in 45 days. A RAG answer also says 45 days, but its only citation is a passage about mileage rates that contains no filing deadline. If factual correctness and citation support are scored separately, which result follows?",
       "kind": "comparison",
       "difficulty": -0.55,
@@ -1936,9 +2471,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE supports citation-correctness evaluation, RAGAS separates factual correctness and faithfulness dimensions, and Lewis supplies the inference boundary. Policy and mileage facts are stipulated.",
         "independence_note": "The keyed operation classifies one true-but-uncited claim on independent factuality and citation-support axes, so it shares f_rag_dual_axis_factuality_grounding with the existing astronomy-axis item."
@@ -1957,7 +2490,7 @@
       "version": 1,
       "family_id": "f_rag_dual_axis_factuality_grounding",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A retrieved historical catalog explicitly lists a bridge as 310 meters long, and the answer cites it for 310 meters. A later authoritative survey establishes that the catalog entry was wrong and the bridge is 301 meters. How should the cited answer be scored on factual correctness and passage support?",
       "kind": "debugging",
       "difficulty": 0.65,
@@ -2020,9 +2553,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE supports evaluating whether a citation entails the generated statement and RAGAS distinguishes answer correctness from faithfulness. The catalog, survey, and measurements are stipulated original facts.",
         "independence_note": "The operation identifies the false-but-passage-supported quadrant of the same two-axis table used by f_rag_dual_axis_factuality_grounding, not a new family based on a changed domain."
@@ -2041,7 +2572,7 @@
       "version": 1,
       "family_id": "f_rag_dual_axis_factuality_grounding",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "An audited registry states that a license lasts six months. The answer says six months and cites a retrieved registry passage that states exactly the same duration. Assuming the citation points to that passage, what can the two evaluation axes record?",
       "kind": "diagnostic",
       "difficulty": -0.8,
@@ -2104,9 +2635,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE supports citation entailment, RAGAS supports separate correctness and faithfulness axes, and Lewis distinguishes retrieval from parameter training. The license duration is stipulated.",
         "independence_note": "This fills the true-and-supported cell of the existing f_rag_dual_axis_factuality_grounding classification table and remains dependent on that solution path."
@@ -2125,7 +2654,7 @@
       "version": 1,
       "family_id": "f_rag_claim_citation_alignment_revision",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A draft has three bullets: \"Doors open at 08:00,\" \"Parking is free,\" and \"Reservations are required.\" Retrieved passages A, B, and C respectively state those three facts, but the draft places [A][B][C] only after the final bullet. Which revision gives the clearest claim-level attribution?",
       "kind": "application",
       "difficulty": -0.95,
@@ -2187,9 +2716,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE supports citation completeness and correctness at statement level, while RAGAS supports faithfulness evaluation. The venue facts, bullet layout, and proposed inline alignment are stipulated original content.",
         "independence_note": "The keyed operation revises a bullet representation by aligning each atomic claim to its entailing passage. It shares f_rag_claim_citation_alignment_revision with the existing sentence-splitting revision."
@@ -2208,7 +2735,7 @@
       "version": 1,
       "family_id": "f_rag_claim_citation_alignment_revision",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A generated comparison table lists Product X's warranty as two years from passage A and Product Y's warranty as five years from passage B. A single footnote [A] appears under the whole table. No other evidence is available. What is the best correction?",
       "kind": "debugging",
       "difficulty": 0.45,
@@ -2270,9 +2797,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE supports evaluating citation correctness and completeness, and RAGAS supports context faithfulness. The products, warranties, table, and row-level repair are stipulated.",
         "independence_note": "The item applies the existing f_rag_claim_citation_alignment_revision operation to a tabular representation; it is dependent on claim-to-source realignment rather than an independent table family."
@@ -2290,7 +2815,7 @@
       "version": 1,
       "family_id": "f_rag_claim_citation_alignment_revision",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Passage A states that Dataset D contains 50,000 records but gives no date. Passage B states that Dataset D was refreshed in July 2026 but gives no record count. A draft says, \"Dataset D contained 50,000 records after its July 2026 refresh [A].\" No other evidence is allowed. What revision is supportable?",
       "kind": "transfer",
       "difficulty": 1.05,
@@ -2353,9 +2878,7 @@
         "generated": true,
         "batch_id": "batch_rag_grounding_claim_checks_20260809_a",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE supports citation correctness and completeness, RAGAS supports context faithfulness, and Lewis supports inference-time retrieval. Dataset size, refresh date, and conjunction are stipulated.",
         "independence_note": "The keyed operation decomposes a conjunctive statement and aligns each supported component to a different passage. It remains in f_rag_claim_citation_alignment_revision rather than claiming independence from other alignment repairs."
@@ -2373,7 +2896,7 @@
       "version": 1,
       "family_id": "f_rag_derived_rate_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A retrieved audit table reports 180 inspected records and 45 violations. The answer cites the table and says, \"The violation rate was 20%.\" No weighting or missing records are involved. What is the grounding diagnosis?",
       "kind": "calculation",
       "difficulty": -0.35,
@@ -2435,9 +2958,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support checking whether cited context supports generated claims. The audit counts and division are self-contained original scenario content.",
         "independence_note": "The keyed operation recomputes a derived rate from cited values, so this remains in f_rag_derived_rate_entailment with the existing 20-of-80 arithmetic item rather than receiving new-family credit."
@@ -2456,7 +2977,7 @@
       "version": 1,
       "family_id": "f_rag_derived_rate_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A retrieved budget table gives last year's cost as $175 million and this year's cost as $240 million. The answer cites it and states that cost increased by $70 million. Assuming the table values are exact, how should that claim be evaluated?",
       "kind": "calculation",
       "difficulty": 0.35,
@@ -2518,9 +3039,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS ground claim-to-context support evaluation. The budget values and subtraction are explicit original synthesis and require no external financial fact.",
         "independence_note": "The learner recomputes a deterministic difference from a cited table, the same solution path as f_rag_derived_rate_entailment; changing from division to subtraction does not justify independence."
@@ -2538,7 +3057,7 @@
       "version": 1,
       "family_id": "f_rag_derived_rate_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A report covers 200 transactions, of which 60 were manually audited and 12 of those audited transactions had errors. The answer says, \"The error rate among audited transactions was 6%,\" citing the report. Which correction follows from the stated denominator?",
       "kind": "debugging",
       "difficulty": 0.8,
@@ -2600,9 +3119,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support claim-level evidence checks. The transaction counts, subset definition, and conditional-rate arithmetic are stipulated original content.",
         "independence_note": "The keyed operation selects the denominator from a claim qualifier and verifies a cited derived rate. It is a harder member of f_rag_derived_rate_entailment, not an independent conditional-metric family."
@@ -2620,7 +3137,7 @@
       "version": 1,
       "family_id": "f_rag_causal_bridge_attribution",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Passage A says a software release completed at 10:00. Passage B says error rate began falling at 10:05. The answer cites both and states, \"The release caused the decline.\" Neither passage evaluates alternative causes or states that relation. What is the precise grounding verdict?",
       "kind": "diagnostic",
       "difficulty": 0.75,
@@ -2682,9 +3199,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support claim-level citation and faithfulness evaluation. The timestamps, release, error trend, and absence of causal evidence are stipulated original content.",
         "independence_note": "The key decomposes supported temporal premises from an unsupported causal relation. It intentionally shares f_rag_causal_bridge_attribution with the existing incident-report causal-bridge item."
@@ -2702,7 +3217,7 @@
       "version": 1,
       "family_id": "f_rag_causal_bridge_attribution",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A maintenance summary cites one passage reporting that room temperature fell on Tuesday and another reporting that support tickets fell on Wednesday. It concludes, \"The temperature change reduced ticket volume.\" The sources contain no intervention, mechanism, or comparison. What should an evidence-grounded revision do?",
       "kind": "transfer",
       "difficulty": 1.05,
@@ -2764,9 +3279,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support checking composite generated claims against cited context. The maintenance observations and deliberately absent causal evidence are stipulated.",
         "independence_note": "This transfers the same premise-versus-causal-bridge decomposition used by f_rag_causal_bridge_attribution into a non-software setting, so it remains dependent on that family."
@@ -2784,7 +3297,7 @@
       "version": 1,
       "family_id": "f_rag_causal_bridge_attribution",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A benchmark passage reports mean latency of 80 ms for System A and 100 ms for System B under one fixed workload. The answer cites it and says, \"A had 20% lower latency in this benchmark and is universally more efficient.\" Which decomposition is defensible?",
       "kind": "comparison",
       "difficulty": 1.2,
@@ -2846,9 +3359,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support claim-level entailment and faithfulness checks. The systems, workload, latency values, arithmetic, and universal-efficiency overreach are stipulated.",
         "independence_note": "The operation separates a supported quantitative relation from an unsupported scope bridge. It shares f_rag_causal_bridge_attribution because the decisive step is decomposing a composite relation, not merely recomputing latency."
@@ -2867,7 +3378,7 @@
       "version": 1,
       "family_id": "f_rag_stage_metrics",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "On 500 questions, an answer-bearing passage appears in the retrieved top 10 for 88% of cases, but only 41% of generated answers are fully supported by their provided passages. Which report best preserves the observed failure boundary?",
       "kind": "diagnostic",
       "difficulty": -0.4,
@@ -2929,9 +3440,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS motivates separate retrieval-context and answer-faithfulness dimensions, while Lewis describes the retrieval/generation pipeline. The sample size and rates are stipulated audit data.",
         "independence_note": "The keyed operation compares retrieval coverage with downstream grounding and conditions diagnosis on stage success. It shares f_rag_stage_metrics with the existing high-recall/contradictory-answer report."
@@ -2950,7 +3459,7 @@
       "version": 1,
       "family_id": "f_rag_retrieval_oracle_ablation",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A claim-level audit finds that none of the system's retrieved top five passages entails the required benchmark answer, and a fixed generator answers correctly on 34% of cases. When an evaluator replaces that top five with a known answer-bearing passage for each case, without changing the question or generator, accuracy rises to 82%. What is the most direct next diagnosis?",
       "kind": "debugging",
       "difficulty": 0.9,
@@ -3012,9 +3521,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis supports retrieval-conditioned generation and RAGAS supports separating context relevance from answer quality. The claim-level audit, oracle replacement, accuracies, and bottleneck inference are stipulated experimental data.",
         "independence_note": "The keyed operation intervenes on the entire retrieved context while holding the generator fixed. This materially differs from f_rag_stage_metrics reporting and f_rag_candidate_reranker_funnel internal-stage retention, justifying f_rag_retrieval_oracle_ablation."
@@ -3032,7 +3539,7 @@
       "version": 1,
       "family_id": "f_rag_stage_metrics",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A benchmark reports answer-bearing-passage recall at 95%, citation correctness at 52%, and factual answer accuracy at 77%. Which interpretation is valid without collapsing the stages?",
       "kind": "comparison",
       "difficulty": 0.65,
@@ -3095,9 +3602,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS supports separate retrieval, faithfulness, and answer-relevance evaluation; ALCE supports citation correctness; Lewis supplies the RAG pipeline boundary. The rates are stipulated.",
         "independence_note": "The key labels and preserves three pipeline metrics rather than diagnosing an intervention, so the item remains in f_rag_stage_metrics."
@@ -3116,7 +3621,7 @@
       "version": 1,
       "family_id": "f_rag_conflicting_sources",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A query asks for today's filing deadline. The retrieved set contains a current regulator notice stating 15 days and an older community post stating 30 days; the community post has the higher similarity score. The service's policy says current regulator notices govern. What should evidence selection do?",
       "kind": "application",
       "difficulty": -0.65,
@@ -3179,9 +3684,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "MRAG supports incorporating temporal relevance, and RAGAS and Lewis support retrieval-quality evaluation. The notices, deadlines, similarity order, and explicit governance policy are stipulated.",
         "independence_note": "The operation reconciles a current governing source against a stale higher-scoring source. It shares f_rag_conflicting_sources with the existing regulator-versus-FAQ conflict."
@@ -3200,7 +3703,7 @@
       "version": 1,
       "family_id": "f_rag_conflicting_sources",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A tax question explicitly concerns State A. Two current official passages are retrieved: State A says the deduction cap is $4,000, while State B says $6,000. The State B passage ranks first because its wording is closer to the query. Which handling is correct?",
       "kind": "debugging",
       "difficulty": 0.75,
@@ -3262,9 +3765,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS and Lewis support evaluating retrieved-context relevance separately from downstream answers. The states, caps, ranking, and applicability scopes are stipulated original facts.",
         "independence_note": "The key resolves conflict through jurisdictional scope rather than freshness, but it still uses the provenance-and-applicability reconciliation path of f_rag_conflicting_sources."
@@ -3282,7 +3783,7 @@
       "version": 1,
       "family_id": "f_rag_conflicting_sources",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A question asks for the current maximum input voltage. Retrieval returns manufacturer specification revision 5, which explicitly supersedes revision 4 and states 12 V, plus a retailer cache of revision 4 stating 10 V. The cache ranks higher. What evidence decision is warranted?",
       "kind": "transfer",
       "difficulty": 1,
@@ -3345,9 +3846,7 @@
         "generated": true,
         "batch_id": "batch_rag_evidence_reconciliation_20260809_b",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "MRAG supports temporal constraints in retrieval, while RAGAS and Lewis support retrieval-stage diagnosis. The manufacturer revisions, voltages, cache, and supersession statement are stipulated.",
         "independence_note": "This is a version-lineage instance of the conflict-reconciliation operation already represented by f_rag_conflicting_sources, so it does not claim a new family for a changed artifact type."
@@ -3365,7 +3864,7 @@
       "version": 1,
       "family_id": "f_rag_context_budget",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A query needs both a current price and a cancellation rule. Passage A gives the current price, B gives the cancellation rule, C duplicates A's price, and D is generic background. Each passage has equal context cost, the budget is at most three passages, and no other claim is needed. Which set is most efficient?",
       "kind": "application",
       "difficulty": -0.7,
@@ -3427,9 +3926,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS motivates context relevance and faithfulness evaluation, and Lewis supports retrieval-conditioned generation. The four passage roles, equal costs, and constrained set-selection task are stipulated original content.",
         "independence_note": "The key performs a minimum-cost facet-coverage selection under a context budget. It shares f_rag_context_budget because the decisive tradeoff is marginal evidence value versus redundant context."
@@ -3448,7 +3945,7 @@
       "version": 1,
       "family_id": "f_rag_context_budget",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A fixed RAG system is evaluated at context sizes k=2, 4, 8, and 16. Grounded-answer rates are 70%, 82%, 81%, and 66%, while answer-bearing retrieval coverage is 78%, 94%, 94%, and 94%; latency rises with k. Policy requires at least 90% coverage, then maximizes grounded-answer rate and breaks a tie by lower latency. Which operating point follows?",
       "kind": "comparison",
       "difficulty": 0.4,
@@ -3510,9 +4007,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "RAGAS supports separating context and answer-faithfulness measures, while Lewis supports the retrieval/generation pipeline. The policy objective, context sizes, rates, and latency ordering are stipulated evaluation data.",
         "independence_note": "The solution selects a measured Pareto point across context size, coverage, grounding, and latency. It is a performance-curve member of f_rag_context_budget rather than an independent family."
@@ -3530,7 +4025,7 @@
       "version": 1,
       "family_id": "f_rag_context_budget",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A six-passage context contains five near-duplicates proving which company acquired Startup S and one passage proving the acquisition year. The question asks which regulator approved that acquisition; no passage contains the regulator relation. What redesign addresses the evidence deficit?",
       "kind": "debugging",
       "difficulty": 0.95,
@@ -3593,9 +4088,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "IRCoT supports retrieval conditioned on unresolved multi-step needs; RAGAS and Lewis support context-quality diagnosis. The acquisition, six passages, missing regulator, and budget redesign are stipulated.",
         "independence_note": "The keyed operation reallocates a fixed context budget from redundant evidence to an uncovered relation. Its central tradeoff is context-budget marginal value, so it remains in f_rag_context_budget despite a multi-hop stimulus."
@@ -3614,7 +4107,7 @@
       "version": 1,
       "family_id": "f_rag_freshness_slice",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A query asks for the rule in force today. The top passage is a relevant policy that expired last year; the second passage is the issuing authority's current replacement and directly answers the question. Which retrieval diagnosis is appropriate?",
       "kind": "diagnostic",
       "difficulty": -0.6,
@@ -3677,9 +4170,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "MRAG supports combining semantic and temporal relevance for time-sensitive retrieval. RAGAS and Lewis support stage evaluation. The policy versions and requested date are stipulated.",
         "independence_note": "The key diagnoses semantic relevance with temporal invalidity at a specific rank. It shares f_rag_freshness_slice with the existing current-policy slice rather than claiming a new source-age family."
@@ -3698,7 +4189,7 @@
       "version": 1,
       "family_id": "f_rag_freshness_slice",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "For 100 time-sensitive questions, retrieval returns a topically answer-bearing passage on 90. Of those 90, 18 passages were no longer valid for the date requested; the other 72 were valid. What topical recall and temporally valid recall should be reported?",
       "kind": "calculation",
       "difficulty": 0.65,
@@ -3760,9 +4251,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "MRAG supports evaluating semantic and temporal relevance separately. The 100-query counts and two recall calculations are self-contained stipulated data.",
         "independence_note": "The keyed steps compute a temporal slice from topical hits, a quantitative representation of f_rag_freshness_slice rather than a distinct metric family."
@@ -3780,7 +4269,7 @@
       "version": 1,
       "family_id": "f_rag_temporal_scope_counterfactual",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A preliminary report published 2 March says a February event affected 40 sites. A correction published 10 April says the same February event affected 37. For \"What had been reported by 5 March?\" the first passage is applicable. If the query changes to \"What is the current corrected count for the February event?\" what should retrieval do?",
       "kind": "counterfactual",
       "difficulty": 1.15,
@@ -3842,9 +4331,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "MRAG supports decomposing time-sensitive questions into content and temporal constraints. The event, reports, dates, counts, and change in knowledge-time cutoff are stipulated.",
         "independence_note": "The keyed operation changes evidence when the query's publication cutoff changes while event time stays fixed. It shares f_rag_temporal_scope_counterfactual but differs from a simple current-versus-historical effective-policy wording."
@@ -3862,7 +4349,7 @@
       "version": 1,
       "family_id": "f_rag_multihop_query_conditioning",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A question asks which company manufactured the drug discovered by Researcher R. Initial retrieval identifies the drug as D and confirms R's discovery, but none of the passages names D's manufacturer. What next retrieval operation is most direct?",
       "kind": "application",
       "difficulty": 0.35,
@@ -3925,9 +4412,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "IRCoT supports interleaving retrieval with unresolved multi-step reasoning; Lewis and RAGAS support retrieval and evaluation boundaries. Researcher R, drug D, and manufacturer relation are stipulated.",
         "independence_note": "The solution conditions a second query on an entity resolved by the first hop, the same operation as f_rag_multihop_query_conditioning; the new domain does not create independence."
@@ -3946,7 +4431,7 @@
       "version": 1,
       "family_id": "f_rag_multihop_query_conditioning",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A question asks where a prize winner worked in the year of the award. Retrieval identifies the winner and award year, then repeatedly returns current biographies that list only today's employer. No passage gives the award-year affiliation. What should the retriever do?",
       "kind": "debugging",
       "difficulty": 0.85,
@@ -4009,9 +4494,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "IRCoT supports follow-up retrieval from intermediate results, and MRAG supports temporal constraints. The prize, year, biography behavior, and missing affiliation are stipulated.",
         "independence_note": "The key combines resolved-entity query conditioning with a time qualifier. It remains in f_rag_multihop_query_conditioning because the solution path is still targeted second-hop retrieval."
@@ -4029,7 +4512,7 @@
       "version": 1,
       "family_id": "f_rag_multihop_query_conditioning",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "An answer requires four stated evidence links: entity-to-product, product-to-release, release-to-region, and region-to-regulator. Retrieved passages directly support the first three links but provide no region-to-regulator relation. If hop coverage counts directly supported required links, what should be reported?",
       "kind": "calculation",
       "difficulty": 1.25,
@@ -4091,9 +4574,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "IRCoT supports multi-step retrieval conditioned on reasoning needs, while RAGAS supports context evaluation. The four-link chain and 3/4 calculation are stipulated original synthesis.",
         "independence_note": "The learner audits completeness of the same conditioned-hop chain represented by f_rag_multihop_query_conditioning. Counting supported links is a dependent verification, not a fresh family."
@@ -4111,7 +4592,7 @@
       "version": 1,
       "family_id": "f_rag_candidate_reranker_funnel",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Across 300 queries, an authoritative answer-bearing passage appears in the initial top 50 for 92% of queries but survives reranking into the final top 5 for 39%. With that passage manually inserted, the fixed generator answers correctly on 85%. Where is the clearest measured loss?",
       "kind": "debugging",
       "difficulty": 0.75,
@@ -4173,9 +4654,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis supports retrieved-context generation and RAGAS supports stage-specific context evaluation. The 300-query funnel, rates, reranker, and insertion control are stipulated.",
         "independence_note": "The key localizes loss between candidate retrieval and final reranking, so it shares f_rag_candidate_reranker_funnel with the existing top-50-to-top-5 audit."
@@ -4194,7 +4673,7 @@
       "version": 1,
       "family_id": "f_rag_candidate_reranker_funnel",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "In one pipeline, an authoritative answer-bearing passage enters the initial top 50 for 43% of queries and the final top 5 for 40%. When inserted directly into final context, the fixed generator succeeds on 88%. Which stage deserves first investigation?",
       "kind": "comparison",
       "difficulty": 1.15,
@@ -4256,9 +4735,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis and RAGAS support separating retrieval and answer stages. The candidate/final rates and oracle insertion result are stipulated diagnostic data.",
         "independence_note": "The operation compares adjacent funnel losses and identifies candidate generation rather than reranking. It is the complementary boundary case within f_rag_candidate_reranker_funnel."
@@ -4277,7 +4754,7 @@
       "version": 1,
       "family_id": "f_rag_retrieval_oracle_ablation",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "With one fixed generator, grounded-answer rates are 33% using deployed retrieval, 84% when the context is replaced by a reviewed answer-bearing passage, and 7% when replaced by a matched irrelevant passage. What conclusion is supported by this three-way ablation?",
       "kind": "counterfactual",
       "difficulty": 1.4,
@@ -4339,9 +4816,7 @@
         "generated": true,
         "batch_id": "batch_rag_retrieval_pipeline_20260809_c",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis supports retrieval-conditioned generation and RAGAS supports context relevance and faithfulness evaluation. The deployed, oracle, irrelevant conditions and rates are stipulated ablation results.",
         "independence_note": "The key interprets a whole-context intervention with fixed generation, so it shares f_rag_retrieval_oracle_ablation with the earlier two-condition oracle replacement rather than creating a new three-arm family."
@@ -4360,7 +4835,7 @@
       "version": 1,
       "family_id": "f_rag_grounding_boundaries",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A retriever returns passages A through D. The recorded prompt sent to a fixed generator contains A through C, including one topically relevant passage, but the prompt builder drops D. The answer makes a factual claim followed by the unresolved label [D]. Which audit conclusion is justified?",
       "kind": "debugging",
       "difficulty": -0.6,
@@ -4424,9 +4899,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis supports retrieval-conditioned generation, RAGAS separates context relevance from faithfulness, and ALCE motivates citation correctness. The A-D trace, unresolved label, conditional prompt-contract audit, and causal-versus-post-hoc distinction are stipulated diagnostic synthesis.",
         "independence_note": "The keyed operation traces the boundary between retrieved candidates, actual prompt context, generation, and later citation audit. That is the same boundary operation as f_rag_grounding_boundaries, so this item is dependent evidence."
@@ -4445,7 +4918,7 @@
       "version": 1,
       "family_id": "f_rag_citation_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Passage A says, 'For some workloads, enabling the cache may reduce median latency under sustained load.' The answer says, 'Enabling the cache will reduce median latency for every workload [A].' What should a grounding audit conclude?",
       "kind": "diagnostic",
       "difficulty": -0.5,
@@ -4508,9 +4981,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support claim-level citation and faithfulness checks. The cache statement and the paired modality and quantifier changes are original, fully stipulated entailment examples.",
         "independence_note": "Checking whether an answer preserves a source's modality and population scope is a claim-to-passage entailment comparison. It therefore reuses f_rag_citation_entailment and must not count independently."
@@ -4529,7 +5000,7 @@
       "version": 1,
       "family_id": "f_rag_citation_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Policy P says a return qualifies for a refund only if it is requested within 30 days and the product seal is unbroken. A request arrives after 20 days, but the retrieved record contains no seal status. The answer says, 'This return qualifies for a refund [P].' Which review is correct?",
       "kind": "application",
       "difficulty": 0.2,
@@ -4592,9 +5063,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support checking whether cited evidence supports the generated claim. The two-condition refund rule, elapsed time, and missing seal status are stipulated logical synthesis.",
         "independence_note": "The solver tests a conjunctive answer claim against its cited rule and case facts. This is the same entailment operation as f_rag_citation_entailment, so the item remains dependent despite the missing-condition form."
@@ -4613,7 +5082,7 @@
       "version": 1,
       "family_id": "f_rag_derived_rate_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A cited survey table reports 100 people invited, 60 respondents, and 30 respondents choosing option X. The answer says, '50% of all invited people chose X [S].' Which audit is correct?",
       "kind": "calculation",
       "difficulty": 0.5,
@@ -4676,9 +5145,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support claim-level citation and faithfulness audits. The invitation, response, and choice counts and both denominator calculations are fully stipulated original synthesis.",
         "independence_note": "Recomputing 30/60 and 30/100 and aligning the resulting rate to the named population is the existing derived-rate operation. The item therefore reuses f_rag_derived_rate_entailment and is not independent evidence."
@@ -4697,7 +5164,7 @@
       "version": 1,
       "family_id": "f_rag_claim_citation_alignment_revision",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "The prompt contains passage A from the current version 3 policy stating a quota of 80, and passage B from archived version 2 stating a quota of 50. The answer says, 'The current quota is 80 [B].' What is the precise repair?",
       "kind": "transfer",
       "difficulty": 1.0,
@@ -4760,9 +5227,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS support aligning citations with the claims they support. The version 2 and version 3 quota passages and misattached marker are original, fully stipulated evidence.",
         "independence_note": "The solver preserves a supported claim while retargeting its citation to the passage that actually entails it. This is the same repair as f_rag_claim_citation_alignment_revision and remains dependent."
@@ -4781,7 +5246,7 @@
       "version": 1,
       "family_id": "f_rag_citation_entailment",
       "learning_objective_id": "lo_rag_claim_grounding",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "An evaluation contract permits an equivalence claim only when a margin is prespecified and an equivalence test supports it. A benchmark instead reports an estimated throughput difference of +1 percentage point, a 95% confidence interval from -4 to +6, and a superiority-test p-value of 0.72; it used neither an equivalence margin nor an equivalence test. The answer says, 'A and B have equivalent throughput; there is no effect [S].' Which review is sound?",
       "kind": "comparison",
       "difficulty": 1.15,
@@ -4844,9 +5309,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "ALCE and RAGAS motivate verifying that a citation entails generated wording. The equivalence decision contract, throughput estimate, interval, p-value, and absence of the contractually required margin and test are fully stipulated in the item rather than attributed to those papers.",
         "independence_note": "The solver compares a categorical generated claim with the uncertainty and test actually reported by its citation. This remains the claim-passage entailment operation in f_rag_citation_entailment rather than a new statistical family."
@@ -4865,7 +5328,7 @@
       "version": 1,
       "family_id": "f_rag_conjunctive_facet_coverage",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A query asks which battery models are both certified for air shipment and not subject to an active recall. Passage A is an authoritative certification register listing models P and Q. Passage B is explicitly a partial recall bulletin listing models R and S and warns that omission does not establish recall status. What does the retrieved set establish?",
       "kind": "diagnostic",
       "difficulty": -0.65,
@@ -4928,9 +5391,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis supports retrieval-conditioned evidence supply and RAGAS supports evaluating context relevance and answer support. The certification register, explicitly partial recall bulletin, and open-world omission warning are fully stipulated diagnostic evidence.",
         "independence_note": "The solver intersects two required evidence facets and diagnoses the missing member-specific facet. That is the operation defining f_rag_conjunctive_facet_coverage, so this negative-evidence form is dependent."
@@ -4949,7 +5410,7 @@
       "version": 1,
       "family_id": "f_rag_conjunctive_facet_coverage",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A 20-query benchmark requires reviewed evidence explicitly binding two requested facets for each answer. For 15 queries, each facet appears somewhere in the retrieved set; for only 9 queries, a reviewed passage explicitly binds the two facets as required. Which report follows the benchmark contract?",
       "kind": "calculation",
       "difficulty": 0.35,
@@ -5012,9 +5473,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis and RAGAS support distinguishing evidence retrieval from answer support. The 20-query benchmark, marginal and binding counts, metric contract, and arithmetic are original stipulated synthesis.",
         "independence_note": "The calculation measures marginal facet presence separately from conjunctive evidence coverage, the same intersection operation as f_rag_conjunctive_facet_coverage. It is dependent quantitative practice."
@@ -5033,7 +5492,7 @@
       "version": 1,
       "family_id": "f_rag_retrieval_oracle_ablation",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "On a large fixed benchmark with one fixed generator, grounded-answer rates are 44% with deployed retrieval, 46% when context is replaced by a reviewed answer-bearing oracle passage, and 7% with matched irrelevant context. Repeated estimates vary by less than one point. Which diagnosis is best supported?",
       "kind": "counterfactual",
       "difficulty": 0.95,
@@ -5096,9 +5555,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis supports retrieval-conditioned generation and RAGAS supports separating context relevance from grounded-answer quality. The fixed benchmark, three intervention rates, and repeated-estimate stability are stipulated ablation evidence.",
         "independence_note": "The item applies the same fixed-generator context replacement used by f_rag_retrieval_oracle_ablation, now at the small-uplift boundary. It is deliberately dependent and does not certify retriever health."
@@ -5117,7 +5574,7 @@
       "version": 1,
       "family_id": "f_rag_stage_metrics",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Across 100 queries, an authoritative answer-bearing passage is retrieved for 80. Forty-eight answers are fully grounded, and all 48 occur among those 80 retrieval successes. Which stage report is correct?",
       "kind": "calculation",
       "difficulty": 0.65,
@@ -5180,9 +5637,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "Lewis supports retrieval-conditioned generation and RAGAS separates context and answer quality dimensions. The 100-query counts, conditional relation, and three rate calculations are original stipulated evaluation data.",
         "independence_note": "The solver preserves retrieval, conditional grounding, and end-to-end denominators, the same stage-separation operation as f_rag_stage_metrics. This calculation is dependent evidence."
@@ -5201,7 +5656,7 @@
       "version": 1,
       "family_id": "f_rag_conflicting_sources",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "For a query about the current safety conclusion, the top-similarity result is a 2024 paper claiming a battery design is safe. An authoritative publisher record says the paper was retracted in 2025 for invalid data, and a later independent review says safety remains unresolved. What should the pipeline do?",
       "kind": "debugging",
       "difficulty": 1.05,
@@ -5265,9 +5720,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "MRAG supports judging retrieval under temporal relevance, while RAGAS and Lewis support separating evidence quality from generation. The battery claim, authoritative retraction, later unresolved review, and requested current scope are fully stipulated conflict evidence.",
         "independence_note": "The solver reconciles a high-ranked historical claim with authoritative invalidation and a later uncertainty assessment. This is the same authority-freshness conflict operation as f_rag_conflicting_sources and remains dependent."
@@ -5286,7 +5739,7 @@
       "version": 1,
       "family_id": "f_rag_temporal_scope_counterfactual",
       "learning_objective_id": "lo_rag_retrieval_evidence_quality",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A new rule is publicly announced on January 1 and explicitly takes effect on April 1; the prior rule remains in force through March 31. For 'What rule was publicly announced by February 15?' the new notice is relevant. For 'What rule was in force on February 15?' which evidence policy is correct?",
       "kind": "transfer",
       "difficulty": 1.15,
@@ -5350,9 +5803,7 @@
         "generated": true,
         "batch_id": "batch_rag_entailment_coverage_20260809_d",
         "human_review": false,
-        "human_review_status": "required_before_activation",
-        "activation": "manual_only_after_human_review_and_new_immutable_release",
-        "review_status": "candidate_pending_independent_review",
+        "review_status": "independent_model_review_passed",
         "psychometrics": "uncalibrated_author_prior",
         "source_scope": "MRAG supports temporally scoped retrieval evaluation, while RAGAS and Lewis support relevance and evidence-stage assessment. The announcement date, effective date, prior-rule interval, and paired query meanings are fully stipulated synthesis.",
         "independence_note": "The item selects between documents by the query's temporal predicate, the operation defining f_rag_temporal_scope_counterfactual. Distinguishing publication from effective time is dependent transfer, not a new family."
@@ -5364,6 +5815,177 @@
         "effective_date",
         "publication_date",
         "transfer"
+      ]
+    },
+    {
+      "id": "q_rag_factuality_grounding_axes_002",
+      "version": 2,
+      "revision_of": "q_rag_factuality_grounding_axes_001",
+      "family_id": "f_rag_dual_axis_factuality_grounding",
+      "learning_objective_id": "lo_rag_claim_grounding",
+      "status": "approved",
+      "stem": "An authoritative astronomy catalog lists Planet K's orbital period as 12.4 days. A RAG answer gives 12.4 days but cites a retrieved passage that states only the host star's temperature. Evaluation records factual correctness against the catalog and citation support against the cited passage. Which pair is warranted?",
+      "kind": "comparison",
+      "difficulty": 0.7,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Correctness passes and citation support passes because a retrieved citation accompanies the true period.",
+          "correct": false,
+          "misconception_id": "m_rag_citation_proves_entailment",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Citation presence does not make a statement about stellar temperature entail the planet's orbital period."
+        },
+        {
+          "id": "b",
+          "text": "Correctness passes, while citation support fails because the cited passage does not support the period claim.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The catalog resolves factual correctness, but grounding is a separate claim-to-cited-evidence relation and this passage is silent about the period."
+        },
+        {
+          "id": "c",
+          "text": "Correctness passes and citation support passes because placing related astronomy context proves faithful use.",
+          "correct": false,
+          "misconception_id": "m_rag_context_guarantees_use",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "The authoritative catalog makes the claim correct, but topical context alone does not supply citation entailment."
+        },
+        {
+          "id": "d",
+          "text": "Both pass because retrieval updates the generator weights with whatever evidence is needed for its answer.",
+          "correct": false,
+          "misconception_id": "m_rag_retrieval_updates_weights",
+          "diagnostic_objective_id": "lo_rag_claim_grounding",
+          "rationale": "Ordinary retrieval supplies inference context rather than training the model, and parameter claims cannot replace passage-level support."
+        }
+      ],
+      "source_ids": [
+        "src_alce_2023",
+        "src_ragas_2024",
+        "src_lewis_rag_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_reviewed_revision",
+        "generated": true,
+        "batch_id": "batch_corpus_release_20260809_a",
+        "created_on": "2026-08-09",
+        "human_review": false,
+        "review_status": "independent_model_review_passed",
+        "review_statement": "The two evaluation axes, answer key, diagnostic routes, source scope, and family dependence were independently checked before release.",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "ALCE and RAGAS support evaluating citation support or faithfulness separately from answer correctness, while Lewis et al. supports retrieval-conditioned generation. The astronomy scenario and passage contents are original synthesis.",
+        "revision_reason": "Adds explicit diagnostic-objective routing and complete source/family scope without changing the reviewed item content.",
+        "independence_note": "This revision retains f_rag_dual_axis_factuality_grounding and cannot count independently from its retired parent. It performs the same two-axis factual-correctness versus citation-support classification."
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "factuality",
+        "citation_support",
+        "evaluation_axes",
+        "revision"
+      ]
+    },
+    {
+      "id": "q_rag_multihop_query_002",
+      "version": 2,
+      "revision_of": "q_rag_multihop_query_001",
+      "family_id": "f_rag_multihop_query_conditioning",
+      "learning_objective_id": "lo_rag_retrieval_evidence_quality",
+      "status": "approved",
+      "stem": "A question asks which university employed the scientist who discovered compound Q at the time of discovery. One broad retrieval query returns five passages that identify the scientist and give the discovery year as 1987, but none gives the scientist's 1987 affiliation. Which next retrieval operation addresses the missing evidence most directly?",
+      "kind": "application",
+      "difficulty": 0.85,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_rag_retrieval_quality",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_rag_grounding",
+          "weight": 0.2,
+          "role": "supporting"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "Declare retrieval complete because five topically relevant passages are a sufficient end-to-end quality measure.",
+          "correct": false,
+          "misconception_id": "m_rag_recall_alone_sufficient",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "The current set covers the scientist-identification hop but lacks the affiliation evidence required for the final answer."
+        },
+        {
+          "id": "b",
+          "text": "Answer from the highest-similarity scientist passage because top rank establishes the missing affiliation.",
+          "correct": false,
+          "misconception_id": "m_rag_top_score_is_truth",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Similarity to the first-hop entity does not supply or certify a time-specific university affiliation absent from that passage."
+        },
+        {
+          "id": "c",
+          "text": "Use the identified scientist and 1987 in a focused affiliation query, then require evidence for both hops.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The unresolved second-hop variable now provides a specific query, while hop-level evidence accounting exposes whether the chain is complete."
+        },
+        {
+          "id": "d",
+          "text": "Keep adding passages from the unchanged broad query because context growth will eventually resolve the missing hop.",
+          "correct": false,
+          "misconception_id": "m_rag_more_context_monotonic",
+          "diagnostic_objective_id": "lo_rag_retrieval_evidence_quality",
+          "rationale": "Repeated first-hop retrieval can add volume without targeting the unresolved relation and can increase distraction."
+        }
+      ],
+      "source_ids": [
+        "src_ircot_2023",
+        "src_lewis_rag_2020",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_reviewed_revision",
+        "generated": true,
+        "batch_id": "batch_corpus_release_20260809_a",
+        "created_on": "2026-08-09",
+        "human_review": false,
+        "review_status": "independent_model_review_passed",
+        "review_statement": "The missing-hop retrieval operation, answer key, diagnostic routes, source scope, and family dependence were independently checked before release.",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "IRCoT supports interleaving reasoning with retrieval for multi-step questions, and Lewis et al. supports retrieval-conditioned generation. The scientist, year, missing-affiliation scenario, and hop evidence test are original synthesis.",
+        "revision_reason": "Adds explicit diagnostic-objective routing and complete source/family scope without changing the reviewed item content.",
+        "independence_note": "This revision retains f_rag_multihop_query_conditioning and cannot count independently from its retired parent. It performs the same second-hop query construction from an identified entity, time, and missing relation."
+      },
+      "tags": [
+        "llm",
+        "rag",
+        "multihop_retrieval",
+        "query_conditioning",
+        "evidence_coverage",
+        "revision"
       ]
     }
   ]

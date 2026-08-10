@@ -1082,7 +1082,7 @@
       "id": "q_bellman_potential_cycle_sum_001",
       "version": 1,
       "family_id": "f_bellman_potential_cycle_sum",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "Starting in A, an agent repeats the transition cycle A-to-B-to-A forever in a discounted MDP with gamma = 0.5, zero original rewards, Phi(A) = 2, and Phi(B) = 6. Under F(s,s') = gamma Phi(s') - Phi(s), what are the shaping return over the first two transitions and over the infinite trajectory?",
       "kind": "calculation",
       "difficulty": 1.15,
@@ -1160,7 +1160,7 @@
       "id": "q_bellman_discount_mismatch_001",
       "version": 1,
       "family_id": "f_bellman_discount_mismatch",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Training used planning discount 0.9 and shaping term 0.9 Phi(s') - Phi(s). A deployment planner changes its discount to 0.7 but keeps the old shaping term. Which conclusion follows?",
       "kind": "counterfactual",
       "difficulty": 0.65,
@@ -1238,7 +1238,7 @@
       "id": "q_ope_importance_contribution_001",
       "version": 1,
       "family_id": "f_ope_importance_ratio_contribution",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "In a one-step logged decision, the behavior policy chose action a with b(a|x) = 0.2, the target policy has pi(a|x) = 0.8, and the observed reward is 3. Which off-policy account is correct before averaging across samples?",
       "kind": "calculation",
       "difficulty": 0.45,
@@ -1316,7 +1316,7 @@
       "id": "q_ope_doubly_robust_numeric_001",
       "version": 1,
       "family_id": "f_ope_doubly_robust_numeric",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "For a one-step logged bandit sample, define the doubly robust estimate as sum_a pi(a)qhat(a) + pi(A)/b(A)[r - qhat(A)]. Here pi(A) = 0.75, pi(B) = 0.25, b(A) = 0.5, qhat(A) = 2, qhat(B) = 6, the logged action is A, and r = 4. Which calculation and interpretation are correct?",
       "kind": "calculation",
       "difficulty": 1.0,
@@ -1388,6 +1388,83 @@
         "doubly_robust",
         "contextual_bandit",
         "numerical_calculation"
+      ],
+      "learning_objective_id": null
+    },
+    {
+      "id": "q_bellman_potential_cycle_sum_002",
+      "version": 2,
+      "revision_of": "q_bellman_potential_cycle_sum_001",
+      "family_id": "f_bellman_potential_cycle_sum",
+      "status": "approved",
+      "stem": "Starting in A, an agent repeats the transition cycle A-to-B-to-A forever in a discounted MDP with gamma = 0.5, zero original rewards, Phi(A) = 2, and Phi(B) = 6. Under F(s,s') = gamma Phi(s') - Phi(s), what are the shaping return over the first two transitions and over the infinite trajectory?",
+      "kind": "calculation",
+      "difficulty": 1.15,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.08,
+      "concepts": [
+        {
+          "concept_id": "c_bellman_reasoning",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "The two-transition prefix is -1.5, and the infinite discounted return is -2 because later two-transition contributions shrink geometrically by gamma squared.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "F(A,B)=1 and F(B,A)=-5, so the first pair returns 1+0.5(-5)=-1.5. Repeated pairs scale by gamma squared=0.25, giving -1.5/(1-0.25)=-2."
+        },
+        {
+          "id": "b",
+          "text": "The prefix is positive and the return diverges to positive infinity, because the positive A-to-B shaping term is collected again on each repeated cycle.",
+          "correct": false,
+          "misconception_id": "m_positive_progress_reward_preserves_policy",
+          "rationale": "Repeating the positive edge also repeats the compensating B-to-A edge, and every later pair is geometrically discounted."
+        },
+        {
+          "id": "c",
+          "text": "Using the plain potential differences gives shaping rewards +4 and -4, so they cancel even under the discounted return; both the two-edge prefix and infinite shaping return are zero.",
+          "correct": false,
+          "misconception_id": "m_discount_can_be_omitted_from_shaping",
+          "rationale": "Discounting prevents that claimed cancellation, and the shaping term must use the same gamma as the return for the telescoping property."
+        },
+        {
+          "id": "d",
+          "text": "Both returns are zero because returning to A preserves the ordering of terminal potentials, so intermediate shaping terms need not be accumulated.",
+          "correct": false,
+          "misconception_id": "m_same_terminal_order_means_safe_shaping",
+          "rationale": "The trajectory is continuing rather than terminal, and its discounted intermediate shaping terms yield the stated nonzero returns."
+        }
+      ],
+      "source_ids": [
+        "src_ng_reward_shaping_1999",
+        "src_sutton_barto_rl_2018",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_reviewed_revision",
+        "generated": true,
+        "batch_id": "batch_corpus_release_20260809_a",
+        "created_on": "2026-08-09",
+        "human_review": false,
+        "review_status": "independent_model_review_passed",
+        "review_statement": "The finite-prefix and infinite-series arithmetic, answer key, misconception routes, source scope, and family dependence were independently checked before release.",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Ng et al. support potential-based shaping with the discounted potential difference, and Sutton and Barto support discounted-return arithmetic. The two-state continuing cycle and numerical values are original synthesis.",
+        "revision_reason": "Balances the keyed option's explanatory specificity with the other answer choices while preserving the verified calculation.",
+        "derivation": "The shaping rewards alternate 1 and -5. The first pair is -1.5, and pair contributions form -1.5 times the geometric series in gamma squared=0.25, totaling -2.",
+        "independence_note": "This revision retains f_bellman_potential_cycle_sum and cannot count independently from its retired parent. The stem and calculation are intentionally unchanged; the key wording is repaired for clue balance."
+      },
+      "tags": [
+        "bellman_reasoning",
+        "potential_shaping",
+        "infinite_cycle",
+        "discounted_return",
+        "revision"
       ],
       "learning_objective_id": null
     }

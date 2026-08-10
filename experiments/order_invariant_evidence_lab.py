@@ -47,6 +47,7 @@ from tsq.learner import (  # noqa: E402
     SESSION_LAPSE_RATE,
 )
 from tsq.corpus import corpus_source_digest, load_bundle  # noqa: E402
+from tsq.families import canonical_family_label  # noqa: E402
 from tsq.models import MASTERY_THRESHOLD, SkillState, logit, sigmoid  # noqa: E402
 
 
@@ -623,7 +624,13 @@ def _load_objective_factors(
         groups[objective_id].append(
             ResponseFactor(
                 item_id=question["id"],
-                family_id=question["family_id"],
+                # Corpus rows retain their immutable published family label.
+                # The laboratory models independent evidence, so reviewed
+                # aliases must share the same budget as their canonical family.
+                # Keep this normalization at the corpus boundary: synthetic
+                # ResponseFactor fixtures deliberately retain their literal
+                # family labels.
+                family_id=canonical_family_label(question["family_id"]),
                 difficulty=float(question["difficulty"]),
                 discrimination=float(question["discrimination"]),
                 guess_rate=float(question["guess_rate"]),

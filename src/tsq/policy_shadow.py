@@ -34,7 +34,10 @@ GREEDY_POLICY_VERSION = "greedy-policy-score-v1"
 SAFE_FRONTIER_LIMIT = 5
 LOGGING_TEMPERATURE = 0.10
 SHADOW_REQUIRED_LOGGING_POLICY_VERSIONS = frozenset(
-    {"recursive-evidence-graph-v18"}
+    {
+        "recursive-evidence-graph-v18",
+        "recursive-evidence-graph-v19",
+    }
 )
 
 _ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")

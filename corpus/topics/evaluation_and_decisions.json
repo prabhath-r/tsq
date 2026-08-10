@@ -1213,7 +1213,7 @@
       "id": "q_calibration_subgroup_uncertainty_batch_c_001",
       "version": 1,
       "family_id": "f_calibration_subgroup_uncertainty",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A risk model assigns 0.70 to 1,000 deployment cases, and 700 events occur. A prespecified subgroup contains ten of those cases, with seven events. Which interpretation is statistically defensible?",
       "kind": "comparison",
       "difficulty": 0.65,
@@ -1307,7 +1307,7 @@
       "id": "q_imbalance_predictive_value_batch_c_001",
       "version": 1,
       "family_id": "f_imbalance_predictive_value_base_rate",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "A screening test is applied to 10,000 people with 1% prevalence. Sensitivity is 90% and specificity is 95%. What does the expected confusion count imply?",
       "kind": "calculation",
       "difficulty": 0.55,
@@ -1407,7 +1407,7 @@
       "id": "q_imbalance_cost_matrix_batch_c_001",
       "version": 1,
       "family_id": "f_imbalance_cost_matrix_comparison",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Among 10,000 cases, 100 are positive. Model A predicts every case negative. Model B has 80 true positives, 20 false negatives, and 300 false positives. A false negative costs 50 units and a false positive costs one. Which comparison is correct?",
       "kind": "calculation",
       "difficulty": 0.4,
@@ -1507,7 +1507,7 @@
       "id": "q_ranking_pairwise_auc_batch_c_001",
       "version": 1,
       "family_id": "f_ranking_pairwise_auc",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Two positive cases receive scores 0.90 and 0.40, while two negative cases receive scores 0.80 and 0.30. With no ties, which statement correctly interprets ROC AUC?",
       "kind": "calculation",
       "difficulty": 0.35,
@@ -1601,7 +1601,7 @@
       "id": "q_ranking_confusion_metrics_batch_c_001",
       "version": 1,
       "family_id": "f_ranking_confusion_metrics",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A classifier has ROC AUC 0.90. At one fixed score threshold it produces 40 true positives, 10 false positives, and 20 false negatives. Which calculation and interpretation are sound?",
       "kind": "calculation",
       "difficulty": 0.5,
@@ -1690,6 +1690,83 @@
         "recall",
         "f1",
         "capacity_batch_c"
+      ]
+    },
+    {
+      "id": "q_imbalance_predictive_value_batch_c_002",
+      "version": 2,
+      "revision_of": "q_imbalance_predictive_value_batch_c_001",
+      "family_id": "f_imbalance_predictive_value_base_rate",
+      "status": "approved",
+      "stem": "A screening test is deployed in a population with 1% prevalence and has 90% sensitivity. What minimum specificity is required for at least half of the positive results to be true positives?",
+      "kind": "calculation",
+      "difficulty": 0.75,
+      "discrimination": 1.65,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_class_imbalance",
+          "weight": 1.0,
+          "role": "primary"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "At least 95%, because high overall accuracy on the overwhelmingly negative population is sufficient evidence that most positive predictions are useful under imbalance.",
+          "correct": false,
+          "misconception_id": "m_accuracy_is_sufficient_under_imbalance",
+          "rationale": "Overall accuracy is dominated by the 99% negative class and does not enforce a 50% positive predictive value."
+        },
+        {
+          "id": "b",
+          "text": "The deployment specificity cannot be determined unless the evaluation sample is first balanced, because resampling preserves the reported predictive value.",
+          "correct": false,
+          "misconception_id": "m_resampling_preserves_probability_calibration",
+          "rationale": "The deployment prevalence is already specified; changing class proportions would change uncorrected predictive value rather than resolve the calculation."
+        },
+        {
+          "id": "c",
+          "text": "At least about 99.09%, because 0.009 divided by 0.009 plus 0.99 times the false-positive rate must be at least 0.5.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The inequality 0.009/(0.009+0.99f)>=0.5 gives f<=0.00909, hence specificity 1-f>=0.99091."
+        },
+        {
+          "id": "d",
+          "text": "Exactly 99%, because setting the decision cutoff equal to the 1% deployment prevalence directly makes the resulting positive predictive value 50%.",
+          "correct": false,
+          "misconception_id": "m_threshold_should_equal_prevalence",
+          "rationale": "A score threshold is not a specificity, and prevalence alone does not set either an operating threshold or the required false-positive rate."
+        }
+      ],
+      "source_ids": [
+        "src_hastie_esl_2009",
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_reviewed_revision",
+        "generated": true,
+        "batch_id": "batch_corpus_release_20260809_a",
+        "created_on": "2026-08-09",
+        "human_review": false,
+        "review_status": "independent_model_review_passed",
+        "review_statement": "The predictive-value inequality, answer key, misconception routes, source scope, and family dependence were independently checked before release.",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Hastie et al. and Murphy support confusion-derived metrics, precision-recall evaluation, and prevalence-sensitive predictive value. The required-specificity scenario and arithmetic are original synthesis.",
+        "revision_reason": "Replaces the parent's direct confusion-count calculation with a required-operating-specificity calculation while preserving the published family.",
+        "derivation": "With prevalence 0.01 and sensitivity 0.90, the true-positive mass is 0.009. Requiring 0.009/(0.009+0.99f)>=0.5 yields f<=0.0090909 and specificity at least 0.990909.",
+        "independence_note": "This revision retains f_imbalance_predictive_value_base_rate and cannot count independently from its retired parent. Both use prevalence, sensitivity, and false-positive burden to reason about positive predictive value."
+      },
+      "tags": [
+        "class_imbalance",
+        "predictive_value",
+        "specificity",
+        "base_rate",
+        "calculation",
+        "revision"
       ]
     }
   ]

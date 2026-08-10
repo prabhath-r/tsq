@@ -13,20 +13,22 @@ good questions is more useful than a large batch of plausible-looking filler.
 
 ## Non-negotiable boundaries
 
-1. AI-authored and AI-revised questions are always `quarantined`, with
-   `provenance.generated` set to the JSON boolean `true` and
-   `provenance.human_review` set to the JSON boolean `false`.
-2. The schema has no quarantine lifecycle for domains, topics, concepts,
-   objectives, misconceptions, sources, or graph edges. AI may propose those
-   definitions, but they require independent human semantic and source review
-   before they enter the manifest or a bundled active release. Without that
-   authority, use the existing reviewed taxonomy for quarantined questions or
-   keep the taxonomy proposal outside `corpus/` as non-runtime prose. An
-   unlisted JSON proposal under `corpus/` is forbidden because the manifest is
-   a closed inventory.
-3. Never create an `activation_review`, claim that a human reviewed the work,
-   or mark generated work `approved` or `calibrated`. Model review is not human
-   review. Passing tests is not activation authority.
+1. Draft questions and taxonomy proposals stay outside `corpus/`, its manifest,
+   and the synchronized package. A question accepted into the canonical corpus
+   uses `approved`; use `calibrated` only after relevant empirical item evidence
+   exists. Do not put unlisted JSON proposals under `corpus/` because the
+   manifest is a closed inventory.
+2. Before a new domain, topic, concept, objective, misconception, source, edge,
+   family, or question enters the corpus, it must pass independent semantic,
+   source, family, and keyed review appropriate to the change. Automated checks
+   are necessary but do not establish factual correctness or independence.
+3. Provenance is descriptive, not an eligibility switch. AI-authored or
+   AI-revised work records `provenance.generated` as the JSON boolean `true`.
+   `provenance.human_review` is `true` only if a person actually reviewed the
+   item and is otherwise `false`. Never invent a human identity, review event,
+   or empirical result. Public question provenance must not name or encode a
+   vendor, model, provider, or generator identity, including through aliases or
+   nested metadata.
 4. Never change content behind a registry-stable concept, objective,
    misconception, source, or question ID. A changed question gets a new
    question ID, a higher version, a `revision_of` pointer, and the same family
@@ -39,7 +41,8 @@ good questions is more useful than a large batch of plausible-looking filler.
 6. Never add low-quality items to raise a count. Every distractor must encode a
    credible named misconception. Joke answers, random falsehoods, and generic
    “does not know the topic” labels are forbidden.
-7. Never describe authored item parameters as calibrated. Never describe an
+7. Never describe authored item parameters as calibrated. Only empirical item
+   evidence can support `calibrated`. Never describe an
    MCQ result as proof that a learner can implement, explain, debug, design, or
    complete a real project.
 8. Never hand-edit `src/tsq/data/curriculum/`. It is synchronized from this
@@ -47,6 +50,12 @@ good questions is more useful than a large batch of plausible-looking filler.
 
 If one of these rules conflicts with a request to produce more content, stop
 the content work and report the conflict.
+
+This document governs bundled selected-response curriculum questions. Emergency
+question revocation remains a separate runtime safety control and can disable a
+released item without rewriting a sealed release. Productive-performance tasks
+also retain their separate proposal, review, and lifecycle rules; do not infer
+their status or readiness from this curriculum workflow.
 
 ## Where data belongs
 
@@ -210,8 +219,8 @@ Before writing, make a family-operation matrix with these columns:
 |---|---|---|---|---:|---|---|---|
 
 If the independence argument is uncertain, reuse the existing family or keep
-the candidate quarantined with an explicit `independence_note`. Never create a
-fresh family merely because the desired coverage count is low.
+the draft outside the corpus with an explicit `independence_note`. Never create
+a fresh family merely because the desired coverage count is low.
 
 `transfer` has a strict meaning: the learner must use the target knowledge in a
 materially changed context, representation, or operation. A new tag, renamed
@@ -245,10 +254,9 @@ hide a missing, thin, or order-sensitive owned concept or objective. The
 coverage planner's concept-kind targets and authored difficulty sequence are
 planning aids, not permission to manufacture redundant families.
 
-Quarantined questions do not satisfy live coverage or capacity. That is an
-honest boundary. `capacity --quarantine-impact` may show which review set would
-help if it later passed every gate, but that counterfactual must remain clearly
-separate from live capacity.
+Drafts do not satisfy live coverage or capacity because they remain outside the
+assembled corpus. Capacity reports describe only the accepted release being
+audited; do not add unreviewed drafts temporarily to make a report look healthy.
 
 ## Question contract
 
@@ -318,15 +326,15 @@ supported by the cited source set. A broad citation to a field or an
 `expert_synthesis` record is not, by itself, claim-level support. Record in
 provenance which source claims support the item and which details are original
 synthesis. If a source is ambiguous, inaccessible, obsolete for the claim, or
-has unclear usage rights, the item cannot move toward activation.
+has unclear usage rights, the item cannot be accepted.
 
 The current schema records document-level sources, not complete claim excerpts
 or signatures. Do not overstate what a source ID proves.
 
-## Provenance and quarantine
+## Provenance and acceptance
 
-For a direct AI-authored candidate, use truthful provenance in this shape. Use
-a stable unique batch ID and do not invent facts to fill placeholders. Public
+For an accepted AI-authored item, use truthful provenance in this shape. Use a
+stable unique batch ID and do not invent facts to fill placeholders. Public
 question provenance deliberately omits vendor and model identity; operational
 generation-job records may retain those details outside the curriculum item.
 This prohibition is recursive: do not hide an identity in nested metadata or
@@ -340,9 +348,7 @@ vendor or model value.
   "generated": true,
   "batch_id": "<stable unique batch id>",
   "human_review": false,
-  "human_review_status": "required_before_activation",
-  "activation": "manual_only_after_human_review_and_new_immutable_release",
-  "review_status": "candidate_pending_independent_review",
+  "review_status": "accepted_after_independent_review",
   "psychometrics": "uncalibrated_author_prior",
   "source_scope": "<source claims used and original synthesis added>",
   "independence_note": "<keyed operation and comparison with nearby families>"
@@ -353,19 +359,21 @@ Do not imitate old questions that omit `provenance.generated`. That exception
 is bound by hash to an exact legacy cohort and is unavailable to new or changed
 content.
 
-The offline authoring pipeline may accept a candidate for reviewed quarantine
-after deterministic validation and independent model critique. It still forces
-the item to `quarantined`. It cannot promote content. An actual independent
-human review must later produce a new immutable reviewed revision, with a new
-question ID and newly sealed release. Never fabricate the required human
-identity, aware timestamp, independence statement, or attestation digest.
+Draft artifacts produced by an offline authoring pipeline stay outside the
+canonical shards and packaged resource. A release maintainer may add an item as
+`approved` only after its deterministic checks, blind solve, family review,
+keyed critique, source review, and route review all pass. Keep
+`generated=true` for generated content and keep `human_review=false` unless a
+person actually performed a documented review; neither field grants or removes
+runtime eligibility. Acceptance creates a newly sealed immutable release and
+does not mutate sessions pinned to an older release.
 
 ## Shape templates
 
-The topic-shard template below describes canonical reviewed data. It is not a
-quarantine format. An AI-only run must not add a new taxonomy shard to the
-manifest; without completed independent human taxonomy review, keep the design
-as non-runtime prose outside `corpus/` and stop before package synchronization.
+The topic-shard template below describes canonical accepted data. Draft
+taxonomy work stays outside `corpus/` until independent semantic and source
+review is complete; after acceptance it may be added to the manifest and
+synchronized package in a new immutable release.
 
 Use the existing shard's formatting and field order. A topic shard has this
 closed outer shape; do not add shared edges or sources to it:
@@ -441,7 +449,7 @@ with reviewed content; do not copy the wording as filler:
   "version": 1,
   "family_id": "f_example_state_reconciliation",
   "learning_objective_id": "lo_example_trace",
-  "status": "quarantined",
+  "status": "approved",
   "stem": "<precise scenario and question with all assumptions needed for one key>",
   "kind": "debugging",
   "difficulty": 0.25,
@@ -494,9 +502,7 @@ with reviewed content; do not copy the wording as filler:
     "generated": true,
     "batch_id": "<stable unique batch id>",
     "human_review": false,
-    "human_review_status": "required_before_activation",
-    "activation": "manual_only_after_human_review_and_new_immutable_release",
-    "review_status": "candidate_pending_independent_review",
+    "review_status": "accepted_after_independent_review",
     "psychometrics": "uncalibrated_author_prior",
     "source_scope": "<source claims used and original synthesis added>",
     "independence_note": "<keyed operation and comparison with nearby families>"
@@ -525,23 +531,27 @@ another:
    solution path.
 4. **Keyed critique:** inspect the answer, all rationales, diagnostic routes,
    source fit, counterexamples, and the proposed family assignment.
-5. **Human activation review:** a genuine independent human accepts, rejects,
-   or revises the candidate outside the generator's authority.
+5. **Release acceptance:** a maintainer checks the independent review evidence,
+   resolves every finding, and accepts, rejects, or revises the draft. The
+   acceptor must not rely on the generator's assertion that its own work is
+   correct.
 6. **Pilot and calibration:** inspect discrimination, distractor use,
    ambiguity reports, timing, drift, and differential behavior before any
    calibrated claim.
 
-Generator and model-reviewer identities must be distinct. Model acceptance can
-authorize only reviewed quarantine, never activation. Deterministic checks
-cannot prove factual correctness, a unique best answer, semantic family
-independence, or psychometric quality.
+Generator and independent-reviewer roles must be distinct. Keep operational
+review evidence outside public question provenance when it would reveal a
+vendor or model identity. Deterministic checks cannot prove factual
+correctness, a unique best answer, semantic family independence, or
+psychometric quality. Record `human_review=true` only when a person actually
+performed a substantive review; acceptance itself does not change that fact.
 
 ## Workflow for a new or expanded topic
 
 ### 1. Establish the baseline
 
 Read `corpus/README.md`, this file, the manifest, `shared.json`, the target
-shard, related shards, and representative active and quarantined questions.
+shard, related shards, and representative accepted questions.
 Assemble the full bundle. Run the strict audit, topic capacity, coverage plan,
 and family-independence report before editing. Record existing gaps and review
 risks; do not assume a count is a gap.
@@ -561,15 +571,16 @@ Define or verify:
 
 Do not write the question batch until this map is coherent and acyclic.
 If any proposed domain, topic, concept, objective, misconception, source, or
-edge lacks completed independent human semantic/source review, do not add it
-to the canonical shards. Report the proposed map for review and stop that part
-of the expansion. The current schema cannot quarantine taxonomy records.
+edge lacks completed independent semantic and source review, do not add it to
+the canonical shards. Keep the draft outside `corpus/`, report the proposed map
+for review, and stop that part of the expansion.
 
 ### 3. Author a small batch
 
 Write only what the measured gap needs, within a reviewable maximum. Preserve
-existing IDs. Put each item in the primary concept's topic shard. Use the
-question contract above and quarantine every generated candidate.
+existing IDs. Draft outside the canonical shards, then put only independently
+reviewed and accepted items in the primary concept's topic shard with
+`status=approved`.
 
 ### 4. Review item behavior
 
@@ -595,41 +606,26 @@ python3 scripts/sync_bundled_corpus.py --write
 python3 scripts/sync_bundled_corpus.py
 ```
 
-Use quarantine impact only as a review-priority diagnostic:
-
-```bash
-PYTHONPATH=src python3 -m tsq capacity corpus \
-  --topic <TOPIC_ID> --quarantine-impact \
-  --candidate-batch-id <BATCH_ID> --json
-```
-
-Do not call this live capacity. The exact search may fail at an explicit state,
-candidate, combination, or evaluation bound. That is a visible limit, not
-permission to substitute a heuristic. For a large quarantine bank, review one
-small provenance batch per invocation with `--candidate-batch-id`. Repeating
-the flag in one invocation intentionally unions those batches. Alternatively,
-name an exact review set with repeated `--candidate-question-id`. The live
-baseline still uses the full corpus. The report records both the explicit
-filter and the eligible target-owned count before filtering, and its minimality
-claim applies only to the declared filtered candidate space. Never omit that
-scope when reporting the result.
+The exact capacity search may fail at an explicit state or evaluation bound.
+That is a visible limit, not permission to substitute a heuristic. Report the
+bound and reduce the requested analysis scope without weakening the release
+gate.
 
 Create a disposable database and inspect the topic catalog, graph scope,
-coverage blueprints, quarantine list, and stage-specific review packets. Never
-use a learner's real database for corpus experiments.
+coverage blueprints, and accepted release membership. Never use a learner's
+real database for corpus experiments.
 
 Run focused tests for corpus loading/assembly, quality, objectives,
 misconception routes, authoring, capacity, family independence, packaging, and
-generated activation. Then run the complete suite with `ResourceWarning`
-treated as an error.
+release eligibility. Then run the complete suite with `ResourceWarning` treated
+as an error.
 
 ### 6. Inspect adaptive behavior at the correct boundary
 
-Quarantined additions must not change normal selection or live capacity. Verify
-that they are never served.
-
-Only after genuine human review and a new active release may learner simulations
-exercise the proposed route. At that stage inspect, rather than merely count:
+Drafts remain outside the release and therefore cannot change normal selection
+or live capacity. After acceptance and creation of a new active release, run
+learner simulations against the proposed route and inspect, rather than merely
+count:
 
 - a confident wrong answer selecting the named misconception and a related
   repair;
@@ -650,19 +646,17 @@ family reuse, projection changes, session report, and event integrity.
 Report:
 
 - files and taxonomy changed;
-- questions and unique families by lifecycle status, kind, objective, and
-  primary concept;
+- questions and unique families by status, kind, objective, and primary concept;
 - objective × misconception × family coverage;
 - strict audit results;
-- live capacity and quarantine-impact results separately;
+- exact live-capacity results and any explicit search bounds;
 - family-dependence risks and unresolved source claims;
 - tests and behavior checks run; and
-- work still requiring independent human review or empirical calibration.
+- work still requiring independent review or empirical calibration.
 
 Do not describe a green audit, deterministic test, model review, lexical
-similarity screen, simulation, or quarantine-impact result as proof of item
-correctness, family independence, human efficacy, calibration, or activation
-eligibility.
+similarity screen, or simulation as proof of item correctness, family
+independence, human efficacy, or calibration.
 
 ## Stop and fail visibly when
 
@@ -683,108 +677,154 @@ these conditions holds:
 - split assembly is nondeterministic or the packaged resource differs;
 - strict audit emits an error or warning;
 - exact capacity exceeds a configured search bound;
-- generated content appears eligible for adaptation;
+- a draft was added to a canonical shard before independent review finished;
 - a review stage would have to invent a human identity or calibration claim;
 - focused or full tests fail; or
 - the only way to meet a count is to lower the quality bar.
 
 Do not hide a blocker by deleting the difficult concept, broadening the topic,
-renaming a duplicate family, approving generated content, or reducing a gate.
+renaming a duplicate family, accepting unreviewed content, or reducing a gate.
 
 ## Copy-ready prompt for adding or expanding a topic
 
 Copy the block below and replace every angle-bracket field. If required source
-material or topic ownership is unknown, gather that evidence before running
-the prompt.
+material or topic ownership is unknown, gather that evidence before running the
+prompt. The prompt deliberately separates drafting, independent review, and
+release acceptance.
 
 ```text
-You are extending TSQ's adaptive-learning corpus with one carefully designed
-topic. Work as a corpus engineer and assessment author, not as a quiz-volume
-generator.
+Extend TSQ's adaptive-learning corpus with one carefully designed topic or one
+bounded expansion of an existing topic. Work as a corpus engineer and
+assessment author, not as a quiz-volume generator. Quality and diagnostic value
+take priority over the requested count.
 
 Topic name: <TOPIC_NAME>
-Existing reviewed topic ID, or PROPOSAL_ONLY: <TOPIC_ID_OR_PROPOSAL_ONLY>
+Existing topic ID, or NEW_TOPIC_PROPOSAL: <TOPIC_ID_OR_NEW_TOPIC_PROPOSAL>
 Parent topic ID: <PARENT_TOPIC_ID>
 Domain ID: <DOMAIN_ID>
-Intended learner scope: <WHAT_THE_TOPIC_INCLUDES_AND_EXCLUDES>
+Learner scope, including explicit exclusions: <IN_SCOPE_AND_OUT_OF_SCOPE>
 Requested concepts or objectives: <REQUESTED_SCOPE_OR_NONE>
-Approved primary sources or existing source IDs: <SOURCES>
-Maximum new candidate questions: <SMALL_REVIEWABLE_LIMIT>
+Primary sources or existing source IDs to inspect: <SOURCES>
+Maximum accepted questions: <SMALL_REVIEWABLE_LIMIT>
 
-First read corpus/README.md and all of corpus/AGENTS.md. Inspect manifest.json,
-shared.json, the target topic shard, related shards, the assembled bundle,
-existing concepts, objectives, misconceptions, sources, active and quarantined
-families, strict-audit output, exact topic capacity, release-pinned coverage
-blueprints, and family-independence nominations. Verify every reused ID against
-the repository. Do not write questions until you have identified measured
-coverage or capacity debt and likely semantic overlap.
+Read corpus/README.md and every line of corpus/AGENTS.md before acting. Inspect
+manifest.json, shared.json, the target and related topic shards, and the fully
+assembled corpus. Inventory existing topics, concepts, learning objectives,
+misconceptions, sources, question families, revisions, kinds, difficulty priors,
+key-position balance, diagnostic routes, strict-audit findings, exact capacity
+blockers, coverage blueprints, and family-independence nominations. Verify each
+reused ID from repository data. Do not infer a content gap from raw count.
 
-The runtime schema can quarantine questions but cannot quarantine taxonomy,
-misconceptions, sources, or graph records. If this work requires any new
-domain, topic, concept, objective, misconception, source, or edge that has not
-already completed independent human semantic and source review, produce a
-non-runtime prose proposal outside corpus/ and stop before editing the
-manifest, canonical shards, or packaged resource. Do not place an unlisted
-JSON candidate under corpus/. You may continue directly only with quarantined
-questions that use existing reviewed definitions.
+Keep every draft outside corpus/, the manifest, and the packaged curriculum
+until all review stages below pass. Never put an unlisted JSON proposal under
+corpus/. Design the change in this order:
 
-Design from domain -> topic -> atomic concepts -> fine learning objectives ->
-prerequisite edges -> named misconceptions -> independent solution operations
--> questions. A topic is a navigation bucket, not a mastery score. Give each
-concept one owner topic. Use typed concept mappings and symmetric related-topic
-links for genuine overlap; do not duplicate definitions or questions across
-shards. Keep readiness and containment graphs acyclic.
+1. domain and parent topic;
+2. learner-facing topic boundary;
+3. atomic assessable concepts with exactly one owner topic each;
+4. fine learning objectives with one observable supported operation;
+5. prerequisite and objective edges with direction and rationale;
+6. falsifiable named misconceptions;
+7. bounded source claims and original synthesis;
+8. genuinely distinct keyed solution operations and family groups; and
+9. questions, repair routes, and different-family verification reserves.
 
-Before authoring, make a compact matrix for every proposed item containing:
-primary concept; direct learning objective and observable operation; the three
-exact named distractor misconceptions; question kind; authored-prior
-difficulty; keyed solution steps; family ID; closest existing families and why
-the item is independent or must share a family; approved source claims; and the
-repair plus verification families that remain after it is used. Remove every
-row that is only a paraphrase, number swap, keyword test, trivia item, or set of
-implausible foils.
+Use typed concept mappings and symmetric related-topic links for genuine
+overlap. Do not duplicate definitions or questions across shards. Keep strict
+readiness, containment, and mixed closures acyclic. A topic is a navigation
+bucket, not evidence of mastery. A selected-response answer is evidence only
+for its named objective and mappings; it does not certify implementation,
+explanation, debugging, design, or project skill.
 
-Write only the small batch justified by that matrix. Every question must have
-one defensible answer under explicit assumptions, four substantive parallel
-options, three distinct credible named misconceptions, one local rationale per
-option, exact concept and objective mappings, sources supporting the material
-claims, and no answer-only wording clue. A transfer item must change context,
-representation, or operation materially. family_id encodes solution-path
-dependence; never manufacture independence with a new name. A revision gets a
-new question ID and higher version, points to its parent, and stays in the same
+Before drafting options, produce a family-operation matrix with one row per
+proposed question and these columns: question purpose; primary concept; direct
+objective and operation; kind; authored-prior difficulty; three exact
+distractor misconceptions; keyed solution steps; proposed family; closest
+existing family and why the operation is the same or genuinely different;
+source claims; source_scope; and the distinct repair and verification families
+left after the item is used. Reject rows that are paraphrases, number or name
+swaps, keyword recognition, trivia, implausible foils, or hidden duplicates.
+
+Draft only the rows justified by that matrix. Each question needs one
+defensible best answer under explicit assumptions; four substantive,
+parallel, normalized-distinct options; exactly one key; three distinct credible
+named misconceptions; one specific rationale per option; correct concept and
+objective mappings; sources supporting every material claim; and no key clue
+from length, qualifiers, grammar, punctuation, vocabulary, or position. Try to
+construct a counterexample to the key. A transfer item must materially change
+context, representation, or operation. family_id records shared solution-path
+dependence, so reuse a family for paraphrases and revisions. A revision uses a
+new ID, increments version, points to revision_of, and preserves its parent's
 family.
 
-You are an AI author. Set every new or revised item to status=quarantined,
-provenance.generated=true, and provenance.human_review=false. Record truthful
-batch, source-scope, psychometric-prior, and family-independence notes, while
-omitting vendor/model identity from the public item. Do not add
-identity aliases or nested identity metadata. Do not add
-activation_review, claim human review, mark an item approved or calibrated, or
-change a validator or threshold to make it pass. MCQs provide selected-response
-evidence only and cannot certify productive skill.
+For public provenance, record truthful descriptive facts. AI-authored or
+AI-revised work has generated=true. Set human_review=true only if a person
+actually performs a substantive review; otherwise use false. Include a stable
+batch_id, psychometrics=uncalibrated_author_prior, a claim-level source_scope,
+and a concrete independence_note. Do not include vendor, provider, model, or
+generator identity anywhere in public provenance, including nested fields and
+aliases. Do not invent a person, review event, timestamp, attestation,
+calibration result, or source claim. Keep any operational generation identities
+outside the curriculum item.
 
-After writing, solve each stem without its key, review the options without
-content knowledge for clues, try to construct a counterexample to the key,
-check that each distractor follows from its named misconception, and compare
-answer-redacted solution paths with neighboring families. Reject or revise
-ambiguous, source-weak, redundant, or clue-bearing items.
+Use independent review roles that do not inherit the generator's hidden answer:
 
-Assemble the corpus deterministically and run packaged parity, strict audit,
-exact topic capacity, quarantine-impact analysis, the family-independence lab,
-focused corpus/objective/misconception/authoring/capacity/packaging tests, and
-the full test suite. Use a disposable database to inspect topic resolution,
-graph scope, coverage demand, quarantine review packets, and ineligibility of
-generated content. Do not activate candidates to run a simulation. If a real
-human later approves a new immutable revision and release, run adversarial
-correct, incorrect, unsure, fast, slow, hinted, repeated-answer, remediation,
-verification, prerequisite, exploration, and corpus-gap sessions and inspect
-their traces, projections, reports, and event integrity.
+1. Run deterministic shape, reference, graph, revision, route, clue, and source
+   checks on the draft.
+2. Give a blind reviewer the stem, options, and necessary source context, but
+   remove the key, rationales, misconception IDs, family ID, status, and
+   provenance. Require an answer, derivation, ambiguity report, and any second
+   defensible key.
+3. Give a family reviewer answer-redacted questions without family IDs or
+   source-selection metadata. Require inferred solution steps, dependence
+   clusters, and challenges to every proposed independent family.
+4. Give a keyed critic the complete draft and sources. Require checks of the
+   key, every rationale, every misconception route, source fit, counterexamples,
+   option clues, difficulty prior, and family assignment.
+5. Resolve every finding by revising and repeating affected reviews. Reject the
+   item if ambiguity, weak support, false independence, or a broken repair path
+   remains.
 
-Report exact files changed; taxonomy added and reused; candidate questions and
-families by status, kind, concept, and objective; objective x misconception x
-family coverage; strict-audit result; live capacity separately from
-counterfactual quarantine impact; source and family-review risks; all tests and
-behavior checks; and the remaining human-review and empirical-calibration
-work. Stop and report rather than padding counts, weakening gates, inventing
-provenance, or activating generated content.
+Only after those stages pass may a release maintainer add the accepted records
+to canonical shards. Accepted questions use status=approved. Generated and
+human_review remain the truthful descriptive values established above; they do
+not decide eligibility. Never use status=calibrated without relevant empirical
+item evidence. Preserve stable IDs, place each definition in its one owning
+shard, update the closed manifest only for an accepted topic shard, and create a
+new immutable release without changing old pinned sessions.
+
+Validate the assembled result, not an isolated shard. Run, at minimum:
+
+PYTHONPATH=src python3 -m tsq audit corpus --strict
+PYTHONPATH=src python3 -m tsq capacity corpus --topic <TOPIC_ID> --json
+PYTHONPATH=src python3 experiments/family_independence_lab.py --stdout
+python3 scripts/sync_bundled_corpus.py --write
+python3 scripts/sync_bundled_corpus.py
+PYTHONPATH=src python3 -W error::ResourceWarning -m unittest discover -s tests
+
+Also run the focused corpus, objective, misconception-route, authoring,
+capacity, family, packaging, database-upgrade, and release-eligibility tests
+present in the repository. Treat every strict warning, source mismatch, package
+parity failure, unresolved family nomination, route failure, and exact-search
+bound as a finding to resolve or report, not as permission to lower a gate. Use
+a disposable database to inspect topic resolution, graph scope, coverage demand,
+release membership, and emergency revocation behavior. Never experiment on a
+learner's real database.
+
+After acceptance in a new active release, run adversarial learner sessions for
+correct, incorrect, unsure, fast, slow, hinted, missing-confidence, and repeated
+answers, plus remediation, different-family verification, prerequisite descent
+and resumption, exploration, and corpus exhaustion. Inspect question order,
+phase, focus objective, misconception hypotheses, family reuse, projection
+changes, reports, and event integrity. These simulations validate control-flow
+behavior; they do not establish semantic correctness or calibration.
+
+Report the exact files changed; accepted and rejected draft counts; taxonomy
+added and reused; questions and unique families by status, kind, concept, and
+objective; objective x misconception x family coverage; source_scope and
+unresolved source risks; family-review decisions; strict audit and exact
+capacity results; package parity; focused and full tests; behavioral checks;
+and any remaining independent-review or empirical-calibration work. Stop and
+report a blocker instead of padding counts, weakening checks, inventing
+provenance, mutating stable content in place, or accepting a weak item.
 ```

@@ -38,6 +38,7 @@ from tsq.corpus import (  # noqa: E402
     read_and_parse,
 )
 from tsq.engine import AdaptiveEngine  # noqa: E402
+from tsq.families import canonical_family_label  # noqa: E402
 from tsq.models import Presentation  # noqa: E402
 from tsq.objective_posterior import decode_objective_posterior  # noqa: E402
 from tsq.policy import (  # noqa: E402
@@ -51,13 +52,10 @@ from tsq.simulation import (  # noqa: E402
     SyntheticAnswer,
     SyntheticLearner,
 )
-from tsq.store import (  # noqa: E402
-    Database,
-    question_runtime_activation_safe,
-)
+from tsq.store import Database  # noqa: E402
 
 
-LAB_VERSION = "cold-start-lab-v3"
+LAB_VERSION = "cold-start-lab-v4"
 SEMANTIC_PROJECTION_SIGNATURE_SCHEMA = 1
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = PROJECT_ROOT / "experiments" / "results" / "cold_start_lab.json"
@@ -170,6 +168,59 @@ def canonical_hash(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_family_projection_rows(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    dimension_key: str,
+) -> list[dict[str, Any]]:
+    """Collapse persisted aliases into one reviewed evidence-family row."""
+
+    collapsed: dict[tuple[str, str, str], dict[str, Any]] = {}
+    latest_rank: dict[tuple[str, str, str], tuple[str, str, str]] = {}
+    for source in rows:
+        row = dict(source)
+        published_family_id = str(row["family_id"])
+        row["family_id"] = canonical_family_label(published_family_id)
+        key = (
+            str(row["learner_id"]),
+            str(row[dimension_key]),
+            str(row["family_id"]),
+        )
+        rank = (
+            str(row["last_unguided_correct_at"]),
+            published_family_id,
+            str(row["kind"]),
+        )
+        existing = collapsed.get(key)
+        if existing is None:
+            collapsed[key] = row
+            latest_rank[key] = rank
+            continue
+        existing["first_unguided_correct_at"] = min(
+            str(existing["first_unguided_correct_at"]),
+            str(row["first_unguided_correct_at"]),
+        )
+        existing["last_unguided_correct_at"] = max(
+            str(existing["last_unguided_correct_at"]),
+            str(row["last_unguided_correct_at"]),
+        )
+        delayed = [
+            value
+            for value in (
+                existing["delayed_unguided_correct_at"],
+                row["delayed_unguided_correct_at"],
+            )
+            if value is not None
+        ]
+        existing["delayed_unguided_correct_at"] = (
+            min(str(value) for value in delayed) if delayed else None
+        )
+        if rank > latest_rank[key]:
+            existing["kind"] = row["kind"]
+            latest_rank[key] = rank
+    return [collapsed[key] for key in sorted(collapsed)]
+
+
 def _semantic_projection_signature(
     database: Database,
     learner_id: str,
@@ -217,9 +268,8 @@ def _semantic_projection_signature(
                 (learner_id,),
             )
         ]
-        skill_families = [
-            dict(row)
-            for row in connection.execute(
+        skill_families = _canonical_family_projection_rows(
+            connection.execute(
                 """SELECT learner_id, concept_id, family_id, kind,
                           first_unguided_correct_at,
                           last_unguided_correct_at,
@@ -227,11 +277,11 @@ def _semantic_projection_signature(
                    FROM learner_skill_families WHERE learner_id = ?
                    ORDER BY concept_id, family_id""",
                 (learner_id,),
-            )
-        ]
-        objective_families = [
-            dict(row)
-            for row in connection.execute(
+            ),
+            dimension_key="concept_id",
+        )
+        objective_families = _canonical_family_projection_rows(
+            connection.execute(
                 """SELECT learner_id, objective_id, family_id, kind,
                           first_unguided_correct_at,
                           last_unguided_correct_at,
@@ -239,8 +289,9 @@ def _semantic_projection_signature(
                    FROM learner_objective_families WHERE learner_id = ?
                    ORDER BY objective_id, family_id""",
                 (learner_id,),
-            )
-        ]
+            ),
+            dimension_key="objective_id",
+        )
         grid_rows = connection.execute(
             """SELECT learner_id, objective_id, posterior_schema_version,
                       algorithm, grid_id, codec, posterior_blob,
@@ -542,7 +593,8 @@ def _candidate_inventory_from_row(
     if (
         row["attempted_question_id"] != expected_question_id
         or row["selected_question_id"] != expected_question_id
-        or row["selected_family_id"] != step.family_id
+        or canonical_family_label(str(row["selected_family_id"]))
+        != step.family_id
         or row["selected_question_kind"] != step.question_kind
         or row["selected_objective_id"]
         != step.learning_objective_id
@@ -650,7 +702,6 @@ def _candidate_inventory_from_row(
             "release_status",
             "evidence_weight",
             "revoked",
-            "runtime_activation_safe",
         }
         if (
             not isinstance(metadata, Mapping)
@@ -675,7 +726,6 @@ def _candidate_inventory_from_row(
             or not math.isfinite(float(evidence_weight))
             or float(evidence_weight) <= 0.0
             or metadata["revoked"] is not False
-            or metadata["runtime_activation_safe"] is not True
         ):
             raise ColdStartInvariantError(
                 f"{trace_label} contains a runtime-ineligible candidate."
@@ -709,7 +759,8 @@ def _candidate_inventory_from_row(
             f"{trace_label} selected outside the production sampling frontier."
         )
     if (
-        selected[0]["family_id"] != step.family_id
+        canonical_family_label(str(selected[0]["family_id"]))
+        != step.family_id
         or selected[0]["learning_objective_id"]
         != step.learning_objective_id
         or selected[0]["question_kind"] != step.question_kind
@@ -878,11 +929,6 @@ def _release_question_metadata(
         ).fetchall()
         result: dict[str, dict[str, Any]] = {}
         for row in rows:
-            question = database.get_question(
-                row["id"],
-                connection,
-                release_id=release_id,
-            )
             result[row["id"]] = {
                 "corpus_release_id": release_id,
                 "family_id": row["family_id"],
@@ -896,12 +942,6 @@ def _release_question_metadata(
                 "release_status": row["release_status"],
                 "evidence_weight": float(row["evidence_weight"]),
                 "revoked": bool(row["revoked"]),
-                "runtime_activation_safe": (
-                    question_runtime_activation_safe(
-                        question,
-                        status=row["release_status"],
-                    )
-                ),
             }
     return result
 

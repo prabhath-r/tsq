@@ -254,7 +254,10 @@ def restore_pre_shadow_schema(connection: sqlite3.Connection) -> None:
         """SELECT event_id, stream_id, metadata_json FROM events
            WHERE json_extract(
                  metadata_json, '$.policy_version'
-             )='recursive-evidence-graph-v18'
+             ) IN (
+                 'recursive-evidence-graph-v18',
+                 'recursive-evidence-graph-v19'
+             )
            ORDER BY stream_id, stream_version"""
     ).fetchall()
     event_guards = []
@@ -280,7 +283,10 @@ def restore_pre_shadow_schema(connection: sqlite3.Connection) -> None:
     connection.execute(
         """UPDATE decisions
            SET policy_version='recursive-evidence-graph-v17'
-           WHERE policy_version='recursive-evidence-graph-v18'"""
+           WHERE policy_version IN (
+               'recursive-evidence-graph-v18',
+               'recursive-evidence-graph-v19'
+           )"""
     )
     for policy_event in shadow_policy_events:
         metadata = json.loads(policy_event["metadata_json"])

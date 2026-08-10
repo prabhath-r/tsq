@@ -1517,7 +1517,8 @@ class BehavioralSimulator:
         }
         with self.engine.database.read() as connection:
             rows = connection.execute(
-                """SELECT q.id AS question_id, q.family_id,
+                """SELECT q.id AS question_id,
+                          tsq_canonical_family(q.family_id) AS family_id,
                           surface.concept_id AS surface_concept_id,
                           direct.objective_id,
                           objective.primary_concept_id

@@ -22,7 +22,6 @@ from tsq.authoring import (
     AuthoringJobs,
     CoveragePlanner,
     OfflineAuthoringPipeline,
-    QuarantineReviewQueue,
     deterministic_test_pipeline,
 )
 from tsq.cli import command_topics, main
@@ -408,6 +407,89 @@ class AuthoringTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def coverage_filter_fixture(self):
+        planner = CoveragePlanner(self.database)
+        objective_id = "lo_incremental_kv_cache"
+        misconception_id = "m_decode_cache_retains_queries"
+        self.reduce_direct_service_families(
+            objective_id,
+            misconception_id,
+        )
+        seed = next(
+            gap
+            for gap in planner.gaps(limit=1000)
+            if gap.blueprint.coverage_goal
+            == "objective_misconception_serviceability"
+            and gap.blueprint.learning_objective_id == objective_id
+            and gap.blueprint.target_misconception_id == misconception_id
+        )
+        catalog = self.database.get_catalog()
+        topic = next(
+            topic
+            for topic in catalog["topics"]
+            if seed.blueprint.concept_id
+            in {concept["id"] for concept in topic["concepts"]}
+        )
+        filters = {
+            "topic_filter": topic["id"],
+            "objective_filter": seed.blueprint.learning_objective_id,
+            "misconception_filter": (
+                seed.blueprint.target_misconception_id
+            ),
+            "goal_filter": seed.blueprint.coverage_goal,
+            "maximum_difficulty": seed.blueprint.target_difficulty,
+        }
+        expected = planner.gaps(limit=1000, **filters)
+        self.assertIn(seed, expected)
+        return planner, seed, topic, filters, expected
+
+    def reduce_direct_service_families(
+        self,
+        objective_id: str,
+        misconception_id: str,
+        *,
+        keep: int = 2,
+    ) -> None:
+        with self.database.read() as connection:
+            release_id = self.database.get_active_release_id(connection)
+            rows = connection.execute(
+                """SELECT DISTINCT q.id, q.family_id
+                   FROM release_option_objectives diagnostic
+                   JOIN release_question_objectives assessed
+                     ON assessed.release_id = diagnostic.release_id
+                    AND assessed.question_id = diagnostic.question_id
+                   JOIN options option
+                     ON option.question_id = diagnostic.question_id
+                    AND option.option_id = diagnostic.option_id
+                   JOIN release_questions membership
+                     ON membership.release_id = diagnostic.release_id
+                    AND membership.question_id = diagnostic.question_id
+                   JOIN questions q ON q.id = diagnostic.question_id
+                   WHERE diagnostic.release_id = ?
+                     AND diagnostic.objective_id = ?
+                     AND assessed.objective_id = diagnostic.objective_id
+                     AND option.misconception_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                     AND NOT EXISTS (
+                         SELECT 1 FROM question_revocations revoked
+                         WHERE revoked.question_id = diagnostic.question_id
+                     )
+                   ORDER BY q.family_id, q.id""",
+                (release_id, objective_id, misconception_id),
+            ).fetchall()
+        questions_by_family: dict[str, list[str]] = {}
+        for row in rows:
+            questions_by_family.setdefault(row["family_id"], []).append(
+                row["id"]
+            )
+        self.assertGreater(len(questions_by_family), keep)
+        for family_id in sorted(questions_by_family)[keep:]:
+            for question_id in questions_by_family[family_id]:
+                self.database.revoke_question(
+                    question_id,
+                    "Create deterministic authoring-capacity debt for testing.",
+                )
+
     def test_coverage_plan_targets_assessable_concepts_not_containers(self) -> None:
         gaps = CoveragePlanner(self.database).gaps(limit=1000)
         concept_ids = {gap.blueprint.concept_id for gap in gaps}
@@ -415,30 +497,82 @@ class AuthoringTestCase(unittest.TestCase):
         self.assertTrue(concept_ids)
         self.assertTrue(all(gap.target_count > gap.current_count for gap in gaps))
 
-    def test_coverage_plan_supports_narrow_operational_filters(self) -> None:
-        planner = CoveragePlanner(self.database)
-        gaps = planner.gaps(
-            limit=1000,
-            topic_filter="LLM Agents",
-            objective_filter="lo_agent_tool_authorization",
-            misconception_filter=(
-                "m_agent_tool_availability_is_authorization"
-            ),
-            goal_filter="objective_misconception_serviceability",
-            maximum_difficulty=-0.35,
+    def test_coverage_counts_reviewed_family_aliases_once(self) -> None:
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.coverage_goal == "concept_kind"
+            and gap.blueprint.concept_id
+            == "c_autoregressive_language_modeling"
+            and gap.blueprint.kind == "application"
         )
 
-        self.assertEqual(
-            [gap.blueprint.target_difficulty for gap in gaps],
-            [-1.0, -0.35],
+        # The published f_ar_fixed_weight_demonstrations label belongs to the
+        # reviewed f_ar_prompt_conditioning evidence family.
+        self.assertEqual(gap.current_count, 2)
+        self.assertEqual(gap.target_count, 3)
+
+    def test_exact_route_debt_uses_reviewed_family_count(self) -> None:
+        objective_id = "lo_attention_permutation_order"
+        misconception_id = "m_equivariance_means_pointwise_invariance"
+        with self.database.read() as connection:
+            release_id = self.database.get_active_release_id(connection)
+            question_ids = [
+                row["question_id"]
+                for row in connection.execute(
+                    """SELECT DISTINCT diagnostic.question_id
+                       FROM release_option_objectives diagnostic
+                       JOIN options option
+                         ON option.question_id = diagnostic.question_id
+                        AND option.option_id = diagnostic.option_id
+                       JOIN questions question
+                         ON question.id = diagnostic.question_id
+                       WHERE diagnostic.release_id = ?
+                         AND diagnostic.objective_id = ?
+                         AND option.misconception_id = ?
+                         AND tsq_canonical_family(question.family_id) = ?""",
+                    (
+                        release_id,
+                        objective_id,
+                        misconception_id,
+                        "f_attention_permutation_jacobian_audit",
+                    ),
+                )
+            ]
+        self.assertTrue(question_ids)
+        for question_id in question_ids:
+            self.database.revoke_question(
+                question_id,
+                "Create reviewed-family route debt for testing.",
+            )
+
+        gap = next(
+            gap
+            for gap in CoveragePlanner(self.database).gaps(limit=1000)
+            if gap.blueprint.coverage_goal
+            == "objective_misconception_serviceability"
+            and gap.blueprint.learning_objective_id == objective_id
+            and gap.blueprint.target_misconception_id == misconception_id
         )
+        self.assertEqual(gap.current_count, 2)
+        self.assertEqual(gap.target_count, 3)
+
+    def test_coverage_plan_supports_narrow_operational_filters(self) -> None:
+        planner, seed, _topic, filters, gaps = (
+            self.coverage_filter_fixture()
+        )
+
+        self.assertTrue(gaps)
         self.assertTrue(
             all(
-                gap.blueprint.concept_id == "c_agent_tool_use"
-                and gap.blueprint.learning_objective_id
-                == "lo_agent_tool_authorization"
-                and "m_agent_tool_availability_is_authorization"
+                gap.blueprint.learning_objective_id
+                == seed.blueprint.learning_objective_id
+                and seed.blueprint.target_misconception_id
                 in gap.blueprint.misconception_ids
+                and gap.blueprint.coverage_goal
+                == seed.blueprint.coverage_goal
+                and gap.blueprint.target_difficulty
+                <= seed.blueprint.target_difficulty
                 for gap in gaps
             )
         )
@@ -473,6 +607,9 @@ class AuthoringTestCase(unittest.TestCase):
         )
 
     def test_cli_coverage_filters_are_visible_and_do_not_enqueue(self) -> None:
+        _planner, _seed, topic, filters, expected = (
+            self.coverage_filter_fixture()
+        )
         output = io.StringIO()
         with redirect_stdout(output):
             exit_code = main(
@@ -481,27 +618,28 @@ class AuthoringTestCase(unittest.TestCase):
                     str(self.database.path),
                     "coverage",
                     "--topic",
-                    "LLM Agents",
+                    topic["id"],
                     "--objective",
-                    "lo_agent_tool_authorization",
+                    filters["objective_filter"],
                     "--misconception",
-                    "m_agent_tool_availability_is_authorization",
+                    filters["misconception_filter"],
                     "--goal",
-                    "objective_misconception_serviceability",
+                    filters["goal_filter"],
                     "--maximum-difficulty",
-                    "-0.35",
+                    str(filters["maximum_difficulty"]),
                     "--json",
                 ]
             )
 
         self.assertEqual(exit_code, 0)
         payload = json.loads(output.getvalue())
-        self.assertEqual(payload["gap_count"], 2)
+        self.assertEqual(payload["gap_count"], len(expected))
         self.assertEqual(payload["enqueued_job_ids"], [])
-        self.assertEqual(payload["filters"]["topic"], "LLM Agents")
+        self.assertEqual(payload["filters"]["topic"], topic["id"])
         self.assertTrue(
             all(
-                gap["blueprint"]["target_difficulty"] <= -0.35
+                gap["blueprint"]["target_difficulty"]
+                <= filters["maximum_difficulty"]
                 for gap in payload["gaps"]
             )
         )
@@ -513,669 +651,24 @@ class AuthoringTestCase(unittest.TestCase):
                 0,
             )
 
-    def test_quarantine_queue_exposes_content_bound_review_packets(self) -> None:
-        queue = QuarantineReviewQueue(self.database)
-        rows = queue.list(
-            topic="LLM Agents",
-            learning_objective_id="lo_agent_tool_authorization",
-        )
-        question_id = "q_agent_approval_argument_binding_001"
-        self.assertIn(
-            question_id,
-            {row["question_id"] for row in rows},
-        )
-        self.assertTrue(
-            all(
-                not row["runtime_eligible"]
-                and row["activation_ceiling"] == "quarantined"
-                for row in rows
-            )
-        )
-
-        detail = queue.show(question_id)
-        self.assertEqual(detail["question"]["status"], "quarantined")
-        self.assertEqual(detail["release_evidence_weight"], 0.0)
-        self.assertEqual(len(detail["question"]["options"]), 4)
-        self.assertTrue(
-            all(option["rationale"] for option in detail["question"]["options"])
-        )
-        self.assertTrue(detail["sources"])
-        self.assertTrue(detail["concepts"])
-        self.assertEqual(
-            detail["learning_objective"]["id"],
-            "lo_agent_tool_authorization",
-        )
-        self.assertEqual(
-            [row["id"] for row in detail["diagnostic_objectives"]],
-            ["lo_agent_tool_authorization"],
-        )
-        self.assertEqual(
-            {row["id"] for row in detail["misconceptions"]},
-            {
-                option["misconception_id"]
-                for option in detail["question"]["options"]
-                if option["misconception_id"] is not None
-            },
-        )
-        self.assertTrue(detail["local_family_comparison"])
-        self.assertTrue(detail["local_comparison_scope_complete"])
-        self.assertTrue(
-            detail["local_comparison_scope"]["included_if_same_family"]
-        )
-        self.assertTrue(
-            detail["local_comparison_scope"][
-                "same_family_rows_prioritized"
-            ]
-        )
-        self.assertTrue(
-            detail["local_comparison_scope"][
-                "secondary_concept_only_matches_included"
-            ]
-        )
-        self.assertTrue(
-            detail["local_comparison_scope"][
-                "included_if_any_mapped_concept_shared"
-            ]
-        )
-        self.assertTrue(
-            all(
-                comparison["same_family"]
-                or comparison["same_learning_objective"]
-                or comparison["same_primary_concept"]
-                or comparison["same_any_concept"]
-                for comparison in detail["local_family_comparison"]
-            )
-        )
-        self.assertTrue(
-            all(
-                comparison["same_any_concept"]
-                == bool(comparison["shared_concept_ids"])
-                for comparison in detail["local_family_comparison"]
-            )
-        )
-        self.assertIs(
-            detail["provenance_claims"]["human_review"],
-            False,
-        )
-
-        packet = queue.packet(question_id)
-        packet_core = dict(packet)
-        packet_digest = packet_core.pop("packet_sha256")
-        self.assertEqual(packet_digest, canonical_sha256(packet_core))
-        self.assertFalse(
-            packet["review_contract"]["automatic_activation_permitted"]
-        )
-        self.assertTrue(
-            packet["review_contract"]["human_activation_review_required"]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "blind_solver_must_not_receive_critic_material"
-            ]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "blind_solver_must_not_receive_family_material"
-            ]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "family_reviewer_must_not_receive_critic_material"
-            ]
-        )
-        self.assertFalse(
-            packet["review_contract"][
-                "combined_packet_itself_enforces_stage_isolation"
-            ]
-        )
-        self.assertTrue(
-            packet["review_contract"]["stage_sequence_advisory_only"]
-        )
-        self.assertTrue(
-            packet["review_contract"]["stage_exports_are_not_access_control"]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "family_material_family_assignment_fields_blind"
-            ]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "family_material_selection_family_enriched"
-            ]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "family_material_selection_concept_enriched"
-            ]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "family_material_scope_fields_blind"
-            ]
-        )
-        self.assertFalse(
-            packet["review_contract"]["family_independence_claim_resolved"]
-        )
-        self.assertIn("critic_material", packet)
-        forbidden_blind_fields = {
-            "correct",
-            "rationale",
-            "misconception_id",
-            "diagnostic_objective_id",
-            "provenance",
-            "recorded_item_reviews",
-        }
-        forbidden_family_fields = forbidden_blind_fields | {
-            "family_id",
-            "independence_note",
-            "release_status",
-            "same_family",
-            "same_learning_objective",
-            "same_primary_concept",
-            "shared_concept_ids",
-            "same_any_concept",
-            "secondary_concept_only",
-            "comparison_scope_priority",
-            "source_ids",
-        }
-        self.assertTrue(
-            forbidden_blind_fields.isdisjoint(
-                set(nested_keys(packet["blind_solver_material"]))
-            )
-        )
-        self.assertTrue(
-            forbidden_family_fields.isdisjoint(
-                set(nested_keys(packet["family_reviewer_material"]))
-            )
-        )
-        self.assertEqual(packet, queue.packet(question_id))
-        blind = queue.packet(question_id, stage="blind")
-        family = queue.packet(question_id, stage="family")
-        critic = queue.packet(question_id, stage="critic")
-        self.assertEqual(
-            packet["schema"],
-            "tsq-quarantine-review-packet-v3",
-        )
-        self.assertEqual(blind["stage"], "blind")
-        self.assertEqual(family["stage"], "family")
-        self.assertEqual(critic["stage"], "critic")
-        self.assertEqual(
-            {blind["schema"], family["schema"], critic["schema"]},
-            {"tsq-quarantine-review-stage-v2"},
-        )
-        self.assertEqual(
-            blind["coordinator_packet_sha256"],
-            packet["packet_sha256"],
-        )
-        self.assertEqual(
-            family["coordinator_packet_sha256"],
-            packet["packet_sha256"],
-        )
-        self.assertEqual(
-            critic["coordinator_packet_sha256"],
-            packet["packet_sha256"],
-        )
-        self.assertEqual(
-            blind["material_sha256"],
-            packet["blind_solver_material_sha256"],
-        )
-        self.assertEqual(
-            family["material_sha256"],
-            packet["family_reviewer_material_sha256"],
-        )
-        self.assertEqual(
-            critic["material_sha256"],
-            packet["critic_material_sha256"],
-        )
-        self.assertTrue(
-            forbidden_blind_fields.isdisjoint(
-                set(nested_keys(blind["material"]))
-            )
-        )
-        self.assertTrue(
-            forbidden_family_fields.isdisjoint(
-                set(nested_keys(family["material"]))
-            )
-        )
-        self.assertNotIn(
-            "local_family_comparison",
-            blind["material"],
-        )
-        self.assertTrue(
-            family["material"]["comparison_questions"],
-        )
-        with self.assertRaises(ValidationError):
-            queue.packet(question_id, stage="keyed-and-blind")
-        with tempfile.TemporaryDirectory() as directory:
-            replica = Database(Path(directory) / "replica.db")
-            replica.initialize()
-            replica.import_corpus(
-                *read_and_parse(CORPUS, include_catalog=True)
-            )
-            replica_queue = QuarantineReviewQueue(replica)
-            self.assertEqual(packet, replica_queue.packet(question_id))
-            self.assertEqual(
-                blind,
-                replica_queue.packet(question_id, stage="blind"),
-            )
-            self.assertEqual(
-                family,
-                replica_queue.packet(question_id, stage="family"),
-            )
-        with self.assertRaises(NotFoundError):
-            queue.show("q_agent_tool_execution_boundary_001")
-
-    def test_family_review_prioritizes_reused_transformer_family(
-        self,
-    ) -> None:
-        queue = QuarantineReviewQueue(self.database)
-        cases = (
-            (
-                "q_attention_runtime_workspace_boundary_001",
-                "f_transformer_sequence_shape_audit",
-                "q_transformer_sequence_shape_audit_001",
-                "approved",
-            ),
-            (
-                "q_transformer_unexpected_cross_token_path_001",
-                "f_transformer_axis_mixing",
-                "q_transformer_token_mixing_001",
-                "quarantined",
-            ),
-            (
-                "q_generative_prior_shift_001",
-                "f_label_shift_prior_odds",
-                "q_shift_prior_odds_correction_001",
-                "quarantined",
-            ),
-        )
-        forbidden_fields = {
-            "correct",
-            "rationale",
-            "misconception_id",
-            "diagnostic_objective_id",
-            "provenance",
-            "independence_note",
-            "recorded_item_reviews",
-            "family_id",
-            "release_status",
-            "same_family",
-            "same_learning_objective",
-            "same_primary_concept",
-            "shared_concept_ids",
-            "same_any_concept",
-            "secondary_concept_only",
-            "comparison_scope_priority",
-            "source_ids",
-        }
-        for question_id, family_id, neighbor_id, release_status in cases:
-            with self.subTest(question_id=question_id):
-                detail = queue.show(question_id)
-                same_family_rows = [
-                    comparison
-                    for comparison in detail["local_family_comparison"]
-                    if comparison["same_family"]
-                ]
-                self.assertTrue(same_family_rows)
-                self.assertEqual(
-                    detail["local_family_comparison"][
-                        : len(same_family_rows)
-                    ],
-                    same_family_rows,
-                )
-                same_family = next(
-                    comparison
-                    for comparison in same_family_rows
-                    if comparison["question"]["id"] == neighbor_id
-                )
-                self.assertEqual(
-                    same_family["question"]["id"],
-                    neighbor_id,
-                )
-                self.assertEqual(
-                    same_family["question"]["family_id"],
-                    family_id,
-                )
-                self.assertEqual(
-                    same_family["release_status"],
-                    release_status,
-                )
-                self.assertEqual(
-                    detail["same_family_comparison_total"],
-                    len(same_family_rows),
-                )
-                self.assertEqual(
-                    detail["same_family_comparison_included"],
-                    len(same_family_rows),
-                )
-                self.assertTrue(
-                    detail["same_family_scope_complete"],
-                )
-
-                family_packet = queue.packet(
-                    question_id,
-                    stage="family",
-                )
-                [redacted_neighbor] = [
-                    comparison
-                    for comparison in family_packet["material"][
-                        "comparison_questions"
-                    ]
-                    if comparison["question"]["id"] == neighbor_id
-                ]
-                self.assertEqual(
-                    redacted_neighbor["question"]["id"],
-                    neighbor_id,
-                )
-                self.assertTrue(
-                    forbidden_fields.isdisjoint(
-                        set(nested_keys(family_packet["material"]))
-                    )
-                )
-
-    def test_family_review_includes_secondary_concept_neighbors(
-        self,
-    ) -> None:
-        queue = QuarantineReviewQueue(self.database)
-        cases = {
-            "q_transformer_kv_cache_eviction_equivalence_001": {
-                "q_attention_window_resource_contrast_001",
-                "q_attention_flash_io_arithmetic_001",
-            },
-            "q_transformer_kv_cache_alignment_001": {
-                "q_attention_value_routing_001",
-                "q_attention_value_role_ablation_001",
-                "q_attention_value_projection_counterfactual_001",
-                "q_attention_value_perturbation_001",
-            },
-        }
-        priority = {
-            "same_family": 0,
-            "same_direct_learning_objective": 1,
-            "same_primary_concept": 2,
-            "secondary_concept_only": 3,
-        }
-        family_forbidden_fields = {
-            "correct",
-            "rationale",
-            "misconception_id",
-            "diagnostic_objective_id",
-            "provenance",
-            "independence_note",
-            "family_id",
-            "release_status",
-            "same_family",
-            "same_learning_objective",
-            "same_primary_concept",
-            "shared_concept_ids",
-            "same_any_concept",
-            "secondary_concept_only",
-            "comparison_scope_priority",
-            "source_ids",
-        }
-
-        for question_id, expected_neighbor_ids in cases.items():
-            with self.subTest(question_id=question_id):
-                detail = queue.show(question_id)
-                comparisons = detail["local_family_comparison"]
-                maximum_rows = detail["local_comparison_scope"][
-                    "maximum_rows"
-                ]
-                self.assertLessEqual(
-                    len(comparisons),
-                    maximum_rows,
-                )
-                if detail["local_comparison_scope_complete"]:
-                    self.assertLessEqual(
-                        detail["local_comparison_total_lower_bound"],
-                        maximum_rows,
-                    )
-                else:
-                    self.assertEqual(
-                        detail["local_comparison_total_lower_bound"],
-                        maximum_rows + 1,
-                    )
-                self.assertEqual(
-                    [
-                        priority[row["comparison_scope_priority"]]
-                        for row in comparisons
-                    ],
-                    sorted(
-                        priority[row["comparison_scope_priority"]]
-                        for row in comparisons
-                    ),
-                )
-                by_question_id = {
-                    row["question"]["id"]: row for row in comparisons
-                }
-                self.assertTrue(
-                    expected_neighbor_ids <= set(by_question_id)
-                )
-                for neighbor_id in expected_neighbor_ids:
-                    neighbor = by_question_id[neighbor_id]
-                    self.assertTrue(neighbor["same_any_concept"])
-                    self.assertTrue(
-                        neighbor["secondary_concept_only"]
-                    )
-                    self.assertEqual(
-                        neighbor["comparison_scope_priority"],
-                        "secondary_concept_only",
-                    )
-                    self.assertIn(
-                        "c_attention",
-                        neighbor["shared_concept_ids"],
-                    )
-
-                first_packet = queue.packet(
-                    question_id, stage="family"
-                )
-                second_packet = queue.packet(
-                    question_id, stage="family"
-                )
-                self.assertEqual(first_packet, second_packet)
-                packet_neighbor_ids = {
-                    row["question"]["id"]
-                    for row in first_packet["material"][
-                        "comparison_questions"
-                    ]
-                }
-                self.assertTrue(
-                    expected_neighbor_ids <= packet_neighbor_ids
-                )
-                self.assertEqual(
-                    first_packet["material"][
-                        "comparison_scope_complete"
-                    ],
-                    detail["local_comparison_scope_complete"],
-                )
-                self.assertEqual(
-                    first_packet["material"][
-                        "comparison_total_lower_bound"
-                    ],
-                    detail["local_comparison_total_lower_bound"],
-                )
-                self.assertTrue(
-                    family_forbidden_fields.isdisjoint(
-                        set(nested_keys(first_packet["material"]))
-                    )
-                )
-
-    def test_family_review_reports_same_family_truncation(self) -> None:
-        bundle = load_bundle(CORPUS)
-        candidate = next(
-            question
-            for question in bundle["questions"]
-            if question["id"]
-            == "q_attention_runtime_workspace_boundary_001"
-        )
-        for index in range(100):
-            comparison = copy.deepcopy(candidate)
-            comparison["id"] = (
-                f"q_packet_same_family_fixture_{index:03d}"
-            )
-            comparison["stem"] = (
-                candidate["stem"][:-1]
-                + f" Same-family scope fixture {index:03d}?"
-            )
-            bundle["questions"].append(comparison)
-        cross_scope = copy.deepcopy(candidate)
-        cross_scope["id"] = "q_aaa_packet_cross_scope_fixture_001"
-        cross_scope["stem"] = (
-            candidate["stem"][:-1] + " Cross-scope fixture?"
-        )
-        cross_scope["learning_objective_id"] = (
-            "lo_transformer_information_paths"
-        )
-        cross_scope["concepts"] = [
-            {
-                "concept_id": "c_transformers",
-                "weight": 0.6,
-                "role": "primary",
-            },
-            {
-                "concept_id": "c_attention",
-                "weight": 0.4,
-                "role": "supporting",
-            },
-        ]
-        bundle["questions"].append(cross_scope)
-
-        parsed = parse_bundle(bundle)
-        catalog = read_and_parse(CORPUS, include_catalog=True)[5:]
-        with tempfile.TemporaryDirectory() as directory:
-            database = Database(Path(directory) / "comparison.db")
-            database.initialize()
-            database.import_corpus(*parsed, *catalog)
-            queue = QuarantineReviewQueue(database)
-            detail = queue.show(candidate["id"])
-            packet = queue.packet(candidate["id"])
-            family_stage = queue.packet(
-                candidate["id"],
-                stage="family",
-            )
-
-        self.assertEqual(
-            detail["same_family_comparison_total"],
-            102,
-        )
-        self.assertEqual(
-            detail["same_family_comparison_included"],
-            100,
-        )
-        self.assertFalse(detail["same_family_scope_complete"])
-        self.assertFalse(detail["local_comparison_scope_complete"])
-        self.assertFalse(
-            packet["review_contract"]["same_family_scope_complete"]
-        )
-        self.assertFalse(
-            packet["review_contract"][
-                "family_independence_claim_resolved"
-            ]
-        )
-        self.assertNotIn(
-            "same_family_scope_complete",
-            family_stage["material"],
-        )
-        self.assertEqual(len(detail["local_family_comparison"]), 100)
-        self.assertTrue(
-            all(
-                comparison["same_family"]
-                for comparison in detail["local_family_comparison"]
-            )
-        )
-        cross_scope_detail = next(
-            comparison
-            for comparison in detail["local_family_comparison"]
-            if comparison["question"]["id"] == cross_scope["id"]
-        )
-        self.assertFalse(
-            cross_scope_detail["same_learning_objective"]
-        )
-        self.assertFalse(cross_scope_detail["same_primary_concept"])
-
-    def test_quarantine_queue_uses_release_topics_and_all_concept_mappings(
-        self,
-    ) -> None:
-        queue = QuarantineReviewQueue(self.database)
-        for row in queue.list(limit=500):
-            self.assertNotIn("provider", row["provenance_claims"])
-        foundation_ids = {
-            row["question_id"]
-            for row in queue.list(topic="t_ml_foundations", limit=500)
-        }
-        self.assertEqual(len(foundation_ids), 8)
-        self.assertIn(
-            "q_conditional_independence_common_cause_001",
-            foundation_ids,
-        )
-        transformer_ids = {
-            row["question_id"]
-            for row in queue.list(concept_id="c_transformers", limit=500)
-        }
-        self.assertIn("q_causal_mask_matrix_001", transformer_ids)
-        self.assertIn(
-            "q_causal_cross_attention_mask_scope_001",
-            transformer_ids,
-        )
-        for kwargs in (
-            {"concept_id": "c_not_in_release"},
-            {"learning_objective_id": "lo_not_in_release"},
-            {"topic": "Topic That Does Not Exist"},
-        ):
-            with self.subTest(kwargs=kwargs):
-                with self.assertRaises(NotFoundError):
-                    queue.list(**kwargs)
-
-    def test_revoked_quarantine_packet_preserves_revocation_ceiling(
-        self,
-    ) -> None:
-        question_id = "q_agent_approval_argument_binding_001"
-        reason = "Review found a superseding content concern."
-        self.database.revoke_question(question_id, reason)
-
-        queue = QuarantineReviewQueue(self.database)
-        listed = next(
-            row
-            for row in queue.list(topic="LLM Agents", limit=500)
-            if row["question_id"] == question_id
-        )
-        self.assertTrue(listed["revoked"])
-        self.assertEqual(listed["activation_ceiling"], "revoked")
-        self.assertEqual(listed["revocation_reason"], reason)
-
-        detail = queue.show(question_id)
-        self.assertEqual(detail["activation_ceiling"], "revoked")
-        self.assertEqual(detail["revocation"]["reason"], reason)
-        packet = queue.packet(question_id)
-        self.assertEqual(packet["activation_ceiling"], "revoked")
-        self.assertFalse(
-            packet["review_contract"]["human_activation_review_required"]
-        )
-        self.assertTrue(
-            packet["review_contract"]["revoked_identity_must_not_be_promoted"]
-        )
-        self.assertTrue(
-            packet["review_contract"][
-                "new_immutable_revision_required_if_reconsidered"
-            ]
-        )
-
     def test_filtered_cli_enqueue_is_idempotent(self) -> None:
+        _planner, _seed, topic, filters, expected = (
+            self.coverage_filter_fixture()
+        )
         arguments = [
             "--db",
             str(self.database.path),
             "coverage",
             "--topic",
-            "LLM Agents",
+            topic["id"],
             "--objective",
-            "lo_agent_tool_authorization",
+            filters["objective_filter"],
             "--misconception",
-            "m_agent_tool_availability_is_authorization",
+            filters["misconception_filter"],
             "--goal",
-            "objective_misconception_serviceability",
+            filters["goal_filter"],
             "--maximum-difficulty",
-            "-0.35",
+            str(filters["maximum_difficulty"]),
             "--enqueue",
             "--json",
         ]
@@ -1189,67 +682,17 @@ class AuthoringTestCase(unittest.TestCase):
             payloads[0]["enqueued_job_ids"],
             payloads[1]["enqueued_job_ids"],
         )
-        self.assertEqual(len(payloads[0]["enqueued_job_ids"]), 2)
+        self.assertEqual(
+            len(payloads[0]["enqueued_job_ids"]), len(expected)
+        )
         with self.database.read() as connection:
             self.assertEqual(
                 connection.execute(
                     "SELECT COUNT(*) AS n FROM generation_jobs"
                 ).fetchone()["n"],
-                2,
+                len(expected),
             )
 
-    def test_cli_quarantine_commands_are_read_only(self) -> None:
-        question_id = "q_agent_approval_argument_binding_001"
-        before = hashlib.sha256(self.database.path.read_bytes()).hexdigest()
-        commands = (
-            (
-                "list",
-                "--topic",
-                "LLM Agents",
-                "--objective",
-                "lo_agent_tool_authorization",
-            ),
-            ("show", question_id),
-            ("packet", question_id, "--stage", "combined"),
-            ("packet", question_id, "--stage", "blind"),
-            ("packet", question_id, "--stage", "family"),
-            ("packet", question_id, "--stage", "critic"),
-        )
-        for command in commands:
-            output = io.StringIO()
-            with redirect_stdout(output):
-                exit_code = main(
-                    [
-                        "--db",
-                        str(self.database.path),
-                        "quarantine",
-                        *command,
-                        "--json",
-                    ]
-                )
-            self.assertEqual(exit_code, 0)
-            json.loads(output.getvalue())
-        self.assertEqual(
-            hashlib.sha256(self.database.path.read_bytes()).hexdigest(),
-            before,
-        )
-
-        output = io.StringIO()
-        with redirect_stdout(output):
-            exit_code = main(
-                [
-                    "--db",
-                    str(self.database.path),
-                    "quarantine",
-                    "packet",
-                    question_id,
-                    "--stage",
-                    "blind",
-                ]
-            )
-        self.assertEqual(exit_code, 0)
-        self.assertIn(question_id, output.getvalue())
-        self.assertIn("stage: blind", output.getvalue())
 
     def test_objective_blueprints_are_release_pinned_and_semantically_complete(self) -> None:
         gap = next(
@@ -1303,32 +746,9 @@ class AuthoringTestCase(unittest.TestCase):
                 for gap in CoveragePlanner(self.database).gaps(limit=1000)
             )
         )
-        with self.database.read() as connection:
-            release_id = self.database.get_active_release_id(connection)
-            trigger = connection.execute(
-                """SELECT DISTINCT q.id
-                   FROM release_option_objectives diagnostic
-                   JOIN options option
-                     ON option.question_id = diagnostic.question_id
-                    AND option.option_id = diagnostic.option_id
-                   JOIN release_questions membership
-                     ON membership.release_id = diagnostic.release_id
-                    AND membership.question_id = diagnostic.question_id
-                   JOIN questions q ON q.id = diagnostic.question_id
-                   WHERE diagnostic.release_id = ?
-                     AND diagnostic.objective_id = ?
-                     AND option.misconception_id = ?
-                     AND membership.status IN ('approved', 'calibrated')
-                     AND NOT EXISTS (
-                         SELECT 1 FROM question_revocations revoked
-                         WHERE revoked.question_id = diagnostic.question_id
-                     )
-                   ORDER BY q.id LIMIT 1""",
-                (release_id, objective_id, misconception_id),
-            ).fetchone()
-        self.assertIsNotNone(trigger)
-        self.database.revoke_question(
-            trigger["id"], "Objective authoring serviceability regression."
+        self.reduce_direct_service_families(
+            objective_id,
+            misconception_id,
         )
 
         gaps = CoveragePlanner(self.database).gaps(limit=1000)
@@ -1338,8 +758,9 @@ class AuthoringTestCase(unittest.TestCase):
             if gap.blueprint.learning_objective_id == objective_id
             and gap.blueprint.target_misconception_id == misconception_id
         ]
-        self.assertEqual(len(exact), 1)
-        self.assertEqual((exact[0].current_count, exact[0].target_count), (2, 3))
+        self.assertTrue(exact)
+        self.assertEqual(exact[0].target_count, 3)
+        self.assertLess(exact[0].current_count, exact[0].target_count)
         self.assertEqual(exact[0].blueprint.kind, "transfer")
         self.assertEqual(
             exact[0].blueprint.coverage_goal,
@@ -1350,7 +771,7 @@ class AuthoringTestCase(unittest.TestCase):
         incomplete = OfflineAuthoringPipeline(
             self.database, FakeGenerator(), (AcceptingReviewer(),)
         ).run_job(job_id, "Approved source excerpt.")
-        self.assertFalse(incomplete["accepted_for_reviewed_quarantine"])
+        self.assertFalse(incomplete["accepted_for_review"])
         self.assertIn(
             "missing_exact_diagnostic_targets",
             {issue["code"] for issue in incomplete["deterministic_issues"]},
@@ -1359,36 +780,9 @@ class AuthoringTestCase(unittest.TestCase):
     def test_cross_objective_diagnoses_do_not_count_as_direct_repair_families(self) -> None:
         objective_id = "lo_transformer_information_paths"
         misconception_id = "m_feedforward_layers_mix_token_positions"
-        with self.database.read() as connection:
-            release_id = self.database.get_active_release_id(connection)
-            direct = connection.execute(
-                """SELECT DISTINCT q.id
-                   FROM release_option_objectives diagnostic
-                   JOIN release_question_objectives assessed
-                     ON assessed.release_id = diagnostic.release_id
-                    AND assessed.question_id = diagnostic.question_id
-                   JOIN options option
-                     ON option.question_id = diagnostic.question_id
-                    AND option.option_id = diagnostic.option_id
-                   JOIN release_questions membership
-                     ON membership.release_id = diagnostic.release_id
-                    AND membership.question_id = diagnostic.question_id
-                   JOIN questions q ON q.id = diagnostic.question_id
-                   WHERE diagnostic.release_id = ?
-                     AND diagnostic.objective_id = ?
-                     AND assessed.objective_id = diagnostic.objective_id
-                     AND option.misconception_id = ?
-                     AND membership.status IN ('approved', 'calibrated')
-                     AND NOT EXISTS (
-                         SELECT 1 FROM question_revocations revoked
-                         WHERE revoked.question_id = diagnostic.question_id
-                     )
-                   ORDER BY q.id LIMIT 1""",
-                (release_id, objective_id, misconception_id),
-            ).fetchone()
-        self.assertIsNotNone(direct)
-        self.database.revoke_question(
-            direct["id"], "Cross-objective capacity counting regression."
+        self.reduce_direct_service_families(
+            objective_id,
+            misconception_id,
         )
         exact = next(
             gap
@@ -1398,9 +792,10 @@ class AuthoringTestCase(unittest.TestCase):
             and gap.blueprint.learning_objective_id == objective_id
             and misconception_id in gap.blueprint.misconception_ids
         )
-        self.assertEqual((exact.current_count, exact.target_count), (2, 3))
+        self.assertEqual(exact.target_count, 3)
+        self.assertLess(exact.current_count, exact.target_count)
 
-    def test_objective_fixture_round_trips_through_schema_v2_in_quarantine(self) -> None:
+    def test_accepted_objective_fixture_round_trips_through_schema_v2(self) -> None:
         gap = next(
             gap
             for gap in CoveragePlanner(self.database).gaps(limit=1000)
@@ -1413,7 +808,7 @@ class AuthoringTestCase(unittest.TestCase):
         )
         item = result["item"]
         self.assertEqual(result["status"], "reviewed")
-        self.assertEqual(item["status"], "quarantined")
+        self.assertEqual(item["status"], "approved")
         self.assertEqual(
             item["learning_objective_id"], gap.blueprint.learning_objective_id
         )
@@ -1430,7 +825,7 @@ class AuthoringTestCase(unittest.TestCase):
         bundle["questions"].append(item)
         parsed_questions = parse_bundle(bundle)[4]
         parsed = next(question for question in parsed_questions if question.id == item["id"])
-        self.assertEqual(parsed.status.value, "quarantined")
+        self.assertEqual(parsed.status.value, "approved")
         self.assertEqual(parsed.objective_id, gap.blueprint.learning_objective_id)
         self.assertTrue(
             all(
@@ -1452,7 +847,7 @@ class AuthoringTestCase(unittest.TestCase):
         missing = OfflineAuthoringPipeline(
             self.database, MissingObjectiveGenerator(), (AcceptingReviewer(),)
         ).run_job(first_job, "Approved source excerpt.")
-        self.assertFalse(missing["accepted_for_reviewed_quarantine"])
+        self.assertFalse(missing["accepted_for_review"])
         self.assertIn(
             "blueprint_objective_mismatch",
             {issue["code"] for issue in missing["deterministic_issues"]},
@@ -1465,7 +860,7 @@ class AuthoringTestCase(unittest.TestCase):
             WrongDiagnosticObjectiveGenerator(),
             (AcceptingReviewer(),),
         ).run_job(second_job, "Approved source excerpt.")
-        self.assertFalse(retargeted["accepted_for_reviewed_quarantine"])
+        self.assertFalse(retargeted["accepted_for_review"])
         self.assertIn(
             "blueprint_diagnostic_objective_mismatch",
             {issue["code"] for issue in retargeted["deterministic_issues"]},
@@ -1508,7 +903,7 @@ class AuthoringTestCase(unittest.TestCase):
             self.database, FakeGenerator(), (AcceptingReviewer(),)
         ).run_job(job_id, "Approved source excerpt for a legacy job.")
         self.assertEqual(result["status"], "reviewed")
-        self.assertEqual(result["item"]["status"], "quarantined")
+        self.assertEqual(result["item"]["status"], "approved")
 
     def test_v2_blueprint_without_release_pin_fails_before_claim(self) -> None:
         gap = next(
@@ -1534,7 +929,7 @@ class AuthoringTestCase(unittest.TestCase):
             ).run_job(job_id, "Approved source excerpt.")
         self.assertEqual(AuthoringJobs(self.database).show(job_id)["status"], "planned")
 
-    def test_duplicate_quarantined_family_is_rejected_across_jobs(self) -> None:
+    def test_duplicate_prior_artifact_is_rejected_across_jobs(self) -> None:
         gap = next(
             gap
             for gap in CoveragePlanner(self.database).gaps(limit=1000)
@@ -1555,8 +950,8 @@ class AuthoringTestCase(unittest.TestCase):
         )
         self.assertEqual(second["status"], "rejected")
         codes = {issue["code"] for issue in second["deterministic_issues"]}
-        self.assertIn("quarantine_family_collision", codes)
-        self.assertIn("quarantine_question_id_collision", codes)
+        self.assertIn("prior_artifact_family_collision", codes)
+        self.assertIn("prior_artifact_question_id_collision", codes)
 
     def test_concurrent_jobs_cannot_certify_the_same_generated_family(self) -> None:
         gap = next(
@@ -1601,41 +996,69 @@ class AuthoringTestCase(unittest.TestCase):
         )
         rejected = next(result for result in results if result["status"] == "rejected")
         codes = {issue["code"] for issue in rejected["deterministic_issues"]}
-        self.assertIn("quarantine_family_collision", codes)
-        self.assertIn("quarantine_question_id_collision", codes)
+        self.assertIn("prior_artifact_family_collision", codes)
+        self.assertIn("prior_artifact_question_id_collision", codes)
         self.assertTrue(self.database.verify_integrity()["ok"])
 
     def test_coverage_plan_excludes_revoked_items_from_all_live_evidence(self) -> None:
         planner = CoveragePlanner(self.database)
-        initial = planner.gaps(limit=1000)
-        attention = [
+        with self.database.read() as connection:
+            release_id = self.database.get_active_release_id(connection)
+            rows = connection.execute(
+                """SELECT q.id, q.family_id
+                   FROM release_questions membership
+                   JOIN questions q ON q.id = membership.question_id
+                   JOIN question_concepts mapping
+                     ON mapping.question_id = q.id
+                    AND mapping.role = 'primary'
+                   WHERE membership.release_id = ?
+                     AND membership.status IN ('approved', 'calibrated')
+                     AND mapping.concept_id = 'c_attention'
+                     AND q.kind = 'conceptual'
+                   ORDER BY q.family_id, q.id""",
+                (release_id,),
+            ).fetchall()
+        questions_by_family: dict[str, list[str]] = {}
+        for row in rows:
+            questions_by_family.setdefault(row["family_id"], []).append(
+                row["id"]
+            )
+        target = CoveragePlanner.KIND_TARGETS["conceptual"]
+        self.assertGreaterEqual(len(questions_by_family), target)
+        retained_family = sorted(questions_by_family)[0]
+        for family_id in sorted(questions_by_family)[1:]:
+            for question_id in questions_by_family[family_id]:
+                self.database.revoke_question(
+                    question_id,
+                    "Create deterministic concept-kind debt for testing.",
+                )
+
+        one_missing = [
             gap
-            for gap in initial
+            for gap in planner.gaps(limit=1000)
             if gap.blueprint.concept_id == "c_attention"
             and gap.blueprint.kind == "conceptual"
         ]
-        self.assertEqual(len(attention), 1)
-        self.assertEqual(attention[0].current_count, 1)
-        original_sources = attention[0].blueprint.source_ids
-        self.assertIn("src_goodfellow_dl_2016", original_sources)
-
-        self.database.revoke_question(
-            "q_attention_sequence_scaling_001",
-            "Coverage regression: item is no longer selectable.",
+        self.assertEqual(len(one_missing), target - 1)
+        self.assertTrue(
+            all(gap.current_count == 1 for gap in one_missing)
         )
 
-        updated = planner.gaps(limit=1000)
-        attention = [
+        for question_id in questions_by_family[retained_family]:
+            self.database.revoke_question(
+                question_id,
+                "Remove the final concept-kind family for testing.",
+            )
+        all_missing = [
             gap
-            for gap in updated
+            for gap in planner.gaps(limit=1000)
             if gap.blueprint.concept_id == "c_attention"
             and gap.blueprint.kind == "conceptual"
         ]
-        self.assertEqual(len(attention), 2)
-        self.assertTrue(all(gap.current_count == 0 for gap in attention))
-        self.assertTrue(attention[0].blueprint.misconception_ids)
-        self.assertNotIn("src_goodfellow_dl_2016", attention[0].blueprint.source_ids)
-        self.assertNotEqual(original_sources, attention[0].blueprint.source_ids)
+        self.assertEqual(len(all_missing), target)
+        self.assertTrue(
+            all(gap.current_count == 0 for gap in all_missing)
+        )
 
     def test_topics_excludes_revoked_questions_from_direct_counts(self) -> None:
         def topic_count() -> int:
@@ -1659,7 +1082,7 @@ class AuthoringTestCase(unittest.TestCase):
         )
         self.assertEqual(topic_count(), initial_count - 1)
 
-    def test_generated_item_is_forced_into_quarantine(self) -> None:
+    def test_reviewed_generated_item_is_approved(self) -> None:
         planner = CoveragePlanner(self.database)
         gap = next(gap for gap in planner.gaps(limit=1000) if gap.blueprint.misconception_ids)
         job_id = planner.enqueue([gap])[0]
@@ -1667,15 +1090,15 @@ class AuthoringTestCase(unittest.TestCase):
             self.database, FakeGenerator(), (AcceptingReviewer(),)
         )
         result = pipeline.run_job(job_id, "approved source excerpt")
-        self.assertEqual(result["item"]["status"], "quarantined")
+        self.assertEqual(result["item"]["status"], "approved")
         self.assertTrue(result["accepted_by_critics"])
-        self.assertTrue(result["accepted_for_reviewed_quarantine"])
+        self.assertTrue(result["accepted_for_review"])
         with self.database.read() as connection:
             row = connection.execute(
                 "SELECT status, raw_output_json FROM generation_jobs WHERE id = ?", (job_id,)
             ).fetchone()
         self.assertEqual(row["status"], "reviewed")
-        self.assertIn('"status": "quarantined"', row["raw_output_json"])
+        self.assertIn('"status": "approved"', row["raw_output_json"])
 
     def test_critic_acceptance_cannot_bypass_deterministic_validation(self) -> None:
         planner = CoveragePlanner(self.database)
@@ -1685,7 +1108,7 @@ class AuthoringTestCase(unittest.TestCase):
             self.database, BrokenGenerator(), (AcceptingReviewer(),)
         ).run_job(job_id, "approved source excerpt")
         self.assertTrue(result["accepted_by_critics"])
-        self.assertFalse(result["accepted_for_reviewed_quarantine"])
+        self.assertFalse(result["accepted_for_review"])
         self.assertTrue(result["deterministic_issues"])
         with self.database.read() as connection:
             status = connection.execute(
@@ -1715,7 +1138,7 @@ class AuthoringTestCase(unittest.TestCase):
         messages = " ".join(issue["message"] for issue in result["deterministic_issues"])
         self.assertIn("options[1].correct must be a JSON boolean", messages)
         self.assertIn("'difficulty' must be a finite JSON number", messages)
-        self.assertFalse(result["accepted_for_reviewed_quarantine"])
+        self.assertFalse(result["accepted_for_review"])
         with self.database.read() as connection:
             status = connection.execute(
                 "SELECT status FROM generation_jobs WHERE id = ?", (job_id,)
@@ -1729,7 +1152,7 @@ class AuthoringTestCase(unittest.TestCase):
         result = OfflineAuthoringPipeline(
             self.database, NonObjectGenerator(), (AcceptingReviewer(),)
         ).run_job(job_id, "approved source excerpt")
-        self.assertFalse(result["accepted_for_reviewed_quarantine"])
+        self.assertFalse(result["accepted_for_review"])
         self.assertEqual(result["item"]["generator_output_rejected"], True)
         self.assertIn(
             "Generated item must be a JSON object",
@@ -1786,7 +1209,7 @@ class AuthoringTestCase(unittest.TestCase):
                 self.assertEqual(result["status"], "rejected")
                 self.assertTrue(result["deterministic_issues"])
                 self.assertFalse(
-                    result["accepted_for_reviewed_quarantine"]
+                    result["accepted_for_review"]
                 )
 
     def test_reviewers_receive_blinded_isolated_copies(self) -> None:
@@ -1819,7 +1242,7 @@ class AuthoringTestCase(unittest.TestCase):
             result["item"]["options"][0]["text"],
             "A reviewer attempted to replace an option.",
         )
-        self.assertTrue(result["accepted_for_reviewed_quarantine"])
+        self.assertTrue(result["accepted_for_review"])
 
     def test_reviewer_identities_must_be_unique_and_distinct_from_generator(self) -> None:
         with self.assertRaisesRegex(ValueError, "Duplicate reviewer identity"):
@@ -1894,7 +1317,7 @@ class AuthoringTestCase(unittest.TestCase):
         self.assertNotIn(context, row["raw_output_json"])
         self.assertNotIn(context, row["validation_json"])
 
-    def test_generator_cannot_self_attest_human_activation(self) -> None:
+    def test_generator_cannot_publish_authority_or_identity_claims(self) -> None:
         for apparently_valid in (False, True):
             with self.subTest(apparently_valid=apparently_valid):
                 gap = next(
@@ -1917,10 +1340,6 @@ class AuthoringTestCase(unittest.TestCase):
                 provenance = result["item"]["provenance"]
                 self.assertIs(provenance["human_review"], False)
                 self.assertNotIn("activation_review", provenance)
-                self.assertEqual(
-                    provenance["human_review_status"],
-                    "required_before_activation",
-                )
                 self.assertEqual(
                     provenance["stripped_generator_authority_field_count"],
                     15,
@@ -2069,7 +1488,7 @@ class AuthoringTestCase(unittest.TestCase):
             persisted,
         )
 
-    def test_non_string_reviewer_verdict_cannot_authorize_quarantine(self) -> None:
+    def test_non_string_reviewer_verdict_cannot_accept_item(self) -> None:
         planner = CoveragePlanner(self.database)
         gap = next(gap for gap in planner.gaps(limit=1000) if gap.blueprint.misconception_ids)
         job_id = planner.enqueue([gap])[0]
@@ -2077,7 +1496,7 @@ class AuthoringTestCase(unittest.TestCase):
             self.database, FakeGenerator(), (InvalidVerdictReviewer(),)
         ).run_job(job_id, "approved source excerpt")
         self.assertFalse(result["accepted_by_critics"])
-        self.assertFalse(result["accepted_for_reviewed_quarantine"])
+        self.assertFalse(result["accepted_for_review"])
         self.assertFalse(result["reviews"][0]["valid"])
         self.assertTrue(result["reviews"][0]["validation_errors"])
 
@@ -2262,7 +1681,7 @@ class AuthoringTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         run_result = json.loads(output.getvalue())
         self.assertEqual(run_result["status"], "reviewed")
-        self.assertEqual(run_result["item"]["status"], "quarantined")
+        self.assertEqual(run_result["item"]["status"], "approved")
         with self.assertRaisesRegex(
             ConflictError,
             "reviewed jobs are terminal",

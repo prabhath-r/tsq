@@ -6,6 +6,7 @@ import unittest
 from types import SimpleNamespace
 
 from experiments.objective_discovery_lab import (
+    LAB_VERSION,
     ObjectivePatternLearner,
     bounded_family_recovery_probe,
     build_report,
@@ -71,12 +72,58 @@ class ObjectiveDiscoveryLabTests(unittest.TestCase):
 
         self.assertTrue(result["all_families_recovered"], result["failed_cases"])
         self.assertGreater(result["case_count"], 1)
+        self.assertLess(result["case_count"], result["eligible_question_count"])
         self.assertFalse(result["failed_cases"])
+        self.assertEqual(
+            len({case["family_id"] for case in result["cases"]}),
+            result["case_count"],
+        )
+        self.assertEqual(
+            sum(case["member_count"] for case in result["cases"]),
+            result["eligible_question_count"],
+        )
         for case in result["cases"]:
+            self.assertEqual(
+                case["question_id"], case["representative_question_id"]
+            )
+            self.assertIn(
+                case["representative_question_id"],
+                case["member_question_ids"],
+            )
             self.assertLess(case["after_wrong_mastery"], case["prior_mastery"])
             self.assertIsNotNone(case["recovered_after_correct_retests"])
             self.assertLessEqual(case["recovered_after_correct_retests"], 2)
             self.assertGreaterEqual(case["recovery_fraction"], 0.75)
+
+        cases_by_family = {
+            case["family_id"]: case for case in result["cases"]
+        }
+        variance = cases_by_family["f_attention_scaling_variance"]
+        self.assertEqual(
+            variance["representative_question_id"],
+            "q_attention_scaling_variance_001",
+        )
+        self.assertIn(
+            "q_attention_scaling_head_dimension_comparison_001",
+            variance["member_question_ids"],
+        )
+        self.assertIn(
+            "q_attention_scaling_variance_warmup_001",
+            variance["member_question_ids"],
+        )
+        self.assertIn(
+            "f_attention_scaled_variance_nonunit",
+            variance["published_family_ids"],
+        )
+        rank = cases_by_family["f_attention_scaling_rank"]
+        self.assertEqual(
+            rank["representative_question_id"],
+            "q_attention_scaling_rank_001",
+        )
+        self.assertIn(
+            "q_attention_scaling_rank_warmup_001",
+            rank["member_question_ids"],
+        )
 
         deliberately_too_short = bounded_family_recovery_probe(
             objective_id="lo_attention_logit_scaling",
@@ -194,6 +241,8 @@ class ObjectiveDiscoveryLabTests(unittest.TestCase):
             include_recovery=False,
         )
 
+        self.assertEqual(report["lab_version"], "objective-discovery-lab-v6")
+        self.assertEqual(report["lab_version"], LAB_VERSION)
         self.assertEqual(report["findings"]["case_count"], 1)
         self.assertEqual(
             report["findings"]["cases_passing_discovery_hypothesis"], 1

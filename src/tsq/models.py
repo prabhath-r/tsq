@@ -8,6 +8,7 @@ from enum import StrEnum
 from math import erfc, exp, isfinite, log, pi, sqrt
 from typing import Any
 
+from .families import family_assignment
 from .objective_posterior import ObjectivePosterior
 
 
@@ -56,7 +57,6 @@ class RelationType(StrEnum):
 
 class QuestionStatus(StrEnum):
     DRAFT = "draft"
-    QUARANTINED = "quarantined"
     PILOT = "pilot"
     APPROVED = "approved"
     CALIBRATED = "calibrated"
@@ -70,12 +70,25 @@ class QuestionStatus(StrEnum):
     def evidence_weight(self) -> float:
         return {
             QuestionStatus.DRAFT: 0.0,
-            QuestionStatus.QUARANTINED: 0.0,
             QuestionStatus.PILOT: 0.2,
             QuestionStatus.APPROVED: 0.65,
             QuestionStatus.CALIBRATED: 1.0,
             QuestionStatus.RETIRED: 0.0,
         }[self]
+
+
+def question_status_from_storage(value: object) -> QuestionStatus:
+    """Decode a persisted question status from any supported database.
+
+    Releases written before schema 23 may contain the retired curriculum-only
+    ``quarantined`` label.  It had the same zero-evidence behavior as ``draft``
+    and is decoded that way for pinned-session and replay compatibility.  New
+    corpus input and new database rows cannot use the legacy label.
+    """
+
+    if value == "quarantined":
+        return QuestionStatus.DRAFT
+    return QuestionStatus(value)
 
 
 class QuestionKind(StrEnum):
@@ -415,6 +428,19 @@ class Question:
     tags: tuple[str, ...] = ()
     revision_of: str | None = None
     objective: LearningObjective | None = None
+    published_family_id: str | None = None
+
+    def __post_init__(self) -> None:
+        assignment = family_assignment(
+            self.id,
+            self.published_family_id or self.family_id,
+        )
+        object.__setattr__(
+            self,
+            "published_family_id",
+            assignment.published_family_id,
+        )
+        object.__setattr__(self, "family_id", assignment.evidence_family_id)
 
     @property
     def correct_option(self) -> Option:

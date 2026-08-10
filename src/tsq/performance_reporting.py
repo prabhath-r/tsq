@@ -364,7 +364,7 @@ def productive_shadow_summary(
         attempt_parameters.append(session_id)
 
     with database.read() as connection:
-        database.require_learner_evidence_safe(
+        database.require_learner_evidence_integrity(
             learner_id,
             connection,
         )
@@ -505,7 +505,7 @@ def productive_shadow_summary(
 
     if not included_attempt_rows:
         with database.read() as connection:
-            database.require_learner_evidence_safe(
+            database.require_learner_evidence_integrity(
                 learner_id,
                 connection,
             )
@@ -1033,7 +1033,7 @@ def productive_shadow_summary(
         explicit_objective_ids
     )
     with database.read() as connection:
-        database.require_learner_evidence_safe(
+        database.require_learner_evidence_integrity(
             learner_id,
             connection,
         )

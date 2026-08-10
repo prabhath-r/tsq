@@ -1,25 +1,17 @@
 # SPDX-License-Identifier: MPL-2.0
 
-"""Fail-closed provenance rules for activating generated questions.
+"""Public provenance validation for curriculum questions.
 
-Generation and model review can produce a quarantined artifact, but neither is
-an activation authority. A generated question pinned as ``approved`` or
-``calibrated`` must carry an immutable human-review commitment in its content
-provenance. Since question provenance participates in the immutable content
-hash and status participates in the release manifest, activation then requires
-an explicit reviewed artifact and a newly sealed corpus release; changing only
-the status of an unreviewed generated item remains invalid.
-
-The commitment is intentionally small and syntactic. It records who attested,
-when, and that the reviewer claims independence from the author. Validation
-cannot establish that the attestation is truthful, so callers must still
-verify the external human-review process.
+Provenance records reproducible authoring facts, not permission to serve an
+item.  In particular, ``generated`` and ``human_review`` remain truthful
+descriptive booleans while content quality is enforced by the corpus audit,
+family checks, and immutable release process.  Vendor/model identities are
+kept out of the public corpus and belong only in the private generation ledger.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
 from functools import lru_cache
 import hashlib
 from importlib.resources import files
@@ -28,7 +20,6 @@ import re
 from typing import Iterable
 
 
-ACTIVE_QUESTION_STATUSES = frozenset({"approved", "calibrated"})
 PUBLIC_QUESTION_IDENTITY_FIELDS = frozenset(
     {"provider", "model", "generator", "provider_name", "model_name"}
 )
@@ -45,16 +36,6 @@ _PUBLIC_IDENTITY_KEY_TOKENS = frozenset(
     {"backend", "engine", "generator", "llm", "model", "provider", "vendor"}
 )
 _FIELD_TOKEN_BOUNDARY = re.compile(r"(?<=[a-z0-9])(?=[A-Z])|[^A-Za-z0-9]+")
-ACTIVATION_REVIEW_FIELD = "activation_review"
-ACTIVATION_REVIEW_FIELDS = frozenset(
-    {
-        "reviewer_kind",
-        "reviewer_id",
-        "reviewed_at",
-        "independent_of_author",
-        "attestation_digest",
-    }
-)
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 LEGACY_UNATTESTED_COHORT_SCHEMA = "tsq-legacy-unattested-question-cohort-v1"
 LEGACY_UNATTESTED_COHORT_SHA256 = (
@@ -216,7 +197,7 @@ def legacy_question_identity_payload(
 
     The payload deliberately normalizes both raw JSON rows and typed
     :class:`Question` objects into one representation. Lifecycle status is not
-    content: an immutable legacy question may be safely quarantined without
+    content: an immutable legacy question may be safely retired without
     invalidating its identity. Objective and option-diagnostic bindings are
     included because they affect what a response claims to measure.
     """
@@ -385,36 +366,13 @@ def legacy_unattested_member_compatible(
         return False
 
 
-def _aware_iso8601(value: str) -> bool:
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    return parsed.tzinfo is not None and parsed.utcoffset() is not None
-
-
 def question_provenance_issues(
     provenance: object,
     *,
     status: object,
     legacy_unattested_compatible: bool = False,
 ) -> tuple[ProvenanceIssue, ...]:
-    """Validate the generated-question activation commitment.
-
-    Quarantined generated artifacts need only retain the exact boolean
-    ``generated`` marker. If ``human_review`` or ``activation_review`` claims
-    are present, however, their types and fields are always validated. Active
-    generated questions additionally require ``human_review is True`` and the
-    complete strict review object below::
-
-        {
-          "reviewer_kind": "human",
-          "reviewer_id": "stable-human-reviewer-id",
-          "reviewed_at": "2026-07-23T12:00:00+00:00",
-          "independent_of_author": true,
-          "attestation_digest": "<64 lowercase hex characters>"
-        }
-    """
+    """Validate public, status-independent question provenance."""
 
     if type(provenance) is not dict:
         return (
@@ -466,139 +424,4 @@ def question_provenance_issues(
             )
         )
 
-    active_generated = (
-        generated is True
-        and type(status) is str
-        and status in ACTIVE_QUESTION_STATUSES
-    )
-    if active_generated and human_review is not True:
-        issues.append(
-            ProvenanceIssue(
-                "generated_human_review_required",
-                "human_review",
-                "Active generated questions require human_review=true.",
-            )
-        )
-
-    review = provenance.get(ACTIVATION_REVIEW_FIELD)
-    if review is None:
-        if active_generated:
-            issues.append(
-                ProvenanceIssue(
-                    "activation_review_required",
-                    ACTIVATION_REVIEW_FIELD,
-                    "Active generated questions require activation_review.",
-                )
-            )
-        return tuple(issues)
-    if type(review) is not dict:
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_type",
-                ACTIVATION_REVIEW_FIELD,
-                "provenance.activation_review must be an object.",
-            )
-        )
-        return tuple(issues)
-
-    fields = set(review)
-    missing = sorted(ACTIVATION_REVIEW_FIELDS - fields)
-    extra = sorted(fields - ACTIVATION_REVIEW_FIELDS)
-    if missing:
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_missing_fields",
-                ACTIVATION_REVIEW_FIELD,
-                "provenance.activation_review is missing fields: "
-                + ", ".join(missing),
-            )
-        )
-    if extra:
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_extra_fields",
-                ACTIVATION_REVIEW_FIELD,
-                "provenance.activation_review has unsupported fields: "
-                + ", ".join(extra),
-            )
-        )
-
-    reviewer_kind = review.get("reviewer_kind")
-    if reviewer_kind != "human":
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_reviewer_kind",
-                f"{ACTIVATION_REVIEW_FIELD}.reviewer_kind",
-                "provenance.activation_review.reviewer_kind must be 'human'.",
-            )
-        )
-    reviewer_id = review.get("reviewer_id")
-    if type(reviewer_id) is not str or not reviewer_id.strip():
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_reviewer_id",
-                f"{ACTIVATION_REVIEW_FIELD}.reviewer_id",
-                "provenance.activation_review.reviewer_id must be a non-blank string.",
-            )
-        )
-    reviewed_at = review.get("reviewed_at")
-    if (
-        type(reviewed_at) is not str
-        or not reviewed_at.strip()
-        or not _aware_iso8601(reviewed_at)
-    ):
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_timestamp",
-                f"{ACTIVATION_REVIEW_FIELD}.reviewed_at",
-                "provenance.activation_review.reviewed_at must be an aware ISO-8601 timestamp.",
-            )
-        )
-    if review.get("independent_of_author") is not True:
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_independence",
-                f"{ACTIVATION_REVIEW_FIELD}.independent_of_author",
-                "provenance.activation_review.independent_of_author must be true.",
-            )
-        )
-    digest = review.get("attestation_digest")
-    if type(digest) is not str or _SHA256.fullmatch(digest) is None:
-        issues.append(
-            ProvenanceIssue(
-                "activation_review_digest",
-                f"{ACTIVATION_REVIEW_FIELD}.attestation_digest",
-                "provenance.activation_review.attestation_digest must be a lowercase SHA-256 digest.",
-            )
-        )
     return tuple(issues)
-
-
-def generated_question_runtime_safe(
-    provenance: object,
-    *,
-    status: str,
-) -> bool:
-    """Fail closed for explicitly generated content already stored in SQLite.
-
-    Exact legacy questions can predate the ``generated`` marker, so an absent
-    marker remains a compatibility case whose identity is enforced at import.
-    Once the marker is present it must be an exact boolean. Generated active
-    content must satisfy the complete human activation-review commitment even
-    when it came from a release created by an older TSQ binary.
-    """
-
-    if type(provenance) is not dict:
-        return False
-    if "generated" not in provenance:
-        return True
-    generated = provenance["generated"]
-    if generated is False:
-        return True
-    if generated is not True:
-        return False
-    return not question_provenance_issues(
-        provenance,
-        status=status,
-        legacy_unattested_compatible=True,
-    )

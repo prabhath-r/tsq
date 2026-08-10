@@ -101,7 +101,7 @@ class ProductiveLedgerUpgradeTests(unittest.TestCase):
             before_learner = learner_fingerprint(database)
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 22)
+            self.assertEqual(SCHEMA_VERSION, 23)
             self.assertEqual(event_fingerprint(database), before_events)
             self.assertEqual(learner_fingerprint(database), before_learner)
             with database.read() as connection:

@@ -254,7 +254,7 @@ class PolicyShadowSchemaTests(unittest.TestCase):
             before_data = historical_data_snapshot(database)
             before_events = event_snapshot(database)
 
-            self.assertEqual(SCHEMA_VERSION, 22)
+            self.assertEqual(SCHEMA_VERSION, 23)
             self.assertIsNotNone(decision_id)
             self.assertEqual(
                 schema_contract(database),

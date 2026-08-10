@@ -33,6 +33,7 @@ from tsq.adaptive import BOUNDARY_ALGORITHM_VERSION  # noqa: E402
 from tsq.corpus import corpus_source_digest, read_and_parse  # noqa: E402
 from tsq.engine import AdaptiveEngine  # noqa: E402
 from tsq.errors import NotFoundError  # noqa: E402
+from tsq.families import canonical_family_label  # noqa: E402
 from tsq.models import Presentation, SessionPhase  # noqa: E402
 from tsq.objective_posterior import decode_objective_posterior  # noqa: E402
 from tsq.policy import POLICY_VERSION  # noqa: E402
@@ -1121,6 +1122,20 @@ def compact_session_report(report: Mapping[str, Any]) -> dict[str, Any]:
     return {key: report[key] for key in retained}
 
 
+def _evidence_family_key(
+    *,
+    objective_id: str | None,
+    anchor_concept_id: str,
+    published_family_id: str,
+) -> str:
+    """Build one capacity key from the reviewed evidence-family label."""
+
+    family_id = canonical_family_label(str(published_family_id))
+    if objective_id is not None:
+        return f"objective:{objective_id}|family:{family_id}"
+    return f"concept:{anchor_concept_id}|family:{family_id}"
+
+
 def capacity_and_demand_snapshot(
     database: Database, session: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -1174,14 +1189,10 @@ def capacity_and_demand_snapshot(
             (session["id"],),
         ).fetchall()
         used_family_keys = {
-            (
-                f"objective:{row['question_objective_id']}|"
-                f"family:{row['family_id']}"
-                if row["question_objective_id"] is not None
-                else (
-                    f"concept:{row['surface_concept_id']}|"
-                    f"family:{row['family_id']}"
-                )
+            _evidence_family_key(
+                objective_id=row["question_objective_id"],
+                anchor_concept_id=row["surface_concept_id"],
+                published_family_id=row["family_id"],
             )
             for row in used_rows
         }
@@ -1235,10 +1246,10 @@ def capacity_and_demand_snapshot(
         )
         if anchor not in owned:
             continue
-        family_key = (
-            f"objective:{objective_id}|family:{row['family_id']}"
-            if objective_id is not None
-            else f"concept:{anchor}|family:{row['family_id']}"
+        family_key = _evidence_family_key(
+            objective_id=objective_id,
+            anchor_concept_id=anchor,
+            published_family_id=row["family_id"],
         )
         values = by_concept[anchor]
         values["questions"].add(row["question_id"])
@@ -1318,8 +1329,9 @@ def capacity_and_demand_snapshot(
             owned_family_keys - used_family_keys
         ),
         "denominator_contract": (
-            "Objective/family pairs are distinct evidence buckets; legacy "
-            "questions use canonical concept/family pairs."
+            "Objective/reviewed-evidence-family pairs are distinct evidence "
+            "buckets; legacy questions use canonical "
+            "concept/reviewed-evidence-family pairs."
         ),
         "generation_demands_created": jobs,
     }

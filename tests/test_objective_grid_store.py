@@ -29,9 +29,11 @@ from tsq.objective_posterior import (
     decode_objective_posterior,
 )
 from tsq.replay import ProjectionReplay
-from tsq.store import Database, SCHEMA_VERSION
-
-from tests.schema_upgrade_helpers import restore_pre_shadow_schema
+from tsq.store import (
+    SCHEMA_VERSION,
+    Database,
+    _V0_1_0_QUESTIONS_VALID_STATUS_TRIGGER_SQL,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -152,7 +154,7 @@ class ObjectiveGridStoreTestCase(unittest.TestCase):
             ).fetchone()
 
         self.assertEqual(schema_version, str(SCHEMA_VERSION))
-        self.assertEqual(SCHEMA_VERSION, 22)
+        self.assertEqual(SCHEMA_VERSION, 23)
         self.assertEqual(row["posterior_schema_version"], OBJECTIVE_POSTERIOR_SCHEMA_VERSION)
         self.assertEqual(row["algorithm"], OBJECTIVE_POSTERIOR_ALGORITHM)
         self.assertEqual(row["grid_id"], OBJECTIVE_POSTERIOR_GRID_ID)
@@ -304,7 +306,7 @@ class ObjectiveGridStoreTestCase(unittest.TestCase):
         integrity = rebuilt.verify_integrity()
         self.assertTrue(integrity["ok"], integrity["errors"])
 
-    def test_v11_migration_keeps_v5_parent_only_and_hash_bytes(self) -> None:
+    def test_v22_migration_keeps_v5_parent_only_and_hash_bytes(self) -> None:
         objective_id = self.answer_objective(
             "grid-v5", model_version=OBJECTIVE_GAUSSIAN_MODEL_VERSION
         )
@@ -312,16 +314,18 @@ class ObjectiveGridStoreTestCase(unittest.TestCase):
             "grid-v5", hash_version=2
         )
         with self.database.transaction() as connection:
-            restore_pre_shadow_schema(connection)
             child_count = connection.execute(
                 """SELECT COUNT(*) AS n FROM objective_grid_states
                    WHERE learner_id = ? AND objective_id = ?""",
                 ("grid-v5", objective_id),
             ).fetchone()["n"]
             self.assertEqual(child_count, 0)
-            connection.execute("DROP TABLE objective_grid_states")
+            connection.execute("DROP TRIGGER questions_valid_status")
             connection.execute(
-                "UPDATE meta SET value='11' WHERE key='schema_version'"
+                _V0_1_0_QUESTIONS_VALID_STATUS_TRIGGER_SQL
+            )
+            connection.execute(
+                "UPDATE meta SET value='22' WHERE key='schema_version'"
             )
 
         self.database.initialize()

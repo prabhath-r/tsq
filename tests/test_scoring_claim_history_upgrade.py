@@ -401,7 +401,7 @@ class ScoringClaimHistoryUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 22)
+            self.assertEqual(SCHEMA_VERSION, 23)
             database.validate_current_schema()
             integrity = database.verify_integrity()
             self.assertTrue(integrity["ok"], integrity["errors"])

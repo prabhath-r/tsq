@@ -282,6 +282,33 @@ class BehavioralSimulationTests(unittest.TestCase):
                 evidence_anchor_concept_id(question),
             )
 
+    def test_coverage_denominator_collapses_reviewed_family_aliases(self) -> None:
+        engine = self.simulator.engine
+        engine.create_learner("canonical-family-denominator")
+        session = engine.start_session(
+            "canonical-family-denominator",
+            "c_autoregressive_language_modeling",
+            seed=802,
+            now=START,
+        )
+
+        denominator = self.simulator._coverage_denominator(session)
+
+        self.assertIn(
+            "f_ar_prompt_conditioning",
+            denominator.eligible_family_ids,
+        )
+        self.assertNotIn(
+            "f_ar_fixed_weight_demonstrations",
+            denominator.eligible_family_ids,
+        )
+        self.assertTrue(
+            all(
+                "family:f_ar_fixed_weight_demonstrations" not in family
+                for family in denominator.eligible_evidence_family_ids
+            )
+        )
+
     def test_coverage_denominator_excludes_global_revocations(self) -> None:
         engine = self.simulator.engine
         database = engine.database
@@ -867,25 +894,109 @@ class BehavioralSimulationTests(unittest.TestCase):
         )
 
     def test_verified_prerequisite_returns_to_an_independent_parent_check(self) -> None:
+        class VerifiedPrerequisiteScript:
+            name = "verified-prerequisite-script"
+            response_model = "scripted"
+
+            def __init__(self) -> None:
+                self.stage = "await_parent"
+
+            def answer(self, presentation, **_context) -> SyntheticAnswer:
+                question = presentation.question
+                role = presentation.pedagogical_role
+                objective_id = question.objective_id
+                correct = True
+                if (
+                    self.stage == "await_parent"
+                    and role == "main"
+                    and objective_id == "lo_attention_resource_scaling"
+                ):
+                    correct = False
+                    self.stage = "parent_repair"
+                elif self.stage == "parent_repair":
+                    if (
+                        role,
+                        objective_id,
+                    ) != (
+                        "remediation_probe",
+                        "lo_attention_resource_scaling",
+                    ):
+                        raise AssertionError(
+                            "The scripted parent repair was not selected."
+                        )
+                    correct = False
+                    self.stage = "child_repair"
+                elif self.stage == "child_repair":
+                    if (
+                        role,
+                        objective_id,
+                    ) != (
+                        "remediation_probe",
+                        "lo_attention_value_routing",
+                    ):
+                        raise AssertionError(
+                            "The scripted prerequisite repair was not selected."
+                        )
+                    self.stage = "child_verification"
+                elif self.stage == "child_verification":
+                    if (
+                        role,
+                        objective_id,
+                    ) != (
+                        "verification",
+                        "lo_attention_value_routing",
+                    ):
+                        raise AssertionError(
+                            "The scripted prerequisite verification was not selected."
+                        )
+                    self.stage = "parent_verification"
+                elif self.stage == "parent_verification":
+                    if (
+                        role,
+                        objective_id,
+                    ) != (
+                        "verification",
+                        "lo_attention_resource_scaling",
+                    ):
+                        raise AssertionError(
+                            "The independent parent check was not selected."
+                        )
+                    self.stage = "done"
+
+                if correct:
+                    selected = question.correct_option
+                else:
+                    selected = next(
+                        option
+                        for option in question.options
+                        if not option.correct
+                        and (
+                            option.diagnostic_objective_id
+                            or question.objective_id
+                        )
+                        == question.objective_id
+                    )
+                return SyntheticAnswer(
+                    selected_option_id=selected.id,
+                    correct=correct,
+                    ground_truth_probability=1.0 if correct else 0.0,
+                    confidence=0.95,
+                    response_ms=4_000,
+                    hint_count=0,
+                )
+
+        profile = VerifiedPrerequisiteScript()
         report = self.simulator.run(
-            SyntheticLearner(
-                "intermediate",
-                default_ability=0.55,
-                slip_probability=0.04,
-                guess_probability=0.02,
-                seed=17,
-            ),
+            profile,
             learner_id="verified-boundary",
-            root_concept_id="t_large_language_models",
-            # v17's hybrid breadth frontier changes the deterministic main-path
-            # ordering; seed 1 retains this test's recursive-boundary episode.
+            root_concept_id="c_attention",
             policy_seed=1,
-            trial_index=4,
-            max_steps=16,
+            max_steps=7,
             start_at=START,
         )
 
         self.assertFalse(report.has_blockers, report.summary())
+        self.assertEqual(profile.stage, "done")
         with self.simulator.engine.database.read() as connection:
             session_id = connection.execute(
                 "SELECT id FROM sessions WHERE learner_id='verified-boundary'"

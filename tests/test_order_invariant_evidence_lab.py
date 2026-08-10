@@ -5,12 +5,14 @@ from __future__ import annotations
 import itertools
 import math
 import unittest
+from pathlib import Path
 
 from experiments.order_invariant_evidence_lab import (
     APPROVED_EVIDENCE_WEIGHT,
     GRID_SPECS,
     INITIAL_VARIANCE,
     ResponseFactor,
+    _load_objective_factors,
     batch_fisher_laplace,
     family_budget,
     gaussian_summary,
@@ -20,6 +22,10 @@ from experiments.order_invariant_evidence_lab import (
     two_epoch_projection,
 )
 from tsq.models import logit
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CORPUS = ROOT / "corpus"
 
 
 def factor(
@@ -164,6 +170,35 @@ class OrderInvariantEvidenceLabTests(unittest.TestCase):
             with_zero[informative.item_id], alone[informative.item_id]
         )
         self.assertEqual(with_zero[zero_quality.item_id], 0.0)
+
+    def test_corpus_aliases_share_one_evidence_family_and_budget(self) -> None:
+        _, objectives = _load_objective_factors(CORPUS)
+        alias_ids = {
+            "q_causal_mask_training_leak_001",
+            "q_causal_mask_parallelism_001",
+            "q_causal_mask_matrix_002",
+        }
+        canonical_id = "q_causal_mask_batch_matrix_001"
+        cohort = tuple(
+            item
+            for item in objectives["lo_causal_visibility"]
+            if item.item_id in alias_ids | {canonical_id}
+        )
+
+        self.assertEqual(
+            {item.item_id for item in cohort},
+            alias_ids | {canonical_id},
+        )
+        self.assertEqual(
+            {item.family_id for item in cohort},
+            {"f_causal_mask_batch_matrix"},
+        )
+        exponents = symmetric_family_exponents(cohort)
+        self.assertAlmostEqual(
+            math.fsum(exponents.values()),
+            APPROVED_EVIDENCE_WEIGHT * family_budget(0, len(cohort)),
+            places=12,
+        )
 
     def test_retention_between_epochs_preserves_chronological_order(self) -> None:
         easy = self.factors[:2]

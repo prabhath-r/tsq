@@ -603,15 +603,45 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
             seed=2,
             now=START,
         )
-        trigger = self.engine.next_question(session["id"], now=START)
-        self.assertEqual(
-            trigger.question.id, "q_transformer_mask_direction_001"
-        )
+        trigger_candidates = [
+            question
+            for question in self.questions
+            if question.status.eligible_for_adaptation
+            and question.objective_id == "lo_causal_visibility"
+            and any(
+                not option.correct
+                and option.diagnostic_objective_id
+                == "lo_transformer_information_paths"
+                and option.misconception_id
+                == "m_feedforward_layers_mix_token_positions"
+                for option in question.options
+            )
+        ]
+        self.assertTrue(trigger_candidates)
+        questions_for_scope = self.database.questions_for_scope
+
+        def semantic_trigger_pool(*args, **kwargs):
+            if kwargs.get("focus_objective_id") is None:
+                return trigger_candidates
+            return questions_for_scope(*args, **kwargs)
+
+        with patch.object(
+            self.database,
+            "questions_for_scope",
+            side_effect=semantic_trigger_pool,
+        ):
+            trigger = self.engine.next_question(session["id"], now=START)
         self.assertEqual(
             trigger.question.objective_id, "lo_causal_visibility"
         )
         wrong = next(
-            option for option in trigger.question.options if option.id == "b"
+            option
+            for option in trigger.question.options
+            if not option.correct
+            and option.diagnostic_objective_id
+            == "lo_transformer_information_paths"
+            and option.misconception_id
+            == "m_feedforward_layers_mix_token_positions"
         )
         self.assertEqual(
             wrong.diagnostic_objective_id,
@@ -817,6 +847,7 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
         verification_kinds = {
             question_kind.value for question_kind in VERIFICATION_KINDS
         }
+        synthetic_ids: dict[str, str] = {}
         for question in bundle["questions"]:
             if (
                 question.get("learning_objective_id") == parent_objective
@@ -828,9 +859,15 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
                 ):
                     # Keep one distinct, misconception-aligned repair family so
                     # the trigger remains pairwise serviceable.
+                    original_id = question["id"]
+                    question["id"] = f"{original_id}_fixture"
+                    synthetic_ids[original_id] = question["id"]
                     question["kind"] = QuestionKind.CONCEPTUAL.value
                 elif question["kind"] in verification_kinds:
                     # Every remaining parent verification aliases one family.
+                    original_id = question["id"]
+                    question["id"] = f"{original_id}_fixture"
+                    synthetic_ids[original_id] = question["id"]
                     question["family_id"] = shared_family
             if (
                 question["id"]
@@ -838,7 +875,15 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
             ):
                 # This otherwise attractive child probe aliases the parent's
                 # only transfer family and must never be consumed.
+                original_id = question["id"]
+                question["id"] = f"{original_id}_fixture"
+                synthetic_ids[original_id] = question["id"]
                 question["family_id"] = shared_family
+        for question in bundle["questions"]:
+            for lineage_field in ("revision_of", "superseded_by"):
+                lineage_id = question.get(lineage_field)
+                if lineage_id in synthetic_ids:
+                    question[lineage_field] = synthetic_ids[lineage_id]
 
         parsed = parse_bundle(bundle)
         domains, topics = parse_catalog(bundle, parsed[0], parsed[4])
@@ -856,12 +901,43 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
             now=START,
         )
 
-        trigger = engine.next_question(session["id"], now=START)
+        trigger_candidates = [
+            question
+            for question in parsed[4]
+            if question.status.eligible_for_adaptation
+            and question.objective_id == parent_objective
+            and any(
+                not option.correct
+                and option.diagnostic_objective_id == child_objective
+                and option.misconception_id
+                == "m_feedforward_layers_mix_token_positions"
+                for option in question.options
+            )
+        ]
+        self.assertTrue(trigger_candidates)
+        questions_for_scope = database.questions_for_scope
+
+        def semantic_trigger_pool(*args, **kwargs):
+            if kwargs.get("focus_objective_id") is None:
+                return trigger_candidates
+            return questions_for_scope(*args, **kwargs)
+
+        with patch.object(
+            database,
+            "questions_for_scope",
+            side_effect=semantic_trigger_pool,
+        ):
+            trigger = engine.next_question(session["id"], now=START)
         self.assertEqual(
-            trigger.question.id, "q_transformer_mask_direction_001"
+            trigger.question.objective_id, parent_objective
         )
         wrong = next(
-            option for option in trigger.question.options if option.id == "b"
+            option
+            for option in trigger.question.options
+            if not option.correct
+            and option.diagnostic_objective_id == child_objective
+            and option.misconception_id
+            == "m_feedforward_layers_mix_token_positions"
         )
         diagnosed = engine.submit_answer(
             trigger.decision_id,
@@ -880,7 +956,7 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
         self.assertNotEqual(child_repair.question.family_id, shared_family)
         repair_trace = engine.trace(session["id"])[0]
         self.assertNotIn(
-            "q_transformer_cross_attention_direction_001",
+            synthetic_ids["q_transformer_cross_attention_direction_001"],
             {
                 candidate["question_id"]
                 for candidate in repair_trace["top_candidates"]
@@ -975,37 +1051,28 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
                 for option in trigger.options
             ),
         )
-        parent_repair = replace(
-            by_id["q_causal_mask_training_leak_001"],
-            family_id="f_synthetic_parent_repair",
-        )
-        parent_verification = replace(
-            by_id["q_causal_mask_parallelism_001"],
-            family_id="f_synthetic_shared",
-        )
-        child_repair = replace(
-            by_id["q_transformer_cross_attention_direction_001"],
-            family_id="f_synthetic_shared",
-        )
-        child_verification = replace(
-            by_id["q_transformer_cross_attention_ablation_001"],
-            family_id="f_synthetic_child_verification",
-        )
+        parent_repair = by_id["q_causal_mask_training_leak_001"]
+        parent_verification = by_id["q_causal_mask_parallelism_001"]
+        child_repair = by_id["q_transformer_cross_attention_direction_001"]
+        child_verification = by_id[
+            "q_transformer_cross_attention_ablation_001"
+        ]
         child_objective = "lo_transformer_information_paths"
         parent_objective = "lo_causal_visibility"
 
-        # Pairwise reserves exist: parent repair -> shared verification, and
-        # shared child repair -> child verification. The shared family makes
-        # the complete trigger/repair/child-verify/parent-verify sequence
-        # impossible, which is the case the older pairwise proof admitted.
+        # These questions retain distinct published labels for immutable
+        # identity, but the reviewed equivalence manifest maps both to the same
+        # evidence family. They therefore cannot form an independent
+        # parent-repair/parent-verification pair.
         self.assertNotEqual(
+            parent_repair.published_family_id,
+            parent_verification.published_family_id,
+        )
+        self.assertEqual(
             parent_repair.family_id, parent_verification.family_id
         )
         self.assertNotEqual(
             child_repair.family_id, child_verification.family_id
-        )
-        self.assertEqual(
-            parent_verification.family_id, child_repair.family_id
         )
 
         def constrained_pool(

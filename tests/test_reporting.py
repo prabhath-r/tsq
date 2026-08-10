@@ -332,12 +332,27 @@ class SessionReportingTests(unittest.TestCase):
             )
 
             presentation = engine.next_question(session["id"], now=START)
-            self.assertEqual(
-                database.question_topics(
+            catalog = database.get_catalog(session["corpus_release_id"])
+            descendants = {"t_large_language_models"}
+            while True:
+                discovered = {
+                    topic["id"]
+                    for topic in catalog["topics"]
+                    if topic["parent_id"] in descendants
+                }
+                if discovered.issubset(descendants):
+                    break
+                descendants.update(discovered)
+            question_topic_ids = {
+                topic["id"]
+                for topic in database.question_topics(
                     presentation.question.id,
                     session["corpus_release_id"],
-                )[0]["id"],
-                "t_transformers",
+                )
+            }
+            self.assertTrue(
+                question_topic_ids & descendants,
+                (presentation.question.id, question_topic_ids),
             )
             engine.submit_answer(
                 presentation.decision_id,

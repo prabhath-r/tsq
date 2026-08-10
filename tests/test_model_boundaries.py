@@ -19,6 +19,7 @@ from tsq.learner import (
     OBJECTIVE_GAUSSIAN_MODEL_VERSION,
     OBJECTIVE_GRID_V6_MODEL_VERSION,
     OBJECTIVE_GRID_V7_MODEL_VERSION,
+    OBJECTIVE_GRID_V8_MODEL_VERSION,
     LearnerModel,
 )
 from tsq.models import SessionPhase
@@ -113,6 +114,36 @@ class LearnerModelBoundaryTestCase(unittest.TestCase):
         )
         integrity = self.database.verify_integrity()
         self.assertTrue(integrity["ok"], integrity["errors"])
+
+    def test_v9_invalidates_a_pending_v8_family_decision(self) -> None:
+        _, session, selected_v8 = self._pending_objective(
+            "v8-family-boundary", OBJECTIVE_GRID_V8_MODEL_VERSION
+        )
+
+        replacement = self._engine(MODEL_VERSION).next_question(
+            session["id"], now=START + timedelta(seconds=1)
+        )
+
+        self.assertNotEqual(selected_v8.decision_id, replacement.decision_id)
+        with self.database.read() as connection:
+            stale = connection.execute(
+                """SELECT invalidation_reason FROM decisions WHERE id=?""",
+                (selected_v8.decision_id,),
+            ).fetchone()
+            versions = [
+                json.loads(row["metadata_json"])["learner_model_version"]
+                for row in connection.execute(
+                    """SELECT metadata_json FROM events
+                       WHERE learner_id=? AND event_type='QuestionSelected'
+                       ORDER BY stream_version""",
+                    ("v8-family-boundary",),
+                )
+            ]
+        self.assertEqual(stale["invalidation_reason"], "learner_model_changed")
+        self.assertEqual(
+            versions,
+            [OBJECTIVE_GRID_V8_MODEL_VERSION, MODEL_VERSION],
+        )
 
     def test_submission_durably_invalidates_cross_model_pending_choice(self) -> None:
         _, _, selected_v5 = self._pending_objective(

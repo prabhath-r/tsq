@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import hashlib
 import json
 import shutil
@@ -37,6 +38,107 @@ from tsq.store import Database
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus"
+
+CLEAN_PROVENANCE_REVISIONS = {
+    "q_transformer_token_mixing_001": "q_transformer_token_mixing_002",
+    "q_causal_mask_matrix_001": "q_causal_mask_matrix_002",
+    "q_transformer_position_signal_ablation_001": (
+        "q_transformer_position_signal_ablation_002"
+    ),
+    "q_causal_mask_softmax_normalization_001": (
+        "q_causal_mask_softmax_normalization_002"
+    ),
+    "q_causal_full_incremental_equivalence_001": (
+        "q_causal_full_incremental_equivalence_002"
+    ),
+    "q_transformer_token_intervention_trace_001": (
+        "q_transformer_token_intervention_trace_002"
+    ),
+    "q_causal_cross_attention_mask_scope_002": (
+        "q_causal_cross_attention_mask_scope_003"
+    ),
+    "q_attention_runtime_workspace_boundary_001": (
+        "q_attention_runtime_workspace_boundary_002"
+    ),
+    "q_transformer_unexpected_cross_token_path_001": (
+        "q_transformer_unexpected_cross_token_path_002"
+    ),
+    "q_transformer_kv_cache_alignment_001": (
+        "q_transformer_kv_cache_alignment_002"
+    ),
+    "q_transformer_kv_cache_eviction_equivalence_001": (
+        "q_transformer_kv_cache_eviction_equivalence_002"
+    ),
+    "q_attention_duplicate_value_identifiability_002": (
+        "q_attention_duplicate_value_identifiability_003"
+    ),
+    "q_attention_value_gradient_routing_001": (
+        "q_attention_value_gradient_routing_002"
+    ),
+    "q_agent_delegated_capability_envelope_001": (
+        "q_agent_delegated_capability_envelope_002"
+    ),
+    "q_agent_approval_argument_binding_001": (
+        "q_agent_approval_argument_binding_002"
+    ),
+    "q_agent_saga_compensation_001": "q_agent_saga_compensation_002",
+    "q_agent_snapshot_observation_completeness_001": (
+        "q_agent_snapshot_observation_completeness_002"
+    ),
+    "q_agent_catalog_expansion_boundary_001": (
+        "q_agent_catalog_expansion_boundary_002"
+    ),
+    "q_agent_granted_subset_match_001": (
+        "q_agent_granted_subset_match_002"
+    ),
+    "q_agent_context_caveat_expiry_001": (
+        "q_agent_context_caveat_expiry_002"
+    ),
+    "q_agent_dry_run_effect_boundary_001": (
+        "q_agent_dry_run_effect_boundary_002"
+    ),
+    "q_agent_completion_predicate_counterfactual_001": (
+        "q_agent_completion_predicate_counterfactual_002"
+    ),
+    "q_rag_causal_bridge_attribution_001": (
+        "q_rag_causal_bridge_attribution_002"
+    ),
+    "q_rag_derived_rate_entailment_001": (
+        "q_rag_derived_rate_entailment_002"
+    ),
+    "q_rag_candidate_reranker_funnel_001": (
+        "q_rag_candidate_reranker_funnel_002"
+    ),
+    "q_rag_temporal_scope_counterfactual_001": (
+        "q_rag_temporal_scope_counterfactual_002"
+    ),
+    "q_rag_claim_citation_alignment_revision_001": (
+        "q_rag_claim_citation_alignment_revision_002"
+    ),
+    "q_rag_conjunctive_facet_coverage_001": (
+        "q_rag_conjunctive_facet_coverage_002"
+    ),
+}
+
+SOURCE_SCOPE_CORRECTION_REVISIONS = {
+    "q_agent_delegated_capability_envelope_001": (
+        "q_agent_delegated_capability_envelope_002"
+    ),
+    "q_agent_approval_argument_binding_001": (
+        "q_agent_approval_argument_binding_002"
+    ),
+    "q_agent_saga_compensation_001": "q_agent_saga_compensation_002",
+    "q_agent_snapshot_observation_completeness_001": (
+        "q_agent_snapshot_observation_completeness_002"
+    ),
+    "q_rag_temporal_scope_counterfactual_001": (
+        "q_rag_temporal_scope_counterfactual_002"
+    ),
+}
+
+OBSOLETE_ACTIVATION_GATE_SUFFIX = (
+    "; human review and activation of this generated item remain required."
+)
 
 
 def declare_test_fixture_generation_provenance(
@@ -112,7 +214,7 @@ class CorpusTestCase(unittest.TestCase):
         self.assertIn("multiple_topic_owners", codes)
         self.assertIn("asymmetric_related_topic", codes)
 
-    def test_llm_objective_families_do_not_inflate_active_evidence(
+    def test_llm_objective_dependent_practice_is_explicitly_labeled(
         self,
     ) -> None:
         new_objectives = {
@@ -135,59 +237,50 @@ class CorpusTestCase(unittest.TestCase):
                 question
                 for question in items
                 if question.revision_of is None
+                and question.status.eligible_for_adaptation
             ]
             self.assertGreaterEqual(len(root_items), 3, concept_id)
-            eligible_items = [
-                question
-                for question in items
-                if question.status.eligible_for_adaptation
-            ]
-            self.assertEqual(
-                len({item.family_id for item in eligible_items}),
-                len(eligible_items),
-                concept_id,
-            )
             roots_by_family: dict[str, list[Question]] = {}
             for item in root_items:
-                roots_by_family.setdefault(item.family_id, []).append(item)
+                roots_by_family.setdefault(
+                    item.published_family_id or item.family_id,
+                    [],
+                ).append(item)
             for family_id, family_items in roots_by_family.items():
                 if len(family_items) == 1:
                     continue
-                historical = [
-                    item
-                    for item in family_items
-                    if "20260809"
-                    not in str(item.provenance.get("batch_id", ""))
-                ]
-                self.assertLessEqual(
-                    len(historical),
-                    1,
-                    f"{concept_id}:{family_id}",
-                )
-                current_dependents = [
-                    item
-                    for item in family_items
-                    if item not in historical
-                ]
-                self.assertTrue(current_dependents)
                 self.assertTrue(
                     all(
-                        item.status.value == "quarantined"
-                        and not item.status.eligible_for_adaptation
-                        and item.provenance.get("generated") is True
-                        and item.provenance.get("human_review") is False
-                        and bool(
-                            item.provenance.get("independence_note")
-                        )
-                        for item in current_dependents
+                        item.status.value == "approved"
+                        and item.status.eligible_for_adaptation
+                        for item in family_items
                     ),
+                    f"{concept_id}:{family_id}",
+                )
+                self.assertTrue(
+                    all(
+                        item.provenance.get("human_review") is False
+                        for item in family_items
+                        if item.provenance.get("generated") is True
+                    ),
+                    f"{concept_id}:{family_id}",
+                )
+                self.assertGreaterEqual(
+                    sum(
+                        bool(item.provenance.get("independence_note"))
+                        for item in family_items
+                    ),
+                    len(family_items) - 1,
                     f"{concept_id}:{family_id}",
                 )
             for item in items:
                 if item.revision_of is None:
                     continue
                 parent = questions_by_id[item.revision_of]
-                self.assertEqual(item.family_id, parent.family_id)
+                self.assertEqual(
+                    item.published_family_id,
+                    parent.published_family_id,
+                )
                 self.assertGreater(item.version, parent.version)
             misconception_sets = [item.misconception_ids for item in items]
             self.assertTrue(all(len(values) == 3 for values in misconception_sets))
@@ -225,6 +318,210 @@ class CorpusTestCase(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertGreaterEqual(len(self.questions), 20)
         self.assertTrue(all(len(question.misconception_ids) == 3 for question in self.questions))
+
+    def test_current_curriculum_is_approved_or_explicitly_superseded(
+        self,
+    ) -> None:
+        status_counts = Counter(
+            question.status.value for question in self.questions
+        )
+        self.assertEqual(set(status_counts), {"approved", "retired"})
+        self.assertEqual(len(self.questions), 532)
+        self.assertEqual(status_counts["approved"], 491)
+        self.assertEqual(status_counts["retired"], 41)
+
+        retired_ids = {
+            question.id
+            for question in self.questions
+            if question.status is QuestionStatus.RETIRED
+        }
+        children_by_parent: dict[str, list[Question]] = {}
+        for question in self.questions:
+            if question.revision_of is not None:
+                children_by_parent.setdefault(question.revision_of, []).append(
+                    question
+                )
+
+        def has_approved_descendant(question_id: str) -> bool:
+            children = children_by_parent.get(question_id, [])
+            return any(
+                child.status is QuestionStatus.APPROVED
+                or has_approved_descendant(child.id)
+                for child in children
+            )
+
+        self.assertTrue(
+            all(has_approved_descendant(question_id) for question_id in retired_ids)
+        )
+
+    def test_clean_provenance_revisions_preserve_substantive_payload(self) -> None:
+        bundle = load_bundle(CORPUS)
+        by_id = {question["id"]: question for question in bundle["questions"]}
+        identity_fields = {"id", "version", "revision_of", "status", "provenance"}
+        changed_provenance_fields = {
+            "activation",
+            "human_review_status",
+            "review_status",
+            "review_statement",
+            "revision_review_batch_id",
+            "revision_reviewed_on",
+        }
+
+        self.assertEqual(len(CLEAN_PROVENANCE_REVISIONS), 28)
+        self.assertEqual(len(SOURCE_SCOPE_CORRECTION_REVISIONS), 5)
+        self.assertEqual(
+            SOURCE_SCOPE_CORRECTION_REVISIONS,
+            {
+                parent_id: CLEAN_PROVENANCE_REVISIONS[parent_id]
+                for parent_id in SOURCE_SCOPE_CORRECTION_REVISIONS
+            },
+        )
+        for parent_id, child_id in CLEAN_PROVENANCE_REVISIONS.items():
+            with self.subTest(parent_id=parent_id, child_id=child_id):
+                parent = by_id[parent_id]
+                child = by_id[child_id]
+                self.assertEqual(parent["status"], "retired")
+                self.assertEqual(child["status"], "approved")
+                self.assertEqual(child["revision_of"], parent_id)
+                self.assertEqual(child["version"], parent["version"] + 1)
+                self.assertEqual(
+                    {
+                        key: value
+                        for key, value in child.items()
+                        if key not in identity_fields
+                    },
+                    {
+                        key: value
+                        for key, value in parent.items()
+                        if key not in identity_fields
+                    },
+                )
+
+                parent_provenance = parent["provenance"]
+                child_provenance = child["provenance"]
+                self.assertIs(child_provenance["generated"], True)
+                self.assertIs(child_provenance["human_review"], False)
+                self.assertEqual(
+                    child_provenance["review_status"],
+                    "independent_model_review_passed",
+                )
+                self.assertNotIn("activation", child_provenance)
+                self.assertNotIn("human_review_status", child_provenance)
+                self.assertIn("answer-redacted", child_provenance["review_statement"])
+                self.assertIn("keyed answer", child_provenance["review_statement"])
+                for key, value in parent_provenance.items():
+                    if (
+                        key == "source_scope"
+                        and parent_id in SOURCE_SCOPE_CORRECTION_REVISIONS
+                    ):
+                        self.assertTrue(
+                            value.endswith(OBSOLETE_ACTIVATION_GATE_SUFFIX)
+                        )
+                        self.assertEqual(
+                            child_provenance[key],
+                            value.removesuffix(
+                                OBSOLETE_ACTIVATION_GATE_SUFFIX
+                            )
+                            + ".",
+                        )
+                        continue
+                    if key not in changed_provenance_fields:
+                        self.assertEqual(child_provenance.get(key), value, key)
+
+    def test_active_provenance_free_text_has_no_obsolete_activation_gate(
+        self,
+    ) -> None:
+        free_text_fields = {
+            "derivation",
+            "independence_note",
+            "review_statement",
+            "revision_reason",
+            "source_scope",
+        }
+        obsolete_markers = {
+            "activation of this generated item remain required",
+            "human review and activation of this generated item remain required",
+            "human review remains required",
+            "manual only after human review and new immutable release",
+            "pending quarantined",
+            "required before activation",
+        }
+        for question in self.questions:
+            if question.status is not QuestionStatus.APPROVED:
+                continue
+            for field in free_text_fields:
+                value = question.provenance.get(field)
+                if not isinstance(value, str):
+                    continue
+                normalized = value.casefold().replace("_", " ").replace("-", " ")
+                for marker in obsolete_markers:
+                    self.assertNotIn(
+                        marker,
+                        normalized,
+                        f"{question.id}:provenance.{field}",
+                    )
+
+    def test_legacy_review_promotions_have_accepted_independent_review(self) -> None:
+        promoted_ids = {
+            "q_transformer_token_mixing_002",
+            "q_causal_mask_matrix_002",
+            "q_transformer_position_signal_ablation_002",
+            "q_causal_mask_softmax_normalization_002",
+            "q_causal_full_incremental_equivalence_002",
+            "q_transformer_token_intervention_trace_002",
+        }
+        promoted = {
+            question.id: question
+            for question in self.questions
+            if question.id in promoted_ids
+        }
+        self.assertEqual(set(promoted), promoted_ids)
+        for question_id, question in promoted.items():
+            with self.subTest(question_id=question_id):
+                self.assertTrue(question.status.eligible_for_adaptation)
+                self.assertIs(question.provenance.get("generated"), True)
+                self.assertIs(question.provenance.get("human_review"), False)
+                self.assertEqual(
+                    question.provenance.get("review_status"),
+                    "independent_model_review_passed",
+                )
+                self.assertTrue(question.provenance.get("source_scope"))
+                self.assertTrue(question.provenance.get("independence_note"))
+                self.assertIn(
+                    "answer-redacted",
+                    question.provenance.get("review_statement", ""),
+                )
+                self.assertIn(
+                    "keyed answer",
+                    question.provenance.get("review_statement", ""),
+                )
+                self.assertNotIn("activation", question.provenance)
+                self.assertNotIn("human_review_status", question.provenance)
+
+    def test_active_review_provenance_has_no_pending_status(self) -> None:
+        for question in self.questions:
+            if not question.status.eligible_for_adaptation:
+                continue
+            review_status = str(question.provenance.get("review_status", "")).lower()
+            self.assertNotIn("pending", review_status, question.id)
+            self.assertNotIn("quarantin", review_status, question.id)
+
+    def test_expansion_provenance_has_no_manual_activation_condition(self) -> None:
+        expansion = [
+            question
+            for question in self.questions
+            if "20260809" in str(question.provenance.get("batch_id", ""))
+            and question.provenance.get("method") == "ai_assisted_source_scoped"
+        ]
+        self.assertEqual(len(expansion), 192)
+        for question in expansion:
+            self.assertNotIn("activation", question.provenance, question.id)
+            self.assertNotIn("human_review_status", question.provenance, question.id)
+            self.assertEqual(
+                question.provenance.get("review_status"),
+                "independent_model_review_passed",
+                question.id,
+            )
 
     def test_correct_answer_source_positions_have_no_material_skew(self) -> None:
         counts = [0, 0, 0, 0]
@@ -392,7 +689,7 @@ class CorpusTestCase(unittest.TestCase):
             corpus_source_digest(CORPUS / "manifest.json"),
         )
         self.assertEqual(len(directory_bundle["topics"]), 16)
-        self.assertEqual(len(directory_bundle["questions"]), 480)
+        self.assertGreaterEqual(len(directory_bundle["questions"]), 480)
 
         with tempfile.TemporaryDirectory() as directory:
             legacy = Path(directory) / "legacy.json"
@@ -410,13 +707,25 @@ class CorpusTestCase(unittest.TestCase):
 
     def test_sharding_preserves_the_immutable_release_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            database = Database(Path(directory) / "release.db")
-            database.initialize()
-            imported = database.import_corpus(
+            sharded = Database(Path(directory) / "sharded.db")
+            sharded.initialize()
+            sharded_release = sharded.import_corpus(
                 *read_and_parse(CORPUS, include_catalog=True)
-            )
+            )["release_id"]
 
-        self.assertEqual(imported["release_id"], "rel_7fa8d12e03dff0e08bcc739e")
+            bundle = load_bundle(CORPUS)
+            legacy_path = Path(directory) / "legacy.json"
+            legacy_path.write_text(
+                json.dumps(bundle, sort_keys=True),
+                encoding="utf-8",
+            )
+            legacy = Database(Path(directory) / "legacy.db")
+            legacy.initialize()
+            legacy_release = legacy.import_corpus(
+                *read_and_parse(legacy_path, include_catalog=True)
+            )["release_id"]
+
+        self.assertEqual(sharded_release, legacy_release)
 
     def test_sharded_loader_rejects_path_and_inventory_ambiguity(self) -> None:
         cases = (

@@ -11,9 +11,9 @@ from unittest.mock import patch
 
 from tsq.corpus import read_and_parse
 from tsq.engine import AdaptiveEngine
-from tsq.errors import ValidationError
+from tsq.errors import ConflictError, ValidationError
 from tsq.replay import ProjectionReplay
-from tsq.store import SCHEMA_VERSION, Database
+from tsq.store import Database
 
 from tests.schema_upgrade_helpers import restore_pre_shadow_schema
 
@@ -386,8 +386,10 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
             integrity["errors"],
         )
 
-    def test_v10_migration_appends_boundary_for_legacy_stale_decision(self) -> None:
-        first, stale_decision_id = self._pending_session()
+    def test_v10_response_history_requires_marker_capable_intermediate(
+        self,
+    ) -> None:
+        _first, stale_decision_id = self._pending_session()
         second = self.engine.start_session(
             "session-end", "c_attention", seed=71
         )
@@ -407,41 +409,24 @@ class SessionEndIntegrityTestCase(unittest.TestCase):
             )
 
         migrated = Database(self.database.path)
-        migrated.initialize()
+        with self.assertRaisesRegex(
+            ConflictError,
+            "Schema v9 contains learner response history.*schema v22",
+        ):
+            migrated.initialize()
 
         with migrated.read() as connection:
-            decision = connection.execute(
-                "SELECT * FROM decisions WHERE id = ?",
-                (stale_decision_id,),
-            ).fetchone()
+            schema_version = connection.execute(
+                "SELECT value FROM meta WHERE key = 'schema_version'"
+            ).fetchone()["value"]
             invalidation = connection.execute(
-                """SELECT * FROM events
+                """SELECT 1 FROM events
                    WHERE event_type = 'DecisionInvalidated'
                      AND causation_id = ?""",
                 (stale_decision_id,),
             ).fetchone()
-            schema_version = connection.execute(
-                "SELECT value FROM meta WHERE key = 'schema_version'"
-            ).fetchone()["value"]
-
-        self.assertEqual(schema_version, str(SCHEMA_VERSION))
-        self.assertEqual(
-            decision["invalidation_reason"], "learner_projection_advanced"
-        )
-        self.assertEqual(
-            invalidation["occurred_at"], decision["invalidated_at"]
-        )
-        payload = json.loads(invalidation["payload_json"])
-        self.assertEqual(payload["decision_id"], stale_decision_id)
-        self.assertGreater(
-            payload["current_learner_revision"],
-            payload["selection_learner_revision"],
-        )
-        self.assertEqual(
-            migrated.get_session(first["id"])["status"], "active"
-        )
-        integrity = migrated.verify_integrity()
-        self.assertTrue(integrity["ok"], integrity["errors"])
+        self.assertEqual(schema_version, "9")
+        self.assertIsNone(invalidation)
 
 
 if __name__ == "__main__":

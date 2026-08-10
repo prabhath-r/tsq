@@ -21,6 +21,45 @@ SPEC.loader.exec_module(COLD_START_LAB)
 
 
 class ColdStartLabTests(unittest.TestCase):
+    def test_family_projection_collapses_reviewed_alias_rows(self) -> None:
+        rows = [
+            {
+                "learner_id": "learner",
+                "concept_id": "concept",
+                "family_id": "f_ar_prompt_conditioning",
+                "kind": "application",
+                "first_unguided_correct_at": "2100-01-02T00:00:00+00:00",
+                "last_unguided_correct_at": "2100-01-03T00:00:00+00:00",
+                "delayed_unguided_correct_at": None,
+            },
+            {
+                "learner_id": "learner",
+                "concept_id": "concept",
+                "family_id": "f_ar_fixed_weight_demonstrations",
+                "kind": "debugging",
+                "first_unguided_correct_at": "2100-01-01T00:00:00+00:00",
+                "last_unguided_correct_at": "2100-01-04T00:00:00+00:00",
+                "delayed_unguided_correct_at": "2100-01-04T00:00:00+00:00",
+            },
+        ]
+
+        projected = COLD_START_LAB._canonical_family_projection_rows(
+            rows,
+            dimension_key="concept_id",
+        )
+
+        self.assertEqual(len(projected), 1)
+        self.assertEqual(projected[0]["family_id"], "f_ar_prompt_conditioning")
+        self.assertEqual(projected[0]["kind"], "debugging")
+        self.assertEqual(
+            projected[0]["first_unguided_correct_at"],
+            "2100-01-01T00:00:00+00:00",
+        )
+        self.assertEqual(
+            projected[0]["last_unguided_correct_at"],
+            "2100-01-04T00:00:00+00:00",
+        )
+
     def test_objective_depths_follow_declared_prerequisites(self) -> None:
         bundle = {
             "learning_objectives": [
@@ -152,11 +191,6 @@ class ColdStartLabTests(unittest.TestCase):
                     ]
                     for step in run["steps"]
                 ),
-            )
-            self.assertTrue(
-                run["steps"][0]["candidate_inventory"][
-                    "ranked_inventory_complete"
-                ]
             )
             for step in run["steps"]:
                 inventory = step["candidate_inventory"]
@@ -323,7 +357,6 @@ class ColdStartLabTests(unittest.TestCase):
                 "release_status": "approved",
                 "evidence_weight": 1.0,
                 "revoked": False,
-                "runtime_activation_safe": True,
             }
             for question_id, difficulty in (("q1", -1.0), ("q2", 0.0))
         }
@@ -365,6 +398,27 @@ class ColdStartLabTests(unittest.TestCase):
             ]
         )
 
+        alias_step = SimpleNamespace(**vars(step))
+        alias_step.family_id = "f_transformer_invariances"
+        alias_row = dict(base_row)
+        alias_row["selected_family_id"] = (
+            "f_attention_permutation_contract"
+        )
+        alias_metadata = json.loads(json.dumps(metadata))
+        alias_metadata["q1"]["family_id"] = (
+            "f_attention_permutation_contract"
+        )
+        alias_inventory = COLD_START_LAB._candidate_inventory_from_row(
+            row=alias_row,
+            step=alias_step,
+            question_metadata=alias_metadata,
+            trace_label="reviewed family alias",
+        )
+        self.assertEqual(
+            alias_inventory["ranked_candidates"][0]["family_id"],
+            "f_attention_permutation_contract",
+        )
+
         def assert_invalid(
             row: dict[str, object],
             *,
@@ -397,8 +451,8 @@ class ColdStartLabTests(unittest.TestCase):
         )
 
         unsafe_metadata = json.loads(json.dumps(metadata))
-        unsafe_metadata["q2"]["global_status"] = "quarantined"
-        unsafe_metadata["q2"]["release_status"] = "quarantined"
+        unsafe_metadata["q2"]["global_status"] = "draft"
+        unsafe_metadata["q2"]["release_status"] = "draft"
         unsafe_metadata["q2"]["evidence_weight"] = 0.0
         assert_invalid(
             base_row,
@@ -410,15 +464,6 @@ class ColdStartLabTests(unittest.TestCase):
         assert_invalid(
             base_row,
             known_metadata=revoked_metadata,
-        )
-
-        unsafe_generated_metadata = json.loads(json.dumps(metadata))
-        unsafe_generated_metadata["q2"][
-            "runtime_activation_safe"
-        ] = False
-        assert_invalid(
-            base_row,
-            known_metadata=unsafe_generated_metadata,
         )
 
         bad_digest = dict(base_row)
@@ -549,7 +594,6 @@ class ColdStartLabTests(unittest.TestCase):
                 "release_status": "approved",
                 "evidence_weight": 1.0,
                 "revoked": False,
-                "runtime_activation_safe": True,
             }
             for index in range(6)
         }

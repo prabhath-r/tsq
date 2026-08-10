@@ -47,7 +47,7 @@ from .policy import (
 )
 from .performance_reporting import productive_shadow_summary
 from .response_patterns import display_position_shadow
-from .store import Database, new_id, question_runtime_activation_safe
+from .store import Database, new_id
 from .versions import (
     AUTHORITATIVE_RESPONSE_WINDOW_MODEL_VERSIONS,
     COMPLETE_TRANSITION_OUTCOME_MODEL_VERSIONS,
@@ -874,7 +874,7 @@ class AdaptiveEngine:
             if not decision:
                 raise NotFoundError(f"Unknown decision: {decision_id}")
             session = self.database.get_session(decision["session_id"], connection)
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 session["learner_id"],
                 connection,
             )
@@ -1288,7 +1288,7 @@ class AdaptiveEngine:
                 or decision["invalidated_at"] is not None
             ):
                 return None
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 decision["learner_id"],
                 connection,
             )
@@ -1478,10 +1478,10 @@ class AdaptiveEngine:
                 session_id=decision["session_id"],
             )
             session = self.database.get_session(decision["session_id"], connection)
-            # A prior idempotent response still exposes learner-facing
-            # adaptive output. Quarantine therefore precedes both replay and
-            # every new projection write.
-            self.database.require_learner_evidence_safe(
+            # An exact response retry still exposes learner-facing adaptive
+            # output, so the integrity boundary precedes both replay and all
+            # new projection writes.
+            self.database.require_learner_evidence_integrity(
                 session["learner_id"],
                 connection,
             )
@@ -1622,15 +1622,6 @@ class AdaptiveEngine:
                     "This question was emergency-revoked and cannot contribute learner "
                     f"evidence: {revocation['reason']}"
                 )
-            if not question_runtime_activation_safe(
-                question,
-                status=decision["question_status"],
-            ):
-                raise ConflictError(
-                    "This generated question lacks the immutable independent "
-                    "human-review commitment required for activation and "
-                    "cannot contribute learner evidence."
-                )
             if session["status"] != "active":
                 raise ConflictError("Session is not active.")
             if (
@@ -1732,6 +1723,9 @@ class AdaptiveEngine:
                 occurred_at=now,
             )
             interaction_id = new_id("att")
+            response_family_id = self.learner_model.response_family_id(
+                question
+            )
             connection.execute(
                 """INSERT INTO attempts(
                        id, event_id, decision_id, session_id, learner_id,
@@ -1748,7 +1742,7 @@ class AdaptiveEngine:
                     session["learner_id"],
                     question.id,
                     question.version,
-                    question.family_id,
+                    response_family_id,
                     decision["option_order_json"],
                     selected_option_id,
                     int(correct),
@@ -2396,7 +2390,48 @@ class AdaptiveEngine:
         verified_prerequisites: set[str] = set()
         unserviceable_prerequisites: set[str] = set()
         prerequisite_objectives: dict[str, str] = {}
+        failed_verification_capacity_exit: dict[str, Any] | None = None
         if 2 <= next_depth <= MAX_REMEDIATION_DEPTH and focus_concept:
+            if current == SessionPhase.VERIFY:
+                if focus_objective is not None:
+                    failed_focus = (
+                        focus_objective,
+                        focus_misconception,
+                    )
+                    failed_focus_capacity = (
+                        self._fresh_objective_focus_capacity(
+                            connection,
+                            session_id=session["id"],
+                            learner_id=session["learner_id"],
+                            release_id=decision["corpus_release_id"],
+                            focuses={failed_focus},
+                            now=now,
+                        ).get(failed_focus, {})
+                    )
+                else:
+                    failed_focus_capacity = self._fresh_focus_capacity(
+                        connection,
+                        session_id=session["id"],
+                        learner_id=session["learner_id"],
+                        release_id=decision["corpus_release_id"],
+                        concept_ids={focus_concept},
+                        now=now,
+                    ).get(focus_concept, {})
+                if not failed_focus_capacity.get(
+                    "verification_families"
+                ):
+                    failed_verification_capacity_exit = {
+                        "phase": _main_phase(session["mode"]),
+                        "focus_concept_id": None,
+                        "focus_misconception_id": None,
+                        "focus_objective_id": None,
+                        "remediation_depth": 0,
+                        "remediation_path": [],
+                        "transition_reason": (
+                            "no_serviceable_prerequisite_boundary"
+                        ),
+                        "boundary_decision": None,
+                    }
             if focus_objective is not None:
                 declared_boundary = self._declared_objective_boundary(
                     connection,
@@ -2429,6 +2464,13 @@ class AdaptiveEngine:
                             ),
                             "boundary_decision": None,
                         }
+                    if failed_verification_capacity_exit is not None:
+                        # A failed verification may justify testing this
+                        # prerequisite only if the current focus can still be
+                        # rechecked afterward. Descending without that reserve
+                        # would knowingly strand the next remediation step in
+                        # selection.
+                        return failed_verification_capacity_exit
                     parent_focus = {
                         "concept_id": focus_concept,
                         "objective_id": focus_objective,
@@ -2578,14 +2620,18 @@ class AdaptiveEngine:
                                         AND attempt.is_correct=1
                                         AND attempt.hint_count=0
                                         {certificate_observability}
-                                       THEN attempt.family_id END)
+                                       THEN tsq_canonical_family(
+                                           attempt.family_id
+                                       ) END)
                                            AS repair_families,
                                    COUNT(DISTINCT CASE
                                        WHEN choice.pedagogical_role='verification'
                                         AND attempt.is_correct=1
                                         AND attempt.hint_count=0
                                         {certificate_observability}
-                                       THEN attempt.family_id END)
+                                       THEN tsq_canonical_family(
+                                           attempt.family_id
+                                       ) END)
                                            AS verification_families
                             FROM attempts attempt
                             JOIN decisions choice
@@ -2709,6 +2755,8 @@ class AdaptiveEngine:
                 prerequisite = boundary.selected_concept_id
                 boundary_decision_payload = boundary.terms()
                 if prerequisite != focus_concept:
+                    if failed_verification_capacity_exit is not None:
+                        return failed_verification_capacity_exit
                     parent_focus = {
                         "concept_id": focus_concept,
                         "misconception_id": focus_misconception,
@@ -2955,7 +3003,9 @@ class AdaptiveEngine:
             )
         placeholders = ",".join("?" for _ in objective_ids)
         rows = connection.execute(
-            f"""SELECT evidence.objective_id, evidence.family_id, evidence.kind
+            f"""SELECT evidence.objective_id,
+                       tsq_canonical_family(evidence.family_id) AS family_id,
+                       evidence.kind
                 FROM learner_objective_families evidence
                 WHERE evidence.learner_id = ?
                   AND evidence.objective_id IN ({placeholders})
@@ -2969,7 +3019,8 @@ class AdaptiveEngine:
                        AND release_question.question_id = direct.question_id
                       WHERE direct.release_id = ?
                         AND direct.objective_id = evidence.objective_id
-                        AND question.family_id = evidence.family_id
+                        AND tsq_canonical_family(question.family_id)
+                            = tsq_canonical_family(evidence.family_id)
                         AND release_question.status IN (?, ?)
                         AND NOT EXISTS (
                             SELECT 1 FROM question_revocations revoked
@@ -3059,7 +3110,7 @@ class AdaptiveEngine:
             f"""SELECT choice.focus_objective_id,
                        choice.focus_misconception_id,
                        choice.pedagogical_role,
-                       attempt.family_id
+                       tsq_canonical_family(attempt.family_id) AS family_id
                 FROM attempts attempt
                 JOIN decisions choice ON choice.id=attempt.decision_id
                 JOIN events response_event
@@ -3089,7 +3140,7 @@ class AdaptiveEngine:
                 GROUP BY choice.focus_objective_id,
                          choice.focus_misconception_id,
                          choice.pedagogical_role,
-                         attempt.family_id""",
+                         tsq_canonical_family(attempt.family_id)""",
             parameters,
         ).fetchall()
         repair_families: dict[tuple[str, str | None], set[str]] = {}
@@ -3346,7 +3397,9 @@ class AdaptiveEngine:
             return {}
         placeholders = ",".join("?" for _ in concept_ids)
         rows = connection.execute(
-            f"""SELECT mapping.concept_id, question.family_id, question.kind
+            f"""SELECT mapping.concept_id,
+                       tsq_canonical_family(question.family_id) AS family_id,
+                       question.kind
                 FROM question_concepts mapping
                 JOIN questions question ON question.id = mapping.question_id
                 JOIN release_questions release_question
@@ -3371,7 +3424,8 @@ class AdaptiveEngine:
                       WHERE seen.session_id = ?
                         AND (
                             seen.question_id = question.id
-                            OR seen_question.family_id = question.family_id
+                            OR tsq_canonical_family(seen_question.family_id)
+                               = tsq_canonical_family(question.family_id)
                         )
                   )""",
             (
@@ -3439,7 +3493,8 @@ class AdaptiveEngine:
         placeholders = ",".join("?" for _ in objective_ids)
         rows = connection.execute(
             f"""SELECT direct.objective_id, question.id AS question_id,
-                       question.family_id, question.kind,
+                       tsq_canonical_family(question.family_id) AS family_id,
+                       question.kind,
                        option.misconception_id,
                        diagnostic.objective_id AS diagnostic_objective_id
                 FROM release_question_objectives direct
@@ -3469,7 +3524,8 @@ class AdaptiveEngine:
                       WHERE seen.session_id = ?
                         AND (
                             seen.question_id = question.id
-                            OR seen_question.family_id = question.family_id
+                            OR tsq_canonical_family(seen_question.family_id)
+                               = tsq_canonical_family(question.family_id)
                         )
                   )""",
             (
@@ -3564,13 +3620,14 @@ class AdaptiveEngine:
             return {}
         placeholders = ",".join("?" for _ in family_ids)
         rows = connection.execute(
-            f"""SELECT question.family_id,
+            f"""SELECT tsq_canonical_family(question.family_id) AS family_id,
                        MAX(decision.created_at) AS last_at
                 FROM decisions decision
                 JOIN questions question ON question.id = decision.question_id
                 WHERE decision.learner_id = ?
-                  AND question.family_id IN ({placeholders})
-                GROUP BY question.family_id""",
+                  AND tsq_canonical_family(question.family_id)
+                      IN ({placeholders})
+                GROUP BY tsq_canonical_family(question.family_id)""",
             (learner_id, *sorted(family_ids)),
         ).fetchall()
         result: dict[str, datetime] = {}
@@ -3597,13 +3654,16 @@ class AdaptiveEngine:
         with self.database.read() as connection:
             row = connection.execute(
                 """SELECT COUNT(*) AS active_questions,
-                          COUNT(DISTINCT question.family_id) AS active_families,
+                          COUNT(DISTINCT
+                              tsq_canonical_family(question.family_id)
+                          ) AS active_families,
                           SUM(CASE WHEN released.status = ? THEN 1 ELSE 0 END)
                               AS approved_questions,
                           SUM(CASE WHEN released.status = ? THEN 1 ELSE 0 END)
                               AS calibrated_questions,
                           COUNT(DISTINCT CASE
-                              WHEN released.status = ? THEN question.family_id
+                              WHEN released.status = ? THEN
+                                  tsq_canonical_family(question.family_id)
                               ELSE NULL END) AS calibrated_families
                    FROM release_questions released
                    JOIN questions question
@@ -3690,7 +3750,7 @@ class AdaptiveEngine:
                 "SELECT 1 FROM learners WHERE id = ?", (learner_id,)
             ).fetchone():
                 raise NotFoundError(f"Unknown learner: {learner_id}")
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 learner_id,
                 connection,
             )
@@ -3777,32 +3837,61 @@ class AdaptiveEngine:
         if release_objective_ids:
             with self.database.read() as connection:
                 objective_evidence_rows = connection.execute(
-                    """SELECT evidence.objective_id, COUNT(*) AS families,
-                              COUNT(DISTINCT evidence.kind) AS operation_kinds,
-                              SUM(CASE WHEN evidence.delayed_unguided_correct_at
-                                                  IS NOT NULL
-                                       THEN 1 ELSE 0 END) AS delayed
-                       FROM learner_objective_families evidence
-                       WHERE evidence.learner_id = ?
-                         AND EXISTS (
-                             SELECT 1
-                             FROM release_question_objectives direct
-                             JOIN questions question
-                               ON question.id = direct.question_id
-                             JOIN release_questions released
-                               ON released.release_id = direct.release_id
-                              AND released.question_id = direct.question_id
-                             WHERE direct.release_id = ?
-                               AND direct.objective_id = evidence.objective_id
-                               AND question.family_id = evidence.family_id
-                               AND released.status IN (?, ?)
-                               AND NOT EXISTS (
-                                   SELECT 1
-                                   FROM question_revocations revoked
-                                   WHERE revoked.question_id = question.id
-                               )
-                         )
-                       GROUP BY evidence.objective_id""",
+                    """WITH ranked AS (
+                           SELECT evidence.objective_id,
+                                  tsq_canonical_family(evidence.family_id)
+                                      AS family_id,
+                                  evidence.kind,
+                                  ROW_NUMBER() OVER (
+                                      PARTITION BY evidence.objective_id,
+                                          tsq_canonical_family(
+                                              evidence.family_id
+                                          )
+                                      ORDER BY
+                                          evidence.last_unguided_correct_at DESC,
+                                          evidence.family_id
+                                  ) AS family_rank,
+                                  MAX(CASE WHEN
+                                      evidence.delayed_unguided_correct_at
+                                          IS NOT NULL
+                                      THEN 1 ELSE 0 END) OVER (
+                                      PARTITION BY evidence.objective_id,
+                                          tsq_canonical_family(
+                                              evidence.family_id
+                                          )
+                                  ) AS has_delayed
+                           FROM learner_objective_families evidence
+                           WHERE evidence.learner_id = ?
+                             AND EXISTS (
+                                 SELECT 1
+                                 FROM release_question_objectives direct
+                                 JOIN questions question
+                                   ON question.id = direct.question_id
+                                 JOIN release_questions released
+                                   ON released.release_id = direct.release_id
+                                  AND released.question_id = direct.question_id
+                                 WHERE direct.release_id = ?
+                                   AND direct.objective_id = evidence.objective_id
+                                   AND tsq_canonical_family(question.family_id)
+                                       = tsq_canonical_family(
+                                           evidence.family_id
+                                       )
+                                   AND released.status IN (?, ?)
+                                   AND NOT EXISTS (
+                                       SELECT 1
+                                       FROM question_revocations revoked
+                                       WHERE revoked.question_id = question.id
+                                   )
+                             )
+                       )
+                       SELECT objective_id, COUNT(*) AS families,
+                              COUNT(DISTINCT CASE WHEN kind != 'unknown'
+                                                  THEN kind END)
+                                  AS operation_kinds,
+                              SUM(has_delayed) AS delayed
+                       FROM ranked
+                       WHERE family_rank = 1
+                       GROUP BY objective_id""",
                     (
                         learner_id,
                         active_release,
@@ -3812,7 +3901,9 @@ class AdaptiveEngine:
                 ).fetchall()
                 observed_objective_rows = connection.execute(
                     """SELECT decision.question_objective_id AS objective_id,
-                              COUNT(DISTINCT attempt.family_id) AS families
+                              COUNT(DISTINCT
+                                  tsq_canonical_family(attempt.family_id)
+                              ) AS families
                        FROM attempts attempt
                        JOIN decisions decision
                          ON decision.id = attempt.decision_id
@@ -3858,7 +3949,9 @@ class AdaptiveEngine:
             with self.database.read() as connection:
                 observed_rows = connection.execute(
                     f"""SELECT mapping.concept_id,
-                               COUNT(DISTINCT attempt.family_id) AS families
+                               COUNT(DISTINCT
+                                   tsq_canonical_family(attempt.family_id)
+                               ) AS families
                         FROM attempts attempt
                         JOIN question_concepts mapping
                           ON mapping.question_id = attempt.question_id
@@ -4278,8 +4371,11 @@ class AdaptiveEngine:
             learner_id,
             concept_ids=scope,
         )
+        # Profile construction spans several read snapshots. Recheck before
+        # returning so a concurrent v22 migration cannot expose an invalidated
+        # projection assembled from the earlier snapshot.
         with self.database.read() as connection:
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 learner_id,
                 connection,
             )
@@ -4295,7 +4391,7 @@ class AdaptiveEngine:
         now = now.astimezone(timezone.utc)
         session = self.database.get_session(session_id)
         with self.database.read() as connection:
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 session["learner_id"],
                 connection,
             )
@@ -4310,7 +4406,8 @@ class AdaptiveEngine:
                           decision.selected_score_json, decision.created_at,
                           selection_event.occurred_at
                               AS selection_occurred_at,
-                          question.family_id, question.difficulty, question.kind,
+                          tsq_canonical_family(question.family_id) AS family_id,
+                          question.difficulty, question.kind,
                           primary_mapping.concept_id AS primary_concept_id,
                           attempt.id AS attempt_id, attempt.is_correct,
                           attempt.selected_option_id, attempt.confidence,
@@ -5151,7 +5248,10 @@ class AdaptiveEngine:
             placeholders = ",".join("?" for _ in seen_objective_ids)
             with self.database.read() as connection:
                 family_rows = connection.execute(
-                    f"""SELECT evidence.objective_id, COUNT(*) AS families
+                    f"""SELECT evidence.objective_id,
+                                COUNT(DISTINCT
+                                    tsq_canonical_family(evidence.family_id)
+                                ) AS families
                          FROM learner_objective_families evidence
                          WHERE evidence.learner_id = ?
                            AND evidence.objective_id IN ({placeholders})
@@ -5166,7 +5266,8 @@ class AdaptiveEngine:
                                WHERE direct.release_id = ?
                                  AND direct.objective_id
                                      = evidence.objective_id
-                                 AND question.family_id = evidence.family_id
+                                 AND tsq_canonical_family(question.family_id)
+                                     = tsq_canonical_family(evidence.family_id)
                                  AND released.status IN (?, ?)
                                  AND NOT EXISTS (
                                      SELECT 1
@@ -5676,7 +5777,7 @@ class AdaptiveEngine:
             ),
         }
         with self.database.read() as connection:
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 session["learner_id"],
                 connection,
             )

@@ -1695,7 +1695,7 @@ class PerformanceLedger:
             ).fetchone()
             if session is None:
                 raise NotFoundError(f"Session {session_id} does not exist.")
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 session["learner_id"],
                 connection,
             )
@@ -2085,7 +2085,7 @@ class PerformanceLedger:
                 raise NotFoundError(
                     f"Performance attempt {attempt_id} does not exist."
                 )
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 attempt["learner_id"],
                 connection,
             )
@@ -2983,8 +2983,9 @@ class PerformanceLedger:
                 raise NotFoundError(
                     f"Performance attempt {attempt_id} does not exist."
                 )
-            self.database.require_learner_evidence_safe(
-                attempt["learner_id"], connection
+            self.database.require_learner_evidence_integrity(
+                attempt["learner_id"],
+                connection,
             )
             session = connection.execute(
                 "SELECT * FROM sessions WHERE id=?",
@@ -3270,8 +3271,9 @@ class PerformanceLedger:
                     "after admission; the observation was rejected and the "
                     "claim remains unresolved."
                 )
-            self.database.require_learner_evidence_safe(
-                current_attempt["learner_id"], connection
+            self.database.require_learner_evidence_integrity(
+                current_attempt["learner_id"],
+                connection,
             )
             check_action: LearningAction | None = None
             if process_terms is not None:
@@ -3989,7 +3991,7 @@ class PerformanceLedger:
         ).fetchone()
         if session is None:
             raise ValidationError("Performance attempt has no session.")
-        self.database.require_learner_evidence_safe(
+        self.database.require_learner_evidence_integrity(
             attempt["learner_id"],
             connection,
         )
@@ -4494,7 +4496,7 @@ class PerformanceLedger:
             ).fetchone()
             if attempt is None:
                 raise NotFoundError(f"Performance attempt {attempt_id} does not exist.")
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 attempt["learner_id"],
                 connection,
             )
@@ -4587,7 +4589,7 @@ class PerformanceLedger:
                 raise ConflictError(
                     "Performance attempt disappeared before scoring admission."
                 )
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 current_attempt["learner_id"],
                 connection,
             )
@@ -4728,7 +4730,10 @@ class PerformanceLedger:
                 raise ConflictError(
                     "Performance attempt disappeared while it was being scored."
                 )
-            self.database.require_learner_evidence_safe(
+            # Recheck after the provider call under the serialized writer
+            # boundary. A concurrent v22 migration wins the race and leaves
+            # the admission claim unresolved, with no evaluation committed.
+            self.database.require_learner_evidence_integrity(
                 current_attempt["learner_id"],
                 connection,
             )
@@ -5069,12 +5074,10 @@ class PerformanceLedger:
                 raise NotFoundError(
                     f"Performance scoring claim {claim_id} does not exist."
                 )
-            # Reconciliation may append a recovered evaluation, so it obeys
-            # the same learner-wide quarantine boundary as new scoring and
-            # direct imports. Check before even invoking the observational
-            # adapter; an exact-key replay is also withheld while evidence is
-            # unsafe.
-            self.database.require_learner_evidence_safe(
+            # Reconciliation can append a recovered evaluation, so even an
+            # exact-key replay is withheld while the learner projection is
+            # invalidated.
+            self.database.require_learner_evidence_integrity(
                 learner["learner_id"],
                 connection,
             )
@@ -5267,10 +5270,9 @@ class PerformanceLedger:
                     "Performance scoring claim disappeared during "
                     "reconciliation."
                 )
-            # Recheck under the writer transaction so a quarantine committed
-            # while the external observer ran wins the race and leaves no
-            # reconciliation event or projection row.
-            self.database.require_learner_evidence_safe(
+            # Close the observer-call race before recording either the receipt
+            # or any recovered evaluation projection.
+            self.database.require_learner_evidence_integrity(
                 current_learner["learner_id"],
                 connection,
             )
@@ -5539,7 +5541,7 @@ class PerformanceLedger:
             ).fetchone()
             if attempt is None:
                 raise NotFoundError(f"Performance attempt {attempt_id} does not exist.")
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 attempt["learner_id"],
                 connection,
             )
@@ -5694,7 +5696,7 @@ class PerformanceLedger:
                 raise NotFoundError(
                     f"Performance attempt {attempt_id} does not exist."
                 )
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 owner["learner_id"],
                 connection,
             )
@@ -5757,7 +5759,7 @@ class PerformanceLedger:
                 "certification_claim": False,
             }
         with self.database.read() as connection:
-            self.database.require_learner_evidence_safe(
+            self.database.require_learner_evidence_integrity(
                 report["learner_id"],
                 connection,
             )

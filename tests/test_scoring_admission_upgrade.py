@@ -72,7 +72,7 @@ class ScoringAdmissionUpgradeTests(unittest.TestCase):
 
             database.initialize()
 
-            self.assertEqual(SCHEMA_VERSION, 22)
+            self.assertEqual(SCHEMA_VERSION, 23)
             self.assertEqual(event_fingerprint(database), before_events)
             after_performance = performance_source_snapshot(database)
             self.assertEqual(

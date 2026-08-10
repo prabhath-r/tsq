@@ -33,7 +33,7 @@ adaptive step, remediation episodes, transition reasons, boundary decisions,
 final learner projections, diagnostic findings, integrity results, cross-profile
 comparisons, and any contradicted behavioral hypotheses. When a run reaches a
 corpus gap, the artifact also shows remaining per-concept family capacity and
-the exact quarantined authoring blueprint emitted by the engine.
+the exact source-bound authoring blueprint emitted by the engine.
 
 The artifact also states the present observation boundary. TSQ can observe the
 final option or abstention, confidence, latency, and hint count. Its immutable
@@ -149,7 +149,11 @@ Its ignored artifact includes every selected family, phase transition, objective
 snapshot, detection rank, recovery path, durable episode spend, interleaving
 audit, and independent-family certificate check. This is a deterministic
 identifiability falsification probe, not human calibration or evidence of a
-causal teaching effect. The dual-gap profile deliberately uses a longer spaced
+causal teaching effect. Its bounded mechanism probe runs once per canonical
+evidence family on that family's earliest-authored released anchor; reviewed
+aliases and dependent practice variants are listed as members rather than
+misreported as independent recovery cases. It does not calibrate every member
+item. The dual-gap profile deliberately uses a longer spaced
 horizon so both weak targets and the strong controls have at least two
 independent observed families before localization is judged.
 
@@ -226,35 +230,32 @@ The bundled adapter is synthetic; the result does not validate any production
 provider receipt authority.
 
 The family-independence laboratory nominates active cross-family pairs through
-documented token-overlap signals, then counterfactually collapses each review
-cluster before running the exact capacity analyzer:
+documented token-overlap signals, records exact answer-redacted solution-
+operation adjudications, and runs a counterfactual collapse through the exact
+capacity analyzer:
 
 ```sh
 python experiments/family_independence_lab.py --fail-on-critical
 ```
 
-Its deterministic artifact distinguishes lexical review candidates from proven
-dependence. Exit status `3` means a candidate would reduce exact repair or
-verification capacity if semantic review confirmed that its families collapse;
-it is not a dependence verdict and the laboratory never edits the corpus. The
-artifact also tests the quarantined Transformer capacity-repair batch by making
-its frozen question dataclasses eligible in memory only. It reports baseline,
-declared-family collapse, candidate expansion, and collapsed-plus-candidate
-capacity for the exact objective and misconception signature. This is a
-counterfactual authoring check: generated candidates remain quarantined,
-human-unreviewed, manual-activation-only, and semantically unverified.
+Its deterministic artifact distinguishes lexical nominations, reviewed-
+distinct operation partitions, and proven equivalences. The review view
+contains only stems and option text; it excludes keys, rationales, routing
+metadata, family labels, and provenance. Exit status `3` is reserved for an
+unresolved candidate that would reduce exact repair or verification capacity
+if later review confirmed a collapse. The artifact validates every explicit
+published-to-evidence family alias, fails closed on review-set membership
+drift or an unlisted alias user, and requires every active family above the
+large-cohort threshold to match its exact reviewed cohort. Reviewed-equivalent
+clusters are reported as one evidence family and are not collapsed a second
+time.
 
-The same artifact declares the three active teacher-forced causal-visibility
-families as a semantic-review cluster, including the pair that falls below the
-lexical nomination threshold. It then evaluates the complete sixteen-subset
-power set of four quarantined causal-reserve families under declared-family,
-batch/training-pair-collapse, and three-family-collapse assumptions. Every
-subset is measured at both the whole causal-masking concept and the exact
-three-misconception route. Only one frozen representative of the
-cross-attention family is made eligible, so its `_001`/`_002` revision pair
-still contributes one family. Missing legacy generation, human-review, or
-manual-activation provenance is reported explicitly; quarantine remains the
-activation ceiling and no capacity result establishes semantic independence.
+The same artifact runs the deterministic corpus audit and exposes every exact
+warning code, identifier, and message, including fine-objective and contextual
+serviceability failures. Use `--fail-on-serviceability` to return exit status
+`4` if any audit issue remains. The lab analyzes only currently eligible
+questions: it never substitutes a status, activates an authoring candidate, or
+grants hypothetical family capacity.
 
 The policy-shadow comparison laboratory gives many fresh synthetic learners
 exactly one production-selected question each, then evaluates the event-backed

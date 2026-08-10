@@ -10,6 +10,11 @@ from math import isfinite, pi, sqrt
 from types import MappingProxyType
 from typing import Iterable, Mapping
 
+from .families import (
+    canonical_family_label,
+    evidence_family_id,
+    register_family_sql_functions,
+)
 from .inference import (
     LEGACY_MISCONCEPTION_ALGORITHM,
     MIN_CREDIBLE_CONFIDENCE,
@@ -40,6 +45,8 @@ from .objective_posterior import (
 )
 from .store import Database, to_timestamp
 from .versions import (
+    CANONICAL_FAMILY_MODEL_VERSIONS,
+    CANONICAL_FAMILY_V9_MODEL_VERSION,
     CONCEPT_MODEL_VERSION,
     DEFAULT_LEARNER_MODEL_VERSION,
     LEGACY_MODEL_VERSION,
@@ -254,7 +261,7 @@ class LearnerModel:
     ) -> ObjectivePosterior:
         """Return exact state, or conservatively lift one v5 Gaussian once.
 
-        A row already labelled v6, v7, or v8 must have its durable grid child.
+        A row already labelled v6 or later must have its durable grid child.
         Missing exact state is corruption, not a reason to silently rebuild a
         different posterior from redundant moments. v7 may carry a validated
         v6 exact posterior forward byte-for-byte before applying its first new
@@ -268,7 +275,15 @@ class LearnerModel:
             )
         if state.posterior is not None:
             compatible_exact_versions: set[str | None]
-            if self.model_version == OBJECTIVE_GRID_V8_MODEL_VERSION:
+            if self.model_version == CANONICAL_FAMILY_V9_MODEL_VERSION:
+                compatible_exact_versions = {
+                    None,
+                    OBJECTIVE_GRID_V6_MODEL_VERSION,
+                    OBJECTIVE_GRID_V7_MODEL_VERSION,
+                    OBJECTIVE_GRID_V8_MODEL_VERSION,
+                    CANONICAL_FAMILY_V9_MODEL_VERSION,
+                }
+            elif self.model_version == OBJECTIVE_GRID_V8_MODEL_VERSION:
                 compatible_exact_versions = {
                     None,
                     OBJECTIVE_GRID_V6_MODEL_VERSION,
@@ -930,6 +945,7 @@ class LearnerModel:
         event_id: str,
         now: datetime,
         allow_missing_event: bool = False,
+        match_equivalent_families: bool = True,
     ) -> tuple[FamilyResponseRecord, ...] | None:
         """Reconstruct prior family facts through the current event boundary."""
 
@@ -974,15 +990,20 @@ class LearnerModel:
                 "The learner update timestamp does not match its immutable "
                 "response event."
             )
+        family_predicate = (
+            "tsq_canonical_family(attempt.family_id) = ?"
+            if match_equivalent_families
+            else "attempt.family_id = ?"
+        )
         rows = connection.execute(
-            """SELECT event.occurred_at, event.metadata_json,
+            f"""SELECT event.occurred_at, event.metadata_json,
                       attempt.selected_option_id,
                       attempt.confidence, attempt.response_ms,
                       attempt.hint_count
                FROM attempts attempt
                JOIN events event ON event.event_id = attempt.event_id
                WHERE attempt.learner_id = ?
-                 AND attempt.family_id = ?
+                 AND {family_predicate}
                  AND event.stream_id = ?
                  AND event.event_type = 'ResponseSubmitted'
                  AND event.stream_version < ?
@@ -1072,14 +1093,33 @@ class LearnerModel:
             for family_id in requested
         ):
             raise ValueError("Potential family IDs must be non-blank strings.")
-        normalized = tuple(sorted(set(requested)))
+        canonical_families = (
+            self.model_version in CANONICAL_FAMILY_MODEL_VERSIONS
+        )
+        normalized = tuple(
+            sorted(
+                {
+                    canonical_family_label(family_id)
+                    if canonical_families
+                    else family_id
+                    for family_id in requested
+                }
+            )
+        )
         if not normalized:
             return {}
 
         placeholders = ",".join("?" for _ in normalized)
         expected_stream_id = f"learner:{learner_id}"
+        register_family_sql_functions(connection)
+        family_expression = (
+            "tsq_canonical_family(attempt.family_id)"
+            if canonical_families
+            else "attempt.family_id"
+        )
         rows = connection.execute(
-            f"""SELECT attempt.family_id, attempt.selected_option_id,
+            f"""SELECT {family_expression} AS family_id,
+                       attempt.selected_option_id,
                        attempt.confidence, attempt.response_ms,
                        attempt.hint_count, event.occurred_at,
                        event.metadata_json, event.stream_id,
@@ -1087,7 +1127,7 @@ class LearnerModel:
                 FROM attempts attempt
                 JOIN events event ON event.event_id = attempt.event_id
                 WHERE attempt.learner_id = ?
-                  AND attempt.family_id IN ({placeholders})
+                  AND {family_expression} IN ({placeholders})
                   AND event.event_type = 'ResponseSubmitted'
                 ORDER BY event.stream_version""",
             (learner_id, *normalized),
@@ -1177,6 +1217,21 @@ class LearnerModel:
             )
         )
 
+    def response_family_id(self, question: Question) -> str:
+        """Return the family label committed by this immutable model version.
+
+        Models through v8 wrote the item's published family label.  v9 is the
+        first reducer that treats reviewed aliases as one evidence family and
+        therefore writes the canonical label.  Keeping this decision on the
+        model boundary lets replay reconstruct either contract exactly.
+        """
+
+        if self.model_version in CANONICAL_FAMILY_MODEL_VERSIONS:
+            return question.family_id
+        if question.published_family_id is None:
+            raise ValueError("Question lacks its published family identity.")
+        return question.published_family_id
+
     def update_from_response(
         self,
         connection: sqlite3.Connection,
@@ -1192,6 +1247,7 @@ class LearnerModel:
         now: datetime,
         response_ms: int | None = None,
         prior_family_attempts_override: int | None = None,
+        family_id_override: str | None = None,
         misconception_algorithm: str = LEGACY_MISCONCEPTION_ALGORITHM,
     ) -> tuple[dict[str, SkillState], list[dict[str, object]]]:
         if misconception_algorithm not in SUPPORTED_MISCONCEPTION_ALGORITHMS:
@@ -1199,6 +1255,39 @@ class LearnerModel:
                 "Unsupported misconception inference algorithm: "
                 f"{misconception_algorithm}"
             )
+        register_family_sql_functions(connection)
+        response_family_id = self.response_family_id(question)
+        match_equivalent_families = (
+            self.model_version in CANONICAL_FAMILY_MODEL_VERSIONS
+        )
+        if family_id_override is not None:
+            if (
+                type(family_id_override) is not str
+                or not family_id_override.strip()
+                or evidence_family_id(question.id, family_id_override)
+                != question.family_id
+            ):
+                raise ValueError(
+                    "Family override must be the question's published or "
+                    "reviewed evidence family."
+                )
+            expected_family_id = self.response_family_id(question)
+            if self.model_version in CANONICAL_FAMILY_MODEL_VERSIONS:
+                response_family_id = canonical_family_label(
+                    family_id_override
+                )
+            else:
+                response_family_id = family_id_override
+            if response_family_id != expected_family_id:
+                raise ValueError(
+                    "Family override does not match the event model's family "
+                    "identity contract."
+                )
+        projection_family_predicate = (
+            "tsq_canonical_family(family_id) = ?"
+            if match_equivalent_families
+            else "family_id = ?"
+        )
         concept_rows = connection.execute(
             "SELECT * FROM concepts WHERE id IN ({})".format(
                 ",".join("?" for _ in question.concepts)
@@ -1279,22 +1368,29 @@ class LearnerModel:
                 )
             prior_family_attempts = prior_family_attempts_override
         else:
+            attempt_family_predicate = (
+                "tsq_canonical_family(family_id) = ?"
+                if match_equivalent_families
+                else "family_id = ?"
+            )
             prior_family_attempts = connection.execute(
-                """SELECT COUNT(*) AS n FROM attempts
-                   WHERE learner_id = ? AND family_id = ? AND event_id <> ?""",
-                (learner_id, question.family_id, event_id),
+                f"""SELECT COUNT(*) AS n FROM attempts
+                    WHERE learner_id = ? AND {attempt_family_predicate}
+                      AND event_id <> ?""",
+                (learner_id, response_family_id, event_id),
             ).fetchone()["n"]
 
         if self.model_version in SPACING_AWARE_FAMILY_MODEL_VERSIONS:
             prior_family_records = self._family_response_records(
                 connection,
                 learner_id=learner_id,
-                family_id=question.family_id,
+                family_id=response_family_id,
                 event_id=event_id,
                 now=now,
                 allow_missing_event=(
                     prior_family_attempts_override is not None
                 ),
+                match_equivalent_families=match_equivalent_families,
             )
             if prior_family_records is None:
                 base_power = self.family_dependence_discount(
@@ -1421,18 +1517,39 @@ class LearnerModel:
         )
         if projected_objective is not None:
             prior_primary_family = connection.execute(
-                """SELECT * FROM learner_objective_families
-                   WHERE learner_id = ? AND objective_id = ? AND family_id = ?""",
-                (learner_id, question.objective_id, question.family_id),
+                f"""SELECT MIN(first_unguided_correct_at)
+                                AS first_unguided_correct_at,
+                           MAX(last_unguided_correct_at)
+                                AS last_unguided_correct_at,
+                           MIN(delayed_unguided_correct_at)
+                                AS delayed_unguided_correct_at
+                    FROM learner_objective_families
+                    WHERE learner_id = ? AND objective_id = ?
+                      AND {projection_family_predicate}""",
+                (learner_id, question.objective_id, response_family_id),
             ).fetchone()
         else:
             prior_primary_family = connection.execute(
-                """SELECT * FROM learner_skill_families
-                   WHERE learner_id = ? AND concept_id = ? AND family_id = ?""",
-                (learner_id, primary_mapping.concept_id, question.family_id),
+                f"""SELECT MIN(first_unguided_correct_at)
+                                AS first_unguided_correct_at,
+                           MAX(last_unguided_correct_at)
+                                AS last_unguided_correct_at,
+                           MIN(delayed_unguided_correct_at)
+                                AS delayed_unguided_correct_at
+                    FROM learner_skill_families
+                    WHERE learner_id = ? AND concept_id = ?
+                      AND {projection_family_predicate}""",
+                (
+                    learner_id,
+                    primary_mapping.concept_id,
+                    response_family_id,
+                ),
             ).fetchone()
-        independent_retrieval = prior_primary_family is None
-        if prior_primary_family:
+        independent_retrieval = (
+            prior_primary_family is None
+            or prior_primary_family["last_unguided_correct_at"] is None
+        )
+        if not independent_retrieval:
             last_at = datetime.fromisoformat(prior_primary_family["last_unguided_correct_at"])
             primary_state = (
                 projected_objective
@@ -1563,12 +1680,26 @@ class LearnerModel:
             )
             if certifying_retrieval and mapping.role is ConceptRole.PRIMARY:
                 family_evidence = connection.execute(
-                    """SELECT * FROM learner_skill_families
-                       WHERE learner_id = ? AND concept_id = ? AND family_id = ?""",
-                    (learner_id, mapping.concept_id, question.family_id),
+                    f"""SELECT MIN(first_unguided_correct_at)
+                                    AS first_unguided_correct_at,
+                               MAX(last_unguided_correct_at)
+                                    AS last_unguided_correct_at,
+                               MIN(delayed_unguided_correct_at)
+                                    AS delayed_unguided_correct_at
+                        FROM learner_skill_families
+                        WHERE learner_id = ? AND concept_id = ?
+                          AND {projection_family_predicate}""",
+                    (learner_id, mapping.concept_id, response_family_id),
                 ).fetchone()
                 delayed_at = None
-                if family_evidence:
+                first_at = to_timestamp(now)
+                if (
+                    family_evidence is not None
+                    and family_evidence["last_unguided_correct_at"] is not None
+                ):
+                    first_at = family_evidence[
+                        "first_unguided_correct_at"
+                    ]
                     delayed_at = family_evidence["delayed_unguided_correct_at"]
                     last_at = datetime.fromisoformat(
                         family_evidence["last_unguided_correct_at"]
@@ -1595,9 +1726,9 @@ class LearnerModel:
                     (
                         learner_id,
                         mapping.concept_id,
-                        question.family_id,
+                        response_family_id,
                         question.kind.value,
-                        to_timestamp(now),
+                        first_at,
                         to_timestamp(now),
                         delayed_at,
                     ),
@@ -1652,7 +1783,7 @@ class LearnerModel:
                     evidence_posterior = before_posterior.with_observation(
                         LikelihoodObservation(
                             observation_id=event_id,
-                            family_id=question.family_id,
+                            family_id=response_family_id,
                             difficulty=question.difficulty,
                             discrimination=question.discrimination,
                             guess_rate=question.guess_rate,
@@ -1801,13 +1932,26 @@ class LearnerModel:
                 )
             if certifying_retrieval:
                 family_evidence = connection.execute(
-                    """SELECT * FROM learner_objective_families
-                       WHERE learner_id = ? AND objective_id = ?
-                         AND family_id = ?""",
-                    (learner_id, question.objective_id, question.family_id),
+                    f"""SELECT MIN(first_unguided_correct_at)
+                                    AS first_unguided_correct_at,
+                               MAX(last_unguided_correct_at)
+                                    AS last_unguided_correct_at,
+                               MIN(delayed_unguided_correct_at)
+                                    AS delayed_unguided_correct_at
+                        FROM learner_objective_families
+                        WHERE learner_id = ? AND objective_id = ?
+                          AND {projection_family_predicate}""",
+                    (learner_id, question.objective_id, response_family_id),
                 ).fetchone()
                 delayed_at = None
-                if family_evidence:
+                first_at = to_timestamp(now)
+                if (
+                    family_evidence is not None
+                    and family_evidence["last_unguided_correct_at"] is not None
+                ):
+                    first_at = family_evidence[
+                        "first_unguided_correct_at"
+                    ]
                     delayed_at = family_evidence[
                         "delayed_unguided_correct_at"
                     ]
@@ -1839,9 +1983,9 @@ class LearnerModel:
                     (
                         learner_id,
                         question.objective_id,
-                        question.family_id,
+                        response_family_id,
                         question.kind.value,
-                        to_timestamp(now),
+                        first_at,
                         to_timestamp(now),
                         delayed_at,
                     ),
@@ -2351,7 +2495,7 @@ class LearnerModel:
         legacy_family_effects: dict[str, float] = {}
         legacy_family_counts: dict[str, int] = {}
         latest_family_contributions: dict[str, float] = {}
-        migrated_families: set[str] = set()
+        latest_family_units: dict[str, int] = {}
         explicit_algorithm_seen = False
         current_observation_applied = False
 
@@ -2370,7 +2514,62 @@ class LearnerModel:
                     "A legacy misconception event cannot follow an explicitly "
                     "versioned misconception event in one learner stream."
                 )
-            family_id = row["family_id"]
+            raw_family_id = row["family_id"]
+            family_id = (
+                canonical_family_label(raw_family_id)
+                if event_model_version
+                in CANONICAL_FAMILY_MODEL_VERSIONS
+                else raw_family_id
+            )
+            if event_model_version in CANONICAL_FAMILY_MODEL_VERSIONS:
+                # A v9 observation is the explicit boundary at which every
+                # earlier published alias becomes one reducer key.  Merge the
+                # already-applied bookkeeping without changing its accumulated
+                # value; the current credible observation below can then
+                # replace the whole equivalent-family contribution once.
+                known_family_ids = (
+                    set(family_attempts)
+                    | set(family_records)
+                    | set(legacy_family_effects)
+                    | set(legacy_family_counts)
+                    | set(latest_family_contributions)
+                    | set(latest_family_units)
+                )
+                aliases = {
+                    prior_family_id
+                    for prior_family_id in known_family_ids
+                    if prior_family_id != family_id
+                    and canonical_family_label(prior_family_id)
+                    == family_id
+                }
+                for alias in aliases:
+                    family_attempts[family_id] = (
+                        family_attempts.get(family_id, 0)
+                        + family_attempts.pop(alias, 0)
+                    )
+                    family_records.setdefault(family_id, []).extend(
+                        family_records.pop(alias, ())
+                    )
+                    legacy_family_effects[family_id] = (
+                        legacy_family_effects.get(family_id, 0.0)
+                        + legacy_family_effects.pop(alias, 0.0)
+                    )
+                    legacy_family_counts[family_id] = (
+                        legacy_family_counts.get(family_id, 0)
+                        + legacy_family_counts.pop(alias, 0)
+                    )
+                    latest_family_contributions[family_id] = (
+                        latest_family_contributions.get(family_id, 0.0)
+                        + latest_family_contributions.pop(alias, 0.0)
+                    )
+                    latest_family_units[family_id] = (
+                        latest_family_units.get(family_id, 0)
+                        + latest_family_units.pop(alias, 0)
+                    )
+                if family_id in family_records:
+                    family_records[family_id].sort(
+                        key=lambda record: record.occurred_at
+                    )
             prior_family_attempts = family_attempts.get(family_id, 0)
             try:
                 occurred_at = datetime.fromisoformat(row["occurred_at"])
@@ -2473,24 +2672,24 @@ class LearnerModel:
                     discrimination=row["discrimination"],
                 )
                 if contribution is not None:
-                    if family_id not in migrated_families:
-                        log_odds_value -= legacy_family_effects.get(
-                            family_id, 0.0
-                        )
-                        # The public count follows effective evidence units,
-                        # not raw retries: migrate all historical votes from
-                        # this family into one replaceable current-family unit.
-                        evidence_count -= legacy_family_counts.get(
-                            family_id, 0
-                        )
-                        migrated_families.add(family_id)
-                        evidence_count += 1
-                    else:
-                        log_odds_value -= latest_family_contributions.get(
-                            family_id, 0.0
-                        )
+                    # Replace all effective votes for this semantic family.
+                    # For v9 that includes every reviewed alias accumulated by
+                    # older event versions; for earlier versions the key stays
+                    # the exact published family label.
+                    log_odds_value -= legacy_family_effects.get(
+                        family_id, 0.0
+                    )
+                    log_odds_value -= latest_family_contributions.get(
+                        family_id, 0.0
+                    )
+                    evidence_count -= legacy_family_counts.get(family_id, 0)
+                    evidence_count -= latest_family_units.get(family_id, 0)
                     log_odds_value += contribution
+                    evidence_count += 1
+                    legacy_family_effects[family_id] = 0.0
+                    legacy_family_counts[family_id] = 0
                     latest_family_contributions[family_id] = contribution
+                    latest_family_units[family_id] = 1
                     applied = True
 
             family_attempts[family_id] = prior_family_attempts + 1

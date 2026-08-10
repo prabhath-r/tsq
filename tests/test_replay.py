@@ -24,9 +24,10 @@ from tsq.learner import (
     LearnerModel,
 )
 from tsq.replay import ProjectionReplay
-from tsq.store import Database
-
-from tests.schema_upgrade_helpers import restore_pre_shadow_schema
+from tsq.store import (
+    Database,
+    _V0_1_0_QUESTIONS_VALID_STATUS_TRIGGER_SQL,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -275,9 +276,11 @@ class ProjectionReplayTestCase(unittest.TestCase):
 
     def test_cli_check_is_operational_and_source_schema_is_not_migrated(self) -> None:
         with self.database.transaction() as connection:
-            restore_pre_shadow_schema(connection)
-            self.database._drop_v6_authoring_triggers(connection)
-            connection.execute("UPDATE meta SET value='5' WHERE key='schema_version'")
+            connection.execute("DROP TRIGGER questions_valid_status")
+            connection.execute(
+                _V0_1_0_QUESTIONS_VALID_STATUS_TRIGGER_SQL
+            )
+            connection.execute("UPDATE meta SET value='22' WHERE key='schema_version'")
         output = io.StringIO()
         with redirect_stdout(output):
             exit_code = main(
@@ -294,12 +297,12 @@ class ProjectionReplayTestCase(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         report = json.loads(output.getvalue())
         self.assertTrue(report["ok"])
-        self.assertEqual(report["source_schema_version"], 5)
+        self.assertEqual(report["source_schema_version"], 22)
         with self.database.read() as connection:
             source_version = connection.execute(
                 "SELECT value FROM meta WHERE key='schema_version'"
             ).fetchone()["value"]
-        self.assertEqual(source_version, "5")
+        self.assertEqual(source_version, "22")
 
     def test_unknown_event_or_model_schema_fails_closed(self) -> None:
         with self.database.transaction() as connection:

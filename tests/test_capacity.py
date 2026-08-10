@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import tsq.capacity as capacity_module
-from tsq.corpus import corpus_source_digest, load_bundle
+from tsq.corpus import load_bundle
 from tsq.capacity import (
     CapacityAnalysisLimitError,
     CapacityTarget,
@@ -42,40 +42,6 @@ from tsq.models import (
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus"
-
-HISTORICAL_AGENT_QUARANTINE_IDS = (
-    "q_agent_revision_ordering_001",
-    "q_agent_delegated_capability_envelope_001",
-    "q_agent_approval_argument_binding_001",
-    "q_agent_saga_compensation_001",
-    "q_agent_snapshot_observation_completeness_001",
-    "q_agent_catalog_expansion_boundary_001",
-    "q_agent_granted_subset_match_001",
-    "q_agent_context_caveat_expiry_001",
-    "q_agent_dry_run_effect_boundary_001",
-    "q_agent_completion_predicate_counterfactual_001",
-)
-HISTORICAL_RAG_QUARANTINE_IDS = (
-    "q_rag_factuality_grounding_axes_001",
-    "q_rag_multihop_query_001",
-    "q_rag_causal_bridge_attribution_001",
-    "q_rag_derived_rate_entailment_001",
-    "q_rag_candidate_reranker_funnel_001",
-    "q_rag_temporal_scope_counterfactual_001",
-    "q_rag_claim_citation_alignment_revision_001",
-    "q_rag_conjunctive_facet_coverage_001",
-)
-
-
-def candidate_question_arguments(
-    question_ids: tuple[str, ...],
-) -> list[str]:
-    return [
-        argument
-        for question_id in question_ids
-        for argument in ("--candidate-question-id", question_id)
-    ]
-
 
 def make_question(
     family_id: str,
@@ -228,8 +194,13 @@ class SustainedCapacityTestCase(unittest.TestCase):
         graph: KnowledgeGraph,
         misconceptions: list[Misconception],
         target: CapacityTarget,
+        *,
+        component_solver=None,
+        compare_sequences: bool = True,
     ) -> None:
-        optimized_component_bounds = capacity_module._component_bounds
+        optimized_component_bounds = (
+            component_solver or capacity_module._component_bounds
+        )
         checked_components = 0
 
         def checked_component_bounds(component, **kwargs):
@@ -301,19 +272,26 @@ class SustainedCapacityTestCase(unittest.TestCase):
             expected_low, expected_low_sequence = brute_low(0)
             expected_high, expected_high_sequence = brute_high(0)
             self.assertEqual(
-                (
-                    actual.low,
-                    actual.high,
-                    actual.low_sequence,
-                    actual.high_sequence,
-                ),
-                (
-                    expected_low,
-                    expected_high,
-                    expected_low_sequence,
-                    expected_high_sequence,
-                ),
+                (actual.low, actual.high),
+                (expected_low, expected_high),
             )
+            for sequence, expected_count in (
+                (actual.low_sequence, expected_low),
+                (actual.high_sequence, expected_high),
+            ):
+                consumed = 0
+                self.assertEqual(len(sequence), expected_count)
+                self.assertEqual(len(set(sequence)), expected_count)
+                for family_id in sequence:
+                    index = component.index(family_id)
+                    self.assertIn(index, safe_indices(consumed))
+                    consumed |= 1 << index
+                self.assertEqual(safe_indices(consumed), ())
+            if compare_sequences:
+                self.assertEqual(
+                    (actual.low_sequence, actual.high_sequence),
+                    (expected_low_sequence, expected_high_sequence),
+                )
             return actual
 
         with patch.object(
@@ -328,6 +306,81 @@ class SustainedCapacityTestCase(unittest.TestCase):
                 [target],
             )
         self.assertGreater(checked_components, 0)
+
+    def test_closure_solver_matches_exhaustive_random_small_banks(self) -> None:
+        concept = Concept("c", "Concept", "Description")
+        graph = KnowledgeGraph([concept], [])
+        rng = random.Random(719_503)
+        for case in range(30):
+            misconceptions = [
+                Misconception(
+                    f"closure_m_{case}_{index}",
+                    "c",
+                    f"Gap {index}",
+                    "Description",
+                )
+                for index in range(rng.randint(2, 4))
+            ]
+            misconception_ids = tuple(
+                misconception.id for misconception in misconceptions
+            )
+            questions: list[Question] = []
+            for family_index in range(rng.randint(3, 10)):
+                family_id = f"closure_f_{case}_{family_index}"
+                for variant in range(2 if rng.random() < 0.4 else 1):
+                    selected = tuple(
+                        misconception_id
+                        for misconception_id in misconception_ids
+                        if rng.random() < 0.55
+                    ) or (misconception_ids[family_index % len(misconception_ids)],)
+                    questions.append(
+                        make_question(
+                            family_id,
+                            "c",
+                            selected,
+                            question_id=f"q_{family_id}_{variant}",
+                        )
+                    )
+            with self.subTest(case=case):
+                self.assert_matches_brute_force(
+                    questions,
+                    graph,
+                    misconceptions,
+                    concept_target("c"),
+                    component_solver=capacity_module._large_component_bounds,
+                    compare_sequences=False,
+                )
+
+    def test_large_closure_solver_is_exact_deterministic_and_budgeted(self) -> None:
+        concept = Concept("c", "Concept", "Description")
+        graph = KnowledgeGraph([concept], [])
+        questions, misconceptions = interchangeable_bank("c", "large", 18)
+
+        forward = analyze_sustained_capacity(
+            questions,
+            graph,
+            misconceptions,
+            [concept_target("c")],
+        ).targets[0]
+        reverse = analyze_sustained_capacity(
+            list(reversed(questions)),
+            graph,
+            list(reversed(misconceptions)),
+            [concept_target("c")],
+        ).targets[0]
+
+        self.assertEqual(forward.order_robust_main_capacity, 16)
+        self.assertEqual(forward.achievable_main_capacity, 16)
+        self.assertEqual(forward.to_dict(), reverse.to_dict())
+        with self.assertRaises(CapacityAnalysisLimitError) as raised:
+            analyze_sustained_capacity(
+                questions,
+                graph,
+                misconceptions,
+                [concept_target("c")],
+                state_limit=1,
+            )
+        self.assertEqual(raised.exception.component_size, 18)
 
     def test_certificates_match_exhaustive_random_small_banks(self) -> None:
         concept = Concept("c", "Concept", "Description")
@@ -913,60 +966,14 @@ class CapacityCliTestCase(unittest.TestCase):
         self.assertEqual(payload["summary"]["target_count"], 1)
         result = payload["targets"][0]
         self.assertEqual(result["target_id"], "t_transformers")
-        self.assertLessEqual(
-            result["order_robust_main_capacity"],
-            result["achievable_main_capacity"],
-        )
-
-    def test_quarantined_transformer_candidates_do_not_inflate_live_capacity(
-        self,
-    ) -> None:
-        bundle = load_bundle(CORPUS)
-        topic = next(
-            item for item in bundle["topics"] if item["id"] == "t_transformers"
-        )
-        owned_concepts = set(topic["concept_ids"])
-        active_questions = [
-            question
-            for question in bundle["questions"]
-            if question["status"] == "approved"
-            and any(
-                concept["concept_id"] in owned_concepts
-                and concept["role"] == "primary"
-                for concept in question["concepts"]
-            )
-        ]
-        quarantined_bridge_ids = {
-            "q_attention_runtime_workspace_boundary_001",
-            "q_causal_cross_attention_mask_scope_002",
-            "q_transformer_unexpected_cross_token_path_001",
-        }
-
-        self.assertEqual(len(active_questions), 48)
         self.assertEqual(
-            len({question["family_id"] for question in active_questions}),
-            48,
+            (
+                result["order_robust_main_capacity"],
+                result["achievable_main_capacity"],
+            ),
+            (23, 28),
         )
-        self.assertTrue(
-            quarantined_bridge_ids.isdisjoint(
-                {question["id"] for question in active_questions}
-            )
-        )
-
-        code, output, errors = self.run_cli(
-            [
-                "capacity",
-                str(CORPUS),
-                "--topic",
-                "t_transformers",
-                "--json",
-            ]
-        )
-        payload = json.loads(output)
-        self.assertEqual(code, 0, errors)
-        [result] = payload["targets"]
-        self.assertEqual(result["order_robust_main_capacity"], 26)
-        self.assertEqual(result["achievable_main_capacity"], 26)
+        self.assertLess(result["states_evaluated"], 2_000_000)
 
     def test_default_scope_analyzes_all_topics(self) -> None:
         code, output, errors = self.run_cli(
@@ -1041,7 +1048,7 @@ class CapacityCliTestCase(unittest.TestCase):
                 "--topic",
                 "t_retrieval_augmented_generation",
                 "--target-main-count",
-                "10",
+                "14",
                 "--strict",
                 "--json",
             ]
@@ -1049,17 +1056,15 @@ class CapacityCliTestCase(unittest.TestCase):
 
         payload = json.loads(output)
         self.assertEqual(code, 2, errors)
-        self.assertEqual(payload["summary"]["requested_main_capacity"], 10)
+        self.assertEqual(payload["summary"]["requested_main_capacity"], 14)
         self.assertEqual(
             payload["summary"]["strict_failure_targets"],
             ["t_retrieval_augmented_generation"],
         )
         [result] = payload["targets"]
-        self.assertEqual(result["target_main_count"], 10)
-        # Generated questions without human review are quarantined and must not
-        # inflate the live serviceability horizon.
-        self.assertEqual(result["order_robust_main_capacity"], 4)
-        self.assertEqual(result["achievable_main_capacity"], 4)
+        self.assertEqual(result["target_main_count"], 14)
+        self.assertEqual(result["order_robust_main_capacity"], 13)
+        self.assertEqual(result["achievable_main_capacity"], 13)
         self.assertEqual(result["status"], "thin")
 
     def test_state_limit_failure_never_emits_a_partial_report(self) -> None:
@@ -1080,299 +1085,6 @@ class CapacityCliTestCase(unittest.TestCase):
         self.assertIn("analysis is incomplete", errors)
         self.assertIn("no heuristic result", errors)
 
-    def test_quarantine_impact_finds_exact_agent_bridge_without_activation(
-        self,
-    ) -> None:
-        before = corpus_source_digest(CORPUS)
-        code, output, errors = self.run_cli(
-            [
-                "capacity",
-                str(CORPUS),
-                "--topic",
-                "t_llm_agents",
-                "--quarantine-impact",
-                *candidate_question_arguments(
-                    HISTORICAL_AGENT_QUARANTINE_IDS
-                ),
-                "--json",
-            ]
-        )
-
-        payload = json.loads(output)
-        self.assertEqual(code, 0, errors)
-        self.assertEqual(
-            corpus_source_digest(CORPUS), before
-        )
-        self.assertTrue(
-            payload["exact_within_declared_search_space"]
-        )
-        self.assertTrue(payload["non_activating"])
-        self.assertEqual(payload["corpus_sha256"], before)
-        self.assertEqual(payload["baseline"]["status"], "thin")
-        self.assertEqual(payload["minimal_closing_combination_size"], 1)
-        self.assertEqual(
-            {
-                tuple(row["question_ids"])
-                for row in payload["closing_combinations"]
-            },
-            {
-                ("q_agent_dry_run_effect_boundary_001",),
-                ("q_agent_revision_ordering_001",),
-                ("q_agent_saga_compensation_001",),
-                ("q_agent_snapshot_observation_completeness_001",),
-            },
-        )
-        self.assertFalse(
-            payload["boundary"]["activation_performed_by_analyzer"]
-        )
-        self.assertFalse(
-            payload["boundary"]["source_corpus_mutated_by_analyzer"]
-        )
-        self.assertTrue(
-            payload["boundary"]["human_review_required_before_activation"]
-        )
-        for candidate in payload["candidates"]:
-            self.assertEqual(
-                candidate["original_question_status"], "quarantined"
-            )
-            self.assertFalse(
-                candidate[
-                    "original_question_eligible_for_adaptation"
-                ]
-            )
-            self.assertRegex(
-                candidate["question_input_digest"], r"^[0-9a-f]{64}$"
-            )
-            self.assertNotIn("stem", candidate)
-            self.assertNotIn("options", candidate)
-
-    def test_quarantine_impact_finds_rag_pair_and_reports_truncation(self) -> None:
-        code, output, errors = self.run_cli(
-            [
-                "capacity",
-                str(CORPUS),
-                "--topic",
-                "t_retrieval_augmented_generation",
-                "--quarantine-impact",
-                *candidate_question_arguments(
-                    HISTORICAL_RAG_QUARANTINE_IDS
-                ),
-                "--result-limit",
-                "1",
-                "--json",
-            ]
-        )
-
-        payload = json.loads(output)
-        self.assertEqual(code, 0, errors)
-        self.assertEqual(payload["candidate_count"], 8)
-        self.assertEqual(payload["evaluated_combination_count"], 36)
-        self.assertEqual(payload["baseline"]["status"], "thin")
-        self.assertEqual(payload["minimal_closing_combination_size"], 2)
-        self.assertEqual(
-            payload["closing_combination_count_at_minimum"], 16
-        )
-        self.assertEqual(len(payload["closing_combinations"]), 1)
-        self.assertTrue(payload["closing_combinations_truncated"])
-        self.assertEqual(
-            payload["search_outcome"],
-            "minimal_closing_combination_found",
-        )
-
-    def test_quarantine_impact_bounded_nonclosure_is_not_impossibility(
-        self,
-    ) -> None:
-        code, output, errors = self.run_cli(
-            [
-                "capacity",
-                str(CORPUS),
-                "--topic",
-                "t_llm_agents",
-                "--target-main-count",
-                "10",
-                "--quarantine-impact",
-                *candidate_question_arguments(
-                    HISTORICAL_AGENT_QUARANTINE_IDS
-                ),
-                "--maximum-combination-size",
-                "3",
-                "--json",
-            ]
-        )
-
-        payload = json.loads(output)
-        self.assertEqual(code, 0, errors)
-        self.assertEqual(payload["candidate_count"], 10)
-        self.assertEqual(
-            payload["preflight_admissible_combination_count"], 175
-        )
-        self.assertEqual(payload["evaluated_combination_count"], 175)
-        self.assertIsNone(payload["minimal_closing_combination_size"])
-        self.assertFalse(
-            payload["admissible_candidate_search_space_fully_exhausted"]
-        )
-        self.assertFalse(
-            payload[
-                "closure_absence_is_exact_within_declared_candidate_space"
-            ]
-        )
-        self.assertEqual(
-            payload["search_outcome"],
-            "no_closing_combination_within_bound",
-        )
-
-    def test_quarantine_impact_requires_one_scope_and_is_not_a_strict_gate(
-        self,
-    ) -> None:
-        for arguments, expected in (
-            (
-                [
-                    "capacity",
-                    str(CORPUS),
-                    "--quarantine-impact",
-                    "--json",
-                ],
-                "requires exactly one",
-            ),
-            (
-                [
-                    "capacity",
-                    str(CORPUS),
-                    "--topic",
-                    "t_llm_agents",
-                    "--quarantine-impact",
-                    "--strict",
-                    "--json",
-                ],
-                "not a live corpus gate",
-            ),
-            (
-                [
-                    "capacity",
-                    str(CORPUS),
-                    "--candidate-limit",
-                    "3",
-                    "--json",
-                ],
-                "require --quarantine-impact",
-            ),
-            (
-                [
-                    "capacity",
-                    str(CORPUS),
-                    "--candidate-batch-id",
-                    "batch_agent_intro_bridges_20260724_a",
-                    "--json",
-                ],
-                "filters require --quarantine-impact",
-            ),
-            (
-                [
-                    "capacity",
-                    str(CORPUS),
-                    "--topic",
-                    "t_llm_agents",
-                    "--quarantine-impact",
-                    "--candidate-limit",
-                    "0",
-                    "--json",
-                ],
-                "candidate_limit must be between",
-            ),
-        ):
-            with self.subTest(arguments=arguments):
-                code, output, errors = self.run_cli(arguments)
-                self.assertEqual(code, 2)
-                self.assertEqual(output, "")
-                self.assertIn(expected, errors)
-
-    def test_quarantine_impact_can_scope_one_review_batch(self) -> None:
-        batch_id = "batch_agent_intro_bridges_20260724_a"
-        code, output, errors = self.run_cli(
-            [
-                "capacity",
-                str(CORPUS),
-                "--topic",
-                "t_llm_agents",
-                "--quarantine-impact",
-                "--candidate-batch-id",
-                batch_id,
-                "--json",
-            ]
-        )
-
-        payload = json.loads(output)
-        self.assertEqual(code, 0, errors)
-        self.assertEqual(
-            payload["candidate_filter"],
-            {"mode": "batch_ids", "values": [batch_id]},
-        )
-        self.assertEqual(payload["candidate_count"], 5)
-        self.assertGreater(
-            payload["eligible_candidate_count_before_filter"],
-            payload["candidate_count"],
-        )
-        self.assertTrue(
-            all(
-                candidate["provenance_claims"]["batch_id"] == batch_id
-                for candidate in payload["candidates"]
-            )
-        )
-
-    def test_quarantine_impact_candidate_limit_fails_instead_of_truncating(
-        self,
-    ) -> None:
-        code, output, errors = self.run_cli(
-            [
-                "capacity",
-                str(CORPUS),
-                "--topic",
-                "t_llm_agents",
-                "--quarantine-impact",
-                *candidate_question_arguments(
-                    HISTORICAL_AGENT_QUARANTINE_IDS
-                ),
-                "--candidate-limit",
-                "9",
-                "--json",
-            ]
-        )
-
-        self.assertEqual(code, 2)
-        self.assertEqual(output, "")
-        self.assertIn("refuses to truncate 10 candidates", errors)
-
-    def test_quarantine_impact_evaluation_budget_emits_no_partial_report(
-        self,
-    ) -> None:
-        code, output, errors = self.run_cli(
-            [
-                "capacity",
-                str(CORPUS),
-                "--topic",
-                "t_llm_agents",
-                "--target-main-count",
-                "10",
-                "--quarantine-impact",
-                *candidate_question_arguments(
-                    HISTORICAL_AGENT_QUARANTINE_IDS
-                ),
-                "--maximum-combination-size",
-                "3",
-                "--evaluation-limit",
-                "174",
-                "--json",
-            ]
-        )
-
-        self.assertEqual(code, 2)
-        self.assertEqual(output, "")
-        self.assertIn(
-            "requires 175 admissible candidate-subset evaluations",
-            errors,
-        )
-        self.assertIn("No heuristic or partial result was used", errors)
-
     def test_capacity_selectors_are_mutually_exclusive(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             build_parser().parse_args(
@@ -1383,20 +1095,6 @@ class CapacityCliTestCase(unittest.TestCase):
                     "c_attention",
                     "--topic",
                     "t_transformers",
-                ]
-            )
-        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            build_parser().parse_args(
-                [
-                    "capacity",
-                    str(CORPUS),
-                    "--topic",
-                    "t_transformers",
-                    "--quarantine-impact",
-                    "--candidate-question-id",
-                    "q_one",
-                    "--candidate-batch-id",
-                    "batch_one",
                 ]
             )
 

@@ -275,11 +275,10 @@ def _recommend_performance_tasks(
             "recommended only inside active sessions."
         )
     with database.read() as connection:
-        database.require_learner_evidence_safe(
+        database.require_learner_evidence_integrity(
             session["learner_id"],
             connection,
         )
-
     try:
         graph = database.get_graph(session["corpus_release_id"])
         if session["topic_id"]:
@@ -401,7 +400,7 @@ def _recommend_performance_tasks(
         tuple[str, int, str], LearningTask
     ] = {}
     with database.read() as connection:
-        database.require_learner_evidence_safe(
+        database.require_learner_evidence_integrity(
             session["learner_id"],
             connection,
         )
@@ -897,7 +896,7 @@ def _recommend_performance_tasks(
         },
     }
     with database.read() as connection:
-        database.require_learner_evidence_safe(
+        database.require_learner_evidence_integrity(
             session["learner_id"],
             connection,
         )

@@ -9,6 +9,7 @@ from statistics import median
 from typing import Iterable
 
 from .capacity import VERIFICATION_KINDS
+from .families import reviewed_large_family_cohort
 from .graph import KnowledgeGraph
 from .models import ConceptRole, Misconception, QualityIssue, Question
 
@@ -176,11 +177,12 @@ def audit_corpus(
 ) -> list[QualityIssue]:
     all_items = list(questions)
     issues = [issue for item in all_items for issue in validate_question(item)]
-    # Draft, quarantined, pilot, and retired material cannot rescue the coverage
+    # Draft, pilot, and retired material cannot rescue the coverage
     # or option-key statistics of the bank actually served by the policy.
     items = [item for item in all_items if item.status.eligible_for_adaptation]
     stems: dict[str, str] = {}
     family_counts: Counter[str] = Counter()
+    family_members: dict[str, set[str]] = defaultdict(set)
     answer_positions: Counter[int] = Counter()
     primary_families: dict[str, set[str]] = defaultdict(set)
     mapped_concepts: set[str] = set()
@@ -204,6 +206,7 @@ def audit_corpus(
             )
         stems[normalized_stem] = item.id
         family_counts[item.family_id] += 1
+        family_members[item.family_id].add(item.id)
         for mapping in item.concepts:
             mapped_concepts.add(mapping.concept_id)
             if mapping.role == ConceptRole.PRIMARY:
@@ -243,7 +246,10 @@ def audit_corpus(
                     )
                 )
     for family_id, count in family_counts.items():
-        if count > 8:
+        if count > 8 and not reviewed_large_family_cohort(
+            family_id,
+            family_members[family_id],
+        ):
             issues.append(
                 QualityIssue(
                     "large_item_family",

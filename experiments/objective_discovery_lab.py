@@ -36,7 +36,7 @@ from tsq.learner import (  # noqa: E402
     FamilyResponseRecord,
     LearnerModel,
 )
-from tsq.models import Presentation  # noqa: E402
+from tsq.models import Presentation, Question  # noqa: E402
 from tsq.objective_posterior import (  # noqa: E402
     LikelihoodObservation,
     ObjectivePosterior,
@@ -51,7 +51,7 @@ from tsq.simulation import (  # noqa: E402
 from tsq.store import Database  # noqa: E402
 
 
-LAB_VERSION = "objective-discovery-lab-v5"
+LAB_VERSION = "objective-discovery-lab-v6"
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = (
     PROJECT_ROOT / "experiments" / "results" / "objective_discovery_lab.json"
@@ -186,6 +186,48 @@ def corpus_hash(path: Path) -> str:
     return corpus_source_digest(path)
 
 
+def _family_recovery_anchor(questions: Sequence[Question]) -> Question:
+    """Choose one canonical lineage's oldest member as its stable probe anchor.
+
+    The recovery experiment predates in-family practice variants and originally
+    had exactly one released question for each family.  Reviewed aliases can
+    merge several of those original families, so prefer a member whose immutable
+    published label is the canonical evidence-family label.  ``created_on``
+    then retains that lineage's historical anchor when dependent variants are
+    appended.  If a cohort has no canonical-label member, fall back to its
+    oldest member.  Older legacy items without dated provenance sort before
+    dated additions, and the immutable question ID is the deterministic final
+    tie-breaker.
+    """
+
+    if not questions:
+        raise DiscoveryInvariantError(
+            "A family recovery case must contain at least one question."
+        )
+
+    family_ids = {question.family_id for question in questions}
+    if len(family_ids) != 1:
+        raise DiscoveryInvariantError(
+            "A family recovery case cannot mix canonical evidence families."
+        )
+    canonical_family_id = next(iter(family_ids))
+    has_canonical_label = any(
+        question.published_family_id == canonical_family_id
+        for question in questions
+    )
+
+    def anchor_key(question: Question) -> tuple[bool, str, str]:
+        created_on = question.provenance.get("created_on")
+        return (
+            has_canonical_label
+            and question.published_family_id != canonical_family_id,
+            created_on if isinstance(created_on, str) else "",
+            question.id,
+        )
+
+    return min(questions, key=anchor_key)
+
+
 def bounded_family_recovery_probe(
     *,
     corpus: Path = DEFAULT_CORPUS,
@@ -196,13 +238,15 @@ def bounded_family_recovery_probe(
 ) -> dict[str, Any]:
     """Try to falsify bounded recovery for every released family in an objective.
 
-    Each case applies one credible wrong answer, followed by credible correct
-    retests of that *same* family at the production spacing interval.  It uses
-    the production exact posterior, status evidence weight, bounded family
-    power, retention transition, and correct-feedback transition.  The probe
-    therefore catches the historical failure mode where a single wrong family
-    could never be reversed even by its entire admissible positive-evidence
-    tail.
+    Each case applies one credible wrong answer to the stable anchor of one
+    canonical evidence family, followed by credible correct retests of that
+    *same* anchor at the production spacing interval.  Published aliases and
+    dependent practice variants remain visible as members of that case; they
+    are not counted as additional independent families.  The probe uses the
+    production exact posterior, status evidence weight, bounded family power,
+    retention transition, and correct-feedback transition.  It therefore
+    catches the historical failure mode where a single wrong family could
+    never be reversed even by its admissible positive-evidence tail.
 
     This is intentionally a fast mechanism probe, not a routing claim.  The
     longitudinal engine case below separately checks whether policy actually
@@ -229,8 +273,16 @@ def bounded_family_recovery_probe(
 
     model = LearnerModel()
     started_at = DEFAULT_START
+    grouped_questions: dict[str, list[Question]] = {}
+    for question in questions:
+        grouped_questions.setdefault(question.family_id, []).append(question)
+
     cases: list[dict[str, Any]] = []
-    for question in sorted(questions, key=lambda item: item.id):
+    for family_id in sorted(grouped_questions):
+        members = sorted(
+            grouped_questions[family_id], key=lambda item: item.id
+        )
+        question = _family_recovery_anchor(members)
         if question.objective is None:
             raise DiscoveryInvariantError(
                 f"Objective-aware question {question.id} lacks objective metadata."
@@ -340,7 +392,16 @@ def bounded_family_recovery_probe(
         cases.append(
             {
                 "question_id": question.id,
-                "family_id": question.family_id,
+                "representative_question_id": question.id,
+                "family_id": family_id,
+                "member_question_ids": [member.id for member in members],
+                "published_family_ids": sorted(
+                    {
+                        member.published_family_id or member.family_id
+                        for member in members
+                    }
+                ),
+                "member_count": len(members),
                 "status": question.status.value,
                 "prior_mastery": prior_mastery,
                 "after_wrong_mastery": trough_mastery,
@@ -367,20 +428,28 @@ def bounded_family_recovery_probe(
         "max_correct_retests": max_correct_retests,
         "spacing_days": spacing_days,
         "required_recovery_fraction": required_recovery_fraction,
+        "eligible_question_count": len(questions),
         "case_count": len(cases),
         "cases": cases,
         "failed_cases": failures,
         "all_families_recovered": not failures,
+        "family_case_rule": (
+            "One case per canonical evidence family, using its earliest-authored "
+            "canonical-label member as the stable calibration anchor, or its "
+            "earliest member when no canonical-label member exists."
+        ),
         "criterion": (
-            "After one credible wrong response, every adaptation-eligible item "
-            "family must recover at least the declared fraction of its "
-            "cold-start mastery gap within the bounded number of credible, "
-            "spaced, same-family correct retests."
+            "After one credible wrong response on its stable anchor, every "
+            "adaptation-eligible canonical evidence family must recover at "
+            "least the declared fraction of its cold-start mastery gap within "
+            "the bounded number of credible, spaced, same-anchor retests."
         ),
         "interpretation_boundary": (
             "This directly falsifies posterior/family-power recoverability. "
-            "It does not prove that policy will route the retests or that a "
-            "human learned from feedback."
+            "Dependent variants and reviewed aliases are not independent "
+            "recovery cases. This does not calibrate every member item, prove "
+            "that policy will route the retests, or prove that a human learned "
+            "from feedback."
         ),
     }
 

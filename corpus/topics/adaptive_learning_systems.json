@@ -716,7 +716,7 @@
       "id": "q_adaptive_stopping_utility_001",
       "version": 1,
       "family_id": "f_adaptive_stopping_utility",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "At the current decision point, an adaptive diagnostic converts every term to common utility points and scores continuation as expected entropy reduction minus a fatigue-and-reliability penalty minus response burden. Candidate H, the hardest item, scores 0.31 - 0.30 - 0.06. Candidate M, mapped to mastery nearest 0.50, scores 0.36 - 0.22 - 0.17. Candidate I, with the largest unconstrained information estimate, scores 0.48 - 0.34 - 0.18. Stopping now scores 0. Which current action maximizes the defined utility?",
       "kind": "calculation",
       "difficulty": 0.55,
@@ -793,7 +793,7 @@
       "id": "q_adaptive_posterior_shape_001",
       "version": 1,
       "family_id": "f_adaptive_posterior_shape",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Define mastery as P(theta > 0). Learner A places probability 0.5 at theta = -0.1 and 0.5 at +0.1; learner B places probability 0.5 at -2 and 0.5 at +2, so both have mastery 0.50. For a candidate item, P(correct | theta) = sigmoid(theta), so both also predict a correct response with probability 0.50. A policy concludes that the item has equal information value for A and B. Which diagnosis is correct?",
       "kind": "calculation",
       "difficulty": 1.15,
@@ -880,7 +880,7 @@
       "id": "q_information_gain_orthogonal_partition_001",
       "version": 1,
       "family_id": "f_information_gain_orthogonal_partition",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "Four hypotheses A, B, C, and D are equally likely. Probe X reports whether the truth is in {A, B} or {C, D}; probe Z reports whether it is in {A, C} or {B, D}; probe Y returns an independent fair coin. Which two-probe plan has the greatest expected information?",
       "kind": "calculation",
       "difficulty": 0.4,
@@ -955,7 +955,7 @@
       "id": "q_information_gain_conditional_table_001",
       "version": 1,
       "family_id": "f_information_gain_conditional_table",
-      "status": "quarantined",
+      "status": "retired",
       "stem": "After existing evidence E, a fault has posterior P(F = 1 | E) = 0.80. A second check Z shares part of the evidence pipeline, so its conditional table is used rather than an independence assumption: P(Z = 1 | F = 1, E) = 0.75 and P(Z = 1 | F = 0, E) = 0.25. Thus P(Z = 1 | E) = 0.65. Approximately what expected additional information I(F; Z | E) does Z provide?",
       "kind": "calculation",
       "difficulty": 0.85,
@@ -1035,7 +1035,7 @@
       "id": "q_tracing_multiskill_likelihood_001",
       "version": 1,
       "family_id": "f_tracing_multiskill_likelihood",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "A database-migration exercise requires transaction-boundary reasoning T and foreign-key ordering F. As a separate authoring annotation, its content mapping assigns weight 0.70 to T and 0.30 to F. Before the response, a tracer assigns independent mastery priors P(T) = P(F) = 0.70. Its wrong-answer likelihoods are 0.10 when both are mastered, 0.60 when T is mastered and F is unmastered, 0.70 when T is unmastered and F is mastered, and 0.90 when both are unmastered. After a wrong answer, which update follows from Bayes' rule?",
       "kind": "calculation",
       "difficulty": 1.15,
@@ -1118,7 +1118,7 @@
       "id": "q_tracing_disambiguation_probe_001",
       "version": 1,
       "family_id": "f_tracing_disambiguation_probe",
-      "status": "quarantined",
+      "status": "approved",
       "stem": "After a wrong response to a two-skill item, a joint tracer retains correlated uncertainty with P(A unmastered) = 0.30 and P(B unmastered) = 0.55. The original item had content weights A = 0.70 and B = 0.30. An A-only probe has P(correct | A mastered) = 0.65 and P(correct | A unmastered) = 0.35; a B-only probe has corresponding probabilities 0.90 and 0.10. The goal is to reduce failure-attribution uncertainty without making a hard mastery label. What is the strongest next step?",
       "kind": "transfer",
       "difficulty": 0.95,
@@ -1195,6 +1195,86 @@
         "disambiguation",
         "targeted_probe",
         "adaptive_follow_up"
+      ]
+    },
+    {
+      "id": "q_information_gain_conditional_table_002",
+      "version": 2,
+      "revision_of": "q_information_gain_conditional_table_001",
+      "family_id": "f_information_gain_conditional_table",
+      "status": "approved",
+      "stem": "For a fault variable F and observations E and Z, an analysis reports I(F;E)=0.40 bits, I(F;E,Z)=0.50 bits, I(F;Z)=0.35 bits, H(Z|E)=0.80 bits, and P(z*|E)=0.25 for one possible outcome. What is the conditional information I(F;Z|E)?",
+      "kind": "calculation",
+      "difficulty": 0.8,
+      "discrimination": 1.6,
+      "guess_rate": 0.25,
+      "slip_rate": 0.07,
+      "concepts": [
+        {
+          "concept_id": "c_information_gain",
+          "weight": 0.8,
+          "role": "primary"
+        },
+        {
+          "concept_id": "c_probability_reasoning",
+          "weight": 0.2,
+          "role": "prerequisite"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": "0.35 bits, because Z contributes its full marginal information even after E has already been observed.",
+          "correct": false,
+          "misconception_id": "m_correlated_evidence_adds_full_information",
+          "rationale": "I(F;Z) includes information that can overlap with E; the conditional increment is obtained from the joint-information chain rule."
+        },
+        {
+          "id": "b",
+          "text": "0.80 bits, treating all remaining entropy in Z as information about the fault.",
+          "correct": false,
+          "misconception_id": "m_outcome_entropy_guarantees_information",
+          "rationale": "Outcome entropy can include variation unrelated to F and therefore is only an upper bound, not the requested conditional mutual information."
+        },
+        {
+          "id": "c",
+          "text": "2 bits, because the outcome z* has surprise -log2(0.25).",
+          "correct": false,
+          "misconception_id": "m_information_gain_is_realized_surprise",
+          "rationale": "The surprise of one possible observation is not the expected reduction in uncertainty about F from observing Z."
+        },
+        {
+          "id": "d",
+          "text": "0.10 bits, because the chain rule I(F;E,Z)=I(F;E)+I(F;Z|E) makes the conditional increment 0.50 minus 0.40.",
+          "correct": true,
+          "misconception_id": null,
+          "rationale": "The chain rule gives I(F;Z|E)=0.50-0.40=0.10 bits; the other supplied values diagnose common substitutions."
+        }
+      ],
+      "source_ids": [
+        "src_murphy_pml_2022",
+        "src_expert_synthesis_2026"
+      ],
+      "provenance": {
+        "method": "source_grounded_reviewed_revision",
+        "generated": true,
+        "batch_id": "batch_corpus_release_20260809_a",
+        "created_on": "2026-08-09",
+        "human_review": false,
+        "review_status": "independent_model_review_passed",
+        "review_statement": "The chain-rule calculation, decoy quantities, misconception routes, source scope, and family dependence were independently checked before release.",
+        "psychometrics": "uncalibrated_author_prior",
+        "source_scope": "Murphy supports entropy, mutual information, conditional mutual information, and their chain rule. The reported quantities and diagnostic substitutions are original synthesis.",
+        "revision_reason": "Replaces the parent's conditional-table entropy arithmetic with a direct conditional-mutual-information chain-rule calculation while preserving the published family.",
+        "derivation": "I(F;Z|E)=I(F;E,Z)-I(F;E)=0.50-0.40=0.10 bits.",
+        "independence_note": "This revision retains f_information_gain_conditional_table and cannot count independently from its retired parent. It isolates the conditional increment using the mutual-information chain rule."
+      },
+      "tags": [
+        "information_gain",
+        "conditional_mutual_information",
+        "chain_rule",
+        "calculation",
+        "revision"
       ]
     }
   ]

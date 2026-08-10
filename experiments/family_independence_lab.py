@@ -3,27 +3,23 @@
 
 """Falsify declared question-family independence with transparent evidence.
 
-The production selector treats different ``family_id`` values as independent
-opportunities for diagnosis, repair, and verification.  This laboratory asks a
+The production selector treats distinct evidence-family IDs as independent
+opportunities for diagnosis, repair, and verification. This laboratory asks a
 narrower, adversarial question: which active cross-family items look similar
 enough that a human reviewer should verify that they require genuinely
 different solution paths?
 
-Token overlap is deliberately used only to nominate candidates.  It is not a
-semantic model and cannot establish dependence.  For every declared or
-signal-nominated cluster, the lab also stress-tests the exact sustained-capacity
-analyzer by counterfactually treating the cluster as one family.  A capacity
-drop means independence is operationally important *if* a reviewer later
-confirms dependence; it does not confirm dependence itself.
+Token overlap is deliberately used only to nominate candidates. It is not a
+semantic model and cannot establish dependence. For every declared or reviewed
+signal cluster, the lab also stress-tests the exact sustained-capacity analyzer
+by counterfactually treating the cluster as one family. A capacity drop means
+independence is operationally important under that counterfactual; it does not
+confirm dependence itself.
 
-The laboratory also measures one declared batch of quarantined repair
-candidates by making frozen question copies eligible in memory.  This is a
-counterfactual authoring check, not activation or evidence that the candidate
-families are semantically independent.  A second bounded power-set check does
-the same for four historical causal-visibility reserve representatives under
-explicit pair- and triad-collapse assumptions.  Later same-family practice
-variants are validated as a separate dependent cohort and receive no capacity
-credit in that historical counterfactual.
+Reviewed equivalences are validated against TSQ's explicit family manifest.
+The lab never changes question status, invents candidate availability, or
+activates content in memory. It also runs the same deterministic corpus-quality
+audit used by the release path and exposes every exact warning and error.
 """
 
 from __future__ import annotations
@@ -33,8 +29,8 @@ import hashlib
 import json
 import re
 import sys
-from dataclasses import dataclass, replace
-from itertools import combinations
+from collections import Counter
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -56,17 +52,21 @@ from tsq.corpus import (  # noqa: E402
     load_bundle,
     read_and_parse,
 )
-from tsq.graph import KnowledgeGraph  # noqa: E402
-from tsq.models import (  # noqa: E402
-    LearningObjective,
-    Question,
-    QuestionStatus,
+from tsq.families import (  # noqa: E402
+    family_alias_members,
+    family_assignment,
+    reviewed_large_family_cohort,
 )
+from tsq.graph import KnowledgeGraph  # noqa: E402
+from tsq.models import LearningObjective, Question  # noqa: E402
 from tsq.policy import POLICY_VERSION  # noqa: E402
+from tsq.quality import audit_corpus  # noqa: E402
 from tsq.versions import DEFAULT_LEARNER_MODEL_VERSION  # noqa: E402
 
 
-LAB_VERSION = "family-independence-falsification-v4"
+LAB_VERSION = "family-independence-falsification-v6"
+REPORT_CONTRACT_VERSION = "family-independence-report-v3"
+ANSWER_REDACTED_REVIEW_VERSION = "solution-operation-review-2026-08-10-v1"
 NORMALIZATION_VERSION = "lower-alnum-stopwords-v1"
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = (
@@ -75,10 +75,13 @@ DEFAULT_OUTPUT = (
 STEM_OVERLAP_THRESHOLD = 0.27
 SOLUTION_OVERLAP_THRESHOLD = 0.37
 COMBINED_JACCARD_THRESHOLD = 0.29
+LARGE_FAMILY_THRESHOLD = 8
 
-# These are review declarations, not declarations of dependence.  They make
-# known, high-consequence cases durable even if a future wording edit pushes a
-# lexical score just below the automatic nomination threshold.
+# These declarations keep known, high-consequence cases durable even if a
+# wording edit pushes a lexical score below the automatic threshold. A reviewed
+# equivalence must resolve to one evidence family in the manifest. A reviewed-
+# distinct cluster must expose a complete solution-operation partition and
+# receives a collapse stress test without changing its adjudication.
 DECLARED_REVIEW_CLUSTERS: tuple[dict[str, object], ...] = (
     {
         "id": "attention_value_routing_trio",
@@ -87,10 +90,21 @@ DECLARED_REVIEW_CLUSTERS: tuple[dict[str, object], ...] = (
             "q_attention_value_projection_counterfactual_001",
             "q_attention_value_perturbation_001",
         ),
+        "disposition": "reviewed_equivalent",
         "review_reason": (
-            "All three items use the same fine objective and named-error routes "
-            "while varying a value-vector perturbation. A reviewer must decide "
-            "whether the required traces are independently diagnostic."
+            "The semantic review found the three value-vector perturbation "
+            "traces to exercise one evidence family. Their immutable published "
+            "labels are preserved while runtime evidence is consolidated."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": ("f_attention_value_role_ablation",),
+                "operation": (
+                    "Hold the query-key routing weights fixed, perturb the "
+                    "value path, and propagate the change through the weighted "
+                    "value sum."
+                ),
+            },
         ),
     },
     {
@@ -100,10 +114,40 @@ DECLARED_REVIEW_CLUSTERS: tuple[dict[str, object], ...] = (
             "q_transformer_multiquery_cache_inventory_001",
             "q_transformer_multiquery_state_transition_001",
         ),
+        "disposition": "reviewed_distinct",
         "review_reason": (
-            "All three items use the same fine objective and named-error routes "
-            "while tracing multi-query key-value cache state. A reviewer must "
-            "decide whether the tensor-accounting operations are independent."
+            "Answer-redacted review found three different keyed operations: "
+            "compare architectural head axes, construct a concrete tensor "
+            "inventory, and update persistent versus transient state."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": (
+                    "f_transformer_multiquery_cache_axes",
+                ),
+                "operation": (
+                    "Compare multi-head and multi-query architectures along "
+                    "the query and key-value head axes while retaining time."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_transformer_multiquery_cache_inventory",
+                ),
+                "operation": (
+                    "Construct the persistent K/V and transient Q tensor "
+                    "inventory with exact sequence, head, and width axes."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_transformer_multiquery_state_transition",
+                ),
+                "operation": (
+                    "Append the current shared K/V, discard the used Q, and "
+                    "form fresh query heads for the next step."
+                ),
+            },
         ),
     },
     {
@@ -113,131 +157,343 @@ DECLARED_REVIEW_CLUSTERS: tuple[dict[str, object], ...] = (
             "q_causal_mask_parallelism_001",
             "q_causal_mask_batch_matrix_001",
         ),
+        "disposition": "reviewed_equivalent",
         "review_reason": (
-            "The batch-matrix item combines the future-leakage and parallel-"
-            "training distinctions tested separately by the other two items. "
-            "A reviewer must decide whether these are genuinely independent "
-            "solution operations rather than differently framed uses of one "
-            "inclusive lower-triangular visibility rule."
+            "The semantic review found that the three prompts exercise the "
+            "same inclusive lower-triangular visibility rule. Their immutable "
+            "published labels are preserved while evidence is consolidated."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": ("f_causal_mask_batch_matrix",),
+                "operation": (
+                    "Apply the same inclusive lower-triangular visible-key "
+                    "set to each teacher-forced query row."
+                ),
+            },
         ),
     },
 )
 
-CANDIDATE_REPAIR_BATCH_ID = "batch_transformer_capacity_repairs_20260725_a"
-CANDIDATE_REPAIR_CLUSTERS: tuple[dict[str, object], ...] = (
+# These exact sets were independently adjudicated from stems and option text.
+# Correctness flags, rationales, misconception routes, family labels, and
+# provenance were excluded from the review view. A reviewed-distinct set must
+# retain exactly one contained automatic component spanning every surviving
+# evidence family; reviewed-equivalent sets must be fully collapsed by the
+# explicit family manifest. Any component that crosses a reviewed set fails
+# closed.
+REVIEWED_SIGNAL_CLUSTERS: tuple[dict[str, object], ...] = (
     {
-        "declared_cluster_id": "multiquery_kv_cache_trio",
-        "candidate_question_ids": (
-            "q_transformer_kv_cache_alignment_001",
-            "q_transformer_kv_cache_eviction_equivalence_001",
+        "id": "attention_temperature_vs_variance",
+        "question_ids": (
+            "q_attention_double_scaling_001",
+            "q_attention_scaling_numeric_001",
+            "q_attention_scaling_variance_001",
+        ),
+        "disposition": "reviewed_distinct",
+        "review_reason": (
+            "The first two prompts apply a common positive logit temperature "
+            "and are consolidated; the third derives variance growth under "
+            "independent coordinate products."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": ("f_attention_scaling_rank",),
+                "operation": (
+                    "Divide one realized logit row by a common positive scale, "
+                    "compute the new logits, preserve rank, and infer a flatter "
+                    "softmax."
+                ),
+            },
+            {
+                "evidence_family_ids": ("f_attention_scaling_variance",),
+                "operation": (
+                    "Derive variance of an independent coordinate-product sum "
+                    "and cancel its dimension factor with square-root scaling."
+                ),
+            },
         ),
     },
     {
-        "declared_cluster_id": "attention_value_routing_trio",
-        "candidate_question_ids": (
-            "q_attention_duplicate_value_identifiability_002",
-            "q_attention_value_gradient_routing_001",
+        "id": "attention_equivariance_operation_partition",
+        "question_ids": (
+            "q_attention_equivariance_contract_002",
+            "q_attention_equivariance_contract_003",
+            "q_attention_permutation_jacobian_001",
+            "q_attention_permutation_matrix_002",
+            "q_attention_permutation_matrix_004",
+            "q_attention_stochastic_permutation_coupling_001",
         ),
-    },
-)
-_MANUAL_ACTIVATION_MARKER = (
-    "manual_only_after_human_review_and_new_immutable_release"
-)
-
-CAUSAL_RESERVE_OBJECTIVE_ID = "lo_causal_visibility"
-CAUSAL_RESERVE_CONCEPT_ID = "c_causal_masking"
-CAUSAL_RESERVE_ROUTE_MISCONCEPTION_IDS = (
-    "m_mask_hides_current_token",
-    "m_mask_only_inference",
-    "m_mask_prevents_parallel_training",
-)
-CAUSAL_RESERVE_CANDIDATES: tuple[dict[str, object], ...] = (
-    {
-        "question_id": "q_causal_mask_matrix_001",
-        "family_id": "f_causal_mask_matrix",
-        "family_question_ids": ("q_causal_mask_matrix_001",),
-    },
-    {
-        "question_id": "q_causal_mask_softmax_normalization_001",
-        "family_id": "f_causal_mask_softmax_normalization",
-        "family_question_ids": (
-            "q_causal_mask_softmax_normalization_001",
+        "disposition": "reviewed_distinct",
+        "review_reason": (
+            "The contract and matrix prompts all apply the same row-"
+            "equivariance identity and are consolidated; the Jacobian prompt "
+            "differentiates that identity, while the stochastic prompt pushes "
+            "an exchangeable mask law through it and constructs a coupling."
         ),
-    },
-    {
-        "question_id": "q_causal_full_incremental_equivalence_001",
-        "family_id": "f_causal_full_incremental_equivalence",
-        "family_question_ids": (
-            "q_causal_full_incremental_equivalence_001",
-        ),
-    },
-    {
-        # Only the immutable revision is made eligible in memory.  Its parent
-        # remains visible in the report and in the same family, so the two
-        # wordings can never inflate the family count.
-        "question_id": "q_causal_cross_attention_mask_scope_002",
-        "family_id": "f_causal_cross_attention_mask_scope",
-        "family_question_ids": (
-            "q_causal_cross_attention_mask_scope_001",
-            "q_causal_cross_attention_mask_scope_002",
-        ),
-    },
-)
-CAUSAL_RESERVE_DEPENDENT_VARIANTS: tuple[dict[str, str], ...] = (
-    {
-        "question_id": "q_causal_mask_first_row_001",
-        "family_id": "f_causal_mask_softmax_normalization",
-        "batch_id": "batch_transformer_composition_causality_20260809_d",
-    },
-    {
-        "question_id": "q_causal_mask_probability_row_001",
-        "family_id": "f_causal_mask_softmax_normalization",
-        "batch_id": "batch_transformer_composition_causality_20260809_d",
-    },
-    {
-        "question_id": "q_causal_mask_post_softmax_bug_001",
-        "family_id": "f_causal_mask_softmax_normalization",
-        "batch_id": "batch_transformer_composition_causality_20260809_d",
-    },
-    {
-        "question_id": "q_causal_full_incremental_warmup_001",
-        "family_id": "f_causal_full_incremental_equivalence",
-        "batch_id": "batch_transformer_causality_scaling_20260809_e",
-    },
-    {
-        "question_id": "q_causal_full_incremental_intermediate_row_001",
-        "family_id": "f_causal_full_incremental_equivalence",
-        "batch_id": "batch_transformer_causality_scaling_20260809_e",
-    },
-    {
-        "question_id": "q_causal_full_incremental_mismatch_001",
-        "family_id": "f_causal_full_incremental_equivalence",
-        "batch_id": "batch_transformer_causality_scaling_20260809_e",
-    },
-)
-CAUSAL_RESERVE_COLLAPSE_SCENARIOS: tuple[dict[str, object], ...] = (
-    {
-        "id": "declared_families",
-        "retained_representative_family_id": None,
-        "unavailable_family_ids": (),
-    },
-    {
-        "id": "batch_training_pair_collapsed",
-        "retained_representative_family_id": (
-            "f_causal_mask_batch_matrix"
-        ),
-        "unavailable_family_ids": (
-            "f_causal_mask_training_leak",
+        "solution_operations": (
+            {
+                "evidence_family_ids": ("f_transformer_invariances",),
+                "operation": (
+                    "Apply H(PX)=P H(X), equivalently transform attention as "
+                    "P A P-transpose and values as P V."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_attention_permutation_jacobian_audit",
+                ),
+                "operation": (
+                    "Differentiate the equivariance identity and conjugate the "
+                    "Jacobian across output-token and input-token block axes."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_attention_stochastic_permutation_coupling",
+                ),
+                "operation": (
+                    "Push an iid dropout-mask law through a row permutation "
+                    "and couple masks to separate distributional equivariance "
+                    "from samplewise equality."
+                ),
+            },
         ),
     },
     {
-        "id": "training_visibility_triad_collapsed",
-        "retained_representative_family_id": (
-            "f_causal_mask_batch_matrix"
+        "id": "attention_equivariance_matrix_equivalence",
+        "question_ids": (
+            "q_attention_permutation_contract_001",
+            "q_attention_permutation_matrix_001",
         ),
-        "unavailable_family_ids": (
-            "f_causal_mask_parallelism",
-            "f_causal_mask_training_leak",
+        "disposition": "reviewed_equivalent",
+        "review_reason": (
+            "The supplied matrix transformation simplifies exactly to the "
+            "same H(PX)=P H(X) assertion as the abstract contract."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": ("f_transformer_invariances",),
+                "operation": (
+                    "Substitute P A P-transpose and P V, cancel P-transpose P, "
+                    "and obtain the permuted output P A V."
+                ),
+            },
+        ),
+    },
+    {
+        "id": "attention_scaling_operation_partition",
+        "question_ids": (
+            "q_attention_scaled_variance_nonunit_001",
+            "q_attention_scaling_covariance_audit_001",
+            "q_attention_scaling_covariance_claim_001",
+            "q_attention_scaling_entropy_comparison_001",
+            "q_attention_scaling_head_dimension_comparison_001",
+            "q_attention_scaling_linear_divisor_001",
+            "q_attention_scaling_log_odds_001",
+            "q_attention_scaling_nonunit_variance_001",
+            "q_attention_scaling_rank_warmup_001",
+            "q_attention_scaling_softmax_gradient_001",
+            "q_attention_scaling_variance_warmup_001",
+        ),
+        "disposition": "reviewed_distinct",
+        "review_reason": (
+            "Answer-redacted review separates realized-row temperature effects, "
+            "independent-sum variance, covariance corrections, and local "
+            "softmax sensitivity. The linear-divisor prompt is consolidated "
+            "with the temperature family because its keyed diagnosis is "
+            "positive-scale rank preservation plus over-flattening."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": ("f_attention_scaling_rank",),
+                "operation": (
+                    "Apply a common positive scale to realized logits and "
+                    "derive preserved order, log odds, or entropy change."
+                ),
+            },
+            {
+                "evidence_family_ids": ("f_attention_scaling_variance",),
+                "operation": (
+                    "Compute variance of an independent sum and transform it "
+                    "by the square of the logit divisor."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_attention_scaling_covariance_audit",
+                ),
+                "operation": (
+                    "Add cross-coordinate covariance terms and reject a unit-"
+                    "variance guarantee that assumes independence."
+                ),
+            },
+            {
+                "evidence_family_ids": ("f_attention_unscaled_softmax",),
+                "operation": (
+                    "Evaluate p(1-p) before and after scaling to audit local "
+                    "softmax sensitivity under saturation."
+                ),
+            },
+        ),
+    },
+    {
+        "id": "attention_resource_pair_count_equivalence",
+        "question_ids": (
+            "q_attention_sequence_scaling_001",
+            "q_attention_window_resource_contrast_002",
+        ),
+        "disposition": "reviewed_equivalent",
+        "review_reason": (
+            "Both prompts solve by multiplying the number of queries by keys "
+            "scored per query while holding projection parameters fixed."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": ("f_transformer_complexity",),
+                "operation": (
+                    "Count L times L pairs for full attention or L times a "
+                    "bounded window, independently of parameter count."
+                ),
+            },
+        ),
+    },
+    {
+        "id": "causal_visibility_operation_partition",
+        "question_ids": (
+            "q_causal_full_incremental_intermediate_row_001",
+            "q_causal_mask_first_row_001",
+            "q_causal_packed_visible_set_001",
+        ),
+        "disposition": "reviewed_distinct",
+        "review_reason": (
+            "The prompts respectively compare two execution-mode key sets, "
+            "normalize a masked logit row, and intersect a causal prefix with "
+            "segment membership."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": (
+                    "f_causal_full_incremental_equivalence",
+                ),
+                "operation": (
+                    "Compare full-pass and incremental visible K/V sets and "
+                    "infer equal row outputs when the sets and parameters match."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_causal_mask_softmax_normalization",
+                ),
+                "operation": (
+                    "Mask future logits before softmax and normalize only over "
+                    "the inclusive visible prefix."
+                ),
+            },
+            {
+                "evidence_family_ids": ("f_causal_mask_packed_sequences",),
+                "operation": (
+                    "Intersect inclusive causal visibility with same-segment "
+                    "membership for a packed query."
+                ),
+            },
+        ),
+    },
+    {
+        "id": "kv_cache_operation_partition",
+        "question_ids": (
+            "q_kv_cache_cross_attention_static_memory_001",
+            "q_kv_cache_prompt_transition_warmup_001",
+            "q_kv_cache_query_head_intervention_001",
+            "q_kv_cache_scalar_inventory_001",
+            "q_transformer_kv_cache_alignment_002",
+            "q_transformer_kv_cache_eviction_equivalence_002",
+            "q_transformer_multiquery_cache_axes_001",
+            "q_transformer_multiquery_cache_inventory_001",
+            "q_transformer_multiquery_state_transition_001",
+        ),
+        "disposition": "reviewed_distinct",
+        "review_reason": (
+            "The five evidence families require architectural axis comparison, "
+            "tensor inventory, lifetime transition, K/V positional alignment, "
+            "or an equivalence judgment after context eviction."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": (
+                    "f_transformer_multiquery_cache_axes",
+                ),
+                "operation": (
+                    "Compare query-head and shared K/V-head axes while "
+                    "preserving the sequence axis."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_transformer_multiquery_cache_inventory",
+                ),
+                "operation": (
+                    "Write persistent and transient tensor shapes or multiply "
+                    "their axes to obtain scalar inventory."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_transformer_multiquery_state_transition",
+                ),
+                "operation": (
+                    "Distinguish reusable K/V from fresh Q and update or reuse "
+                    "state across decoding steps."
+                ),
+            },
+            {
+                "evidence_family_ids": ("f_incremental_cache_kv_alignment",),
+                "operation": (
+                    "Verify that each attention coefficient and value row use "
+                    "the same temporal index ordering."
+                ),
+            },
+            {
+                "evidence_family_ids": ("f_kv_cache_eviction_equivalence",),
+                "operation": (
+                    "Compare visible contexts and reject exact logit or future-"
+                    "trajectory equivalence after eviction from an otherwise "
+                    "full-prefix computation."
+                ),
+            },
+        ),
+    },
+    {
+        "id": "normalization_residual_operation_partition",
+        "question_ids": (
+            "q_transformer_norm_residual_placement_001",
+            "q_transformer_pre_post_ln_forms_001",
+        ),
+        "disposition": "reviewed_distinct",
+        "review_reason": (
+            "One prompt audits a non-equivalent residual/normalization refactor; "
+            "the other identifies the two canonical Pre-LN and Post-LN "
+            "architectural equations."
+        ),
+        "solution_operations": (
+            {
+                "evidence_family_ids": (
+                    "f_transformer_norm_residual_placement",
+                ),
+                "operation": (
+                    "Compare LayerNorm(x+S(x)) with x+LayerNorm(S(x)) and reject "
+                    "commutation of normalization with residual addition."
+                ),
+            },
+            {
+                "evidence_family_ids": (
+                    "f_transformer_pre_post_ln_contract",
+                ),
+                "operation": (
+                    "Identify Post-LN as LayerNorm(x+S(x)) and Pre-LN as "
+                    "x+S(LayerNorm(x))."
+                ),
+            },
         ),
     },
 )
@@ -290,6 +546,20 @@ _STOPWORDS = frozenset(
         "while",
         "with",
     }
+)
+_SERVICEABILITY_CODES = frozenset(
+    {
+        "missing_primary_mapping_coverage",
+        "insufficient_primary_family_coverage",
+        "insufficient_contextual_family_coverage",
+        "insufficient_objective_family_coverage",
+        "unserviceable_objective_path",
+    }
+)
+_ISSUE_SUBJECT_PATTERNS = (
+    re.compile(r"^Learning objective ([a-z0-9_]+)\b"),
+    re.compile(r"^Root ([a-z0-9_]+)\b"),
+    re.compile(r"^Family ([a-z0-9_]+)\b"),
 )
 
 
@@ -359,11 +629,17 @@ def _overlap(left: frozenset[str], right: frozenset[str]) -> dict[str, object]:
     }
 
 
+def _published_family_id(question: Question) -> str:
+    return question.published_family_id or question.family_id
+
+
 def pair_evidence(
     left: QuestionFeatures, right: QuestionFeatures
 ) -> dict[str, object]:
     if left.question.id == right.question.id:
         raise ValueError("Pair evidence requires two different questions.")
+    if left.question.id > right.question.id:
+        left, right = right, left
     stem = _overlap(left.stem_tokens, right.stem_tokens)
     solution = _overlap(left.solution_tokens, right.solution_tokens)
     combined = _overlap(
@@ -378,31 +654,31 @@ def pair_evidence(
         bool(left.misconception_ids)
         and left.misconception_ids == right.misconception_ids
     )
+    different_evidence_families = (
+        left.question.family_id != right.question.family_id
+    )
+    lexical_threshold_passed = bool(
+        (
+            stem["overlap_coefficient"] >= STEM_OVERLAP_THRESHOLD
+            and solution["overlap_coefficient"]
+            >= SOLUTION_OVERLAP_THRESHOLD
+        )
+        or combined["jaccard"] >= COMBINED_JACCARD_THRESHOLD
+    )
     qualifies = bool(
         same_objective
         and same_misconceptions
-        and (
-            (
-                stem["overlap_coefficient"] >= STEM_OVERLAP_THRESHOLD
-                and solution["overlap_coefficient"]
-                >= SOLUTION_OVERLAP_THRESHOLD
-            )
-            or combined["jaccard"] >= COMBINED_JACCARD_THRESHOLD
-        )
+        and different_evidence_families
+        and lexical_threshold_passed
     )
     return {
-        "left_question_id": min(left.question.id, right.question.id),
-        "right_question_id": max(left.question.id, right.question.id),
-        "left_family_id": (
-            left.question.family_id
-            if left.question.id < right.question.id
-            else right.question.family_id
-        ),
-        "right_family_id": (
-            right.question.family_id
-            if left.question.id < right.question.id
-            else left.question.family_id
-        ),
+        "left_question_id": left.question.id,
+        "right_question_id": right.question.id,
+        "left_published_family_id": _published_family_id(left.question),
+        "right_published_family_id": _published_family_id(right.question),
+        "left_family_id": left.question.family_id,
+        "right_family_id": right.question.family_id,
+        "different_evidence_families": different_evidence_families,
         "objective_id": left.question.objective_id if same_objective else None,
         "identical_named_misconception_set": same_misconceptions,
         "named_misconception_ids": (
@@ -411,12 +687,20 @@ def pair_evidence(
         "stem_overlap": stem,
         "solution_path_overlap": solution,
         "combined_overlap": combined,
+        "lexical_threshold_passed": lexical_threshold_passed,
         "signal_threshold_passed": qualifies,
         "candidate_status": (
             "requires_independent_semantic_review"
             if qualifies
-            else "below_automatic_nomination_threshold"
+            else (
+                "already_one_reviewed_evidence_family"
+                if not different_evidence_families
+                else "below_automatic_nomination_threshold"
+            )
         ),
+        "semantic_dependence_established_by_lexical_signal": False,
+        # Backward-compatible truth value: lexical evidence itself never proves
+        # dependence, including when an external semantic review already did.
         "semantic_dependence_established": False,
     }
 
@@ -495,14 +779,13 @@ def _objective_capacity(
         owned_concept_ids=owned_concepts,
         target_main_count=3,
     )
-    report = analyze_sustained_capacity(
+    return analyze_sustained_capacity(
         objective_questions,
         graph,
         misconceptions,
         (target,),
         unavailable_family_ids=unavailable_family_ids,
-    )
-    return report.targets[0]
+    ).targets[0]
 
 
 def _capacity_comparison(
@@ -517,18 +800,22 @@ def _capacity_comparison(
 ) -> dict[str, object]:
     selected = [by_question_id[question_id] for question_id in question_ids]
     objective_ids = {question.objective_id for question in selected}
-    family_ids = tuple(sorted({question.family_id for question in selected}))
-    if len(objective_ids) != 1 or None in objective_ids:
+    signatures = {
+        tuple(sorted(question.misconception_ids)) for question in selected
+    }
+    if len(objective_ids) != 1 or None in objective_ids or len(signatures) != 1:
         raise LabInvariantError(
-            "A counterfactual cluster must share one fine objective."
-        )
-    if len(family_ids) < 2:
-        raise LabInvariantError(
-            "A counterfactual cluster requires at least two declared families."
+            "A counterfactual cluster must share one fine objective and one "
+            "named-misconception signature."
         )
     objective_id = next(iter(objective_ids))
+    misconception_ids = next(iter(signatures))
+    if not misconception_ids:
+        raise LabInvariantError(
+            "A counterfactual cluster needs a named misconception signature."
+        )
     objective = objectives[objective_id]
-    misconception_ids = tuple(sorted(selected[0].misconception_ids))
+    family_ids = tuple(sorted({question.family_id for question in selected}))
     cache_id = f"{objective_id}|{'|'.join(misconception_ids)}"
     baseline = baseline_cache.get(cache_id)
     if baseline is None:
@@ -540,6 +827,31 @@ def _capacity_comparison(
             misconceptions=misconceptions,
         )
         baseline_cache[cache_id] = baseline
+
+    if len(family_ids) == 1:
+        snapshot = _capacity_snapshot(baseline)
+        return {
+            "scope": (
+                "active_questions_with_same_fine_objective_and_identical_"
+                "named_misconception_set"
+            ),
+            "objective_id": objective_id,
+            "objective_name": objective.name,
+            "counterfactual_evaluated": False,
+            "counterfactual_assumption": None,
+            "retained_representative_family_id": family_ids[0],
+            "counterfactually_unavailable_family_ids": [],
+            "baseline": snapshot,
+            "collapsed": snapshot,
+            "impact": {
+                "initial_safe_family_drop": 0,
+                "order_robust_main_capacity_drop": 0,
+                "achievable_main_capacity_drop": 0,
+                "capacity_critical_if_dependence_confirmed": False,
+                "assessment": "already_collapsed_by_semantic_review",
+            },
+        }
+
     retained_family_id = family_ids[0]
     collapsed_family_ids = family_ids[1:]
     collapsed = _objective_capacity(
@@ -568,9 +880,10 @@ def _capacity_comparison(
         ),
         "objective_id": objective_id,
         "objective_name": objective.name,
+        "counterfactual_evaluated": True,
         "counterfactual_assumption": (
-            "Treat the nominated families as one semantic family by retaining "
-            "one deterministic representative and removing the others."
+            "Treat the nominated evidence families as one semantic family by "
+            "retaining one deterministic representative and removing the rest."
         ),
         "retained_representative_family_id": retained_family_id,
         "counterfactually_unavailable_family_ids": list(collapsed_family_ids),
@@ -590,746 +903,277 @@ def _capacity_comparison(
     }
 
 
-def _candidate_repair_batch_report(
-    *,
-    questions: Sequence[Question],
-    active_questions: Sequence[Question],
-    declared_results: Sequence[dict[str, object]],
-    graph: KnowledgeGraph,
-    misconceptions: Sequence[object],
-) -> dict[str, object]:
-    """Measure possible capacity without making candidates eligible.
-
-    Replacing status on frozen in-memory dataclasses is intentionally a
-    counterfactual calculation. It bypasses the production review gate only
-    inside this process and neither serializes nor activates a candidate.
-    """
-
-    by_question_id = {question.id: question for question in questions}
-    declared_by_id = {
-        str(result["cluster_id"]): result for result in declared_results
-    }
-    expected_ids = {
-        str(question_id)
-        for mapping in CANDIDATE_REPAIR_CLUSTERS
-        for question_id in mapping["candidate_question_ids"]
-    }
-    actual_ids = {
-        question.id
-        for question in questions
-        if question.provenance.get("batch_id") == CANDIDATE_REPAIR_BATCH_ID
-    }
-    if actual_ids != expected_ids:
-        missing = sorted(expected_ids - actual_ids)
-        unexpected = sorted(actual_ids - expected_ids)
-        raise LabInvariantError(
-            "Candidate repair batch membership changed: "
-            f"missing={missing}, unexpected={unexpected}."
-        )
-
-    candidate_rows: list[dict[str, object]] = []
-    comparisons: list[dict[str, object]] = []
-    for mapping in CANDIDATE_REPAIR_CLUSTERS:
-        cluster_id = str(mapping["declared_cluster_id"])
-        declared = declared_by_id.get(cluster_id)
-        if declared is None:
-            raise LabInvariantError(
-                f"Candidate repair mapping names unknown cluster {cluster_id}."
-            )
-        candidate_ids = tuple(
-            str(question_id)
-            for question_id in mapping["candidate_question_ids"]
-        )
-        candidates = tuple(
-            by_question_id[question_id] for question_id in candidate_ids
-        )
-        declared_ids = tuple(
-            str(question_id) for question_id in declared["question_ids"]
-        )
-        declared_questions = tuple(
-            by_question_id[question_id] for question_id in declared_ids
-        )
-        objective_id = declared_questions[0].objective_id
-        objective = declared_questions[0].objective
-        if objective_id is None or objective is None:
-            raise LabInvariantError(
-                f"Declared cluster {cluster_id} lacks a fine objective."
-            )
-        misconception_ids = tuple(
-            sorted(declared_questions[0].misconception_ids)
-        )
-        declared_family_ids = tuple(
-            sorted({question.family_id for question in declared_questions})
-        )
-        candidate_family_ids = tuple(
-            sorted({question.family_id for question in candidates})
-        )
-        if len(candidate_family_ids) != len(candidates):
-            raise LabInvariantError(
-                f"Candidate repair mapping {cluster_id} repeats a family."
-            )
-        if set(candidate_family_ids) & set(declared_family_ids):
-            raise LabInvariantError(
-                f"Candidate repair mapping {cluster_id} reuses a declared "
-                "active family."
-            )
-
-        for candidate in candidates:
-            provenance = candidate.provenance
-            failures: list[str] = []
-            if candidate.status is not QuestionStatus.QUARANTINED:
-                failures.append("status_is_not_quarantined")
-            if provenance.get("batch_id") != CANDIDATE_REPAIR_BATCH_ID:
-                failures.append("batch_id_mismatch")
-            if provenance.get("generated") is not True:
-                failures.append("generated_marker_is_not_true")
-            if provenance.get("human_review") is not False:
-                failures.append("human_review_marker_is_not_false")
-            if (
-                provenance.get("human_review_status")
-                != "required_before_activation"
-            ):
-                failures.append("human_review_requirement_missing")
-            if provenance.get("activation") != _MANUAL_ACTIVATION_MARKER:
-                failures.append("manual_activation_marker_missing")
-            if candidate.objective_id != objective_id:
-                failures.append("fine_objective_mismatch")
-            if tuple(sorted(candidate.misconception_ids)) != misconception_ids:
-                failures.append("named_misconception_signature_mismatch")
-            if failures:
-                raise LabInvariantError(
-                    f"Candidate {candidate.id} failed quarantine invariants: "
-                    f"{', '.join(failures)}."
-                )
-            candidate_rows.append(
-                {
-                    "question_id": candidate.id,
-                    "declared_cluster_id": cluster_id,
-                    "family_id": candidate.family_id,
-                    "objective_id": candidate.objective_id,
-                    "named_misconception_ids": list(misconception_ids),
-                    "source_ids": list(candidate.source_ids),
-                    "source_status": candidate.status.value,
-                    "source_eligible_for_adaptation": (
-                        candidate.status.eligible_for_adaptation
-                    ),
-                    "generated": provenance["generated"],
-                    "human_review": provenance["human_review"],
-                    "human_review_status": provenance["human_review_status"],
-                    "activation": provenance["activation"],
-                    "quarantine_invariants_validated": True,
-                }
-            )
-
-        collapsed_family_ids = declared_family_ids[1:]
-        baseline = _objective_capacity(
-            objective=objective,
-            misconception_ids=misconception_ids,
-            questions=active_questions,
-            graph=graph,
-            misconceptions=misconceptions,
-        )
-        collapsed = _objective_capacity(
-            objective=objective,
-            misconception_ids=misconception_ids,
-            questions=active_questions,
-            graph=graph,
-            misconceptions=misconceptions,
-            unavailable_family_ids=collapsed_family_ids,
-        )
-        counterfactually_eligible_candidates = tuple(
-            replace(candidate, status=QuestionStatus.APPROVED)
-            for candidate in candidates
-        )
-        with_candidates = (
-            *active_questions,
-            *counterfactually_eligible_candidates,
-        )
-        expanded = _objective_capacity(
-            objective=objective,
-            misconception_ids=misconception_ids,
-            questions=with_candidates,
-            graph=graph,
-            misconceptions=misconceptions,
-        )
-        collapsed_expanded = _objective_capacity(
-            objective=objective,
-            misconception_ids=misconception_ids,
-            questions=with_candidates,
-            graph=graph,
-            misconceptions=misconceptions,
-            unavailable_family_ids=collapsed_family_ids,
-        )
-        robust_restored = (
-            collapsed_expanded.order_robust_main_capacity
-            >= baseline.order_robust_main_capacity
-        )
-        achievable_restored = (
-            collapsed_expanded.achievable_main_capacity
-            >= baseline.achievable_main_capacity
-        )
-        comparisons.append(
-            {
-                "declared_cluster_id": cluster_id,
-                "objective_id": objective_id,
-                "objective_name": objective.name,
-                "named_misconception_ids": list(misconception_ids),
-                "candidate_question_ids": list(candidate_ids),
-                "candidate_family_ids": list(candidate_family_ids),
-                "counterfactually_unavailable_declared_family_ids": list(
-                    collapsed_family_ids
-                ),
-                "capacity_scope": (
-                    "exact same fine objective and identical named-"
-                    "misconception signature"
-                ),
-                "baseline": _capacity_snapshot(baseline),
-                "declared_cluster_collapsed": _capacity_snapshot(collapsed),
-                "with_candidates_counterfactually_eligible": (
-                    _capacity_snapshot(expanded)
-                ),
-                "collapsed_with_candidates_counterfactually_eligible": (
-                    _capacity_snapshot(collapsed_expanded)
-                ),
-                "restoration_check": {
-                    "order_robust_at_least_baseline": robust_restored,
-                    "achievable_at_least_baseline": achievable_restored,
-                    "restores_baseline_if_candidate_families_survive_review": (
-                        robust_restored and achievable_restored
-                    ),
-                },
-                "semantic_independence_established": False,
-                "human_review_required_before_activation": True,
-            }
-        )
-
-    restored_cluster_ids = [
-        row["declared_cluster_id"]
-        for row in comparisons
-        if row["restoration_check"][
-            "restores_baseline_if_candidate_families_survive_review"
-        ]
-    ]
-    return {
-        "batch_id": CANDIDATE_REPAIR_BATCH_ID,
-        "status": "counterfactual_only_human_review_required",
-        "candidate_question_ids": sorted(expected_ids),
-        "source_candidate_state": sorted(
-            candidate_rows, key=lambda row: row["question_id"]
-        ),
-        "in_memory_operation": (
-            "replace each quarantined candidate status with approved solely "
-            "for exact capacity analysis; do not serialize the replacement"
-        ),
-        "source_corpus_mutated": False,
-        "semantic_independence_established": False,
-        "manual_activation_required": True,
-        "cluster_comparisons": sorted(
-            comparisons, key=lambda row: row["declared_cluster_id"]
-        ),
-        "findings": {
-            "candidate_count": len(expected_ids),
-            "quarantine_invariants_validated_count": len(candidate_rows),
-            "mapped_cluster_count": len(comparisons),
-            "baseline_restored_cluster_ids": restored_cluster_ids,
-            "baseline_restored_cluster_count": len(restored_cluster_ids),
-        },
-    }
-
-
-def _causal_concept_capacity(
-    *,
-    questions: Sequence[Question],
-    graph: KnowledgeGraph,
-    misconceptions: Sequence[object],
-    unavailable_family_ids: Iterable[str] = (),
-) -> TargetCapacity:
-    target = CapacityTarget(
-        target_id=CAUSAL_RESERVE_CONCEPT_ID,
-        target_type="concept",
-        owned_concept_ids=(CAUSAL_RESERVE_CONCEPT_ID,),
-        target_main_count=3,
-    )
-    report = analyze_sustained_capacity(
-        questions,
-        graph,
-        misconceptions,
-        (target,),
-        unavailable_family_ids=unavailable_family_ids,
-    )
-    return report.targets[0]
-
-
-def _causal_source_state(question: Question) -> dict[str, object]:
-    """Validate a frozen candidate without converting provenance into approval."""
-
-    if question.status.eligible_for_adaptation:
-        raise LabInvariantError(
-            f"Causal reserve source {question.id} unexpectedly became eligible."
-        )
-    provenance = question.provenance
-    checks = {
-        "status_is_quarantined": (
-            question.status is QuestionStatus.QUARANTINED
-        ),
-        "generated_is_explicit_true": provenance.get("generated") is True,
-        "human_review_is_explicit_false": (
-            provenance.get("human_review") is False
-        ),
-        "activation_is_manual_only": (
-            provenance.get("activation") == _MANUAL_ACTIVATION_MARKER
-        ),
-    }
-    gaps = sorted(name for name, valid in checks.items() if not valid)
-    return {
-        "question_id": question.id,
-        "family_id": question.family_id,
-        "revision_of": question.revision_of,
-        "version": question.version,
-        "source_status": question.status.value,
-        "source_eligible_for_adaptation": (
-            question.status.eligible_for_adaptation
-        ),
-        "provenance_checks": checks,
-        "provenance_gaps": gaps,
-        "provenance_complete_for_counterfactual_review": not gaps,
-        "activation_ceiling_preserved_by_source_status": True,
-    }
-
-
-def _subset_kind(size: int, total: int) -> str:
-    if size == 0:
-        return "none"
-    if size == total:
-        return "all"
-    return {
-        1: "single",
-        2: "pair",
-        3: "triple",
-    }.get(size, f"size_{size}")
-
-
-def _causal_reserve_counterfactual_report(
-    *,
-    questions: Sequence[Question],
-    active_questions: Sequence[Question],
-    graph: KnowledgeGraph,
-    misconceptions: Sequence[object],
-) -> dict[str, object]:
-    """Measure causal reserve candidates in memory without blessing them.
-
-    The full power set is deliberately small (sixteen subsets).  Each subset
-    is tested both at the whole causal-masking concept and at the narrow
-    three-misconception route which exposed the long-horizon reserve deficit.
-    """
-
-    by_question_id = {question.id: question for question in questions}
-    candidate_ids = tuple(
-        str(declaration["question_id"])
-        for declaration in CAUSAL_RESERVE_CANDIDATES
-    )
-    historical_member_sequence = tuple(
-        str(question_id)
-        for declaration in CAUSAL_RESERVE_CANDIDATES
-        for question_id in declaration["family_question_ids"]
-    )
-    historical_member_ids = set(historical_member_sequence)
-    if len(historical_member_ids) != len(historical_member_sequence):
-        raise LabInvariantError(
-            "Causal reserve historical cohort declarations repeat a question."
-        )
-    dependent_variant_sequence = tuple(
-        str(declaration["question_id"])
-        for declaration in CAUSAL_RESERVE_DEPENDENT_VARIANTS
-    )
-    dependent_variant_ids = set(dependent_variant_sequence)
-    if len(dependent_variant_ids) != len(dependent_variant_sequence):
-        raise LabInvariantError(
-            "Causal reserve dependent-variant declarations repeat a question."
-        )
-    overlap = sorted(historical_member_ids & dependent_variant_ids)
-    if overlap:
-        raise LabInvariantError(
-            "Causal reserve historical and dependent cohorts overlap: "
-            + ", ".join(overlap)
-        )
-    expected_current_member_ids = (
-        historical_member_ids | dependent_variant_ids
-    )
-    missing = sorted(expected_current_member_ids - set(by_question_id))
-    if missing:
-        raise LabInvariantError(
-            "Causal reserve declarations reference missing questions: "
-            + ", ".join(missing)
-        )
-
-    source_rows: list[dict[str, object]] = []
-    candidate_rows: list[dict[str, object]] = []
-    dependent_variant_rows: list[dict[str, object]] = []
-    seen_members: set[str] = set()
-    candidate_family_ids: list[str] = []
-    declared_candidate_family_ids = {
-        str(declaration["family_id"])
-        for declaration in CAUSAL_RESERVE_CANDIDATES
-    }
-    dependent_ids_by_family: dict[str, list[str]] = {
-        family_id: [] for family_id in declared_candidate_family_ids
-    }
-    for declaration in CAUSAL_RESERVE_DEPENDENT_VARIANTS:
-        family_id = str(declaration["family_id"])
-        if family_id not in declared_candidate_family_ids:
-            raise LabInvariantError(
-                "Causal reserve dependent variant "
-                f"{declaration['question_id']} names non-reserve family "
-                f"{family_id}."
-            )
-        dependent_ids_by_family[family_id].append(
-            str(declaration["question_id"])
-        )
-    for declaration in CAUSAL_RESERVE_CANDIDATES:
-        candidate_id = str(declaration["question_id"])
-        family_id = str(declaration["family_id"])
-        member_ids = tuple(
-            str(question_id)
-            for question_id in declaration["family_question_ids"]
-        )
-        candidate = by_question_id[candidate_id]
-        if candidate.family_id != family_id:
-            raise LabInvariantError(
-                f"Causal reserve candidate {candidate_id} moved from "
-                f"declared family {family_id} to {candidate.family_id}."
-            )
-        if candidate.objective_id != CAUSAL_RESERVE_OBJECTIVE_ID:
-            raise LabInvariantError(
-                f"Causal reserve candidate {candidate_id} moved from "
-                f"objective {CAUSAL_RESERVE_OBJECTIVE_ID}."
-            )
-        for member_id in member_ids:
-            member = by_question_id[member_id]
-            if member.family_id != family_id:
-                raise LabInvariantError(
-                    f"Causal reserve same-family member {member_id} moved "
-                    f"from {family_id} to {member.family_id}."
-                )
-            if member_id not in seen_members:
-                state = _causal_source_state(member)
-                state["cohort_role"] = "historical_cohort_member"
-                source_rows.append(state)
-                seen_members.add(member_id)
-        dependent_ids = tuple(sorted(dependent_ids_by_family[family_id]))
-        current_family_ids = tuple(sorted((*member_ids, *dependent_ids)))
-        candidate_family_ids.append(family_id)
-        candidate_rows.append(
-            {
-                "question_id": candidate_id,
-                "family_id": family_id,
-                # This field intentionally preserves the exact historical
-                # cohort. Later dependent practice stays explicit below.
-                "family_question_ids": list(member_ids),
-                "historical_family_question_ids": list(member_ids),
-                "dependent_variant_question_ids": list(dependent_ids),
-                "current_family_question_ids": list(current_family_ids),
-                "counterfactual_representative": True,
-                "historical_family_member_count": len(member_ids),
-                "dependent_variant_count": len(dependent_ids),
-                "same_family_member_count": len(current_family_ids),
-            }
-        )
-
-    if len(set(candidate_family_ids)) != len(candidate_family_ids):
-        raise LabInvariantError(
-            "Causal reserve candidate declarations must name four semantic "
-            "families; same-family revisions belong in family_question_ids."
-        )
-    for declaration in CAUSAL_RESERVE_DEPENDENT_VARIANTS:
-        question_id = str(declaration["question_id"])
-        expected_family_id = str(declaration["family_id"])
-        expected_batch_id = str(declaration["batch_id"])
-        question = by_question_id[question_id]
-        provenance = question.provenance
-        failures: list[str] = []
-        if question.family_id != expected_family_id:
-            failures.append(
-                f"family_is_{question.family_id}_expected_{expected_family_id}"
-            )
-        if question.objective_id != CAUSAL_RESERVE_OBJECTIVE_ID:
-            failures.append("fine_objective_mismatch")
-        if question.status is not QuestionStatus.QUARANTINED:
-            failures.append("status_is_not_quarantined")
-        if question.status.eligible_for_adaptation:
-            failures.append("source_is_adaptation_eligible")
-        if provenance.get("batch_id") != expected_batch_id:
-            failures.append("batch_id_mismatch")
-        if provenance.get("generated") is not True:
-            failures.append("generated_marker_is_not_true")
-        if provenance.get("human_review") is not False:
-            failures.append("human_review_marker_is_not_false")
-        if (
-            provenance.get("human_review_status")
-            != "required_before_activation"
-        ):
-            failures.append("human_review_requirement_missing")
-        if provenance.get("activation") != _MANUAL_ACTIVATION_MARKER:
-            failures.append("manual_activation_marker_missing")
-        if (
-            provenance.get("review_status")
-            != "candidate_pending_independent_review"
-        ):
-            failures.append("independent_review_is_not_pending")
-        if provenance.get("psychometrics") != "uncalibrated_author_prior":
-            failures.append("psychometrics_are_not_uncalibrated_author_prior")
-        if failures:
-            raise LabInvariantError(
-                f"Causal reserve dependent variant {question_id} failed "
-                f"invariants: {', '.join(failures)}."
-            )
-        state = _causal_source_state(question)
-        if state["provenance_gaps"]:
-            raise LabInvariantError(
-                f"Causal reserve dependent variant {question_id} has "
-                "unexpected provenance gaps."
-            )
-        state.update(
-            {
-                "cohort_role": "declared_dependent_variant",
-                "expected_batch_id": expected_batch_id,
-                "source_batch_id": provenance["batch_id"],
-                "counterfactual_representative": False,
-                "included_in_subset_analysis": False,
-                "capacity_credit_granted": False,
-            }
-        )
-        source_rows.append(state)
-        dependent_variant_rows.append(
-            {
-                "question_id": question_id,
-                "family_id": expected_family_id,
-                "batch_id": expected_batch_id,
-                "objective_id": question.objective_id,
-                "source_status": question.status.value,
-                "source_eligible_for_adaptation": (
-                    question.status.eligible_for_adaptation
-                ),
-                "generated": provenance["generated"],
-                "human_review": provenance["human_review"],
-                "human_review_status": provenance["human_review_status"],
-                "activation": provenance["activation"],
-                "review_status": provenance["review_status"],
-                "psychometrics": provenance["psychometrics"],
-                "counterfactual_representative": False,
-                "included_in_subset_analysis": False,
-                "capacity_credit_granted": False,
-                "quarantine_invariants_validated": True,
-            }
-        )
-    actual_member_ids = {
-        question.id
-        for question in questions
-        if question.family_id in set(candidate_family_ids)
-    }
-    if actual_member_ids != expected_current_member_ids:
-        raise LabInvariantError(
-            "Causal reserve family membership changed: "
-            "missing="
-            f"{sorted(expected_current_member_ids - actual_member_ids)}, "
-            "unexpected="
-            f"{sorted(actual_member_ids - expected_current_member_ids)}."
-        )
-    cross_scope = next(
-        row
-        for row in candidate_rows
-        if row["family_id"] == "f_causal_cross_attention_mask_scope"
-    )
-    if cross_scope["family_question_ids"] != [
-        "q_causal_cross_attention_mask_scope_001",
-        "q_causal_cross_attention_mask_scope_002",
-    ]:
-        raise LabInvariantError(
-            "The causal cross-attention revision family was not preserved."
-        )
-    cross_revision = by_question_id[
-        "q_causal_cross_attention_mask_scope_002"
-    ]
-    if (
-        cross_revision.revision_of
-        != "q_causal_cross_attention_mask_scope_001"
-    ):
-        raise LabInvariantError(
-            "The causal cross-attention revision relationship changed."
-        )
-
-    objective = next(
-        (
-            question.objective
-            for question in questions
-            if question.objective_id == CAUSAL_RESERVE_OBJECTIVE_ID
-            and question.objective is not None
-        ),
-        None,
-    )
-    if objective is None:
-        raise LabInvariantError(
-            f"Missing objective {CAUSAL_RESERVE_OBJECTIVE_ID}."
-        )
-
-    subset_rows: list[dict[str, object]] = []
-    for size in range(len(candidate_ids) + 1):
-        for subset_ids in combinations(candidate_ids, size):
-            counterfactual_candidates = tuple(
-                replace(
-                    by_question_id[question_id],
-                    status=QuestionStatus.APPROVED,
-                )
-                for question_id in subset_ids
-            )
-            counterfactual_questions = (
-                *active_questions,
-                *counterfactual_candidates,
-            )
-            scenario_rows: dict[str, object] = {}
-            for scenario in CAUSAL_RESERVE_COLLAPSE_SCENARIOS:
-                unavailable = tuple(
-                    str(family_id)
-                    for family_id in scenario["unavailable_family_ids"]
-                )
-                concept_capacity = _causal_concept_capacity(
-                    questions=counterfactual_questions,
-                    graph=graph,
-                    misconceptions=misconceptions,
-                    unavailable_family_ids=unavailable,
-                )
-                route_capacity = _objective_capacity(
-                    objective=objective,
-                    misconception_ids=(
-                        CAUSAL_RESERVE_ROUTE_MISCONCEPTION_IDS
-                    ),
-                    questions=counterfactual_questions,
-                    graph=graph,
-                    misconceptions=misconceptions,
-                    unavailable_family_ids=unavailable,
-                )
-                scenario_rows[str(scenario["id"])] = {
-                    "retained_representative_family_id": scenario[
-                        "retained_representative_family_id"
-                    ],
-                    "counterfactually_unavailable_family_ids": list(
-                        unavailable
-                    ),
-                    "whole_concept": _capacity_snapshot(concept_capacity),
-                    "exact_route": _capacity_snapshot(route_capacity),
-                }
-            subset_rows.append(
-                {
-                    "candidate_question_ids": list(subset_ids),
-                    "candidate_family_ids": [
-                        by_question_id[question_id].family_id
-                        for question_id in subset_ids
-                    ],
-                    "candidate_count": size,
-                    "subset_kind": _subset_kind(
-                        size, len(candidate_ids)
-                    ),
-                    "collapse_scenarios": scenario_rows,
-                }
-            )
-
-    source_rows.sort(key=lambda row: str(row["question_id"]))
-    dependent_variant_rows.sort(
-        key=lambda row: str(row["question_id"])
-    )
-    provenance_gap_ids = [
-        str(row["question_id"])
-        for row in source_rows
-        if row["provenance_gaps"]
-    ]
-    baseline = subset_rows[0]["collapse_scenarios"]
-    complete = subset_rows[-1]["collapse_scenarios"]
-    return {
-        "status": "counterfactual_only_human_review_required",
-        "objective_id": CAUSAL_RESERVE_OBJECTIVE_ID,
-        "concept_id": CAUSAL_RESERVE_CONCEPT_ID,
-        "exact_route_misconception_ids": list(
-            CAUSAL_RESERVE_ROUTE_MISCONCEPTION_IDS
-        ),
-        "candidate_question_ids": list(candidate_ids),
-        "candidate_family_ids": candidate_family_ids,
-        "candidate_family_count": len(candidate_family_ids),
-        "historical_cohort_question_ids": sorted(historical_member_ids),
-        "historical_cohort_count": len(historical_member_ids),
-        "dependent_variant_question_ids": sorted(dependent_variant_ids),
-        "dependent_variant_count": len(dependent_variant_ids),
-        "current_family_member_question_ids": sorted(
-            expected_current_member_ids
-        ),
-        "current_family_member_count": len(expected_current_member_ids),
-        # Backward-compatible field names now truthfully describe every
-        # current member of the four declared reserve families.
-        "source_family_member_question_ids": sorted(
-            expected_current_member_ids
-        ),
-        "source_family_member_count": len(expected_current_member_ids),
-        "candidate_declarations": candidate_rows,
-        "dependent_variant_declarations": dependent_variant_rows,
-        "source_candidate_state": source_rows,
-        "provenance_gap_question_ids": provenance_gap_ids,
-        "all_source_provenance_complete": not provenance_gap_ids,
-        "subset_analysis": subset_rows,
-        "subset_count": len(subset_rows),
-        "subset_kind_counts": {
-            kind: sum(
-                row["subset_kind"] == kind for row in subset_rows
-            )
-            for kind in ("none", "single", "pair", "triple", "all")
-        },
-        "baseline_capacity": baseline,
-        "all_candidates_capacity": complete,
-        "collapse_contract": {
-            str(scenario["id"]): {
-                "retained_representative_family_id": scenario[
-                    "retained_representative_family_id"
-                ],
-                "counterfactually_unavailable_family_ids": list(
-                    scenario["unavailable_family_ids"]
-                ),
-            }
-            for scenario in CAUSAL_RESERVE_COLLAPSE_SCENARIOS
-        },
-        "in_memory_operation": (
-            "replace only one historical declared representative per "
-            "quarantined semantic family with an approved frozen dataclass; "
-            "never serialize it, never count same-family revisions twice, "
-            "and never include declared dependent variants in the power set"
-        ),
-        "source_corpus_mutated": False,
-        "semantic_independence_established": False,
-        "human_review_required_before_activation": True,
-        "manual_activation_required": True,
-        "legacy_provenance_gaps_are_fail_visible_not_approval": True,
-        "dependent_variants_excluded_from_counterfactual": True,
-        "dependent_variants_capacity_credit_granted": False,
-    }
-
-
 def _cluster_pair_evidence(
     question_ids: Sequence[str],
     features: dict[str, QuestionFeatures],
 ) -> list[dict[str, object]]:
-    pairs: list[dict[str, object]] = []
+    rows: list[dict[str, object]] = []
     for index, left_id in enumerate(question_ids):
         for right_id in question_ids[index + 1 :]:
-            pairs.append(pair_evidence(features[left_id], features[right_id]))
+            rows.append(pair_evidence(features[left_id], features[right_id]))
     return sorted(
-        pairs,
-        key=lambda row: (
-            row["left_question_id"],
-            row["right_question_id"],
-        ),
+        rows,
+        key=lambda row: (row["left_question_id"], row["right_question_id"]),
     )
+
+
+def _review_fields(
+    declaration: dict[str, object],
+    evidence_family_ids: Sequence[str],
+) -> dict[str, object]:
+    """Validate and expose one exact answer-redacted adjudication."""
+
+    disposition = str(declaration["disposition"])
+    if disposition not in {"reviewed_distinct", "reviewed_equivalent"}:
+        raise LabInvariantError(
+            f"Review cluster {declaration['id']} has unsupported disposition "
+            f"{disposition}."
+        )
+    operations = tuple(declaration.get("solution_operations", ()))
+    if not operations:
+        raise LabInvariantError(
+            f"Review cluster {declaration['id']} lacks solution operations."
+        )
+    operation_family_ids: list[str] = []
+    normalized_operations: list[dict[str, object]] = []
+    for value in operations:
+        if not isinstance(value, dict):
+            raise LabInvariantError(
+                f"Review cluster {declaration['id']} has a malformed solution "
+                "operation."
+            )
+        family_ids = tuple(str(item) for item in value["evidence_family_ids"])
+        operation = str(value["operation"]).strip()
+        if not family_ids or not operation:
+            raise LabInvariantError(
+                f"Review cluster {declaration['id']} has an incomplete solution "
+                "operation."
+            )
+        operation_family_ids.extend(family_ids)
+        normalized_operations.append(
+            {
+                "evidence_family_ids": list(family_ids),
+                "operation": operation,
+            }
+        )
+    expected_families = sorted(set(evidence_family_ids))
+    if (
+        len(operation_family_ids) != len(set(operation_family_ids))
+        or sorted(operation_family_ids) != expected_families
+    ):
+        raise LabInvariantError(
+            f"Review cluster {declaration['id']} solution operations do not "
+            "partition its exact evidence families."
+        )
+
+    reviewed_equivalent = disposition == "reviewed_equivalent"
+    if reviewed_equivalent != (len(expected_families) == 1):
+        raise LabInvariantError(
+            f"Review cluster {declaration['id']} disposition does not match "
+            "the current family manifest."
+        )
+    return {
+        "review_version": ANSWER_REDACTED_REVIEW_VERSION,
+        "review_input": "stem_and_option_text_only",
+        "review_reason": str(declaration["review_reason"]),
+        "review_status": (
+            "reviewed_equivalent_in_family_manifest"
+            if reviewed_equivalent
+            else "reviewed_distinct_after_answer_redacted_review"
+        ),
+        "solution_operations": normalized_operations,
+        "semantic_dependence_established": reviewed_equivalent,
+        "semantic_independence_established": not reviewed_equivalent,
+        "semantic_dependence_evidence": (
+            "explicit_reviewed_family_manifest"
+            if reviewed_equivalent
+            else None
+        ),
+        "semantic_independence_evidence": (
+            None
+            if reviewed_equivalent
+            else "answer_redacted_solution_operation_partition"
+        ),
+    }
+
+
+def _family_manifest_audit(
+    *,
+    questions: Sequence[Question],
+    active_questions: Sequence[Question],
+) -> dict[str, object]:
+    """Validate every explicit alias and every currently large cohort exactly."""
+
+    manifest = family_alias_members()
+    by_question_id = {question.id: question for question in questions}
+    alias_labels = {
+        assignment.published_family_id for assignment in manifest.values()
+    }
+    violations: list[str] = []
+    rows: list[dict[str, object]] = []
+
+    missing = sorted(set(manifest) - set(by_question_id))
+    if missing:
+        violations.append("missing_alias_members:" + ",".join(missing))
+
+    unlisted_alias_users = sorted(
+        question.id
+        for question in questions
+        if _published_family_id(question) in alias_labels
+        and question.id not in manifest
+    )
+    if unlisted_alias_users:
+        violations.append(
+            "unlisted_alias_members:" + ",".join(unlisted_alias_users)
+        )
+
+    for question_id, expected in manifest.items():
+        question = by_question_id.get(question_id)
+        if question is None:
+            continue
+        assignment = family_assignment(
+            question.id,
+            _published_family_id(question),
+        )
+        valid = (
+            assignment == expected
+            and _published_family_id(question) == expected.published_family_id
+            and question.family_id == expected.evidence_family_id
+        )
+        if not valid:
+            violations.append(f"assignment_mismatch:{question_id}")
+        rows.append(
+            {
+                "question_id": question_id,
+                "status": question.status.value,
+                "published_family_id": _published_family_id(question),
+                "evidence_family_id": question.family_id,
+                "manifest_published_family_id": expected.published_family_id,
+                "manifest_evidence_family_id": expected.evidence_family_id,
+                "exact_assignment_valid": valid,
+            }
+        )
+
+    active_members: dict[str, set[str]] = {}
+    for question in active_questions:
+        active_members.setdefault(question.family_id, set()).add(question.id)
+    large_rows: list[dict[str, object]] = []
+    for family_id, question_ids in sorted(active_members.items()):
+        if len(question_ids) <= LARGE_FAMILY_THRESHOLD:
+            continue
+        exact = reviewed_large_family_cohort(family_id, question_ids)
+        if not exact:
+            violations.append(f"unreviewed_large_cohort:{family_id}")
+        large_rows.append(
+            {
+                "evidence_family_id": family_id,
+                "question_count": len(question_ids),
+                "question_ids": sorted(question_ids),
+                "exact_reviewed_cohort": exact,
+            }
+        )
+
+    if violations:
+        raise LabInvariantError(
+            "Family manifest validation failed: " + "; ".join(violations)
+        )
+    return {
+        "manifest_semantics": (
+            "immutable published family labels map to reviewed evidence "
+            "families; every alias-bearing question is explicit"
+        ),
+        "explicit_alias_member_count": len(manifest),
+        "explicit_alias_family_count": len(alias_labels),
+        "member_assignments": sorted(rows, key=lambda row: row["question_id"]),
+        "large_family_threshold": LARGE_FAMILY_THRESHOLD,
+        "reviewed_large_cohorts": large_rows,
+        "reviewed_large_cohort_count": len(large_rows),
+        "all_alias_assignments_exact": True,
+        "all_alias_users_explicit": True,
+        "all_large_cohorts_exactly_reviewed": True,
+        "fail_closed": True,
+    }
+
+
+def _serviceability_audit(
+    *,
+    concepts: Sequence[object],
+    questions: Sequence[Question],
+    graph: KnowledgeGraph,
+    misconceptions: Sequence[object],
+) -> dict[str, object]:
+    issues = audit_corpus(
+        questions,
+        expected_primary_concept_ids={
+            mapping.concept_id
+            for question in questions
+            for mapping in question.concepts
+        },
+        knowledge_graph=graph,
+        misconceptions=misconceptions,
+    )
+    rows = [asdict(issue) for issue in issues]
+
+    def identifier(row: dict[str, object]) -> str:
+        question_id = row.get("question_id")
+        if question_id:
+            subject = str(question_id)
+        else:
+            message = str(row["message"])
+            match = next(
+                (
+                    candidate.match(message)
+                    for candidate in _ISSUE_SUBJECT_PATTERNS
+                    if candidate.match(message) is not None
+                ),
+                None,
+            )
+            subject = (
+                match.group(1)
+                if match is not None
+                else canonical_hash(row)[:12]
+            )
+        return f"{row['code']}:{subject}"
+
+    for row in rows:
+        row["issue_id"] = identifier(row)
+    errors = [row for row in rows if row["severity"] == "error"]
+    warnings = [row for row in rows if row["severity"] == "warning"]
+    serviceability = [
+        row for row in rows if row["code"] in _SERVICEABILITY_CODES
+    ]
+
+    return {
+        "audit_scope": (
+            "all parsed questions with active-bank coverage, contextual, and "
+            "fine-objective serviceability checks"
+        ),
+        "concept_count": len(concepts),
+        "question_count": len(questions),
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "strict_pass": not errors and not warnings,
+        "error_codes": sorted({str(row["code"]) for row in errors}),
+        "warning_codes": sorted({str(row["code"]) for row in warnings}),
+        "error_identifiers": sorted(str(row["issue_id"]) for row in errors),
+        "warning_identifiers": sorted(
+            str(row["issue_id"]) for row in warnings
+        ),
+        "serviceability_issue_count": len(serviceability),
+        "serviceability_issue_codes": sorted(
+            {str(row["code"]) for row in serviceability}
+        ),
+        "serviceability_issue_identifiers": sorted(
+            str(row["issue_id"]) for row in serviceability
+        ),
+        "errors": errors,
+        "warnings": warnings,
+        "serviceability_issues": serviceability,
+    }
 
 
 def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
     source_digest_before = corpus_source_digest(corpus)
-    source_sha256 = source_digest_before
     raw = load_bundle(corpus)
     (
         concepts,
@@ -1385,22 +1229,18 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
                         (left.question.id, right.question.id)
                     )
     duplicate_candidates = sorted(
-        (
-            row for row in all_pairs if row["signal_threshold_passed"]
-        ),
+        (row for row in all_pairs if row["signal_threshold_passed"]),
         key=lambda row: (
             row["left_question_id"],
             row["right_question_id"],
         ),
     )
-    signal_components = _connected_components(
-        features, qualifying_edges
-    )
+    signal_components = _connected_components(features, qualifying_edges)
 
     baseline_cache: dict[str, TargetCapacity] = {}
     declared_results: list[dict[str, object]] = []
     for declaration in DECLARED_REVIEW_CLUSTERS:
-        question_ids = tuple(declaration["question_ids"])
+        question_ids = tuple(str(value) for value in declaration["question_ids"])
         missing = sorted(set(question_ids) - set(by_question_id))
         if missing:
             raise LabInvariantError(
@@ -1420,22 +1260,25 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
                 f"Declared review cluster {declaration['id']} no longer shares "
                 "one objective and one non-empty named-misconception set."
             )
+        evidence_family_ids = sorted(
+            {question.family_id for question in selected}
+        )
+        review_fields = _review_fields(declaration, evidence_family_ids)
         pair_rows = _cluster_pair_evidence(question_ids, features)
         declared_results.append(
             {
                 "cluster_id": declaration["id"],
                 "origin": "declared_review_seed",
                 "question_ids": list(question_ids),
-                "family_ids": sorted(
-                    question.family_id for question in selected
+                "published_family_ids": sorted(
+                    _published_family_id(question) for question in selected
                 ),
+                "family_ids": evidence_family_ids,
                 "objective_id": selected[0].objective_id,
                 "named_misconception_ids": sorted(
                     selected[0].misconception_ids
                 ),
-                "review_reason": declaration["review_reason"],
-                "review_status": "independent_semantic_review_required",
-                "semantic_dependence_established": False,
+                **review_fields,
                 "automatic_signal_connected": _connected_components(
                     question_ids,
                     (
@@ -1464,24 +1307,143 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
     declared_sets = {
         frozenset(result["question_ids"]) for result in declared_results
     }
-    suspected_results: list[dict[str, object]] = []
+    signal_component_sets = {
+        frozenset(question_ids): question_ids
+        for question_ids in signal_components
+    }
+    reviewed_signal_results: list[dict[str, object]] = []
+    reviewed_signal_sets: set[frozenset[str]] = set()
+    adjudicated_signal_component_sets: set[frozenset[str]] = set()
+    for declaration in REVIEWED_SIGNAL_CLUSTERS:
+        question_ids = tuple(str(value) for value in declaration["question_ids"])
+        question_set = frozenset(question_ids)
+        if question_set in reviewed_signal_sets:
+            raise LabInvariantError(
+                f"Duplicate reviewed signal cluster set at {declaration['id']}."
+            )
+        reviewed_signal_sets.add(question_set)
+        missing = sorted(set(question_ids) - set(by_question_id))
+        if missing:
+            raise LabInvariantError(
+                f"Reviewed signal cluster {declaration['id']} has inactive or "
+                f"missing questions: {', '.join(missing)}"
+            )
+        selected = [by_question_id[question_id] for question_id in question_ids]
+        signatures = {
+            (
+                question.objective_id,
+                tuple(sorted(question.misconception_ids)),
+            )
+            for question in selected
+        }
+        if len(signatures) != 1 or not next(iter(signatures))[1]:
+            raise LabInvariantError(
+                f"Reviewed signal cluster {declaration['id']} no longer "
+                "shares one objective and one non-empty named-misconception "
+                "set."
+            )
+        evidence_family_ids = sorted(
+            {question.family_id for question in selected}
+        )
+        review_fields = _review_fields(declaration, evidence_family_ids)
+        pair_rows = _cluster_pair_evidence(question_ids, features)
+        automatic_signal_connected = question_set in signal_component_sets
+        intersecting_components = [
+            component_set
+            for component_set in signal_component_sets
+            if component_set & question_set
+        ]
+        if any(
+            not component_set.issubset(question_set)
+            for component_set in intersecting_components
+        ):
+            raise LabInvariantError(
+                f"Automatic signal membership crossed reviewed cluster "
+                f"{declaration['id']}."
+            )
+        if review_fields["semantic_independence_established"]:
+            if len(intersecting_components) != 1:
+                raise LabInvariantError(
+                    f"Reviewed-distinct signal cluster {declaration['id']} "
+                    "does not retain exactly one contained automatic "
+                    "nomination."
+                )
+            component_family_ids = {
+                by_question_id[question_id].family_id
+                for question_id in next(iter(intersecting_components))
+            }
+            if component_family_ids != set(evidence_family_ids):
+                raise LabInvariantError(
+                    f"Reviewed-distinct signal cluster {declaration['id']} "
+                    "no longer nominates every reviewed evidence family."
+                )
+            adjudicated_signal_component_sets.update(intersecting_components)
+        elif intersecting_components:
+            raise LabInvariantError(
+                f"Reviewed-equivalent signal cluster {declaration['id']} was "
+                "not collapsed by the family manifest."
+            )
+        if not any(row["lexical_threshold_passed"] for row in pair_rows):
+            raise LabInvariantError(
+                f"Reviewed signal cluster {declaration['id']} no longer has "
+                "the lexical evidence that originally nominated it."
+            )
+        reviewed_signal_results.append(
+            {
+                "cluster_id": declaration["id"],
+                "origin": "answer_redacted_signal_adjudication",
+                "question_ids": list(question_ids),
+                "published_family_ids": sorted(
+                    _published_family_id(question) for question in selected
+                ),
+                "family_ids": evidence_family_ids,
+                "objective_id": selected[0].objective_id,
+                "named_misconception_ids": sorted(
+                    selected[0].misconception_ids
+                ),
+                **review_fields,
+                "automatic_signal_connected": automatic_signal_connected,
+                "automatic_signal_component_question_ids": [
+                    sorted(component_set)
+                    for component_set in intersecting_components
+                ],
+                "automatic_lexical_pair_present": True,
+                "pair_evidence": pair_rows,
+                "capacity_stress_test": _capacity_comparison(
+                    question_ids=question_ids,
+                    by_question_id=by_question_id,
+                    objectives=objectives,
+                    questions=active,
+                    graph=graph,
+                    misconceptions=misconceptions,
+                    baseline_cache=baseline_cache,
+                ),
+            }
+        )
+
+    unresolved_results: list[dict[str, object]] = []
     for question_ids in signal_components:
-        if frozenset(question_ids) in declared_sets:
+        question_set = frozenset(question_ids)
+        if (
+            question_set in declared_sets
+            or question_set in adjudicated_signal_component_sets
+        ):
             continue
         selected = [by_question_id[question_id] for question_id in question_ids]
-        # A component cannot cross signatures because qualifying edges require
-        # an exact signature match, but keep the invariant explicit.
         if len({question.objective_id for question in selected}) != 1:
             raise LabInvariantError("Signal component crossed objectives.")
-        suspected_results.append(
+        unresolved_results.append(
             {
                 "cluster_id": (
-                    f"signal_cluster_{len(suspected_results) + 1:03d}"
+                    f"unresolved_signal_cluster_{len(unresolved_results) + 1:03d}"
                 ),
                 "origin": "transparent_lexical_signal",
                 "question_ids": list(question_ids),
+                "published_family_ids": sorted(
+                    _published_family_id(question) for question in selected
+                ),
                 "family_ids": sorted(
-                    question.family_id for question in selected
+                    {question.family_id for question in selected}
                 ),
                 "objective_id": selected[0].objective_id,
                 "named_misconception_ids": sorted(
@@ -1489,6 +1451,9 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
                 ),
                 "review_status": "independent_semantic_review_required",
                 "semantic_dependence_established": False,
+                "semantic_independence_established": False,
+                "semantic_dependence_evidence": None,
+                "semantic_independence_evidence": None,
                 "pair_evidence": _cluster_pair_evidence(
                     question_ids, features
                 ),
@@ -1504,24 +1469,33 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
             }
         )
 
-    clusters = [*declared_results, *suspected_results]
+    clusters = [
+        *declared_results,
+        *reviewed_signal_results,
+        *unresolved_results,
+    ]
     critical_ids = [
-        cluster["cluster_id"]
-        for cluster in clusters
+        str(cluster["cluster_id"])
+        for cluster in unresolved_results
         if cluster["capacity_stress_test"]["impact"][
             "capacity_critical_if_dependence_confirmed"
         ]
     ]
-    candidate_batch = _candidate_repair_batch_report(
+    reviewed_distinct_critical_ids = [
+        str(cluster["cluster_id"])
+        for cluster in clusters
+        if cluster["semantic_independence_established"]
+        and cluster["capacity_stress_test"]["impact"][
+            "capacity_critical_if_dependence_confirmed"
+        ]
+    ]
+    family_manifest = _family_manifest_audit(
         questions=questions,
         active_questions=active,
-        declared_results=declared_results,
-        graph=graph,
-        misconceptions=misconceptions,
     )
-    causal_reserve = _causal_reserve_counterfactual_report(
+    serviceability = _serviceability_audit(
+        concepts=concepts,
         questions=questions,
-        active_questions=active,
         graph=graph,
         misconceptions=misconceptions,
     )
@@ -1530,19 +1504,27 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
         raise LabInvariantError(
             "The source corpus changed while the laboratory was running."
         )
+
+    status_counts = Counter(question.status.value for question in questions)
     deterministic: dict[str, object] = {
         "lab_version": LAB_VERSION,
+        "report_contract_version": REPORT_CONTRACT_VERSION,
         "corpus": {
             "path": (
                 str(corpus.resolve().relative_to(PROJECT_ROOT))
                 if corpus.resolve().is_relative_to(PROJECT_ROOT)
                 else str(corpus)
             ),
-            "sha256": source_sha256,
+            "sha256": source_digest_before,
             "source_bytes_unchanged": True,
             "schema_version": raw["schema_version"],
             "title": raw["title"],
+            "question_count": len(questions),
+            "status_counts": dict(sorted(status_counts.items())),
             "active_question_count": len(active),
+            "published_active_family_count": len(
+                {_published_family_id(question) for question in active}
+            ),
             "active_family_count": len(
                 {question.family_id for question in active}
             ),
@@ -1559,8 +1541,8 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
             "stopwords": sorted(_STOPWORDS),
             "candidate_requires": (
                 "same non-null fine objective, identical non-empty named "
-                "misconception set, different declared families, and the "
-                "documented lexical threshold"
+                "misconception set, different reviewed evidence families, "
+                "and the documented lexical threshold"
             ),
             "thresholds": {
                 "stem_overlap_coefficient": STEM_OVERLAP_THRESHOLD,
@@ -1574,74 +1556,127 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
             "solution_path_text": (
                 "correct option text plus every authored option rationale"
             ),
+            "answer_redacted_review": {
+                "version": ANSWER_REDACTED_REVIEW_VERSION,
+                "included": "question stem and option text",
+                "excluded": (
+                    "correctness flags, rationales, misconception routes, "
+                    "published and evidence family labels, and provenance"
+                ),
+                "distinct_semantics": (
+                    "each retained evidence family has a separately stated "
+                    "keyed solution operation"
+                ),
+                "equivalent_semantics": (
+                    "the exact question set is consolidated by the explicit "
+                    "family manifest"
+                ),
+                "membership_drift": "fail_closed",
+            },
             "lexical_signal_semantics": (
                 "candidate nomination only; lexical overlap does not prove "
                 "semantic dependence or interchangeability"
             ),
             "counterfactual_semantics": (
-                "capacity consequence if a nominated cluster were one family; "
-                "the collapse is not a corpus mutation"
+                "capacity consequence under hypothetical dependence; reviewed-"
+                "equivalent clusters are already grouped, reviewed-distinct "
+                "clusters retain the stress result, and no collapse mutates "
+                "the corpus"
             ),
-            "candidate_repair_semantics": (
-                "quarantined generated candidates are made eligible only by "
-                "replacing status on frozen in-memory dataclasses; the report "
-                "does not activate content or establish semantic independence"
+            "family_manifest_semantics": (
+                "published labels remain immutable while explicit reviewed "
+                "aliases define the evidence families used here"
             ),
-            "causal_reserve_semantics": (
-                "one frozen historical representative per quarantined semantic "
-                "family is made eligible only in memory across a complete "
-                "bounded power set; later explicitly declared same-family "
-                "dependent variants are validated but excluded from that set "
-                "and receive no capacity credit, same-family revisions still "
-                "count once, provenance gaps remain fail-visible, and no result "
-                "establishes independence"
+            "content_activation_semantics": (
+                "none; the lab analyzes only currently adaptation-eligible "
+                "questions and never substitutes a status"
             ),
         },
         "duplicate_pair_candidates": duplicate_candidates,
         "declared_review_clusters": declared_results,
-        "signal_nominated_clusters": suspected_results,
-        "quarantined_candidate_counterfactual": candidate_batch,
-        "causal_reserve_counterfactual": causal_reserve,
+        "signal_nominated_clusters": [
+            *reviewed_signal_results,
+            *unresolved_results,
+        ],
+        "reviewed_signal_clusters": reviewed_signal_results,
+        "unresolved_signal_clusters": unresolved_results,
+        "family_manifest_audit": family_manifest,
+        "serviceability_audit": serviceability,
         "findings": {
             "eligible_signature_pair_count": len(all_pairs),
             "duplicate_pair_candidate_count": len(duplicate_candidates),
             "declared_review_cluster_count": len(declared_results),
-            "signal_nominated_cluster_count": len(suspected_results),
+            "reviewed_equivalent_declared_cluster_ids": sorted(
+                str(cluster["cluster_id"])
+                for cluster in declared_results
+                if cluster["semantic_dependence_established"]
+            ),
+            "reviewed_distinct_declared_cluster_ids": sorted(
+                str(cluster["cluster_id"])
+                for cluster in declared_results
+                if cluster["semantic_independence_established"]
+            ),
+            "automatic_signal_component_count": len(signal_components),
+            "signal_nominated_cluster_count": (
+                len(reviewed_signal_results) + len(unresolved_results)
+            ),
+            "reviewed_signal_cluster_count": len(reviewed_signal_results),
+            "reviewed_distinct_signal_cluster_ids": sorted(
+                str(cluster["cluster_id"])
+                for cluster in reviewed_signal_results
+                if cluster["semantic_independence_established"]
+            ),
+            "reviewed_equivalent_signal_cluster_ids": sorted(
+                str(cluster["cluster_id"])
+                for cluster in reviewed_signal_results
+                if cluster["semantic_dependence_established"]
+            ),
+            "unresolved_signal_cluster_ids": sorted(
+                str(cluster["cluster_id"])
+                for cluster in unresolved_results
+            ),
+            "unresolved_signal_cluster_count": len(unresolved_results),
             "capacity_critical_candidate_cluster_ids": critical_ids,
             "capacity_critical_candidate_count": len(critical_ids),
-            "semantic_dependence_confirmed_count": 0,
-            "counterfactual_candidate_count": candidate_batch["findings"][
-                "candidate_count"
-            ],
-            "counterfactual_repaired_cluster_count": candidate_batch[
-                "findings"
-            ]["baseline_restored_cluster_count"],
-            "causal_reserve_candidate_family_count": causal_reserve[
-                "candidate_family_count"
-            ],
-            "causal_reserve_historical_cohort_count": causal_reserve[
-                "historical_cohort_count"
-            ],
-            "causal_reserve_dependent_variant_count": causal_reserve[
-                "dependent_variant_count"
-            ],
-            "causal_reserve_current_family_member_count": causal_reserve[
-                "current_family_member_count"
-            ],
-            "causal_reserve_subset_count": causal_reserve[
-                "subset_count"
-            ],
-            "causal_reserve_provenance_gap_count": len(
-                causal_reserve["provenance_gap_question_ids"]
+            "capacity_critical_reviewed_distinct_cluster_ids": sorted(
+                reviewed_distinct_critical_ids
             ),
+            "semantic_dependence_confirmed_count": sum(
+                bool(cluster["semantic_dependence_established"])
+                for cluster in clusters
+            ),
+            "semantic_independence_confirmed_count": sum(
+                bool(cluster["semantic_independence_established"])
+                for cluster in clusters
+            ),
+            "explicit_alias_member_count": family_manifest[
+                "explicit_alias_member_count"
+            ],
+            "reviewed_large_cohort_count": family_manifest[
+                "reviewed_large_cohort_count"
+            ],
+            "serviceability_error_count": serviceability["error_count"],
+            "serviceability_warning_count": serviceability["warning_count"],
+            "serviceability_warning_identifiers": serviceability[
+                "warning_identifiers"
+            ],
+            "strict_corpus_audit_passed": serviceability["strict_pass"],
             "required_declared_clusters_present": all(
                 declaration["id"]
                 in {
-                    cluster["cluster_id"]
-                    for cluster in declared_results
+                    cluster["cluster_id"] for cluster in declared_results
                 }
                 for declaration in DECLARED_REVIEW_CLUSTERS
             ),
+            "required_signal_reviews_present": all(
+                declaration["id"]
+                in {
+                    cluster["cluster_id"]
+                    for cluster in reviewed_signal_results
+                }
+                for declaration in REVIEWED_SIGNAL_CLUSTERS
+            ),
+            "in_memory_status_substitution_count": 0,
         },
         "limitations": [
             (
@@ -1659,33 +1694,24 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
                 "response dependence or teaching efficacy."
             ),
             (
-                "Independent semantic review and later learner-response data "
-                "remain necessary before changing family declarations."
+                "New or membership-changed lexical nominations require another "
+                "answer-redacted semantic review before their family "
+                "declarations can change."
             ),
             (
-                "The candidate-repair calculation assumes that each candidate "
-                "family survives independent human semantic review. Capacity "
-                "restoration under declared IDs is not evidence that it will."
+                "The operation review adjudicates authored solution paths; "
+                "later learner-response data remains necessary to estimate "
+                "empirical response dependence."
             ),
             (
-                "All candidate status substitutions are process-local and "
-                "counterfactual. Generated content remains quarantined, "
-                "unreviewed, and manual-activation-only in the source corpus."
+                "Exact manifest agreement proves that the reviewed grouping is "
+                "applied consistently; it does not independently repeat the "
+                "original semantic review."
             ),
             (
-                "The causal reserve power-set analysis is also in-memory only. "
-                "A capacity increase cannot establish that a candidate is "
-                "correct, independently diagnostic, or suitable for release."
-            ),
-            (
-                "The six declared later causal-reserve practice variants share "
-                "two historical families. They are provenance-validated but "
-                "excluded from the historical representative power set and "
-                "receive no additional family or capacity credit."
-            ),
-            (
-                "Legacy provenance gaps are reported explicitly and never "
-                "converted into human review or activation evidence."
+                "A strict deterministic corpus audit checks structural clues "
+                "and serviceable routing paths, not human calibration or learning "
+                "efficacy."
             ),
         ],
     }
@@ -1704,9 +1730,14 @@ def parser() -> argparse.ArgumentParser:
         "--fail-on-critical",
         action="store_true",
         help=(
-            "Exit 3 when a candidate cluster would reduce exact capacity if "
-            "semantic dependence were confirmed."
+            "Exit 3 when an unresolved candidate cluster would reduce exact "
+            "capacity if semantic dependence were confirmed."
         ),
+    )
+    result.add_argument(
+        "--fail-on-serviceability",
+        action="store_true",
+        help="Exit 4 when the deterministic corpus audit has any issue.",
     )
     return result
 
@@ -1738,6 +1769,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         and report["findings"]["capacity_critical_candidate_count"]
     ):
         return 3
+    if (
+        arguments.fail_on_serviceability
+        and not report["findings"]["strict_corpus_audit_passed"]
+    ):
+        return 4
     return 0
 
 
