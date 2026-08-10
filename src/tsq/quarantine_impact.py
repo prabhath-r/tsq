@@ -39,7 +39,7 @@ from .models import (
 from .provenance import legacy_question_identity_payload
 
 
-REPORT_SCHEMA = "quarantine-capacity-impact-v1"
+REPORT_SCHEMA = "quarantine-capacity-impact-v2"
 MAX_COMBINATION_SIZE = 3
 MAX_CANDIDATE_LIMIT = 32
 MAX_RESULT_LIMIT = 100
@@ -301,7 +301,6 @@ def _candidate_payload(question: Question) -> dict[str, object]:
         "counterfactual_status": QuestionStatus.APPROVED.value,
         "provenance_claims": {
             "generated": provenance.get("generated"),
-            "provider": provenance.get("provider"),
             "batch_id": provenance.get("batch_id"),
             "review_status": provenance.get("review_status"),
             "human_review": provenance.get("human_review"),
@@ -340,6 +339,8 @@ def analyze_quarantine_capacity_impact(
     result_limit: int = 20,
     evaluation_limit: int = 500,
     state_limit: int = DEFAULT_STATE_LIMIT,
+    candidate_question_ids: Iterable[str] | None = None,
+    candidate_batch_ids: Iterable[str] | None = None,
 ) -> dict[str, object]:
     """Rank exact structural capacity impact without activating content.
 
@@ -394,6 +395,61 @@ def analyze_quarantine_capacity_impact(
     if not isinstance(target, CapacityTarget):
         raise ValueError("target must be a CapacityTarget.")
 
+    def normalize_filter(
+        values: Iterable[str] | None,
+        *,
+        label: str,
+    ) -> tuple[str, ...]:
+        if values is None:
+            return ()
+        if isinstance(values, (str, bytes)):
+            raise ValueError(
+                f"{label} must be an iterable of non-empty strings, not a "
+                "scalar string."
+            )
+        try:
+            normalized = tuple(values)
+        except TypeError as exc:
+            raise ValueError(
+                f"{label} must be an iterable of non-empty strings."
+            ) from exc
+        if not normalized:
+            raise ValueError(f"{label} must not be empty when provided.")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in normalized
+        ):
+            raise ValueError(f"{label} must contain non-empty strings.")
+        seen: set[str] = set()
+        duplicate_values: set[str] = set()
+        for value in normalized:
+            if value in seen:
+                duplicate_values.add(value)
+            else:
+                seen.add(value)
+        duplicates = sorted(duplicate_values)
+        if duplicates:
+            raise ValueError(
+                f"{label} contains duplicate values: "
+                + ", ".join(duplicates)
+                + "."
+            )
+        return tuple(sorted(normalized))
+
+    selected_question_ids = normalize_filter(
+        candidate_question_ids,
+        label="candidate_question_ids",
+    )
+    selected_batch_ids = normalize_filter(
+        candidate_batch_ids,
+        label="candidate_batch_ids",
+    )
+    if selected_question_ids and selected_batch_ids:
+        raise ValueError(
+            "candidate_question_ids and candidate_batch_ids are mutually "
+            "exclusive."
+        )
+
     question_rows = tuple(questions)
     misconception_rows = tuple(misconceptions)
     question_ids = [question.id for question in question_rows]
@@ -425,7 +481,7 @@ def analyze_quarantine_capacity_impact(
             )
     analysis_input_manifest_digest = canonical_digest(
         {
-            "schema": "quarantine-capacity-impact-input-v1",
+            "schema": "quarantine-capacity-impact-input-v2",
             "capacity_algorithm_version": CAPACITY_ALGORITHM_VERSION,
             "target": target.to_dict(),
             "state_limit": state_limit,
@@ -433,6 +489,10 @@ def analyze_quarantine_capacity_impact(
             "candidate_limit": candidate_limit,
             "result_limit": result_limit,
             "evaluation_limit": evaluation_limit,
+            "candidate_filter": {
+                "question_ids": list(selected_question_ids),
+                "batch_ids": list(selected_batch_ids),
+            },
             "questions": [
                 _question_input_payload(question)
                 for question in sorted(
@@ -464,7 +524,7 @@ def analyze_quarantine_capacity_impact(
     # mixing them into this report would turn a focused topic review into a
     # potentially large cross-curriculum search.
     owned = set(target.owned_concept_ids)
-    candidates = tuple(
+    eligible_candidates = tuple(
         sorted(
             (
                 question
@@ -475,11 +535,59 @@ def analyze_quarantine_capacity_impact(
             key=lambda question: question.id,
         )
     )
+    eligible_by_id = {
+        question.id: question for question in eligible_candidates
+    }
+    if selected_question_ids:
+        missing_question_ids = sorted(
+            set(selected_question_ids) - set(eligible_by_id)
+        )
+        if missing_question_ids:
+            raise ValueError(
+                "Candidate question filter contains IDs that are not "
+                "quarantined target-owned candidates: "
+                + ", ".join(missing_question_ids)
+                + "."
+            )
+        candidates = tuple(
+            eligible_by_id[question_id]
+            for question_id in selected_question_ids
+        )
+        candidate_filter_mode = "question_ids"
+        candidate_filter_values = selected_question_ids
+    elif selected_batch_ids:
+        candidates = tuple(
+            question
+            for question in eligible_candidates
+            if question.provenance.get("batch_id")
+            in selected_batch_ids
+        )
+        matched_batch_ids = {
+            str(question.provenance.get("batch_id"))
+            for question in candidates
+        }
+        missing_batch_ids = sorted(
+            set(selected_batch_ids) - matched_batch_ids
+        )
+        if missing_batch_ids:
+            raise ValueError(
+                "Candidate batch filter contains IDs with no quarantined "
+                "target-owned candidates: "
+                + ", ".join(missing_batch_ids)
+                + "."
+            )
+        candidate_filter_mode = "batch_ids"
+        candidate_filter_values = selected_batch_ids
+    else:
+        candidates = eligible_candidates
+        candidate_filter_mode = "all_target_owned"
+        candidate_filter_values = ()
     if len(candidates) > candidate_limit:
         raise ValueError(
             "Exact quarantine impact refuses to truncate "
             f"{len(candidates)} candidates at limit {candidate_limit}; "
-            "increase --candidate-limit or narrow the target."
+            "increase --candidate-limit or declare an exact batch/question "
+            "filter."
         )
     source_statuses = {
         question.id: question.status for question in candidates
@@ -621,7 +729,7 @@ def analyze_quarantine_capacity_impact(
         search_outcome = "no_closing_admissible_combination"
     report: dict[str, object] = {
         "schema": REPORT_SCHEMA,
-        "algorithm": "exact-status-substitution-over-sustained-serviceability-v1",
+        "algorithm": "exact-status-substitution-over-sustained-serviceability-v2",
         "capacity_algorithm_version": CAPACITY_ALGORITHM_VERSION,
         "analysis_input_manifest_digest": (
             analysis_input_manifest_digest
@@ -634,7 +742,18 @@ def analyze_quarantine_capacity_impact(
         ),
         "target": target.to_dict(),
         "baseline": _capacity_snapshot(baseline),
-        "candidate_scope": "target-owned-primary-concepts-only",
+        "candidate_scope": (
+            "target-owned-primary-concepts-only"
+            if candidate_filter_mode == "all_target_owned"
+            else "explicit-filter-within-target-owned-primary-concepts"
+        ),
+        "eligible_candidate_count_before_filter": len(
+            eligible_candidates
+        ),
+        "candidate_filter": {
+            "mode": candidate_filter_mode,
+            "values": list(candidate_filter_values),
+        },
         "candidate_combination_constraint": (
             "at-most-one-question-per-family"
         ),
@@ -712,9 +831,9 @@ def analyze_quarantine_capacity_impact(
             "psychometric_validity_established": False,
             "capacity_results_exact_under_declared_structural_assumptions": True,
             "minimality_claim_limited_to": (
-                "admissible target-owned quarantined question subsets with "
-                "at most one question per family through the declared size "
-                "bound"
+                "admissible selected target-owned quarantined question "
+                "subsets with at most one question per family through the "
+                "declared size bound"
             ),
             "prerequisite_scope_candidates_ranked": False,
             "release_wide_objective_reserve_candidates_ranked": False,

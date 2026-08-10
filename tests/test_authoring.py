@@ -28,6 +28,7 @@ from tsq.authoring import (
 from tsq.cli import command_topics, main
 from tsq.corpus import load_bundle, parse_bundle, read_and_parse
 from tsq.errors import ConflictError, NotFoundError, ValidationError
+from tsq.provenance import public_question_identity_paths
 from tsq.store import Database
 
 from tests.schema_upgrade_helpers import restore_pre_shadow_schema
@@ -198,6 +199,19 @@ class AuthorityClaimingGenerator(FakeGenerator):
             else {"reviewer_kind": "model"}
         )
         item["provenance"] = {
+            "provider": "untrusted-generator-provider",
+            "model": "untrusted-generator-model",
+            "metadata": {
+                "provider": "nested-untrusted-provider",
+                "reviews": [{"modelName": "nested-untrusted-model"}],
+                "human_review": True,
+                "activation_review": activation_review,
+                "humanReview": True,
+                "activationReview": activation_review,
+                "reviewStatus": "approved",
+                "independentReview": "complete",
+            },
+            "generator_identity": "aliased-untrusted-generator",
             "human_review": True,
             "activation_review": activation_review,
             "activation": "activate_now",
@@ -798,14 +812,22 @@ class AuthoringTestCase(unittest.TestCase):
         for question_id, family_id, neighbor_id, release_status in cases:
             with self.subTest(question_id=question_id):
                 detail = queue.show(question_id)
-                [same_family] = [
+                same_family_rows = [
                     comparison
                     for comparison in detail["local_family_comparison"]
                     if comparison["same_family"]
                 ]
-                self.assertIs(
-                    detail["local_family_comparison"][0],
-                    same_family,
+                self.assertTrue(same_family_rows)
+                self.assertEqual(
+                    detail["local_family_comparison"][
+                        : len(same_family_rows)
+                    ],
+                    same_family_rows,
+                )
+                same_family = next(
+                    comparison
+                    for comparison in same_family_rows
+                    if comparison["question"]["id"] == neighbor_id
                 )
                 self.assertEqual(
                     same_family["question"]["id"],
@@ -821,11 +843,11 @@ class AuthoringTestCase(unittest.TestCase):
                 )
                 self.assertEqual(
                     detail["same_family_comparison_total"],
-                    1,
+                    len(same_family_rows),
                 )
                 self.assertEqual(
                     detail["same_family_comparison_included"],
-                    1,
+                    len(same_family_rows),
                 )
                 self.assertTrue(
                     detail["same_family_scope_complete"],
@@ -896,14 +918,24 @@ class AuthoringTestCase(unittest.TestCase):
         for question_id, expected_neighbor_ids in cases.items():
             with self.subTest(question_id=question_id):
                 detail = queue.show(question_id)
-                self.assertLessEqual(
-                    detail["local_comparison_total_lower_bound"],
-                    detail["local_comparison_scope"]["maximum_rows"],
-                )
-                self.assertTrue(
-                    detail["local_comparison_scope_complete"]
-                )
                 comparisons = detail["local_family_comparison"]
+                maximum_rows = detail["local_comparison_scope"][
+                    "maximum_rows"
+                ]
+                self.assertLessEqual(
+                    len(comparisons),
+                    maximum_rows,
+                )
+                if detail["local_comparison_scope_complete"]:
+                    self.assertLessEqual(
+                        detail["local_comparison_total_lower_bound"],
+                        maximum_rows,
+                    )
+                else:
+                    self.assertEqual(
+                        detail["local_comparison_total_lower_bound"],
+                        maximum_rows + 1,
+                    )
                 self.assertEqual(
                     [
                         priority[row["comparison_scope_priority"]]
@@ -951,10 +983,17 @@ class AuthoringTestCase(unittest.TestCase):
                 self.assertTrue(
                     expected_neighbor_ids <= packet_neighbor_ids
                 )
-                self.assertTrue(
+                self.assertEqual(
                     first_packet["material"][
                         "comparison_scope_complete"
-                    ]
+                    ],
+                    detail["local_comparison_scope_complete"],
+                )
+                self.assertEqual(
+                    first_packet["material"][
+                        "comparison_total_lower_bound"
+                    ],
+                    detail["local_comparison_total_lower_bound"],
                 )
                 self.assertTrue(
                     family_forbidden_fields.isdisjoint(
@@ -1059,6 +1098,8 @@ class AuthoringTestCase(unittest.TestCase):
         self,
     ) -> None:
         queue = QuarantineReviewQueue(self.database)
+        for row in queue.list(limit=500):
+            self.assertNotIn("provider", row["provenance_claims"])
         foundation_ids = {
             row["question_id"]
             for row in queue.list(topic="t_ml_foundations", limit=500)
@@ -1096,7 +1137,7 @@ class AuthoringTestCase(unittest.TestCase):
         queue = QuarantineReviewQueue(self.database)
         listed = next(
             row
-            for row in queue.list(topic="LLM Agents")
+            for row in queue.list(topic="LLM Agents", limit=500)
             if row["question_id"] == question_id
         )
         self.assertTrue(listed["revoked"])
@@ -1840,6 +1881,16 @@ class AuthoringTestCase(unittest.TestCase):
             persisted["generator_provenance_sha256"],
             canonical_sha256(persisted["generator_provenance"]),
         )
+        self.assertEqual(
+            persisted["generator_provenance"]["provider_name"],
+            FakeGenerator.provider_name,
+        )
+        self.assertEqual(
+            persisted["generator_provenance"]["model_name"],
+            FakeGenerator.model_name,
+        )
+        self.assertNotIn("provider", persisted_item["provenance"])
+        self.assertNotIn("model", persisted_item["provenance"])
         self.assertNotIn(context, row["raw_output_json"])
         self.assertNotIn(context, row["validation_json"])
 
@@ -1871,15 +1922,32 @@ class AuthoringTestCase(unittest.TestCase):
                     "required_before_activation",
                 )
                 self.assertEqual(
-                    set(
-                        provenance[
-                            "stripped_generator_authority_fields"
-                        ]
-                    ),
+                    provenance["stripped_generator_authority_field_count"],
+                    15,
+                )
+                self.assertNotIn(
+                    "stripped_generator_authority_fields", provenance
+                )
+                self.assertEqual(
+                    public_question_identity_paths(provenance), ()
+                )
+                self.assertEqual(
+                    set(result["stripped_generator_authority_fields"]),
                     {
                         "activation",
                         "activation_review",
+                        "generator_identity",
                         "human_review",
+                        "metadata.activationReview",
+                        "metadata.provider",
+                        "metadata.reviews.[0].modelName",
+                        "metadata.activation_review",
+                        "metadata.humanReview",
+                        "metadata.human_review",
+                        "metadata.independentReview",
+                        "metadata.reviewStatus",
+                        "model",
+                        "provider",
                         "review_status",
                     },
                 )

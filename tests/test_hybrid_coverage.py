@@ -162,6 +162,7 @@ class HybridCoverageTests(unittest.TestCase):
             if not (
                 candidate.objective_id == question.objective_id
                 and candidate.family_id == question.family_id
+                and candidate.status.eligible_for_adaptation
             )
         )
         new_release_id = self.database.import_corpus(

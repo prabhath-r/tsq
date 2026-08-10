@@ -220,7 +220,7 @@ class FamilyIndependenceLabTests(unittest.TestCase):
         after = corpus_source_digest(DEFAULT_CORPUS)
         batch = report["quarantined_candidate_counterfactual"]
 
-        self.assertEqual(LAB_VERSION, "family-independence-falsification-v3")
+        self.assertEqual(LAB_VERSION, "family-independence-falsification-v4")
         self.assertEqual(report["lab_version"], LAB_VERSION)
         self.assertEqual(before, after)
         self.assertEqual(batch["batch_id"], CANDIDATE_REPAIR_BATCH_ID)
@@ -332,6 +332,40 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             "q_causal_mask_softmax_normalization_001",
             "q_causal_full_incremental_equivalence_001",
         }
+        historical_cohort_ids = {
+            *candidate_ids,
+            "q_causal_cross_attention_mask_scope_001",
+        }
+        dependent_variants = {
+            "q_causal_mask_first_row_001": (
+                "f_causal_mask_softmax_normalization",
+                "batch_transformer_composition_causality_20260809_d",
+            ),
+            "q_causal_mask_probability_row_001": (
+                "f_causal_mask_softmax_normalization",
+                "batch_transformer_composition_causality_20260809_d",
+            ),
+            "q_causal_mask_post_softmax_bug_001": (
+                "f_causal_mask_softmax_normalization",
+                "batch_transformer_composition_causality_20260809_d",
+            ),
+            "q_causal_full_incremental_warmup_001": (
+                "f_causal_full_incremental_equivalence",
+                "batch_transformer_causality_scaling_20260809_e",
+            ),
+            "q_causal_full_incremental_intermediate_row_001": (
+                "f_causal_full_incremental_equivalence",
+                "batch_transformer_causality_scaling_20260809_e",
+            ),
+            "q_causal_full_incremental_mismatch_001": (
+                "f_causal_full_incremental_equivalence",
+                "batch_transformer_causality_scaling_20260809_e",
+            ),
+        }
+        current_family_member_ids = {
+            *historical_cohort_ids,
+            *dependent_variants,
+        }
         self.assertEqual(before, after)
         self.assertTrue(report["corpus"]["source_bytes_unchanged"])
         self.assertFalse(reserve["source_corpus_mutated"])
@@ -344,14 +378,45 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             set(reserve["candidate_question_ids"]), candidate_ids
         )
         self.assertEqual(reserve["candidate_family_count"], 4)
-        self.assertEqual(reserve["source_family_member_count"], 5)
+        self.assertEqual(reserve["historical_cohort_count"], 5)
+        self.assertEqual(
+            set(reserve["historical_cohort_question_ids"]),
+            historical_cohort_ids,
+        )
+        self.assertEqual(reserve["dependent_variant_count"], 6)
+        self.assertEqual(
+            set(reserve["dependent_variant_question_ids"]),
+            set(dependent_variants),
+        )
+        self.assertEqual(reserve["current_family_member_count"], 11)
+        self.assertEqual(
+            set(reserve["current_family_member_question_ids"]),
+            current_family_member_ids,
+        )
+        self.assertEqual(reserve["source_family_member_count"], 11)
         self.assertEqual(
             set(reserve["source_family_member_question_ids"]),
-            {
-                *candidate_ids,
-                "q_causal_cross_attention_mask_scope_001",
-            },
+            current_family_member_ids,
         )
+        self.assertTrue(
+            reserve["dependent_variants_excluded_from_counterfactual"]
+        )
+        self.assertFalse(
+            reserve["dependent_variants_capacity_credit_granted"]
+        )
+        self.assertTrue(candidate_ids.isdisjoint(dependent_variants))
+        declared_historical_ids = {
+            question_id
+            for row in reserve["candidate_declarations"]
+            for question_id in row["historical_family_question_ids"]
+        }
+        declared_dependent_ids = {
+            question_id
+            for row in reserve["candidate_declarations"]
+            for question_id in row["dependent_variant_question_ids"]
+        }
+        self.assertEqual(declared_historical_ids, historical_cohort_ids)
+        self.assertEqual(declared_dependent_ids, set(dependent_variants))
         cross = next(
             row
             for row in reserve["candidate_declarations"]
@@ -366,6 +431,41 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             ],
         )
         self.assertEqual(cross["same_family_member_count"], 2)
+
+        dependent_rows = {
+            row["question_id"]: row
+            for row in reserve["dependent_variant_declarations"]
+        }
+        self.assertEqual(set(dependent_rows), set(dependent_variants))
+        for question_id, (family_id, batch_id) in dependent_variants.items():
+            row = dependent_rows[question_id]
+            self.assertEqual(row["family_id"], family_id)
+            self.assertEqual(row["batch_id"], batch_id)
+            self.assertEqual(row["objective_id"], "lo_causal_visibility")
+            self.assertEqual(row["source_status"], "quarantined")
+            self.assertFalse(row["source_eligible_for_adaptation"])
+            self.assertTrue(row["generated"])
+            self.assertFalse(row["human_review"])
+            self.assertEqual(
+                row["human_review_status"],
+                "required_before_activation",
+            )
+            self.assertEqual(
+                row["activation"],
+                "manual_only_after_human_review_and_new_immutable_release",
+            )
+            self.assertEqual(
+                row["review_status"],
+                "candidate_pending_independent_review",
+            )
+            self.assertEqual(
+                row["psychometrics"],
+                "uncalibrated_author_prior",
+            )
+            self.assertFalse(row["counterfactual_representative"])
+            self.assertFalse(row["included_in_subset_analysis"])
+            self.assertFalse(row["capacity_credit_granted"])
+            self.assertTrue(row["quarantine_invariants_validated"])
 
         source = {
             row["question_id"]: row
@@ -382,6 +482,19 @@ class FamilyIndependenceLabTests(unittest.TestCase):
             self.assertTrue(
                 row["activation_ceiling_preserved_by_source_status"]
             )
+        for question_id in historical_cohort_ids:
+            self.assertEqual(
+                source[question_id]["cohort_role"],
+                "historical_cohort_member",
+            )
+        for question_id, (_, batch_id) in dependent_variants.items():
+            row = source[question_id]
+            self.assertEqual(row["cohort_role"], "declared_dependent_variant")
+            self.assertEqual(row["expected_batch_id"], batch_id)
+            self.assertEqual(row["source_batch_id"], batch_id)
+            self.assertFalse(row["counterfactual_representative"])
+            self.assertFalse(row["included_in_subset_analysis"])
+            self.assertFalse(row["capacity_credit_granted"])
         self.assertEqual(
             source["q_causal_mask_matrix_001"]["provenance_gaps"],
             [
@@ -416,6 +529,14 @@ class FamilyIndependenceLabTests(unittest.TestCase):
         self.assertEqual(len(subsets), 16)
         self.assertIn(frozenset(), subsets)
         self.assertIn(frozenset(candidate_ids), subsets)
+        self.assertTrue(
+            all(
+                set(row["candidate_question_ids"]).isdisjoint(
+                    dependent_variants
+                )
+                for row in reserve["subset_analysis"]
+            )
+        )
 
         scenarios = {
             "declared_families": (4, 2),

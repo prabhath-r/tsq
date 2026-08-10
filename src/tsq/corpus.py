@@ -738,7 +738,8 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
                 provenance,
                 status=row.get("status"),
                 legacy_unattested_compatible=(
-                    row.get("id") in legacy_unattested_compatible_ids
+                    type(row.get("id")) is str
+                    and row.get("id") in legacy_unattested_compatible_ids
                     and "generated" not in provenance
                 ),
             ):
@@ -768,6 +769,7 @@ def validate_bundle(bundle: object) -> list[QualityIssue]:
             required=False,
             nullable=True,
         )
+
     return issues
 
 

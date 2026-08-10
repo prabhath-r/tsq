@@ -505,11 +505,13 @@ def command_capacity(args: argparse.Namespace) -> int:
                 args.candidate_limit,
                 args.evaluation_limit,
                 args.result_limit,
+                args.candidate_question_id,
+                args.candidate_batch_id,
             )
         ):
             raise ValueError(
-                "Combination, candidate, evaluation, and result limits require "
-                "--quarantine-impact."
+                "Combination, candidate, evaluation, result, and candidate "
+                "filters require --quarantine-impact."
             )
         if args.concept:
             targets = (
@@ -566,6 +568,8 @@ def command_capacity(args: argparse.Namespace) -> int:
                     else args.evaluation_limit
                 ),
                 state_limit=args.state_limit,
+                candidate_question_ids=args.candidate_question_id,
+                candidate_batch_ids=args.candidate_batch_id,
             )
             payload = {
                 "path": corpus_label,
@@ -605,6 +609,14 @@ def command_capacity(args: argparse.Namespace) -> int:
                 "preflight maximum="
                 f"{impact['preflight_admissible_combination_count']}"
             )
+            if impact["candidate_filter"]["mode"] != "all_target_owned":
+                print(
+                    "  exact candidate filter="
+                    f"{impact['candidate_filter']['mode']}: "
+                    + ", ".join(impact["candidate_filter"]["values"])
+                    + "  eligible before filter="
+                    f"{impact['eligible_candidate_count_before_filter']}"
+                )
             minimum = impact["minimal_closing_combination_size"]
             if minimum is None:
                 print(
@@ -3584,6 +3596,25 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Fail before subset analysis above this exact evaluation budget "
             f"(1-{MAX_EVALUATION_LIMIT}; requires --quarantine-impact)"
+        ),
+    )
+    quarantine_candidate_scope = capacity.add_mutually_exclusive_group()
+    quarantine_candidate_scope.add_argument(
+        "--candidate-question-id",
+        action="append",
+        default=None,
+        help=(
+            "Restrict exact quarantine impact to this target-owned "
+            "quarantined question ID; repeat for an explicit review set"
+        ),
+    )
+    quarantine_candidate_scope.add_argument(
+        "--candidate-batch-id",
+        action="append",
+        default=None,
+        help=(
+            "Restrict exact quarantine impact to target-owned quarantined "
+            "questions from this provenance batch; repeat for more batches"
         ),
     )
     capacity.add_argument("--json", action="store_true")

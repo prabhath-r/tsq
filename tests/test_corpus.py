@@ -27,6 +27,7 @@ from tsq.models import (
     ConceptRole,
     ConceptWeight,
     Option,
+    Question,
     QuestionStatus,
     RelationType,
 )
@@ -111,7 +112,9 @@ class CorpusTestCase(unittest.TestCase):
         self.assertIn("multiple_topic_owners", codes)
         self.assertIn("asymmetric_related_topic", codes)
 
-    def test_new_llm_objectives_have_independent_misconception_families(self) -> None:
+    def test_llm_objective_families_do_not_inflate_active_evidence(
+        self,
+    ) -> None:
         new_objectives = {
             "c_autoregressive_language_modeling",
             "c_attention_scaling",
@@ -134,16 +137,52 @@ class CorpusTestCase(unittest.TestCase):
                 if question.revision_of is None
             ]
             self.assertGreaterEqual(len(root_items), 3, concept_id)
+            eligible_items = [
+                question
+                for question in items
+                if question.status.eligible_for_adaptation
+            ]
             self.assertEqual(
-                len({item.family_id for item in root_items}),
-                len(root_items),
+                len({item.family_id for item in eligible_items}),
+                len(eligible_items),
                 concept_id,
             )
-            self.assertEqual(
-                len({item.family_id for item in items}),
-                len(root_items),
-                concept_id,
-            )
+            roots_by_family: dict[str, list[Question]] = {}
+            for item in root_items:
+                roots_by_family.setdefault(item.family_id, []).append(item)
+            for family_id, family_items in roots_by_family.items():
+                if len(family_items) == 1:
+                    continue
+                historical = [
+                    item
+                    for item in family_items
+                    if "20260809"
+                    not in str(item.provenance.get("batch_id", ""))
+                ]
+                self.assertLessEqual(
+                    len(historical),
+                    1,
+                    f"{concept_id}:{family_id}",
+                )
+                current_dependents = [
+                    item
+                    for item in family_items
+                    if item not in historical
+                ]
+                self.assertTrue(current_dependents)
+                self.assertTrue(
+                    all(
+                        item.status.value == "quarantined"
+                        and not item.status.eligible_for_adaptation
+                        and item.provenance.get("generated") is True
+                        and item.provenance.get("human_review") is False
+                        and bool(
+                            item.provenance.get("independence_note")
+                        )
+                        for item in current_dependents
+                    ),
+                    f"{concept_id}:{family_id}",
+                )
             for item in items:
                 if item.revision_of is None:
                     continue
@@ -353,7 +392,7 @@ class CorpusTestCase(unittest.TestCase):
             corpus_source_digest(CORPUS / "manifest.json"),
         )
         self.assertEqual(len(directory_bundle["topics"]), 16)
-        self.assertEqual(len(directory_bundle["questions"]), 288)
+        self.assertEqual(len(directory_bundle["questions"]), 480)
 
         with tempfile.TemporaryDirectory() as directory:
             legacy = Path(directory) / "legacy.json"
@@ -377,7 +416,7 @@ class CorpusTestCase(unittest.TestCase):
                 *read_and_parse(CORPUS, include_catalog=True)
             )
 
-        self.assertEqual(imported["release_id"], "rel_e8047a6bdb517fd42e1cb2d6")
+        self.assertEqual(imported["release_id"], "rel_7fa8d12e03dff0e08bcc739e")
 
     def test_sharded_loader_rejects_path_and_inventory_ambiguity(self) -> None:
         cases = (

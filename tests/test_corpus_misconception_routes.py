@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 import unittest
 from pathlib import Path
 
@@ -48,8 +49,29 @@ TRANSFORMER_INTRO_BATCH_ID = "batch_transformer_intro_bridges_20260724_a"
 TRANSFORMER_CAPACITY_BATCH_ID = (
     "batch_transformer_capacity_repairs_20260725_a"
 )
+CURRENT_CANDIDATE_BATCH_COUNTS = {
+    "batch_agent_authorization_boundaries_20260809_a": 12,
+    "batch_agent_authorization_controls_20260809_b": 12,
+    "batch_agent_reconciliation_diagnostics_20260809_b": 12,
+    "batch_agent_reconciliation_state_20260809_a": 12,
+    "batch_language_modeling_diagnostics_20260809_b": 12,
+    "batch_language_modeling_foundations_20260809_a": 12,
+    "batch_rag_entailment_coverage_20260809_d": 12,
+    "batch_rag_evidence_reconciliation_20260809_b": 12,
+    "batch_rag_grounding_claim_checks_20260809_a": 12,
+    "batch_rag_retrieval_pipeline_20260809_c": 12,
+    "batch_transformer_causality_scaling_20260809_e": 12,
+    "batch_transformer_composition_causality_20260809_d": 12,
+    "batch_transformer_order_resources_20260809_b": 12,
+    "batch_transformer_resources_paths_20260809_c": 12,
+    "batch_transformer_routing_order_20260809_a": 12,
+    "batch_transformer_scaling_cache_20260809_f": 12,
+}
 LEGACY_GENERATED_MIGRATION_COUNT = 39
-TOTAL_UNREVIEWED_GENERATED_COUNT = 66
+TOTAL_UNREVIEWED_GENERATED_COUNT = 258
+PUBLIC_IDENTITY_PROVENANCE_FIELDS = frozenset(
+    {"provider", "model", "generator", "provider_name", "model_name"}
+)
 
 
 class CorpusMisconceptionRouteTests(unittest.TestCase):
@@ -338,8 +360,9 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                         question_id
                     ].status.eligible_for_adaptation
                     and questions[question_id].provenance.get("generated") is True
-                    and questions[question_id].provenance.get("provider")
-                    is None
+                    and PUBLIC_IDENTITY_PROVENANCE_FIELDS.isdisjoint(
+                        questions[question_id].provenance
+                    )
                     and questions[question_id].provenance.get("human_review")
                     is False
                     and questions[question_id].provenance.get("activation")
@@ -360,6 +383,20 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                     question.status.value == "quarantined"
                     and not question.status.eligible_for_adaptation
                     for question in generated
+                )
+            )
+
+    def test_public_question_provenance_omits_model_identity(self) -> None:
+        for questions in (
+            self.canonical_questions,
+            self.packaged_questions,
+        ):
+            self.assertTrue(
+                all(
+                    PUBLIC_IDENTITY_PROVENANCE_FIELDS.isdisjoint(
+                        question.provenance
+                    )
+                    for question in questions.values()
                 )
             )
 
@@ -762,6 +799,8 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                 question
                 for question in unreviewed_generated
                 if question.provenance.get("batch_id") != GENERATED_BATCH_ID
+                and question.provenance.get("batch_id")
+                not in CURRENT_CANDIDATE_BATCH_COUNTS
                 and question.id not in NEW_TRANSFORMER_QUESTIONS
                 and question.id not in NEW_AGENT_INTRO_QUESTIONS
                 and question.id not in NEW_RAG_INTRO_QUESTIONS
@@ -784,6 +823,114 @@ class CorpusMisconceptionRouteTests(unittest.TestCase):
                     for question in unreviewed_generated
                 )
             )
+
+    def test_new_curriculum_batches_stay_quarantined_and_balanced(
+        self,
+    ) -> None:
+        expected_batches = set(CURRENT_CANDIDATE_BATCH_COUNTS)
+        for questions in (
+            self.canonical_questions,
+            self.packaged_questions,
+        ):
+            batches = {
+                batch_id: [
+                    question
+                    for question in questions.values()
+                    if question.provenance.get("batch_id") == batch_id
+                ]
+                for batch_id in expected_batches
+            }
+            observed_current_batches = {
+                str(question.provenance.get("batch_id"))
+                for question in questions.values()
+                if "20260809"
+                in str(question.provenance.get("batch_id", ""))
+            }
+            self.assertEqual(observed_current_batches, expected_batches)
+
+            for batch_id, batch in batches.items():
+                with self.subTest(batch_id=batch_id):
+                    self.assertEqual(
+                        len(batch),
+                        CURRENT_CANDIDATE_BATCH_COUNTS[batch_id],
+                    )
+                    correct_positions = Counter(
+                        next(
+                            index
+                            for index, option in enumerate(question.options)
+                            if option.correct
+                        )
+                        for question in batch
+                    )
+                    self.assertEqual(
+                        correct_positions,
+                        Counter({0: 3, 1: 3, 2: 3, 3: 3}),
+                    )
+                    self.assertLessEqual(
+                        min(question.difficulty for question in batch),
+                        -0.3,
+                    )
+                    self.assertGreaterEqual(
+                        max(question.difficulty for question in batch),
+                        0.75,
+                    )
+                    for question in batch:
+                        self.assertEqual(
+                            question.status.value,
+                            "quarantined",
+                        )
+                        self.assertFalse(
+                            question.status.eligible_for_adaptation
+                        )
+                        self.assertIs(
+                            question.provenance.get("generated"),
+                            True,
+                        )
+                        self.assertTrue(
+                            PUBLIC_IDENTITY_PROVENANCE_FIELDS.isdisjoint(
+                                question.provenance
+                            ),
+                        )
+                        self.assertIs(
+                            question.provenance.get("human_review"),
+                            False,
+                        )
+                        self.assertEqual(
+                            question.provenance.get(
+                                "human_review_status"
+                            ),
+                            "required_before_activation",
+                        )
+                        self.assertEqual(
+                            question.provenance.get("activation"),
+                            (
+                                "manual_only_after_human_review_and_"
+                                "new_immutable_release"
+                            ),
+                        )
+                        self.assertEqual(
+                            question.provenance.get("review_status"),
+                            "candidate_pending_independent_review",
+                        )
+                        self.assertEqual(
+                            question.provenance.get("psychometrics"),
+                            "uncalibrated_author_prior",
+                        )
+                        self.assertTrue(
+                            question.provenance.get("source_scope")
+                        )
+                        self.assertTrue(
+                            question.provenance.get("independence_note")
+                        )
+                        self.assertEqual(len(question.options), 4)
+                        routes = [
+                            option.misconception_id
+                            for option in question.options
+                            if not option.correct
+                        ]
+                        self.assertEqual(len(routes), 3)
+                        self.assertNotIn(None, routes)
+                        self.assertEqual(len(set(routes)), 3)
 
 
 if __name__ == "__main__":

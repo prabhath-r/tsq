@@ -66,7 +66,6 @@ def make_question(
         source_ids=("src_fixture",),
         provenance={
             "generated": True,
-            "provider": "deterministic_test_provider",
             "batch_id": "batch_quarantine_impact_test",
             "review_status": "synthetic_fixture_only",
             "human_review": False,
@@ -287,6 +286,146 @@ class QuarantineCapacityImpactTestCase(unittest.TestCase):
                 for question in candidates
             )
         )
+
+    def test_explicit_candidate_filters_are_exact_and_auditable(self) -> None:
+        first = make_question(
+            "q_candidate_a",
+            "f_candidate_a",
+            "c",
+            QuestionStatus.QUARANTINED,
+        )
+        second = replace(
+            make_question(
+                "q_candidate_b",
+                "f_candidate_b",
+                "c",
+                QuestionStatus.QUARANTINED,
+            ),
+            provenance={
+                **first.provenance,
+                "batch_id": "batch_second",
+            },
+        )
+        third = replace(
+            make_question(
+                "q_candidate_c",
+                "f_candidate_c",
+                "c",
+                QuestionStatus.QUARANTINED,
+            ),
+            provenance={
+                **first.provenance,
+                "batch_id": "batch_second",
+            },
+        )
+        questions = (*support_questions("c", 2), first, second, third)
+        target = concept_target("c", target_main_count=2)
+
+        by_question = analyze_quarantine_capacity_impact(
+            questions,
+            graph_for("c"),
+            (),
+            target,
+            candidate_question_ids=(third.id, first.id),
+        )
+        by_batch = analyze_quarantine_capacity_impact(
+            questions,
+            graph_for("c"),
+            (),
+            target,
+            candidate_batch_ids=("batch_second",),
+        )
+
+        self.assertEqual(
+            by_question["candidate_scope"],
+            "explicit-filter-within-target-owned-primary-concepts",
+        )
+        self.assertEqual(
+            by_question["eligible_candidate_count_before_filter"], 3
+        )
+        self.assertEqual(
+            by_question["candidate_filter"],
+            {
+                "mode": "question_ids",
+                "values": [first.id, third.id],
+            },
+        )
+        self.assertEqual(
+            [row["question_id"] for row in by_question["candidates"]],
+            [first.id, third.id],
+        )
+        self.assertEqual(
+            by_batch["candidate_filter"],
+            {"mode": "batch_ids", "values": ["batch_second"]},
+        )
+        self.assertEqual(
+            [row["question_id"] for row in by_batch["candidates"]],
+            [second.id, third.id],
+        )
+        self.assertEqual(by_question["baseline"], by_batch["baseline"])
+        self.assertNotEqual(
+            by_question["analysis_input_manifest_digest"],
+            by_batch["analysis_input_manifest_digest"],
+        )
+
+    def test_candidate_filters_reject_ambiguous_or_ineligible_scope(
+        self,
+    ) -> None:
+        candidate = make_question(
+            "q_candidate",
+            "f_candidate",
+            "c",
+            QuestionStatus.QUARANTINED,
+        )
+        questions = (*support_questions("c", 2), candidate)
+        graph = graph_for("c")
+        target = concept_target("c", target_main_count=1)
+
+        invalid_cases = (
+            (
+                {"candidate_question_ids": candidate.id},
+                "not a scalar string",
+            ),
+            (
+                {"candidate_question_ids": 42},
+                "must be an iterable",
+            ),
+            (
+                {"candidate_question_ids": ()},
+                "must not be empty",
+            ),
+            (
+                {"candidate_question_ids": ("q_missing",)},
+                "not quarantined target-owned candidates",
+            ),
+            (
+                {"candidate_batch_ids": ("batch_missing",)},
+                "no quarantined target-owned candidates",
+            ),
+            (
+                {"candidate_question_ids": (candidate.id, candidate.id)},
+                "contains duplicate values",
+            ),
+            (
+                {
+                    "candidate_question_ids": (candidate.id,),
+                    "candidate_batch_ids": (
+                        "batch_quarantine_impact_test",
+                    ),
+                },
+                "mutually exclusive",
+            ),
+        )
+        for kwargs, message in invalid_cases:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaisesRegex(ValueError, message):
+                    analyze_quarantine_capacity_impact(
+                        questions,
+                        graph,
+                        (),
+                        target,
+                        **kwargs,
+                    )
 
     def test_repeated_family_subset_is_skipped(self) -> None:
         candidates = (

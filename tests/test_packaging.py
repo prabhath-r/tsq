@@ -117,9 +117,9 @@ class PackagingTestCase(unittest.TestCase):
 
         self.assertEqual(
             result["release_id"],
-            "rel_e8047a6bdb517fd42e1cb2d6",
+            "rel_7fa8d12e03dff0e08bcc739e",
         )
-        self.assertEqual(result["questions"], 288)
+        self.assertEqual(result["questions"], 480)
         self.assertEqual(result["topics"], 16)
 
     def test_sync_refuses_invalid_source_before_touching_packaged_tree(self) -> None:

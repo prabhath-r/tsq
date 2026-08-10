@@ -43,6 +43,39 @@ from tsq.models import (
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "corpus"
 
+HISTORICAL_AGENT_QUARANTINE_IDS = (
+    "q_agent_revision_ordering_001",
+    "q_agent_delegated_capability_envelope_001",
+    "q_agent_approval_argument_binding_001",
+    "q_agent_saga_compensation_001",
+    "q_agent_snapshot_observation_completeness_001",
+    "q_agent_catalog_expansion_boundary_001",
+    "q_agent_granted_subset_match_001",
+    "q_agent_context_caveat_expiry_001",
+    "q_agent_dry_run_effect_boundary_001",
+    "q_agent_completion_predicate_counterfactual_001",
+)
+HISTORICAL_RAG_QUARANTINE_IDS = (
+    "q_rag_factuality_grounding_axes_001",
+    "q_rag_multihop_query_001",
+    "q_rag_causal_bridge_attribution_001",
+    "q_rag_derived_rate_entailment_001",
+    "q_rag_candidate_reranker_funnel_001",
+    "q_rag_temporal_scope_counterfactual_001",
+    "q_rag_claim_citation_alignment_revision_001",
+    "q_rag_conjunctive_facet_coverage_001",
+)
+
+
+def candidate_question_arguments(
+    question_ids: tuple[str, ...],
+) -> list[str]:
+    return [
+        argument
+        for question_id in question_ids
+        for argument in ("--candidate-question-id", question_id)
+    ]
+
 
 def make_question(
     family_id: str,
@@ -1058,6 +1091,9 @@ class CapacityCliTestCase(unittest.TestCase):
                 "--topic",
                 "t_llm_agents",
                 "--quarantine-impact",
+                *candidate_question_arguments(
+                    HISTORICAL_AGENT_QUARANTINE_IDS
+                ),
                 "--json",
             ]
         )
@@ -1118,6 +1154,9 @@ class CapacityCliTestCase(unittest.TestCase):
                 "--topic",
                 "t_retrieval_augmented_generation",
                 "--quarantine-impact",
+                *candidate_question_arguments(
+                    HISTORICAL_RAG_QUARANTINE_IDS
+                ),
                 "--result-limit",
                 "1",
                 "--json",
@@ -1152,6 +1191,9 @@ class CapacityCliTestCase(unittest.TestCase):
                 "--target-main-count",
                 "10",
                 "--quarantine-impact",
+                *candidate_question_arguments(
+                    HISTORICAL_AGENT_QUARANTINE_IDS
+                ),
                 "--maximum-combination-size",
                 "3",
                 "--json",
@@ -1218,6 +1260,16 @@ class CapacityCliTestCase(unittest.TestCase):
                 [
                     "capacity",
                     str(CORPUS),
+                    "--candidate-batch-id",
+                    "batch_agent_intro_bridges_20260724_a",
+                    "--json",
+                ],
+                "filters require --quarantine-impact",
+            ),
+            (
+                [
+                    "capacity",
+                    str(CORPUS),
                     "--topic",
                     "t_llm_agents",
                     "--quarantine-impact",
@@ -1234,6 +1286,39 @@ class CapacityCliTestCase(unittest.TestCase):
                 self.assertEqual(output, "")
                 self.assertIn(expected, errors)
 
+    def test_quarantine_impact_can_scope_one_review_batch(self) -> None:
+        batch_id = "batch_agent_intro_bridges_20260724_a"
+        code, output, errors = self.run_cli(
+            [
+                "capacity",
+                str(CORPUS),
+                "--topic",
+                "t_llm_agents",
+                "--quarantine-impact",
+                "--candidate-batch-id",
+                batch_id,
+                "--json",
+            ]
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(code, 0, errors)
+        self.assertEqual(
+            payload["candidate_filter"],
+            {"mode": "batch_ids", "values": [batch_id]},
+        )
+        self.assertEqual(payload["candidate_count"], 5)
+        self.assertGreater(
+            payload["eligible_candidate_count_before_filter"],
+            payload["candidate_count"],
+        )
+        self.assertTrue(
+            all(
+                candidate["provenance_claims"]["batch_id"] == batch_id
+                for candidate in payload["candidates"]
+            )
+        )
+
     def test_quarantine_impact_candidate_limit_fails_instead_of_truncating(
         self,
     ) -> None:
@@ -1244,6 +1329,9 @@ class CapacityCliTestCase(unittest.TestCase):
                 "--topic",
                 "t_llm_agents",
                 "--quarantine-impact",
+                *candidate_question_arguments(
+                    HISTORICAL_AGENT_QUARANTINE_IDS
+                ),
                 "--candidate-limit",
                 "9",
                 "--json",
@@ -1266,6 +1354,9 @@ class CapacityCliTestCase(unittest.TestCase):
                 "--target-main-count",
                 "10",
                 "--quarantine-impact",
+                *candidate_question_arguments(
+                    HISTORICAL_AGENT_QUARANTINE_IDS
+                ),
                 "--maximum-combination-size",
                 "3",
                 "--evaluation-limit",
@@ -1292,6 +1383,20 @@ class CapacityCliTestCase(unittest.TestCase):
                     "c_attention",
                     "--topic",
                     "t_transformers",
+                ]
+            )
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            build_parser().parse_args(
+                [
+                    "capacity",
+                    str(CORPUS),
+                    "--topic",
+                    "t_transformers",
+                    "--quarantine-impact",
+                    "--candidate-question-id",
+                    "q_one",
+                    "--candidate-batch-id",
+                    "batch_one",
                 ]
             )
 

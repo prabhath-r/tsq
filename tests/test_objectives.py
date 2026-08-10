@@ -810,9 +810,7 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
         self.assertTrue(replay["source_projection_matches_replay"])
 
     def test_cross_objective_route_preserves_an_only_parent_family(self) -> None:
-        bundle = declared_fixture_bundle(
-            load_bundle(CORPUS)
-        )
+        bundle = declared_fixture_bundle(load_bundle(CORPUS))
         parent_objective = "lo_causal_visibility"
         child_objective = "lo_transformer_information_paths"
         shared_family = "f_adversarial_parent_verification"
@@ -1974,9 +1972,7 @@ class ObjectiveRuntimeTestCase(unittest.TestCase):
     def test_v4_concept_and_v5_objective_history_replay_together(self) -> None:
         mixed = Database(Path(self.tempdir.name) / "mixed.db")
         mixed.initialize()
-        raw = declared_fixture_bundle(
-            load_bundle(CORPUS)
-        )
+        raw = declared_fixture_bundle(load_bundle(CORPUS))
         v1 = legacy_bundle(raw)
         parsed_v1 = parse_bundle(v1)
         catalog_v1 = parse_catalog(v1, parsed_v1[0], parsed_v1[4])

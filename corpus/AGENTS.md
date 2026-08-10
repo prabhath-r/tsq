@@ -326,14 +326,18 @@ or signatures. Do not overstate what a source ID proves.
 ## Provenance and quarantine
 
 For a direct AI-authored candidate, use truthful provenance in this shape. Use
-the actual provider/model identity and a stable unique batch ID; do not invent
-facts to fill placeholders.
+a stable unique batch ID and do not invent facts to fill placeholders. Public
+question provenance deliberately omits vendor and model identity; operational
+generation-job records may retain those details outside the curriculum item.
+This prohibition is recursive: do not hide an identity in nested metadata or
+under aliases such as `modelName`, `vendor_id`, or `generator_identity`.
+Opaque output/review commitments and counts are allowed because they reveal no
+vendor or model value.
 
 ```json
 {
   "method": "ai_assisted_source_scoped",
   "generated": true,
-  "provider": "<actual provider and model identity>",
   "batch_id": "<stable unique batch id>",
   "human_review": false,
   "human_review_status": "required_before_activation",
@@ -488,7 +492,6 @@ with reviewed content; do not copy the wording as filler:
   "provenance": {
     "method": "ai_assisted_source_scoped",
     "generated": true,
-    "provider": "<actual provider and model identity>",
     "batch_id": "<stable unique batch id>",
     "human_review": false,
     "human_review_status": "required_before_activation",
@@ -596,12 +599,20 @@ Use quarantine impact only as a review-priority diagnostic:
 
 ```bash
 PYTHONPATH=src python3 -m tsq capacity corpus \
-  --topic <TOPIC_ID> --quarantine-impact --json
+  --topic <TOPIC_ID> --quarantine-impact \
+  --candidate-batch-id <BATCH_ID> --json
 ```
 
 Do not call this live capacity. The exact search may fail at an explicit state,
 candidate, combination, or evaluation bound. That is a visible limit, not
-permission to substitute a heuristic.
+permission to substitute a heuristic. For a large quarantine bank, review one
+small provenance batch per invocation with `--candidate-batch-id`. Repeating
+the flag in one invocation intentionally unions those batches. Alternatively,
+name an exact review set with repeated `--candidate-question-id`. The live
+baseline still uses the full corpus. The report records both the explicit
+filter and the eligible target-owned count before filtering, and its minimality
+claim applies only to the declared filtered candidate space. Never omit that
+scope when reporting the result.
 
 Create a disposable database and inspect the topic catalog, graph scope,
 coverage blueprints, quarantine list, and stage-specific review packets. Never
@@ -745,10 +756,12 @@ family.
 
 You are an AI author. Set every new or revised item to status=quarantined,
 provenance.generated=true, and provenance.human_review=false. Record truthful
-provider, batch, source-scope, psychometric-prior, and family-independence
-notes. Do not add activation_review, claim human review, mark an item approved
-or calibrated, or change a validator or threshold to make it pass. MCQs provide
-selected-response evidence only and cannot certify productive skill.
+batch, source-scope, psychometric-prior, and family-independence notes, while
+omitting vendor/model identity from the public item. Do not add
+identity aliases or nested identity metadata. Do not add
+activation_review, claim human review, mark an item approved or calibrated, or
+change a validator or threshold to make it pass. MCQs provide selected-response
+evidence only and cannot certify productive skill.
 
 After writing, solve each stem without its key, review the options without
 content knowledge for clues, try to construct a counterexample to the key,

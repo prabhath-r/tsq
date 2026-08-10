@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from math import isfinite
@@ -24,7 +25,10 @@ from .models import (
     Source,
 )
 from .errors import ConflictError, NotFoundError, ValidationError
-from .provenance import question_provenance_issues
+from .provenance import (
+    question_provenance_issues,
+    strip_public_question_identity_fields,
+)
 from .quality import validate_question
 from .store import (
     Database,
@@ -53,9 +57,48 @@ GENERATOR_AUTHORITY_PROVENANCE_FIELDS = frozenset(
         "review_sha256",
         "review_status",
         "reviewed_on",
+        "provider",
+        "provider_name",
+        "model",
+        "model_name",
     }
 )
+_GENERATOR_AUTHORITY_COMPACT_FIELDS = frozenset(
+    re.sub(r"[^a-z0-9]", "", field.lower())
+    for field in GENERATOR_AUTHORITY_PROVENANCE_FIELDS
+)
 SOURCE_CONTEXT_REDACTION = "[REDACTED_EXACT_SOURCE_CONTEXT]"
+
+
+def _strip_generator_authority_claims(
+    provenance: dict[str, object],
+) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Recursively remove claims that a generator has no authority to make."""
+
+    removed: list[str] = []
+
+    def clean(node: object, path: tuple[str, ...]) -> object:
+        if type(node) is dict:
+            result: dict[str, object] = {}
+            for raw_key, value in node.items():
+                key = str(raw_key)
+                child_path = (*path, key)
+                compact_key = re.sub(r"[^a-z0-9]", "", key.lower())
+                if compact_key in _GENERATOR_AUTHORITY_COMPACT_FIELDS:
+                    removed.append(".".join(child_path))
+                    continue
+                result[key] = clean(value, child_path)
+            return result
+        if type(node) is list:
+            return [
+                clean(value, (*path, f"[{index}]"))
+                for index, value in enumerate(node)
+            ]
+        return node
+
+    cleaned = clean(provenance, ())
+    assert type(cleaned) is dict
+    return cleaned, tuple(sorted(set(removed)))
 
 
 def _canonical_json(value: Any) -> str:
@@ -1216,7 +1259,6 @@ class QuarantineReviewQueue:
     ) -> dict[str, Any]:
         return {
             "generated": provenance.get("generated"),
-            "provider": provenance.get("provider"),
             "batch_id": provenance.get("batch_id"),
             "review_status": provenance.get("review_status"),
             "independent_review": provenance.get("independent_review"),
@@ -3402,15 +3444,17 @@ class OfflineAuthoringPipeline:
                 and type(raw_output.get("provenance", {})) is dict
                 else {}
             )
+            (
+                declared_provenance,
+                stripped_authority_paths,
+            ) = _strip_generator_authority_claims(declared_provenance)
+            (
+                declared_provenance,
+                stripped_identity_fields,
+            ) = strip_public_question_identity_fields(declared_provenance)
             stripped_authority_fields = sorted(
-                set(raw_declared_provenance)
-                & GENERATOR_AUTHORITY_PROVENANCE_FIELDS
+                set(stripped_authority_paths) | set(stripped_identity_fields)
             )
-            declared_provenance = {
-                key: copy.deepcopy(value)
-                for key, value in declared_provenance.items()
-                if key not in GENERATOR_AUTHORITY_PROVENANCE_FIELDS
-            }
             generator_provenance = {
                 "provider_name": self.generator_provider_name,
                 "model_name": self.generator_model_name,
@@ -3429,8 +3473,6 @@ class OfflineAuthoringPipeline:
                     "activation": (
                         "manual_only_after_human_review_and_new_immutable_release"
                     ),
-                    "provider": self.generator_provider_name,
-                    "model": self.generator_model_name,
                     "prompt_version": row["prompt_version"],
                     "generation_job_id": job_id,
                     "generation_run_id": run_id,
@@ -3441,7 +3483,7 @@ class OfflineAuthoringPipeline:
                     "generator_declared_provenance_sha256": (
                         _sha256_json(raw_declared_provenance)
                     ),
-                    "stripped_generator_authority_fields": (
+                    "stripped_generator_authority_field_count": len(
                         stripped_authority_fields
                     ),
                 }
@@ -3530,6 +3572,9 @@ class OfflineAuthoringPipeline:
                 "generator_output_sha256": generator_output_sha256,
                 "generator_provenance": generator_provenance,
                 "generator_provenance_sha256": generator_provenance_sha256,
+                "stripped_generator_authority_fields": (
+                    stripped_authority_fields
+                ),
                 "reviews_sha256": reviews_sha256,
                 "exact_source_context_redactions": {
                     "generator_output": (
@@ -3556,6 +3601,9 @@ class OfflineAuthoringPipeline:
                 "generator_output_sha256": generator_output_sha256,
                 "generator_provenance": generator_provenance,
                 "generator_provenance_sha256": generator_provenance_sha256,
+                "stripped_generator_authority_fields": (
+                    stripped_authority_fields
+                ),
                 "reviews": reviews,
                 "reviews_sha256": reviews_sha256,
                 "exact_source_context_redactions": result[

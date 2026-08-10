@@ -20,8 +20,10 @@ The laboratory also measures one declared batch of quarantined repair
 candidates by making frozen question copies eligible in memory.  This is a
 counterfactual authoring check, not activation or evidence that the candidate
 families are semantically independent.  A second bounded power-set check does
-the same for the four causal-visibility reserve families under explicit
-pair- and triad-collapse assumptions.
+the same for four historical causal-visibility reserve representatives under
+explicit pair- and triad-collapse assumptions.  Later same-family practice
+variants are validated as a separate dependent cohort and receive no capacity
+credit in that historical counterfactual.
 """
 
 from __future__ import annotations
@@ -64,7 +66,7 @@ from tsq.policy import POLICY_VERSION  # noqa: E402
 from tsq.versions import DEFAULT_LEARNER_MODEL_VERSION  # noqa: E402
 
 
-LAB_VERSION = "family-independence-falsification-v3"
+LAB_VERSION = "family-independence-falsification-v4"
 NORMALIZATION_VERSION = "lower-alnum-stopwords-v1"
 DEFAULT_CORPUS = PROJECT_ROOT / "corpus"
 DEFAULT_OUTPUT = (
@@ -179,6 +181,38 @@ CAUSAL_RESERVE_CANDIDATES: tuple[dict[str, object], ...] = (
             "q_causal_cross_attention_mask_scope_001",
             "q_causal_cross_attention_mask_scope_002",
         ),
+    },
+)
+CAUSAL_RESERVE_DEPENDENT_VARIANTS: tuple[dict[str, str], ...] = (
+    {
+        "question_id": "q_causal_mask_first_row_001",
+        "family_id": "f_causal_mask_softmax_normalization",
+        "batch_id": "batch_transformer_composition_causality_20260809_d",
+    },
+    {
+        "question_id": "q_causal_mask_probability_row_001",
+        "family_id": "f_causal_mask_softmax_normalization",
+        "batch_id": "batch_transformer_composition_causality_20260809_d",
+    },
+    {
+        "question_id": "q_causal_mask_post_softmax_bug_001",
+        "family_id": "f_causal_mask_softmax_normalization",
+        "batch_id": "batch_transformer_composition_causality_20260809_d",
+    },
+    {
+        "question_id": "q_causal_full_incremental_warmup_001",
+        "family_id": "f_causal_full_incremental_equivalence",
+        "batch_id": "batch_transformer_causality_scaling_20260809_e",
+    },
+    {
+        "question_id": "q_causal_full_incremental_intermediate_row_001",
+        "family_id": "f_causal_full_incremental_equivalence",
+        "batch_id": "batch_transformer_causality_scaling_20260809_e",
+    },
+    {
+        "question_id": "q_causal_full_incremental_mismatch_001",
+        "family_id": "f_causal_full_incremental_equivalence",
+        "batch_id": "batch_transformer_causality_scaling_20260809_e",
     },
 )
 CAUSAL_RESERVE_COLLAPSE_SCENARIOS: tuple[dict[str, object], ...] = (
@@ -894,12 +928,35 @@ def _causal_reserve_counterfactual_report(
         str(declaration["question_id"])
         for declaration in CAUSAL_RESERVE_CANDIDATES
     )
-    expected_member_ids = {
+    historical_member_sequence = tuple(
         str(question_id)
         for declaration in CAUSAL_RESERVE_CANDIDATES
         for question_id in declaration["family_question_ids"]
-    }
-    missing = sorted(expected_member_ids - set(by_question_id))
+    )
+    historical_member_ids = set(historical_member_sequence)
+    if len(historical_member_ids) != len(historical_member_sequence):
+        raise LabInvariantError(
+            "Causal reserve historical cohort declarations repeat a question."
+        )
+    dependent_variant_sequence = tuple(
+        str(declaration["question_id"])
+        for declaration in CAUSAL_RESERVE_DEPENDENT_VARIANTS
+    )
+    dependent_variant_ids = set(dependent_variant_sequence)
+    if len(dependent_variant_ids) != len(dependent_variant_sequence):
+        raise LabInvariantError(
+            "Causal reserve dependent-variant declarations repeat a question."
+        )
+    overlap = sorted(historical_member_ids & dependent_variant_ids)
+    if overlap:
+        raise LabInvariantError(
+            "Causal reserve historical and dependent cohorts overlap: "
+            + ", ".join(overlap)
+        )
+    expected_current_member_ids = (
+        historical_member_ids | dependent_variant_ids
+    )
+    missing = sorted(expected_current_member_ids - set(by_question_id))
     if missing:
         raise LabInvariantError(
             "Causal reserve declarations reference missing questions: "
@@ -908,8 +965,27 @@ def _causal_reserve_counterfactual_report(
 
     source_rows: list[dict[str, object]] = []
     candidate_rows: list[dict[str, object]] = []
+    dependent_variant_rows: list[dict[str, object]] = []
     seen_members: set[str] = set()
     candidate_family_ids: list[str] = []
+    declared_candidate_family_ids = {
+        str(declaration["family_id"])
+        for declaration in CAUSAL_RESERVE_CANDIDATES
+    }
+    dependent_ids_by_family: dict[str, list[str]] = {
+        family_id: [] for family_id in declared_candidate_family_ids
+    }
+    for declaration in CAUSAL_RESERVE_DEPENDENT_VARIANTS:
+        family_id = str(declaration["family_id"])
+        if family_id not in declared_candidate_family_ids:
+            raise LabInvariantError(
+                "Causal reserve dependent variant "
+                f"{declaration['question_id']} names non-reserve family "
+                f"{family_id}."
+            )
+        dependent_ids_by_family[family_id].append(
+            str(declaration["question_id"])
+        )
     for declaration in CAUSAL_RESERVE_CANDIDATES:
         candidate_id = str(declaration["question_id"])
         family_id = str(declaration["family_id"])
@@ -936,16 +1012,27 @@ def _causal_reserve_counterfactual_report(
                     f"from {family_id} to {member.family_id}."
                 )
             if member_id not in seen_members:
-                source_rows.append(_causal_source_state(member))
+                state = _causal_source_state(member)
+                state["cohort_role"] = "historical_cohort_member"
+                source_rows.append(state)
                 seen_members.add(member_id)
+        dependent_ids = tuple(sorted(dependent_ids_by_family[family_id]))
+        current_family_ids = tuple(sorted((*member_ids, *dependent_ids)))
         candidate_family_ids.append(family_id)
         candidate_rows.append(
             {
                 "question_id": candidate_id,
                 "family_id": family_id,
+                # This field intentionally preserves the exact historical
+                # cohort. Later dependent practice stays explicit below.
                 "family_question_ids": list(member_ids),
+                "historical_family_question_ids": list(member_ids),
+                "dependent_variant_question_ids": list(dependent_ids),
+                "current_family_question_ids": list(current_family_ids),
                 "counterfactual_representative": True,
-                "same_family_member_count": len(member_ids),
+                "historical_family_member_count": len(member_ids),
+                "dependent_variant_count": len(dependent_ids),
+                "same_family_member_count": len(current_family_ids),
             }
         )
 
@@ -954,16 +1041,99 @@ def _causal_reserve_counterfactual_report(
             "Causal reserve candidate declarations must name four semantic "
             "families; same-family revisions belong in family_question_ids."
         )
+    for declaration in CAUSAL_RESERVE_DEPENDENT_VARIANTS:
+        question_id = str(declaration["question_id"])
+        expected_family_id = str(declaration["family_id"])
+        expected_batch_id = str(declaration["batch_id"])
+        question = by_question_id[question_id]
+        provenance = question.provenance
+        failures: list[str] = []
+        if question.family_id != expected_family_id:
+            failures.append(
+                f"family_is_{question.family_id}_expected_{expected_family_id}"
+            )
+        if question.objective_id != CAUSAL_RESERVE_OBJECTIVE_ID:
+            failures.append("fine_objective_mismatch")
+        if question.status is not QuestionStatus.QUARANTINED:
+            failures.append("status_is_not_quarantined")
+        if question.status.eligible_for_adaptation:
+            failures.append("source_is_adaptation_eligible")
+        if provenance.get("batch_id") != expected_batch_id:
+            failures.append("batch_id_mismatch")
+        if provenance.get("generated") is not True:
+            failures.append("generated_marker_is_not_true")
+        if provenance.get("human_review") is not False:
+            failures.append("human_review_marker_is_not_false")
+        if (
+            provenance.get("human_review_status")
+            != "required_before_activation"
+        ):
+            failures.append("human_review_requirement_missing")
+        if provenance.get("activation") != _MANUAL_ACTIVATION_MARKER:
+            failures.append("manual_activation_marker_missing")
+        if (
+            provenance.get("review_status")
+            != "candidate_pending_independent_review"
+        ):
+            failures.append("independent_review_is_not_pending")
+        if provenance.get("psychometrics") != "uncalibrated_author_prior":
+            failures.append("psychometrics_are_not_uncalibrated_author_prior")
+        if failures:
+            raise LabInvariantError(
+                f"Causal reserve dependent variant {question_id} failed "
+                f"invariants: {', '.join(failures)}."
+            )
+        state = _causal_source_state(question)
+        if state["provenance_gaps"]:
+            raise LabInvariantError(
+                f"Causal reserve dependent variant {question_id} has "
+                "unexpected provenance gaps."
+            )
+        state.update(
+            {
+                "cohort_role": "declared_dependent_variant",
+                "expected_batch_id": expected_batch_id,
+                "source_batch_id": provenance["batch_id"],
+                "counterfactual_representative": False,
+                "included_in_subset_analysis": False,
+                "capacity_credit_granted": False,
+            }
+        )
+        source_rows.append(state)
+        dependent_variant_rows.append(
+            {
+                "question_id": question_id,
+                "family_id": expected_family_id,
+                "batch_id": expected_batch_id,
+                "objective_id": question.objective_id,
+                "source_status": question.status.value,
+                "source_eligible_for_adaptation": (
+                    question.status.eligible_for_adaptation
+                ),
+                "generated": provenance["generated"],
+                "human_review": provenance["human_review"],
+                "human_review_status": provenance["human_review_status"],
+                "activation": provenance["activation"],
+                "review_status": provenance["review_status"],
+                "psychometrics": provenance["psychometrics"],
+                "counterfactual_representative": False,
+                "included_in_subset_analysis": False,
+                "capacity_credit_granted": False,
+                "quarantine_invariants_validated": True,
+            }
+        )
     actual_member_ids = {
         question.id
         for question in questions
         if question.family_id in set(candidate_family_ids)
     }
-    if actual_member_ids != expected_member_ids:
+    if actual_member_ids != expected_current_member_ids:
         raise LabInvariantError(
             "Causal reserve family membership changed: "
-            f"missing={sorted(expected_member_ids - actual_member_ids)}, "
-            f"unexpected={sorted(actual_member_ids - expected_member_ids)}."
+            "missing="
+            f"{sorted(expected_current_member_ids - actual_member_ids)}, "
+            "unexpected="
+            f"{sorted(actual_member_ids - expected_current_member_ids)}."
         )
     cross_scope = next(
         row
@@ -1064,6 +1234,9 @@ def _causal_reserve_counterfactual_report(
             )
 
     source_rows.sort(key=lambda row: str(row["question_id"]))
+    dependent_variant_rows.sort(
+        key=lambda row: str(row["question_id"])
+    )
     provenance_gap_ids = [
         str(row["question_id"])
         for row in source_rows
@@ -1081,9 +1254,22 @@ def _causal_reserve_counterfactual_report(
         "candidate_question_ids": list(candidate_ids),
         "candidate_family_ids": candidate_family_ids,
         "candidate_family_count": len(candidate_family_ids),
-        "source_family_member_question_ids": sorted(expected_member_ids),
-        "source_family_member_count": len(expected_member_ids),
+        "historical_cohort_question_ids": sorted(historical_member_ids),
+        "historical_cohort_count": len(historical_member_ids),
+        "dependent_variant_question_ids": sorted(dependent_variant_ids),
+        "dependent_variant_count": len(dependent_variant_ids),
+        "current_family_member_question_ids": sorted(
+            expected_current_member_ids
+        ),
+        "current_family_member_count": len(expected_current_member_ids),
+        # Backward-compatible field names now truthfully describe every
+        # current member of the four declared reserve families.
+        "source_family_member_question_ids": sorted(
+            expected_current_member_ids
+        ),
+        "source_family_member_count": len(expected_current_member_ids),
         "candidate_declarations": candidate_rows,
+        "dependent_variant_declarations": dependent_variant_rows,
         "source_candidate_state": source_rows,
         "provenance_gap_question_ids": provenance_gap_ids,
         "all_source_provenance_complete": not provenance_gap_ids,
@@ -1109,15 +1295,18 @@ def _causal_reserve_counterfactual_report(
             for scenario in CAUSAL_RESERVE_COLLAPSE_SCENARIOS
         },
         "in_memory_operation": (
-            "replace only one declared representative per quarantined "
-            "semantic family with an approved frozen dataclass; never "
-            "serialize it and never count same-family revisions twice"
+            "replace only one historical declared representative per "
+            "quarantined semantic family with an approved frozen dataclass; "
+            "never serialize it, never count same-family revisions twice, "
+            "and never include declared dependent variants in the power set"
         ),
         "source_corpus_mutated": False,
         "semantic_independence_established": False,
         "human_review_required_before_activation": True,
         "manual_activation_required": True,
         "legacy_provenance_gaps_are_fail_visible_not_approval": True,
+        "dependent_variants_excluded_from_counterfactual": True,
+        "dependent_variants_capacity_credit_granted": False,
     }
 
 
@@ -1399,10 +1588,13 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
                 "does not activate content or establish semantic independence"
             ),
             "causal_reserve_semantics": (
-                "one frozen representative per quarantined semantic family is "
-                "made eligible only in memory across a complete bounded power "
-                "set; same-family revisions still count once, provenance gaps "
-                "remain fail-visible, and no result establishes independence"
+                "one frozen historical representative per quarantined semantic "
+                "family is made eligible only in memory across a complete "
+                "bounded power set; later explicitly declared same-family "
+                "dependent variants are validated but excluded from that set "
+                "and receive no capacity credit, same-family revisions still "
+                "count once, provenance gaps remain fail-visible, and no result "
+                "establishes independence"
             ),
         },
         "duplicate_pair_candidates": duplicate_candidates,
@@ -1426,6 +1618,15 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
             ]["baseline_restored_cluster_count"],
             "causal_reserve_candidate_family_count": causal_reserve[
                 "candidate_family_count"
+            ],
+            "causal_reserve_historical_cohort_count": causal_reserve[
+                "historical_cohort_count"
+            ],
+            "causal_reserve_dependent_variant_count": causal_reserve[
+                "dependent_variant_count"
+            ],
+            "causal_reserve_current_family_member_count": causal_reserve[
+                "current_family_member_count"
             ],
             "causal_reserve_subset_count": causal_reserve[
                 "subset_count"
@@ -1475,6 +1676,12 @@ def build_report(corpus: Path = DEFAULT_CORPUS) -> dict[str, object]:
                 "The causal reserve power-set analysis is also in-memory only. "
                 "A capacity increase cannot establish that a candidate is "
                 "correct, independently diagnostic, or suitable for release."
+            ),
+            (
+                "The six declared later causal-reserve practice variants share "
+                "two historical families. They are provenance-validated but "
+                "excluded from the historical representative power set and "
+                "receive no additional family or capacity credit."
             ),
             (
                 "Legacy provenance gaps are reported explicitly and never "

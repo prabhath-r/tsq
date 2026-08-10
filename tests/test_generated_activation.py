@@ -98,6 +98,51 @@ class RawGeneratedActivationTestCase(unittest.TestCase):
 
         self.assertEqual(self.provenance_codes(), set())
 
+    def test_public_question_provenance_rejects_model_identity(self) -> None:
+        for provenance in (
+            {"provider": "private-operational-identity"},
+            {"model": "private-operational-identity"},
+            {"generator": "private-operational-identity"},
+            {"provider_name": "private-operational-identity"},
+            {"model_name": "private-operational-identity"},
+            {"metadata": {"provider": "private-operational-identity"}},
+            {"metadata": [{"modelName": "private-operational-identity"}]},
+            {"generator_identity": "private-operational-identity"},
+            {"vendor_id": "private-operational-identity"},
+            {"engineName": "private-operational-identity"},
+            {"modelidentity": "private-operational-identity"},
+            {"llm_name": "private-operational-identity"},
+            {"backendName": "private-operational-identity"},
+            {"model_reviewer": "private-operational-identity"},
+            {"generator_reviewer": "private-operational-identity"},
+            {"llm_backend": "private-operational-identity"},
+            {"engine_label": "private-operational-identity"},
+            {"authoring_backend_label": "private-operational-identity"},
+        ):
+            with self.subTest(provenance=provenance):
+                self.question["status"] = "quarantined"
+                self.question["provenance"] = {
+                    "generated": True,
+                    "human_review": False,
+                    **provenance,
+                }
+                self.assertIn(
+                    "public_provenance_identity_forbidden",
+                    self.provenance_codes(),
+                )
+
+    def test_public_question_provenance_allows_nonidentity_commitments(self) -> None:
+        self.question["status"] = "quarantined"
+        self.question["provenance"] = {
+            "generated": True,
+            "human_review": False,
+            "generator_output_sha256": "a" * 64,
+            "generator_provenance_sha256": "b" * 64,
+            "generator_declared_provenance_sha256": "c" * 64,
+            "independent_model_review_count": 2,
+        }
+        self.assertEqual(self.provenance_codes(), set())
+
     def test_exact_packaged_legacy_cohort_retains_compatibility(self) -> None:
         legacy = [
             question
@@ -293,6 +338,7 @@ class RawGeneratedActivationTestCase(unittest.TestCase):
                 "activation_review_extra_fields",
                 "activation_review_missing_fields",
                 "activation_review_reviewer_id",
+                "public_provenance_identity_forbidden",
             },
         )
 
