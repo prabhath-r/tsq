@@ -1,0 +1,20 @@
+#!/bin/sh
+# SPDX-License-Identifier: MPL-2.0
+
+set -eu
+
+project_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$project_dir/.venv/bin/python" ]; then
+    tsq_python="$project_dir/.venv/bin/python"
+else
+    tsq_python=python3
+fi
+tsq_database=${TSQ_DB:-"$project_dir/tsq.db"}
+
+if ! "$tsq_python" -c 'import sys; raise SystemExit(sys.version_info < (3, 12))'; then
+    echo "TSQ requires Python 3.12 or newer." >&2
+    exit 2
+fi
+
+PYTHONPATH="$project_dir/src${PYTHONPATH:+:$PYTHONPATH}" \
+    exec "$tsq_python" -m tsq.http_api --db "$tsq_database" "$@"

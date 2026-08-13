@@ -59,6 +59,7 @@ class PackagingTestCase(unittest.TestCase):
         self.assertIn("include LICENSE", manifest)
         self.assertIn("include NOTICE", manifest)
         self.assertIn("include start", manifest)
+        self.assertIn("include serve", manifest)
         self.assertIn("include tsq", manifest)
         self.assertIn("recursive-include corpus *.json *.md", manifest)
         self.assertFalse(

@@ -2,6 +2,7 @@ include Makefile
 include LICENSE
 include NOTICE
 include start
+include serve
 include tsq
 recursive-include corpus *.json *.md
 recursive-include benchmarks *.md *.py
